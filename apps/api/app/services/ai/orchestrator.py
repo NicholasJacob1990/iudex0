@@ -9,6 +9,7 @@ from loguru import logger
 
 from app.services.ai.agents import ClaudeAgent, GeminiAgent, GPTAgent
 from app.services.ai.base_agent import AgentResponse, AgentReview
+from app.services.legal_prompts import LegalPrompts
 
 
 @dataclass
@@ -50,6 +51,8 @@ class MultiAgentOrchestrator:
             "text_reviewer": self.gpt
         }
         
+        self.prompts = LegalPrompts()
+        
         logger.info("✅ Todos os agentes inicializados")
     
     async def generate_document(
@@ -77,9 +80,15 @@ class MultiAgentOrchestrator:
         conflicts: List[str] = []
         
         try:
-            # Fase 1: Geração inicial (Claude)
+            # Fase 1: Geração inicial (Claude) com prompt especializado
             logger.info("📝 Fase 1: Geração inicial com Claude...")
-            initial_response = await self.claude.generate(prompt, context)
+            
+            # Usar prompt especializado se tipo de documento for conhecido
+            document_type = context.get('document_type', 'generic')
+            enhanced_prompt = self._enhance_prompt_for_document_type(prompt, context, document_type)
+            
+            system_prompt = self.prompts.get_system_prompt_generator()
+            initial_response = await self.claude.generate(enhanced_prompt, context, system_prompt)
             current_content = initial_response.content
             total_tokens += initial_response.tokens_used
             total_cost += initial_response.cost
@@ -205,6 +214,70 @@ Aplique as correções sugeridas mantendo a essência do documento e gere a vers
         except Exception as e:
             logger.error(f"❌ Erro no orquestrador multi-agente: {e}")
             raise
+    
+    def _enhance_prompt_for_document_type(
+        self,
+        prompt: str,
+        context: Dict[str, Any],
+        document_type: str
+    ) -> str:
+        """
+        Aprimora prompt de acordo com o tipo de documento
+        """
+        doc_type_lower = document_type.lower()
+        
+        # Mapear tipos de documento para prompts especializados
+        if doc_type_lower in ['petition', 'petição', 'ação']:
+            case_details = {
+                'action_type': context.get('action_type', 'Não especificado'),
+                'case_description': prompt,
+                'requests': context.get('requests', ''),
+                'case_value': context.get('case_value', ''),
+                'attached_docs': context.get('attached_docs', 'Nenhum')
+            }
+            return self.prompts.get_petition_generation_prompt(case_details)
+        
+        elif doc_type_lower in ['contract', 'contrato']:
+            contract_details = {
+                'contract_type': context.get('contract_type', 'Prestação de Serviços'),
+                'contractor_info': context.get('contractor_info', ''),
+                'contractee_info': context.get('contractee_info', ''),
+                'object': prompt,
+                'special_conditions': context.get('special_conditions', ''),
+                'value': context.get('value', ''),
+                'duration': context.get('duration', '')
+            }
+            return self.prompts.get_contract_generation_prompt(contract_details)
+        
+        elif doc_type_lower in ['opinion', 'parecer']:
+            opinion_details = {
+                'question': prompt,
+                'context': context.get('background', ''),
+                'documents': context.get('documents', 'Nenhum')
+            }
+            return self.prompts.get_opinion_generation_prompt(opinion_details)
+        
+        elif doc_type_lower in ['appeal', 'recurso', 'apelação']:
+            appeal_details = {
+                'appeal_type': context.get('appeal_type', 'APELAÇÃO'),
+                'decision': context.get('decision', ''),
+                'decision_grounds': context.get('decision_grounds', ''),
+                'contested_points': prompt
+            }
+            return self.prompts.get_appeal_generation_prompt(appeal_details)
+        
+        elif doc_type_lower in ['defense', 'contestação', 'defesa']:
+            defense_details = {
+                'action_type': context.get('action_type', ''),
+                'plaintiff_claims': context.get('plaintiff_claims', ''),
+                'contested_facts': prompt
+            }
+            return self.prompts.get_defense_generation_prompt(defense_details)
+        
+        else:
+            # Usar prompt genérico melhorado
+            user_context = context.get('user_info', {})
+            return self.prompts.enhance_prompt_with_context(prompt, user_context, context)
     
     async def simple_chat(
         self,
