@@ -1,0 +1,524 @@
+2025-11-18T19:57:07.434322Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf(".turbo/cookies/1.cookie"), AnchoredSystemPathBuf(".turbo/cookies/.turbo-cookie")}
+2025-11-18T19:57:07.434337Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T19:57:08.133704Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("packages/shared/dist")}
+2025-11-18T19:57:08.133712Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/shared"), path: AnchoredSystemPathBuf("packages/shared") }}))
+2025-11-18T20:03:17.140984Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/context-store.ts")}
+2025-11-18T20:03:17.141821Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:17.236863Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/context-store.ts")}
+2025-11-18T20:03:17.236873Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:36.037540Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/index.ts")}
+2025-11-18T20:03:36.037608Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:39.637104Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-selector.tsx")}
+2025-11-18T20:03:39.638462Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:40.237963Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-selector.tsx")}
+2025-11-18T20:03:40.237972Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:40.336539Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-selector.tsx")}
+2025-11-18T20:03:40.336557Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:40.337435Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T20:03:41.536669Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T20:03:41.536678Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:03:43.137079Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T20:03:43.137663Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:04:10.336249Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/context-panel.tsx")}
+2025-11-18T20:04:10.336289Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:04:10.537825Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/context-panel.tsx")}
+2025-11-18T20:04:10.537833Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:04:16.337858Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T20:04:16.337879Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:04:17.637230Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T20:04:17.637266Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:04:31.437142Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/index.ts")}
+2025-11-18T20:04:31.437217Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:05:06.441445Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx")}
+2025-11-18T20:05:06.442566Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:05:07.671084Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T20:05:07.671146Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:05:07.783661Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T20:05:07.783684Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:05:07.783867Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T20:05:34.137689Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/prompt-footer.tsx")}
+2025-11-18T20:05:34.137721Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:06:15.587421Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/prompt-footer.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx"), AnchoredSystemPathBuf("apps/web/src/stores/context-store.ts"), AnchoredSystemPathBuf("apps/web/src/stores/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/context-panel.tsx")}
+2025-11-18T20:06:15.598564Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:06:15.741301Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/context-panel.tsx"), AnchoredSystemPathBuf("apps/web/src/stores/context-store.ts"), AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/prompt-footer.tsx"), AnchoredSystemPathBuf("apps/web/src/stores/index.ts")}
+2025-11-18T20:06:15.741389Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:08:14.594406Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T20:08:14.597423Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:08:35.052890Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T20:08:35.054562Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:08:35.075102Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T20:10:03.675547Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-dashboard.tsx")}
+2025-11-18T20:10:03.676681Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:10:03.938759Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-dashboard.tsx")}
+2025-11-18T20:10:03.938777Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:10:19.338593Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T20:10:19.338699Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:10:21.145227Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T20:10:21.145401Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:10:21.245383Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T20:10:21.245661Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:10:21.247132Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T20:10:34.141356Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T20:10:34.141396Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:11:55.448581Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T20:11:55.449455Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:12:07.541240Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T20:12:07.541386Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T20:12:07.562387Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T21:55:46.194415Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/documents-dropzone.tsx")}
+2025-11-18T21:55:46.196417Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T21:55:47.844210Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/dashboard/documents-dropzone.tsx")}
+2025-11-18T21:55:47.844248Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T21:57:08.846702Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf(".turbo/cookies/2.cookie")}
+2025-11-18T21:57:08.847265Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T21:59:41.259442Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/tailwind.config.ts"), AnchoredSystemPathBuf("INTEGRACAO.md"), AnchoredSystemPathBuf("apps/api/app/services/ai/agents.py"), AnchoredSystemPathBuf("README.md"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/quick-actions.tsx"), AnchoredSystemPathBuf("BACKEND_COMPLETO.md")}
+2025-11-18T21:59:41.266636Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T21:59:41.644155Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("BACKEND_COMPLETO.md"), AnchoredSystemPathBuf("apps/web/src/components/dashboard/quick-actions.tsx"), AnchoredSystemPathBuf("INTEGRACAO.md"), AnchoredSystemPathBuf("apps/web/tailwind.config.ts")}
+2025-11-18T21:59:41.644169Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:00:57.551680Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:00:57.552683Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:02:39.649688Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:02:39.650424Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:03:24.058601Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/layout/sidebar-pro.tsx")}
+2025-11-18T22:03:24.060270Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:04:12.053790Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-dashboard.tsx")}
+2025-11-18T22:04:12.057487Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:04:21.445490Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T22:04:21.445514Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:04:23.544329Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T22:04:23.544374Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:05:28.263261Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T22:05:28.271555Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:43:44.460077Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:43:44.461129Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:46:48.073129Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:46:48.074639Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:53:25.599296Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:53:25.600393Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:54:44.163370Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:54:44.164468Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:54:44.164616Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:54:45.658588Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:54:45.658603Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:54:45.658654Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:56:50.261413Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:56:50.262021Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:56:50.262091Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:56:52.559549Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:56:52.559562Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:56:52.559601Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:57:32.859564Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf(".turbo/cookies/3.cookie")}
+2025-11-18T22:57:32.859594Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T22:58:25.561677Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:58:25.562312Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:25.562370Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:58:26.159389Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:58:26.159465Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:26.359128Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:58:26.359140Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:26.359170Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:58:33.960026Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:58:33.960066Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:33.960105Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:58:35.060470Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T22:58:35.060479Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:35.060506Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:58:37.359351Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:58:37.359365Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T22:58:37.369579Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T22:59:56.062287Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T22:59:56.063403Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:00:14.162973Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T23:00:14.163761Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:00:14.172268Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:00:15.659089Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/.next")}
+2025-11-18T23:00:15.659099Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:00:15.659131Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:01:28.363757Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/tailwind.config.ts")}
+2025-11-18T23:01:28.364719Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:01:30.161128Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:01:30.161144Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:07:03.271771Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/ai-simulation.ts"), AnchoredSystemPathBuf("apps/web/src/services")}
+2025-11-18T23:07:03.273921Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:07:03.361214Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/ai-simulation.ts")}
+2025-11-18T23:07:03.361227Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:07:30.362041Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T23:07:30.362067Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:07:52.766088Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx")}
+2025-11-18T23:07:52.766699Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:08:16.361419Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T23:08:16.361451Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:11:30.066772Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:11:30.067896Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:11:30.079374Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:11:44.062568Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:11:44.062621Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:11:44.084621Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:12:22.874014Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/models/user.py")}
+2025-11-18T23:12:22.875117Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:12:36.877026Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/models/user.py")}
+2025-11-18T23:12:36.878303Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:12:55.763172Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:12:55.763212Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:12:55.862864Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx")}
+2025-11-18T23:12:55.863079Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:12:55.963167Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx")}
+2025-11-18T23:12:55.963182Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:18.267930Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:13:18.268665Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:22.963047Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/agents")}
+2025-11-18T23:13:22.963078Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:22.963195Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:13:25.462827Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py")}
+2025-11-18T23:13:25.462864Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:26.762595Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/agents/agent-orchestrator.ts")}
+2025-11-18T23:13:26.762612Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:26.963675Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/agents/agent-orchestrator.ts")}
+2025-11-18T23:13:26.963709Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:27.163612Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/agents/agent-orchestrator.ts")}
+2025-11-18T23:13:27.163648Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:27.163765Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:13:33.462759Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:13:33.462789Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:41.462211Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:13:41.462248Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:13:41.462614Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:13:41.664790Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/security.py")}
+2025-11-18T23:13:41.664807Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:47.163798Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:13:47.163829Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:50.063005Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/core/security.py")}
+2025-11-18T23:13:50.063040Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:53.962834Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/security.py")}
+2025-11-18T23:13:53.962855Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:56.163835Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py")}
+2025-11-18T23:13:56.163876Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:56.662331Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/models/user.py")}
+2025-11-18T23:13:56.662348Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:13:59.263104Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/services/ai-simulation.ts")}
+2025-11-18T23:13:59.263182Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:14:01.063059Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T23:14:01.063160Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:14:01.262573Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:14:01.262582Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:14:02.463124Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T23:14:02.463144Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:14:09.265295Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py")}
+2025-11-18T23:14:09.265398Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:14:13.870883Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/config.py")}
+2025-11-18T23:14:13.871773Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:14:33.766921Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts")}
+2025-11-18T23:14:33.766991Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:14:40.362536Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/document.py")}
+2025-11-18T23:14:40.362583Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:14:52.362767Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T23:14:52.362788Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:15:01.064106Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx")}
+2025-11-18T23:15:01.064124Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:15:03.263861Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py")}
+2025-11-18T23:15:03.263918Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:17.464436Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_generator.py")}
+2025-11-18T23:15:17.464495Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:17.563393Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_generator.py")}
+2025-11-18T23:15:17.563420Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:29.973131Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:15:29.974203Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:33.986397Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T23:15:33.986423Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:15:36.363315Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py")}
+2025-11-18T23:15:36.363350Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:46.863401Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts")}
+2025-11-18T23:15:46.863529Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:15:50.266629Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:15:50.266672Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:15:51.463396Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/generator/page.tsx")}
+2025-11-18T23:15:51.463408Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:11.264447Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/database.py")}
+2025-11-18T23:16:11.264489Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:16:23.064254Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:16:23.064288Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:16:32.881865Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx")}
+2025-11-18T23:16:32.881914Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:32.963992Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx")}
+2025-11-18T23:16:32.964003Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:37.470042Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx"), AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts"), AnchoredSystemPathBuf("apps/api/app/core/security.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:16:37.470296Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:16:37.537417Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:16:37.587440Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/web/src/stores/chat-store.ts"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/page.tsx"), AnchoredSystemPathBuf("apps/api/app/core/security.py")}
+2025-11-18T23:16:37.587451Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:16:37.587491Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:16:50.765771Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:16:50.766047Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:50.863756Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:16:50.863775Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:57.564181Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts")}
+2025-11-18T23:16:57.564241Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:16:57.663674Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts")}
+2025-11-18T23:16:57.663697Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:01.364619Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:17:01.364645Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:17:09.663583Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type")}
+2025-11-18T23:17:09.663617Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:10.564691Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py")}
+2025-11-18T23:17:10.564713Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:10.594406Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:10.664035Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts")}
+2025-11-18T23:17:10.664063Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:10.664134Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:12.064091Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx")}
+2025-11-18T23:17:12.064104Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:12.162970Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx")}
+2025-11-18T23:17:12.162987Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:13.764570Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:17:13.764639Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:13.765515Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:14.569509Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx")}
+2025-11-18T23:17:14.569534Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:14.748283Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx")}
+2025-11-18T23:17:14.748298Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:14.748526Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:23.964376Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx")}
+2025-11-18T23:17:23.964434Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:24.063582Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx")}
+2025-11-18T23:17:24.063596Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:17:27.364349Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts")}
+2025-11-18T23:17:27.364397Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:27.364524Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:30.763180Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py")}
+2025-11-18T23:17:30.763205Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:30.767681Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:48.771819Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:17:48.772608Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:48.784712Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:53.064166Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/database.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py")}
+2025-11-18T23:17:53.064183Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:17:53.064222Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:17:58.363915Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:17:58.363949Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:17:58.364225Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:00.764445Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_templates.py")}
+2025-11-18T23:18:00.764518Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:04.563603Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:18:04.563632Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:18:04.563730Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:04.931202Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/models/user.py")}
+2025-11-18T23:18:04.931229Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:04.962985Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:18:04.963008Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:05.108270Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:05.108431Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py")}
+2025-11-18T23:18:05.108438Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:05.108466Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:08.065088Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:18:08.065121Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:12.164074Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:18:12.164102Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:24.163475Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py")}
+2025-11-18T23:18:24.163491Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:24.163519Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:35.263568Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx")}
+2025-11-18T23:18:35.263590Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:35.274255Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:35.363859Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py")}
+2025-11-18T23:18:35.363872Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:39.064861Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:18:39.064891Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:18:39.064999Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:41.063933Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:18:41.063957Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:18:41.085745Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:41.164665Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx")}
+2025-11-18T23:18:41.164684Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:18:41.164757Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:18:58.265013Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx")}
+2025-11-18T23:18:58.265124Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:18:58.364365Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx")}
+2025-11-18T23:18:58.364377Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:06.164980Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/dialog.tsx")}
+2025-11-18T23:19:06.165064Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:10.464525Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx")}
+2025-11-18T23:19:10.464574Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:12.863853Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/textarea.tsx")}
+2025-11-18T23:19:12.863874Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:12.965034Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/textarea.tsx")}
+2025-11-18T23:19:12.965048Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:15.664354Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/separator.tsx")}
+2025-11-18T23:19:15.664372Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:18.464956Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/avatar.tsx")}
+2025-11-18T23:19:18.465068Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:18.564038Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/avatar.tsx")}
+2025-11-18T23:19:18.564046Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:26.764703Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/index.ts")}
+2025-11-18T23:19:26.764729Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:29.965048Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/package.json")}
+2025-11-18T23:19:29.965081Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:19:56.374243Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/package.json")}
+2025-11-18T23:19:56.375218Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:20:35.110236Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_processor.py")}
+2025-11-18T23:20:35.112357Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:20:36.265787Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("NOVIDADES_V0.3.md")}
+2025-11-18T23:20:36.266015Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:20:36.364131Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("NOVIDADES_V0.3.md")}
+2025-11-18T23:20:36.364143Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:20:38.165312Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:20:38.165362Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:03.286464Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:21:03.290112Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:14.004486Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/node_modules")}
+2025-11-18T23:21:14.004698Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:21:14.061839Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:21:14.204016Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("package-lock.json")}
+2025-11-18T23:21:14.204024Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:19.504302Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("MIGRATION_GUIDE.md")}
+2025-11-18T23:21:19.504375Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:28.504770Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:21:28.504788Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:28.604035Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:21:28.604058Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:31.904675Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py")}
+2025-11-18T23:21:31.904687Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:21:50.103976Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/avatar.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/separator.tsx"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/dialog.tsx"), AnchoredSystemPathBuf("apps/web/package.json"), AnchoredSystemPathBuf("apps/web/src/components/ui/textarea.tsx")}
+2025-11-18T23:21:50.104006Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:21:50.104106Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:22:56.515805Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:22:56.516902Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:23:10.302883Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py"), AnchoredSystemPathBuf("apps/api/app/services/document_processor.py"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/schemas/library.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:23:10.302964Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:23:10.402784Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/services/document_processor.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py"), AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:23:10.402798Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:25:40.510664Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("RESUMO_MELHORIAS.md")}
+2025-11-18T23:25:40.512744Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:25:40.601236Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("RESUMO_MELHORIAS.md")}
+2025-11-18T23:25:40.601250Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:26:14.000505Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("MIGRATION_GUIDE.md"), AnchoredSystemPathBuf("NOVIDADES_V0.3.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("RESUMO_MELHORIAS.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:26:14.001318Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:26:14.001795Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:29:04.413827Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py"), AnchoredSystemPathBuf("apps/api/app/schemas/library.py"), AnchoredSystemPathBuf("apps/api/app/services/document_processor.py")}
+2025-11-18T23:29:04.415162Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:29:04.498797Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md"), AnchoredSystemPathBuf("apps/api/app/schemas/library.py"), AnchoredSystemPathBuf("apps/api/app/services/document_processor.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:29:04.498810Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:29:07.998809Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/dialog.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx"), AnchoredSystemPathBuf("apps/web/package.json"), AnchoredSystemPathBuf("apps/web/src/components/ui/avatar.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx"), AnchoredSystemPathBuf("apps/web/src/styles/globals.css"), AnchoredSystemPathBuf("apps/web/src/components/ui/textarea.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/separator.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/index.ts")}
+2025-11-18T23:29:07.999110Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:29:07.999276Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:30:14.700993Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("MIGRATION_GUIDE.md"), AnchoredSystemPathBuf("apps/api/app/schemas/document.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/api/app/core/config.py"), AnchoredSystemPathBuf("apps/api/app/models/user.py"), AnchoredSystemPathBuf("NOVIDADES_V0.3.md"), AnchoredSystemPathBuf("RESUMO_MELHORIAS.md"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py")}
+2025-11-18T23:30:14.701687Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:14.702032Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:30:16.897418Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/chats.py"), AnchoredSystemPathBuf("apps/api/app/core/database.py"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/auth.py"), AnchoredSystemPathBuf("apps/api/app/schemas/user.py"), AnchoredSystemPathBuf("apps/web/src/stores/auth-store.ts")}
+2025-11-18T23:30:16.897433Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:16.897485Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:30:49.996933Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("status.md")}
+2025-11-18T23:30:49.997006Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:30:50.098651Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:30:50.098668Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:30:50.197001Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/library.py")}
+2025-11-18T23:30:50.197014Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:30:50.296312Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_processor.py")}
+2025-11-18T23:30:50.296327Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:30:50.514571Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/package.json")}
+2025-11-18T23:30:50.514583Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:50.996889Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/index.ts")}
+2025-11-18T23:30:50.996899Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.295790Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx")}
+2025-11-18T23:30:51.295806Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.396915Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/badge.tsx")}
+2025-11-18T23:30:51.396932Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.695821Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css"), AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/dialog.tsx")}
+2025-11-18T23:30:51.695830Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.797458Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/avatar.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/separator.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx"), AnchoredSystemPathBuf("apps/web/src/components/ui/textarea.tsx")}
+2025-11-18T23:30:51.797468Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.896795Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:30:51.896803Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:51.902237Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:30:52.000669Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:30:52.000707Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:30:52.025899Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:31:44.197767Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:31:44.197957Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:31:50.896725Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:31:50.897174Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:31:50.930611Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:32:20.905114Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:32:20.906663Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:33:01.698314Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx")}
+2025-11-18T23:33:01.699245Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:33:06.595586Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx")}
+2025-11-18T23:33:06.595750Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:33:09.294768Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:33:09.294786Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:33:14.995753Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx")}
+2025-11-18T23:33:14.995800Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:33:14.995899Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:33:36.201383Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:33:36.201578Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:33:45.295383Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:33:45.295436Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:34:04.104591Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/templates.py")}
+2025-11-18T23:34:04.105825Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:34:04.194928Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/templates.py")}
+2025-11-18T23:34:04.194942Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:34:20.302650Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/routes.py")}
+2025-11-18T23:34:20.303536Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:35:00.796575Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("MIGRATION_GUIDE.md"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/templates.py"), AnchoredSystemPathBuf("RESUMO_MELHORIAS.md"), AnchoredSystemPathBuf("NOVIDADES_V0.3.md"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/api/routes.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:35:00.797650Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:35:00.797755Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:35:20.293881Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("REVISAO_CODIGO.md")}
+2025-11-18T23:35:20.293953Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:35:20.393309Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("REVISAO_CODIGO.md")}
+2025-11-18T23:35:20.393323Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:35:51.492195Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("REVISAO_CODIGO.md"), AnchoredSystemPathBuf("RESUMO_MELHORIAS.md"), AnchoredSystemPathBuf("apps/api/app/services/document_generator.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/individual/page.tsx"), AnchoredSystemPathBuf("NOVIDADES_V0.3.md"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/templates.py"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register-type/page.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/index.ts"), AnchoredSystemPathBuf("apps/web/src/app/(auth)/register/institutional/page.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py"), AnchoredSystemPathBuf("apps/api/app/services/document_templates.py"), AnchoredSystemPathBuf("MIGRATION_GUIDE.md"), AnchoredSystemPathBuf("apps/api/app/api/routes.py"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx")}
+2025-11-18T23:35:51.492215Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }, WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:35:51.492255Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:35:55.992063Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("RESUMO_REVISAO.md")}
+2025-11-18T23:35:55.992086Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:35:56.192960Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/styles/globals.css"), AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx")}
+2025-11-18T23:35:56.192972Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:35:56.193026Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:35:58.492319Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("RESUMO_REVISAO.md")}
+2025-11-18T23:35:58.492356Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:36:26.405815Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/api/endpoints/templates.py"), AnchoredSystemPathBuf("REVISAO_CODIGO.md"), AnchoredSystemPathBuf("apps/api/app/api/routes.py"), AnchoredSystemPathBuf("RESUMO_REVISAO.md"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-institutional.tsx"), AnchoredSystemPathBuf("apps/web/src/components/auth/register-individual.tsx"), AnchoredSystemPathBuf("apps/api/app/api/endpoints/documents.py")}
+2025-11-18T23:36:26.407267Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }, WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:36:26.431902Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:40:59.995404Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-selector.tsx")}
+2025-11-18T23:41:00.019489Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:41:00.088679Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-selector.tsx")}
+2025-11-18T23:41:00.088754Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:41:00.088888Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:41:14.389618Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/api/app/schemas/library.py")}
+2025-11-18T23:41:14.389648Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:41:16.388115Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/app/(dashboard)/minuta/page.tsx"), AnchoredSystemPathBuf("apps/web/src/styles/globals.css")}
+2025-11-18T23:41:16.388373Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:41:16.388700Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:41:22.289868Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/chat-input.tsx")}
+2025-11-18T23:41:22.289999Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:41:25.988088Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/chat/context-dashboard.tsx")}
+2025-11-18T23:41:25.988105Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:38.897166Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/dropdown-menu.tsx")}
+2025-11-18T23:42:38.904409Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:40.289022Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/dropdown-menu.tsx")}
+2025-11-18T23:42:40.289324Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:41.004360Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/package.json")}
+2025-11-18T23:42:41.004370Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:41.289564Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx")}
+2025-11-18T23:42:41.289598Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:41.788590Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx")}
+2025-11-18T23:42:41.788604Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:42.289697Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("package-lock.json")}
+2025-11-18T23:42:42.290802Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:42:42.497171Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx")}
+2025-11-18T23:42:42.497181Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:42:42.592036Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:46:58.594087Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/package.json")}
+2025-11-18T23:46:58.595623Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:46:58.984751Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("package-lock.json")}
+2025-11-18T23:46:58.984777Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
+2025-11-18T23:47:02.183957Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/dropdown-menu.tsx")}
+2025-11-18T23:47:02.184108Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:47:02.184834Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:47:03.884983Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/src/components/ui/tabs.tsx")}
+2025-11-18T23:47:03.885005Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:47:03.885050Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:55:27.643166Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("apps/web/node_modules")}
+2025-11-18T23:55:27.646419Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Other("@iudex/web"), path: AnchoredSystemPathBuf("apps/web") }}))
+2025-11-18T23:55:27.748197Z  WARN turborepo_lib::package_changes_watcher: hashes are the same, no need to rerun
+2025-11-18T23:55:30.747578Z  WARN turborepo_lib::package_changes_watcher: changed_files: {AnchoredSystemPathBuf("package-lock.json")}
+2025-11-18T23:55:30.747615Z  WARN turborepo_lib::package_changes_watcher: changed_packages: Ok(Some({WorkspacePackage { name: Root, path: AnchoredSystemPathBuf("") }}))
