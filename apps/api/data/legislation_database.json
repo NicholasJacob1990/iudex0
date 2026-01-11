@@ -1,0 +1,238 @@
+{
+    "metadata": {
+        "version": "1.0",
+        "last_updated": "2025-11-21",
+        "total_laws": 15,
+        "description": "Base de dados local de legislação brasileira principal"
+    },
+    "legislation": [
+        {
+            "id": "cf-1988",
+            "tipo": "Constituição",
+            "nome": "Constituição Federal de 1988",
+            "ano": 1988,
+            "ementa": "Nós, representantes do povo brasileiro, reunidos em Assembléia Nacional Constituinte para instituir um Estado Democrático, destinado a assegurar o exercício dos direitos sociais e individuais...",
+            "tags": [
+                "constituição",
+                "direitos fundamentais",
+                "organização do estado"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/constituicao/constituicao.htm",
+            "principais_artigos": [
+                "Art. 5º - Direitos e Garantias Fundamentais",
+                "Art. 37 - Administração Pública",
+                "Art. 196 - Saúde"
+            ]
+        },
+        {
+            "id": "cc-2002",
+            "tipo": "Código",
+            "nome": "Código Civil",
+            "numero": "Lei nº 10.406/2002",
+            "ano": 2002,
+            "ementa": "Institui o Código Civil brasileiro, regulando direitos e obrigações de ordem privada concernentes às pessoas, aos bens e às suas relações.",
+            "tags": [
+                "direito civil",
+                "obrigações",
+                "contratos",
+                "propriedade"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/leis/2002/l10406compilada.htm"
+        },
+        {
+            "id": "cpc-2015",
+            "tipo": "Código",
+            "nome": "Código de Processo Civil",
+            "numero": "Lei nº 13.105/2015",
+            "ano": 2015,
+            "ementa": "Código de Processo Civil - Regula o processo civil brasileiro, estabelecendo normas processuais de direito processual civil.",
+            "tags": [
+                "processo civil",
+                "procedimento",
+                "recursos",
+                "execução"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/l13105.htm"
+        },
+        {
+            "id": "cp-1940",
+            "tipo": "Código",
+            "nome": "Código Penal",
+            "numero": "Decreto-Lei nº 2.848/1940",
+            "ano": 1940,
+            "ementa": "Código Penal brasileiro - Define crimes e estabelece penas.",
+            "tags": [
+                "direito penal",
+                "crimes",
+                "penas",
+                "parte geral"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/decreto-lei/del2848compilado.htm"
+        },
+        {
+            "id": "cpp-1941",
+            "tipo": "Código",
+            "nome": "Código de Processo Penal",
+            "numero": "Decreto-Lei nº 3.689/1941",
+            "ano": 1941,
+            "ementa": "Código de Processo Penal - Regula o processo penal brasileiro.",
+            "tags": [
+                "processo penal",
+                "investigação",
+                "ação penal",
+                "recursos"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/decreto-lei/del3689compilado.htm"
+        },
+        {
+            "id": "cdc-1990",
+            "tipo": "Lei",
+            "nome": "Código de Defesa do Consumidor",
+            "numero": "Lei nº 8.078/1990",
+            "ano": 1990,
+            "ementa": "Dispõe sobre a proteção do consumidor e dá outras providências.",
+            "tags": [
+                "consumidor",
+                "relação de consumo",
+                "direitos básicos",
+                "responsabilidade"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/leis/l8078compilado.htm"
+        },
+        {
+            "id": "clt-1943",
+            "tipo": "Consolidação",
+            "nome": "Consolidação das Leis do Trabalho",
+            "numero": "Decreto-Lei nº 5.452/1943",
+            "ano": 1943,
+            "ementa": "Aprova a Consolidação das Leis do Trabalho - Regula as relações individuais e coletivas de trabalho.",
+            "tags": [
+                "trabalho",
+                "empregado",
+                "empregador",
+                "salário",
+                "jornada"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/decreto-lei/del5452.htm"
+        },
+        {
+            "id": "eca-1990",
+            "tipo": "Lei",
+            "nome": "Estatuto da Criança e do Adolescente",
+            "numero": "Lei nº 8.069/1990",
+            "ano": 1990,
+            "ementa": "Dispõe sobre o Estatuto da Criança e do Adolescente e dá outras providências.",
+            "tags": [
+                "criança",
+                "adolescente",
+                "proteção integral",
+                "direitos"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/leis/l8069.htm"
+        },
+        {
+            "id": "maria-da-penha-2006",
+            "tipo": "Lei",
+            "nome": "Lei Maria da Penha",
+            "numero": "Lei nº 11.340/2006",
+            "ano": 2006,
+            "ementa": "Cria mecanismos para coibir a violência doméstica e familiar contra a mulher.",
+            "tags": [
+                "violência doméstica",
+                "mulher",
+                "proteção",
+                "medidas protetivas"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2004-2006/2006/lei/l11340.htm"
+        },
+        {
+            "id": "lgpd-2018",
+            "tipo": "Lei",
+            "nome": "Lei Geral de Proteção de Dados",
+            "numero": "Lei nº 13.709/2018",
+            "ano": 2018,
+            "ementa": "Dispõe sobre a proteção de dados pessoais e altera a Lei nº 12.965/2014 (Marco Civil da Internet).",
+            "tags": [
+                "dados pessoais",
+                "privacidade",
+                "proteção",
+                "lgpd"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/lei/l13709.htm"
+        },
+        {
+            "id": "licitacoes-2021",
+            "tipo": "Lei",
+            "nome": "Nova Lei de Licitações",
+            "numero": "Lei nº 14.133/2021",
+            "ano": 2021,
+            "ementa": "Lei de Licitações e Contratos Administrativos - Estabelece normas gerais de licitação e contratação para as administrações públicas.",
+            "tags": [
+                "licitação",
+                "contratos administrativos",
+                "modalidades",
+                "dispensa"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2019-2022/2021/lei/L14133.htm"
+        },
+        {
+            "id": "lei-falencias-2005",
+            "tipo": "Lei",
+            "nome": "Lei de Falências e Recuperação Judicial",
+            "numero": "Lei nº 11.101/2005",
+            "ano": 2005,
+            "ementa": "Regula a recuperação judicial, a extrajudicial e a falência do empresário e da sociedade empresária.",
+            "tags": [
+                "falência",
+                "recuperação judicial",
+                "empresário",
+                "credores"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2004-2006/2005/lei/l11101.htm"
+        },
+        {
+            "id": "lei-improbidade-1992",
+            "tipo": "Lei",
+            "nome": "Lei de Improbidade Administrativa",
+            "numero": "Lei nº 8.429/1992",
+            "ano": 1992,
+            "ementa": "Dispõe sobre as sanções aplicáveis em virtude da prática de atos de improbidade administrativa.",
+            "tags": [
+                "improbidade",
+                "administração pública",
+                "sanções",
+                "agente público"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/leis/l8429.htm"
+        },
+        {
+            "id": "marco-civil-2014",
+            "tipo": "Lei",
+            "nome": "Marco Civil da Internet",
+            "numero": "Lei nº 12.965/2014",
+            "ano": 2014,
+            "ementa": "Estabelece princípios, garantias, direitos e deveres para o uso da Internet no Brasil.",
+            "tags": [
+                "internet",
+                "neutralidade",
+                "privacidade",
+                "dados"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2011-2014/2014/lei/l12965.htm"
+        },
+        {
+            "id": "lei-acesso-informacao-2011",
+            "tipo": "Lei",
+            "nome": "Lei de Acesso à Informação",
+            "numero": "Lei nº 12.527/2011",
+            "ano": 2011,
+            "ementa": "Regula o acesso a informações previsto na Constituição Federal.",
+            "tags": [
+                "acesso à informação",
+                "transparência",
+                "administração pública"
+            ],
+            "url": "http://www.planalto.gov.br/ccivil_03/_ato2011-2014/2011/lei/l12527.htm"
+        }
+    ]
+}

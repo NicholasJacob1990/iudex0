@@ -70,12 +70,15 @@ class Document(Base):
     content: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     extracted_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    doc_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     tags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     
     folder_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    share_token: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True, index=True)
+    share_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    share_access_level: Mapped[str] = mapped_column(String, default="VIEW", nullable=False) # VIEW, EDIT
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(

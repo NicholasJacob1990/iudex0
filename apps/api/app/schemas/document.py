@@ -58,7 +58,7 @@ class DocumentResponse(DocumentBase):
 
 class DocumentSummaryRequest(BaseModel):
     """Schema para requisição de resumo"""
-    type: str = Field(..., regex="^(quick|detailed|audio|podcast)$")
+    type: str = Field(..., pattern="^(quick|detailed|audio|podcast)$")
     language: str = "pt-BR"
 
 
@@ -80,12 +80,46 @@ class DocumentGenerationRequest(BaseModel):
     document_type: str = Field(..., description="Tipo de documento (petition, contract, opinion, etc.)")
     context_documents: List[str] = Field(default_factory=list, description="IDs de documentos para contexto")
     effort_level: int = Field(default=3, ge=1, le=5, description="Nível de esforço (1-5)")
+    min_pages: Optional[int] = Field(default=None, ge=0, description="Mínimo de páginas desejado (0 = auto)")
+    max_pages: Optional[int] = Field(default=None, ge=0, description="Máximo de páginas desejado (0 = auto)")
+    attachment_mode: str = Field(default="rag_local", pattern="^(rag_local|prompt_injection)$", description="Como usar anexos (rag_local|prompt_injection)")
     include_signature: bool = Field(default=True, description="Incluir assinatura no documento")
     template_id: Optional[str] = Field(None, description="ID do template a ser usado")
     variables: Dict[str, Any] = Field(default_factory=dict, description="Variáveis do template")
     language: str = "pt-BR"
     tone: str = Field(default="formal", description="Tom do documento (formal, informal, técnico)")
     max_length: Optional[int] = Field(None, description="Comprimento máximo em palavras")
+    use_multi_agent: bool = Field(default=True, description="Ativar modo multi-agente (debate)")
+    # IDs canônicos (ver apps/api/app/services/ai/model_registry.py e apps/web/src/config/models.ts)
+    model_selection: Optional[str] = Field(default="gemini-3-pro", description="Modelo preferencial (ex.: gemini-3-pro, gemini-3-flash, gpt-5.2, claude-4.5-sonnet)")
+    model_gpt: Optional[str] = Field(default="gpt-5.2", description="Modelo GPT específico (id canônico)")
+    model_claude: Optional[str] = Field(default="claude-4.5-sonnet", description="Modelo Claude específico (id canônico)")
+    strategist_model: Optional[str] = Field(default=None, description="Modelo para planejamento/outline (id canônico)")
+    drafter_models: List[str] = Field(default_factory=list, description="Lista de modelos para redação (ids canônicos)")
+    reviewer_models: List[str] = Field(default_factory=list, description="Lista de modelos para revisão/critica (ids canônicos)")
+    chat_personality: str = Field(default="juridico", pattern="^(juridico|geral)$", description="Personalidade do chat (juridico|geral)")
+    reasoning_level: str = Field(default="medium", pattern="^(low|medium|high)$", description="Nível de raciocínio")
+    web_search: bool = Field(default=False, description="Ativar pesquisa na web")
+    thesis: Optional[str] = Field(None, description="Tese jurídica ou instruções livres")
+    formatting_options: Dict[str, bool] = Field(default_factory=dict, description="Opções de formatação (include_toc, include_summaries, include_summary_table)")
+    citation_style: str = Field(default="forense", pattern="^(forense|abnt|hibrido)$", description="Estilo de citação (forense|abnt|hibrido)")
+    use_templates: bool = Field(default=False, description="Ativar uso de modelos de peça (RAG)")
+    template_filters: Dict[str, Any] = Field(default_factory=dict, description="Filtros para busca de modelos (tipo_peca, area, rito, apenas_clause_bank)")
+    prompt_extra: Optional[str] = Field(None, description="Instruções adicionais para a redação")
+    audit: bool = Field(default=True, description="Executar auditoria jurídica ao final")
+    use_langgraph: bool = Field(default=True, description="Usar workflow LangGraph para geração")
+    dense_research: bool = Field(default=False, description="Ativar deep research (LangGraph)")
+    adaptive_routing: bool = Field(default=False, description="Ativar roteamento adaptativo (LangGraph)")
+    crag_gate: bool = Field(default=False, description="Ativar CRAG gate (LangGraph)")
+    crag_min_best_score: float = Field(default=0.45, ge=0, le=1, description="CRAG min best score")
+    crag_min_avg_score: float = Field(default=0.35, ge=0, le=1, description="CRAG min avg score")
+    hyde_enabled: bool = Field(default=False, description="Ativar HyDE (LangGraph)")
+    graph_rag_enabled: bool = Field(default=False, description="Ativar GraphRAG (LangGraph)")
+    graph_hops: int = Field(default=1, ge=1, le=5, description="Profundidade do GraphRAG")
+    destino: str = Field(default="uso_interno", pattern="^(uso_interno|cliente|contraparte|autoridade|regulador)$")
+    risco: str = Field(default="baixo", pattern="^(baixo|medio|alto)$")
+    hil_outline_enabled: bool = Field(default=False, description="Habilitar revisão humana do outline (LangGraph)")
+    hil_target_sections: List[str] = Field(default_factory=list, description="Seções alvo para HIL (LangGraph)")
 
 
 class DocumentGenerationResponse(BaseModel):
@@ -105,7 +139,7 @@ class DocumentGenerationResponse(BaseModel):
 class TemplateVariable(BaseModel):
     """Variável de template"""
     name: str
-    type: str = Field(..., regex="^(text|number|date|boolean|select|user_field)$")
+    type: str = Field(..., pattern="^(text|number|date|boolean|select|user_field)$")
     label: str
     description: Optional[str] = None
     required: bool = True
@@ -144,4 +178,3 @@ class SignatureResponse(BaseModel):
     signature_data: Dict[str, Any]
     created_at: datetime
     updated_at: datetime
-

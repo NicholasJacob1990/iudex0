@@ -452,25 +452,275 @@ class UnlimitedContextProcessor:
         return final_result
 
 
+import pdfplumber
+from docx import Document as DocxDocument
+import pytesseract
+from PIL import Image
+import os
+
 # Funções auxiliares para extração de texto de diferentes formatos
 
 async def extract_text_from_pdf(file_path: str) -> str:
-    """Extrai texto de PDF usando pypdf"""
-    # TODO: Implementar com pypdf ou pdfplumber
+    """
+    Extrai texto de PDF usando pdfplumber
+    Melhor para manter layout e extrair tabelas
+    """
     logger.info(f"Extraindo texto de PDF: {file_path}")
-    return "[Texto extraído do PDF]"  # Placeholder
-
+    text_content = []
+    
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                text_content.append(text)
+        
+        return "\n\n".join(text_content)
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do PDF {file_path}: {e}")
+        # Fallback para pypdf se necessário ou re-raise
+        raise
 
 async def extract_text_from_docx(file_path: str) -> str:
     """Extrai texto de DOCX usando python-docx"""
-    # TODO: Implementar com python-docx
     logger.info(f"Extraindo texto de DOCX: {file_path}")
-    return "[Texto extraído do DOCX]"  # Placeholder
-
+    try:
+        doc = DocxDocument(file_path)
+        text_content = []
+        
+        for paragraph in doc.paragraphs:
+            if paragraph.text.strip():
+                text_content.append(paragraph.text)
+                
+        # Também extrair texto de tabelas
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = [cell.text for cell in row.cells]
+                text_content.append(" | ".join(row_text))
+                
+        return "\n\n".join(text_content)
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do DOCX {file_path}: {e}")
+        raise
 
 async def extract_text_from_image(file_path: str) -> str:
-    """Extrai texto de imagem usando OCR"""
-    # TODO: Implementar com pytesseract
+    """Extrai texto de imagem usando OCR (Tesseract)"""
     logger.info(f"Extraindo texto de imagem: {file_path}")
-    return "[Texto extraído da imagem via OCR]"  # Placeholder
+    try:
+        image = Image.open(file_path)
+        text = pytesseract.image_to_string(image, lang='por') # Assumindo português
+        return text
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto da imagem {file_path}: {e}")
+        return f"[Erro no OCR: {str(e)}]"
 
+
+async def extract_text_from_pdf_with_ocr(file_path: str) -> str:
+    """
+    Aplica OCR completo em PDF digitalizado (imagens)
+    Converte cada página em imagem e aplica Tesseract OCR
+    """
+    logger.info(f"Aplicando OCR completo em PDF: {file_path}")
+    try:
+        from pdf2image import convert_from_path
+        
+        # Converter PDF para imagens (uma por página)
+        # DPI maior = melhor qualidade mas mais lento (300 é um bom balanço)
+        logger.info("Convertendo PDF para imagens...")
+        images = convert_from_path(file_path, dpi=300)
+        
+        logger.info(f"PDF convertido em {len(images)} imagens")
+        
+        ocr_texts = []
+        for i, image in enumerate(images, 1):
+            logger.info(f"Aplicando OCR na página {i}/{len(images)}")
+            
+            # Aplicar OCR em português
+            page_text = pytesseract.image_to_string(image, lang='por')
+            
+            if page_text.strip():
+                ocr_texts.append(f"--- Página {i} ---\n{page_text}")
+            else:
+                ocr_texts.append(f"--- Página {i} ---\n[Página sem texto detectado]")
+        
+        result = "\n\n".join(ocr_texts)
+        logger.info(f"OCR concluído: {len(result)} caracteres extraídos")
+        return result
+        
+    except ImportError as e:
+        logger.error("Bibliotecas necessárias não instaladas")
+        logger.error("Instale com: pip install pdf2image")
+        logger.error("macOS: brew install poppler")
+        logger.error("Linux: apt-get install poppler-utils")
+        return f"[Erro: bibliotecas de OCR não instaladas - {str(e)}]"
+    except Exception as e:
+        logger.error(f"Erro ao aplicar OCR em PDF {file_path}: {e}")
+        return f"[Erro no OCR do PDF: {str(e)}]"
+
+
+
+async def extract_text_from_odt(file_path: str) -> str:
+    """Extrai texto de ODT (OpenDocument Text)"""
+    logger.info(f"Extraindo texto de ODT: {file_path}")
+    try:
+        from odf import text, teletype
+        from odf.opendocument import load
+        
+        textdoc = load(file_path)
+        allparas = textdoc.getElementsByType(text.P)
+        text_content = []
+        
+        for para in allparas:
+            para_text = teletype.extractText(para)
+            if para_text.strip():
+                text_content.append(para_text)
+        
+        return "\n\n".join(text_content)
+    except ImportError:
+        logger.error("Biblioteca odfpy não instalada. Instale com: pip install odfpy")
+        return "[Erro: biblioteca odfpy não instalada]"
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do ODT {file_path}: {e}")
+        return f"[Erro na extração ODT: {str(e)}]"
+
+
+async def extract_text_from_zip(file_path: str) -> dict:
+    """
+    Extrai e processa arquivos de um ZIP
+    Retorna dicionário com informações dos arquivos extraídos
+    """
+    logger.info(f"Processando arquivo ZIP: {file_path}")
+    try:
+        import zipfile
+        import tempfile
+        
+        results = {
+            "files": [],
+            "total_files": 0,
+            "extracted_text": "",
+            "errors": []
+        }
+        
+        with zipfile.ZipFile(file_path, 'r') as zip_ref:
+            # Criar diretório temporário para extração
+            with tempfile.TemporaryDirectory() as temp_dir:
+                zip_ref.extractall(temp_dir)
+                
+                # Listar arquivos extraídos
+                file_list = zip_ref.namelist()
+                results["total_files"] = len(file_list)
+                
+                all_text = []
+                
+                # Processar cada arquivo
+                for file_name in file_list:
+                    extracted_path = os.path.join(temp_dir, file_name)
+                    
+                    # Pular diretórios
+                    if os.path.isdir(extracted_path):
+                        continue
+                    
+                    file_info = {
+                        "name": file_name,
+                        "size": os.path.getsize(extracted_path),
+                        "status": "processed"
+                    }
+                    
+                    # Tentar extrair texto baseado na extensão
+                    ext = os.path.splitext(file_name)[1].lower()
+                    
+                    try:
+                        if ext == '.pdf':
+                            text = await extract_text_from_pdf(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext in ['.docx', '.doc']:
+                            text = await extract_text_from_docx(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext == '.odt':
+                            text = await extract_text_from_odt(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext == '.txt':
+                            with open(extracted_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                text = f.read()
+                                all_text.append(f"=== {file_name} ===\n{text}")
+                        else:
+                            file_info["status"] = "unsupported"
+                    except Exception as e:
+                        logger.error(f"Erro ao processar {file_name}: {e}")
+                        file_info["status"] = "error"
+                        file_info["error"] = str(e)
+                        results["errors"].append(f"{file_name}: {str(e)}")
+                    
+                    results["files"].append(file_info)
+                
+                results["extracted_text"] = "\n\n".join(all_text)
+        
+        logger.info(f"ZIP processado: {len(results['files'])} arquivos")
+        return results
+        
+    except Exception as e:
+        logger.error(f"Erro ao processar ZIP {file_path}: {e}")
+        return {
+            "error": str(e),
+            "files": [],
+            "total_files": 0,
+            "extracted_text": ""
+        }
+
+
+async def transcribe_audio_video(file_path: str, media_type: str = "audio") -> str:
+    """
+    Transcreve áudio ou vídeo usando Whisper (OpenAI)
+    
+    Args:
+        file_path: Caminho do arquivo de áudio/vídeo
+        media_type: "audio" ou "video"
+    """
+    logger.info(f"Transcrevendo {media_type}: {file_path}")
+    try:
+        # Verificar se OpenAI Whisper está disponível
+        import openai
+        
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            logger.warning("OPENAI_API_KEY não configurada, tentando whisper local")
+            return await _transcribe_with_local_whisper(file_path)
+        
+        # Usar API do OpenAI Whisper
+        openai.api_key = api_key
+        
+        with open(file_path, "rb") as audio_file:
+            transcript = openai.Audio.transcribe(
+                model="whisper-1",
+                file=audio_file,
+                language="pt"  # Português
+            )
+        
+        return transcript.text
+        
+    except ImportError:
+        logger.warning("openai não instalado, tentando whisper local")
+        return await _transcribe_with_local_whisper(file_path)
+    except Exception as e:
+        logger.error(f"Erro na transcrição: {e}")
+        return f"[Erro na transcrição: {str(e)}]"
+
+
+async def _transcribe_with_local_whisper(file_path: str) -> str:
+    """
+    Transcreve usando Whisper local (faster-whisper ou whisper)
+    """
+    try:
+        import whisper
+        
+        logger.info("Usando Whisper local para transcrição")
+        model = whisper.load_model("base")  # ou "small", "medium", "large"
+        result = model.transcribe(file_path, language="pt")
+        
+        return result["text"]
+        
+    except ImportError:
+        logger.error("whisper não instalado. Instale com: pip install openai-whisper")
+        return "[Erro: biblioteca whisper não instalada]"
+    except Exception as e:
+        logger.error(f"Erro no Whisper local: {e}")
+        return f"[Erro na transcrição local: {str(e)}]"

@@ -28,7 +28,17 @@ class Settings(BaseSettings):
     WORKERS: int = 4
     
     # CORS
-    CORS_ORIGINS: List[str] = ["http://localhost:3000"]
+    CORS_ORIGINS: List[str] = [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://127.0.0.1:3002",
+        "http://0.0.0.0:3000",
+        "http://0.0.0.0:3001",
+        "http://0.0.0.0:3002",
+    ]
     
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
@@ -63,7 +73,8 @@ class Settings(BaseSettings):
     
     # Anthropic (Claude)
     ANTHROPIC_API_KEY: str
-    ANTHROPIC_MODEL: str = "claude-sonnet-4.5"
+    # Use canonical id; provider name is resolved via model_registry.get_api_model_name()
+    ANTHROPIC_MODEL: str = "claude-4.5-sonnet"
     ANTHROPIC_TEMPERATURE: float = 0.7
     ANTHROPIC_MAX_TOKENS: int = 4000
     
@@ -165,4 +176,3 @@ class Settings(BaseSettings):
 
 # Instância global de configurações
 settings = Settings()
-

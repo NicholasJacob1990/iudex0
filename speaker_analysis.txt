@@ -1,0 +1,13 @@
+SPEAKER         | START  | END    | LENGTH (chars) 
+--------------------------------------------------
+SPEAKER 1       | 1      | 4      | 597            
+SPEAKER 2       | 5      | 6      | 15             
+SPEAKER 3       | 7      | 94     | 27381          
+SPEAKER 4       | 95     | 96     | 2              
+SPEAKER 3       | 97     | 386    | 86864          
+SPEAKER 4       | 387    | 562    | 45839          
+SPEAKER 3       | 563    | 564    | 1              
+SPEAKER 4       | 565    | 714    | 34610          
+SPEAKER 2       | 715    | 976    | 40538          
+SPEAKER 5       | 977    | 978    | 752            
+SPEAKER 2       | 979    | 1194   | 36677          

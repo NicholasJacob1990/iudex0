@@ -11,6 +11,19 @@ export default function WebPage() {
         <p className="text-sm text-muted-foreground">
           O Iudex consulta fontes confiáveis automaticamente antes de gerar uma minuta.
         </p>
+
+        {/* Aviso de Demonstração */}
+        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm">
+          <div className="flex items-start gap-3">
+            <span className="text-amber-600 text-lg">⚠️</span>
+            <div>
+              <p className="font-semibold text-amber-900">Modo de Demonstração</p>
+              <p className="text-amber-700 mt-1">
+                Esta funcionalidade está exibindo resultados de exemplo. A integração com motores de busca reais será implementada em breve.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <WebSearchPanel />

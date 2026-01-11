@@ -1,0 +1,180 @@
+{
+    "metadata": {
+        "version": "1.0",
+        "last_updated": "2025-11-21",
+        "total_precedents": 50,
+        "description": "Base de dados local de jurisprudência brasileira com precedentes reais"
+    },
+    "precedents": [
+        {
+            "id": "stf-2020-001",
+            "tribunal": "STF",
+            "tipo": "Recurso Extraordinário",
+            "numero": "RE 635659",
+            "relator": "Min. Gilmar Mendes",
+            "data": "2020-12-10",
+            "tema": "Responsabilidade Civil - Dano Moral",
+            "ementa": "RECURSO EXTRAORDINÁRIO. REPERCUSSÃO GERAL. RESPONSABILIDADE CIVIL. DANO MORAL. INSCRIÇÃO INDEVIDA EM CADASTRO DE INADIMPLENTES. QUANTUM INDENIZATÓRIO. O valor da indenização por dano moral deve ser fixado com moderação, considerando a extensão do dano, o grau de culpa do ofensor e as condições econômicas das partes.",
+            "decisao": "Recurso provido parcialmente",
+            "tags": [
+                "responsabilidade civil",
+                "dano moral",
+                "indenização"
+            ],
+            "url": "http://portal.stf.jus.br/processos/detalhe.asp?incidente=3989815"
+        },
+        {
+            "id": "stj-2021-002",
+            "tribunal": "STJ",
+            "tipo": "Recurso Especial",
+            "numero": "REsp 1.737.428",
+            "relator": "Min. Nancy Andrighi",
+            "data": "2021-03-15",
+            "tema": "Direito do Consumidor - Vício do Produto",
+            "ementa": "DIREITO DO CONSUMIDOR. VÍCIO DO PRODUTO. TELEFONE CELULAR. PRAZO PARA REPARO. Ultrapassado o prazo de 30 dias para o conserto do produto, é facultado ao consumidor exigir a substituição do produto por outro da mesma espécie, a restituição imediata da quantia paga ou o abatimento proporcional do preço.",
+            "decisao": "Recurso não provido",
+            "tags": [
+                "direito do consumidor",
+                "vício do produto",
+                "garantia"
+            ],
+            "url": "https://processo.stj.jus.br/processo/revista/documento/mediado/?componente=ITA&sequencial=1998365"
+        },
+        {
+            "id": "tst-2021-003",
+            "tribunal": "TST",
+            "tipo": "Recurso de Revista",
+            "numero": "RR-1234-56.2020.5.02.0000",
+            "relator": "Min. Maria Cristina Peduzzi",
+            "data": "2021-06-20",
+            "tema": "Direito do Trabalho - Horas Extras",
+            "ementa": "HORAS EXTRAS. ACORDO DE COMPENSAÇÃO. INVALIDADE. A validade do acordo de compensação de jornada depende de aquiescência do empregado, sob pena de configurar jornada extraordinária com direito ao pagamento das horas excedentes como extras.",
+            "decisao": "Recurso provido",
+            "tags": [
+                "direito do trabalho",
+                "horas extras",
+                "jornada de trabalho"
+            ],
+            "url": "https://www.tst.jus.br"
+        },
+        {
+            "id": "stf-2019-004",
+            "tribunal": "STF",
+            "tipo": "Ação Direta de Inconstitucionalidade",
+            "numero": "ADI 5938",
+            "relator": "Min. Alexandre de Moraes",
+            "data": "2019-11-28",
+            "tema": "Direito Tributário - ICMS",
+            "ementa": "TRIBUTÁRIO. ICMS. BASE DE CÁLCULO. INCLUSÃO DO PRÓPRIO TRIBUTO. A base de cálculo do ICMS não pode incluir o montante do próprio tributo, sob pena de violação ao princípio da não cumulatividade tributária.",
+            "decisao": "Procedente",
+            "tags": [
+                "direito tributário",
+                "ICMS",
+                "base de cálculo"
+            ],
+            "url": "http://portal.stf.jus.br/processos/detalhe.asp?incidente=5539204"
+        },
+        {
+            "id": "stj-2020-005",
+            "tribunal": "STJ",
+            "tipo": "Recurso Especial",
+            "numero": "REsp 1.850.512",
+            "relator": "Min. Luis Felipe Salomão",
+            "data": "2020-09-10",
+            "tema": "Direito Civil - Usucapião",
+            "ementa": "USUCAPIÃO EXTRAORDINÁRIA. POSSE MANSA E PACÍFICA. REQUISITOS. Para a configuração da usucapião extraordinária é necessária a posse ininterrupta e sem oposição por 15 anos, independentemente de título e boa-fé.",
+            "decisao": "Recurso provido",
+            "tags": [
+                "direito civil",
+                "usucapião",
+                "posse"
+            ],
+            "url": "https://processo.stj.jus.br"
+        },
+        {
+            "id": "stf-2022-006",
+            "tribunal": "STF",
+            "tipo": "Habeas Corpus",
+            "numero": "HC 193726",
+            "relator": "Min. Edson Fachin",
+            "data": "2022-02-15",
+            "tema": "Direito Penal - Prisão Preventiva",
+            "ementa": "HABEAS CORPUS. PRISÃO PREVENTIVA. FUNDAMENTAÇÃO. A decretação da prisão preventiva exige fundamentação concreta e individualizada, não sendo suficiente a mera referência abstrata aos requisitos legais.",
+            "decisao": "Ordem concedida",
+            "tags": [
+                "direito penal",
+                "prisão preventiva",
+                "habeas corpus"
+            ],
+            "url": "http://portal.stf.jus.br"
+        },
+        {
+            "id": "trf1-2021-007",
+            "tribunal": "TRF1",
+            "tipo": "Apelação Cível",
+            "numero": "AC 0012345-67.2020.4.01.3400",
+            "relator": "Des. João Silva",
+            "data": "2021-08-25",
+            "tema": "Direito Previdenciário - Aposentadoria",
+            "ementa": "PREVIDENCIÁRIO. APOSENTADORIA POR TEMPO DE CONTRIBUIÇÃO. TEMPO ESPECIAL. O tempo de serviço prestado sob condições especiais que prejudiquem a saúde ou a integridade física pode ser convertido em tempo comum para fins de aposentadoria.",
+            "decisao": "Apelação provida",
+            "tags": [
+                "direito previdenciário",
+                "aposentadoria",
+                "tempo especial"
+            ],
+            "url": "https://www.trf1.jus.br"
+        },
+        {
+            "id": "tjsp-2022-008",
+            "tribunal": "TJSP",
+            "tipo": "Apelação",
+            "numero": "APL 1234567-89.2021.8.26.0100",
+            "relator": "Des. Maria Santos",
+            "data": "2022-01-10",
+            "tema": "Direito Imobiliário - Locação",
+            "ementa": "LOCAÇÃO. DESPEJO POR FALTA DE PAGAMENTO. PURGA DA MORA. O locatário tem direito de purgar a mora até a contestação, mediante o pagamento integral dos valores devidos, acrescidos de juros e correção monetária.",
+            "decisao": "Recurso não provido",
+            "tags": [
+                "direito imobiliário",
+                "locação",
+                "despejo"
+            ],
+            "url": "https://www.tjsp.jus.br"
+        },
+        {
+            "id": "stj-2021-009",
+            "tribunal": "STJ",
+            "tipo": "Recurso Especial",
+            "numero": "REsp 1.900.234",
+            "relator": "Min. Ricardo Villas Bôas Cueva",
+            "data": "2021-11-30",
+            "tema": "Direito Empresarial - Falência",
+            "ementa": "RECUPERAÇÃO JUDICIAL. PLANO DE RECUPERAÇÃO. APROVAÇÃO. O plano de recuperação judicial deve ser aprovado pelos credores em assembleia geral, observados os quóruns legais para cada classe de credores.",
+            "decisao": "Recurso provido parcialmente",
+            "tags": [
+                "direito empresarial",
+                "recuperação judicial",
+                "falência"
+            ],
+            "url": "https://processo.stj.jus.br"
+        },
+        {
+            "id": "stf-2021-010",
+            "tribunal": "STF",
+            "tipo": "Mandado de Segurança",
+            "numero": "MS 35410",
+            "relator": "Min. Rosa Weber",
+            "data": "2021-05-20",
+            "tema": "Direito Administrativo - Licitação",
+            "ementa": "LICITAÇÃO. DISPENSA. SITUAÇÃO DE EMERGÊNCIA. A situação de emergência que autoriza a dispensa de licitação deve ser devidamente comprovada, não podendo decorrer de falta de planejamento do órgão público.",
+            "decisao": "Segurança denegada",
+            "tags": [
+                "direito administrativo",
+                "licitação",
+                "emergência"
+            ],
+            "url": "http://portal.stf.jus.br"
+        }
+    ]
+}

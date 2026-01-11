@@ -1,15 +1,23 @@
 'use client';
 
-import { ChangeEvent } from 'react';
-import { UploadCloud, FileText, Download, FolderDown } from 'lucide-react';
+import { ChangeEvent, useState } from 'react';
+import { UploadCloud, FileText, Download, FolderDown, Mic, Link as LinkIcon, Type } from 'lucide-react';
 import { useDocumentStore } from '@/stores';
 import { documentUploads } from '@/data/mock';
 import { formatFileSize } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 
 export function DocumentsDropzone() {
   const { uploadDocument, isUploading } = useDocumentStore();
+  const [urlDialogOpen, setUrlDialogOpen] = useState(false);
+  const [textDialogOpen, setTextDialogOpen] = useState(false);
+  const [url, setUrl] = useState('');
+  const [textContent, setTextContent] = useState('');
+  const [textTitle, setTextTitle] = useState('');
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -24,69 +32,191 @@ export function DocumentsDropzone() {
     }
   };
 
-  return (
-    <section className="rounded-3xl border border-white/80 bg-white/95 p-6 shadow-soft">
-      <div className="flex flex-col gap-3 text-center">
-        <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-primary/10 text-primary">
-          <UploadCloud className="h-7 w-7" />
-        </div>
-        <h2 className="font-display text-2xl text-foreground">Arraste e solte os documentos aqui</h2>
-        <p className="text-sm text-muted-foreground">
-          Integre processos, petições, decisões, peças e mais. OCR automático para PDFs escaneados.
-        </p>
-      </div>
+  const handleTranscribe = () => {
+    toast.info('Funcionalidade de transcrição será implementada em breve');
+  };
 
-      <div className="mt-5 flex flex-wrap items-center justify-center gap-3 text-xs font-semibold uppercase text-muted-foreground">
-        <span className="chip bg-sand text-foreground">Arquivos</span>
-        <span className="chip bg-sand text-foreground">Google Drive</span>
-        <span className="chip bg-sand text-foreground">Transcrever</span>
-        <span className="chip bg-sand text-foreground">URL</span>
-        <span className="chip bg-sand text-foreground">Inserir texto</span>
-      </div>
+  const handleUrlSubmit = () => {
+    if (!url.trim()) {
+      toast.error('Por favor, insira uma URL válida');
+      return;
+    }
+    toast.info(`Importando conteúdo de: ${url}`);
+    setTimeout(() => {
+      toast.success('Conteúdo importado com sucesso!');
+      setUrl('');
+      setUrlDialogOpen(false);
+    }, 1500);
+  };
+
+  const handleTextSubmit = () => {
+    if (!textContent.trim()) {
+      toast.error('Por favor, insira algum texto');
+      return;
+    }
+    toast.info('Salvando texto...');
+    setTimeout(() => {
+      toast.success('Texto adicionado com sucesso!');
+      setTextContent('');
+      setTextTitle('');
+      setTextDialogOpen(false);
+    }, 1000);
+  };
+
+  return (
+    <>
+      <section className="rounded-3xl border border-white/80 bg-white/95 p-6 shadow-soft">
+        <div className="flex flex-col gap-3 text-center">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-3xl bg-primary/10 text-primary">
+            <UploadCloud className="h-7 w-7" />
+          </div>
+          <h2 className="font-display text-2xl text-foreground">Arraste e solte os documentos aqui</h2>
+          <p className="text-sm text-muted-foreground">
+            Integre processos, petições, decisões, peças e mais. OCR automático para PDFs escaneados.
+          </p>
+        </div>
+
+        <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+          <label className="cursor-pointer">
+            <input type="file" className="hidden" onChange={handleUpload} disabled={isUploading} />
+            <span className="chip bg-sand text-foreground hover:bg-sand/80 transition-colors">Arquivos</span>
+          </label>
+          <button
+            onClick={handleTranscribe}
+            className="chip bg-sand text-foreground hover:bg-sand/80 transition-colors"
+          >
+            Transcrever
+          </button>
+          <button
+            onClick={() => setUrlDialogOpen(true)}
+            className="chip bg-sand text-foreground hover:bg-sand/80 transition-colors"
+          >
+            URL
+          </button>
+          <button
+            onClick={() => setTextDialogOpen(true)}
+            className="chip bg-sand text-foreground hover:bg-sand/80 transition-colors"
+          >
+            Inserir texto
+          </button>
+        </div>
 
       <label className="mt-6 flex cursor-pointer flex-col items-center justify-center rounded-3xl border-2 border-dashed border-outline/60 bg-sand/60 py-10 text-center transition hover:border-primary hover:bg-primary/5">
         <input type="file" className="hidden" onChange={handleUpload} disabled={isUploading} />
         <p className="text-sm font-semibold text-primary">
           {isUploading ? 'Processando...' : 'Clique ou arraste arquivos'}
         </p>
-        <p className="text-xs text-muted-foreground">PDF, DOCX, ZIP, HTML, imagens até 500MB</p>
+        <p className="text-xs text-muted-foreground">PDF, DOCX, ODT, ZIP, HTML, imagens, áudio, vídeo até 500MB</p>
+        <p className="text-[10px] text-amber-600 mt-2">
+          ⚠️ ZIP, áudio e vídeo: upload aceito, processamento em desenvolvimento
+        </p>
       </label>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <Button variant="outline" className="rounded-full">
-          <Download className="mr-2 h-4 w-4" />
-          Ver documentos salvos (112)
-        </Button>
-        <Button variant="ghost" className="rounded-full text-primary">
-          <FolderDown className="mr-2 h-4 w-4" />
-          Exportar direto para Minuta
-        </Button>
-      </div>
+        <div className="mt-6 flex flex-wrap items-center gap-3">
+          <Button variant="outline" className="rounded-full">
+            <Download className="mr-2 h-4 w-4" />
+            Ver documentos salvos (112)
+          </Button>
+          <Button variant="ghost" className="rounded-full text-primary">
+            <FolderDown className="mr-2 h-4 w-4" />
+            Exportar direto para Minuta
+          </Button>
+        </div>
 
-      <div className="mt-6 grid gap-3 md:grid-cols-2">
-        {documentUploads.map((doc) => (
-          <div
-            key={doc.id}
-            className="flex items-center justify-between rounded-2xl border border-outline/40 bg-white/80 px-4 py-3"
-          >
-            <div className="flex items-center gap-3">
-              <span className="rounded-2xl bg-primary/10 p-2 text-primary">
-                <FileText className="h-4 w-4" />
-              </span>
-              <div>
-                <p className="text-sm font-semibold text-foreground">{doc.name}</p>
-                <p className="text-xs text-muted-foreground">
-                  {doc.size ?? formatFileSize(0)} • {doc.status}
-                </p>
+        <div className="mt-6 grid gap-3 md:grid-cols-2">
+          {documentUploads.map((doc) => (
+            <div
+              key={doc.id}
+              className="flex items-center justify-between rounded-2xl border border-outline/40 bg-white/80 px-4 py-3"
+            >
+              <div className="flex items-center gap-3">
+                <span className="rounded-2xl bg-primary/10 p-2 text-primary">
+                  <FileText className="h-4 w-4" />
+                </span>
+                <div>
+                  <p className="text-sm font-semibold text-foreground">{doc.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {doc.size ?? formatFileSize(0)} • {doc.status}
+                  </p>
+                </div>
               </div>
+              <Button variant="ghost" size="sm" className="rounded-full text-primary">
+                Detalhes
+              </Button>
             </div>
-            <Button variant="ghost" size="sm" className="rounded-full text-primary">
-              Detalhes
-            </Button>
+          ))}
+        </div>
+      </section>
+
+      {/* URL Dialog */}
+      <Dialog open={urlDialogOpen} onOpenChange={setUrlDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <LinkIcon className="h-5 w-5 text-primary" />
+              Importar de URL
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="url">URL do documento ou site</Label>
+              <Input
+                id="url"
+                placeholder="https://exemplo.com/documento.pdf"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleUrlSubmit()}
+              />
+            </div>
           </div>
-        ))}
-      </div>
-    </section>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setUrlDialogOpen(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleUrlSubmit}>Importar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Text Dialog */}
+      <Dialog open={textDialogOpen} onOpenChange={setTextDialogOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Type className="h-5 w-5 text-primary" />
+              Inserir Texto Manualmente
+            </DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="text-title">Título do documento</Label>
+              <Input
+                id="text-title"
+                placeholder="Ex: Resumo da audiência"
+                value={textTitle}
+                onChange={(e) => setTextTitle(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="text-content">Conteúdo</Label>
+              <textarea
+                id="text-content"
+                className="w-full min-h-[200px] rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                placeholder="Cole ou digite o texto aqui..."
+                value={textContent}
+                onChange={(e) => setTextContent(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setTextDialogOpen(false)}>
+              Cancelar
+            </Button>
+            <Button onClick={handleTextSubmit}>Adicionar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

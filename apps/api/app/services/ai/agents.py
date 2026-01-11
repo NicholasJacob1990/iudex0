@@ -3,6 +3,8 @@ Implementações concretas dos agentes de IA
 """
 
 from typing import Dict, List, Any, Optional
+import os
+import asyncio
 import anthropic
 import google.generativeai as genai
 from openai import AsyncOpenAI
@@ -26,7 +28,18 @@ class ClaudeAgent(BaseAgent):
             temperature=settings.ANTHROPIC_TEMPERATURE,
             max_tokens=settings.ANTHROPIC_MAX_TOKENS
         )
-        self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        region = os.getenv("VERTEX_AI_LOCATION", "global")
+
+        self._vertex_sync = False
+        if project_id and hasattr(anthropic, "AsyncAnthropicVertex"):
+            self.client = anthropic.AsyncAnthropicVertex(project_id=project_id, region=region)
+            self._vertex_sync = False
+        elif project_id and hasattr(anthropic, "AnthropicVertex"):
+            self.client = anthropic.AnthropicVertex(project_id=project_id, region=region)
+            self._vertex_sync = True
+        else:
+            self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
     
     async def generate(
         self,
@@ -58,17 +71,25 @@ e tecnicamente corretos, seguindo as normas da ABNT e as boas práticas jurídic
             ]
             
             # Chamar API da Anthropic
-            response = await self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                temperature=self.temperature,
-                system=system_prompt,
-                messages=messages
-            )
+            kwargs = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "system": system_prompt,
+                "messages": messages,
+            }
+
+            if hasattr(self.client, "__class__") and self.client.__class__.__name__ in ("AnthropicVertex", "AsyncAnthropicVertex"):
+                kwargs["anthropic_version"] = os.getenv("ANTHROPIC_VERTEX_VERSION", "vertex-2023-10-16")
+
+            if self._vertex_sync:
+                response = await asyncio.to_thread(self.client.messages.create, **kwargs)
+            else:
+                response = await self.client.messages.create(**kwargs)
             
-            content = response.content[0].text
-            input_tokens = response.usage.input_tokens
-            output_tokens = response.usage.output_tokens
+            content = response.content[0].text if response.content else ""
+            input_tokens = response.usage.input_tokens if hasattr(response, "usage") else 0
+            output_tokens = response.usage.output_tokens if hasattr(response, "usage") else 0
             
             cost = self._calculate_cost(input_tokens, output_tokens)
             
@@ -424,4 +445,3 @@ APROVADO: [SIM/NÃO]
         input_cost = (input_tokens / 1_000_000) * 5.0  # $5 por 1M tokens (estimado GPT-5)
         output_cost = (output_tokens / 1_000_000) * 15.0  # $15 por 1M tokens
         return (input_cost + output_cost) * 5.5  # Converter para R$
-

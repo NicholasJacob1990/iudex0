@@ -1,0 +1,60 @@
+# Melhoria na Formação de Tópicos e Sumário (v2.17)
+
+Este plano visa tornar o sumário (tabela de conteúdos) mais preciso, didático e fiel à estrutura lógica da aula, reduzindo títulos genéricos e melhorando a transição entre chunks.
+
+## Status de Implementação
+
+| Proposta | Status | Notas |
+| :--- | :--- | :--- |
+| 1. Mapeamento Enriquecido | ✅ Implementado | PROMPT_MAPEAMENTO detecta Súmulas/Teses/Artigos |
+| 2. Chunking com Âncoras | ✅ Implementado | `dividir_sequencial` usa estrutura global |
+| 3. Contexto Localizado | ✅ Implementado | Âncoras guiam pontos de corte |
+| 4. Normalização Semântica | ✅ Implementado (v2.17) | `remover_paragrafos_duplicados`, `remover_titulos_orfaos` |
+
+---
+
+## Propostas de Mudança
+
+### 1. Mapeamento Enriquecido e Revisão Jurídica (Prompts)
+- **Objetivo:** Identificar marcos legais e jurisprudenciais como sub-hierarquias.
+- **Mudança:** Atualizar `PROMPT_MAPEAMENTO` para:
+    - Detectar marcos legais (Súmulas, Artigos, Teses STF/STJ).
+    - Executar Renumeração Sequencial em caso de promoções.
+    - Priorizar conteúdo real sobre mapeamento inicial.
+
+### 2. Chunking Baseado em Âncoras (Soft Preference)
+- **Objetivo:** Evitar quebras no meio de um tópico importante.
+- **Mudança:** Modificar `dividir_sequencial` para:
+    - Receber `estrutura_global` como parâmetro opcional.
+    - Localizar palavras-chave dos títulos no texto bruto.
+    - Ajustar o ponto de corte para coincidir com o fim de um tópico (se estiver próximo).
+    - **NÃO forçar**: se não encontrar âncora próxima, usar limite padrão.
+
+### 3. Contexto de Chunk Localizado
+- **Objetivo:** Fornecer guia mais preciso para cada chunk.
+- **Mudança:** Em `_format_chunk_async`, passar apenas a "janela" da estrutura:
+    - Identificar qual tópico do mapeamento corresponde ao chunk atual.
+    - Incluir o tópico anterior (contexto) e o próximo (continuidade).
+    - Evitar passar estrutura completa que confunde o modelo.
+
+### 4. Normalização Semântica e Limpeza Técnica ✅
+- **Status:** Já implementado na v2.17.
+- **Funções:** `remover_paragrafos_duplicados`, `remover_titulos_orfaos`, `auto_fix_structure`.
+
+---
+
+## Arquivos a Modificar
+
+### [MODIFY] mlx_vomo.py
+- `PROMPT_MAPEAMENTO` (~linha 100): Enriquecer com detecção de marcos legais.
+- `dividir_sequencial` (~linha 250): Adicionar lógica de âncoras.
+- `_format_chunk_async` (~linha 2200): Passar contexto localizado.
+
+---
+
+## Verificação
+
+- Rodar pipeline com Aula 03 e verificar:
+  - Pontos de corte coincidem com títulos mapeados.
+  - Contexto passado ao modelo é preciso.
+  - Sumário final reflete marcos legais importantes.

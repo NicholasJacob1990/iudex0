@@ -20,7 +20,7 @@ import { cn } from '@/lib/utils';
 
 export default function GeneratorPage() {
     const [isLeftPanelOpen, setIsLeftPanelOpen] = useState(true);
-    const { currentChat, isSending, isAgentRunning, agentSteps } = useChatStore();
+    const { currentChat, isSending, isAgentRunning, agentSteps, effortLevel, setEffortLevel } = useChatStore();
     const [editorContent, setEditorContent] = useState('');
 
     // Effect to update editor content when AI generates a "document"
@@ -60,10 +60,16 @@ export default function GeneratorPage() {
                         <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
                             <span className="text-[10px] font-medium text-muted-foreground">Rigoroso</span>
                             <button
-                                className="relative h-4 w-8 rounded-full bg-indigo-500 transition-colors focus:outline-none"
-                                onClick={() => { }} // Todo: Connect to store
+                                className={cn(
+                                    "relative h-4 w-8 rounded-full transition-colors focus:outline-none",
+                                    effortLevel >= 4 ? "bg-indigo-500" : "bg-gray-600"
+                                )}
+                                onClick={() => setEffortLevel(effortLevel >= 4 ? 3 : 5)}
                             >
-                                <div className="absolute right-0.5 top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform" />
+                                <div className={cn(
+                                    "absolute top-0.5 h-3 w-3 rounded-full bg-white shadow-sm transition-transform",
+                                    effortLevel >= 4 ? "right-0.5" : "left-0.5"
+                                )} />
                             </button>
                         </div>
                         <Button

@@ -1,10 +1,13 @@
 'use client';
 
+import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Plus, Share2 } from 'lucide-react';
-import { LibraryTable } from '@/components/dashboard';
+import { LibraryTable, LibrarySidebar, ShareDialog } from '@/components/dashboard';
 
 export default function LibraryPage() {
+  const [shareDialogOpen, setShareDialogOpen] = useState(false);
+
   return (
     <div className="space-y-8">
       <div className="flex flex-col gap-4 rounded-3xl border border-white/70 bg-white/95 p-6 shadow-soft lg:flex-row lg:items-center lg:justify-between">
@@ -20,14 +23,31 @@ export default function LibraryPage() {
             <Plus className="mr-2 h-4 w-4" />
             Nova pasta
           </Button>
-          <Button className="rounded-full bg-primary text-primary-foreground">
+          <Button
+            className="rounded-full bg-primary text-primary-foreground"
+            onClick={() => setShareDialogOpen(true)}
+          >
             <Share2 className="mr-2 h-4 w-4" />
             Compartilhar
           </Button>
         </div>
       </div>
 
-      <LibraryTable />
+      <div className="flex gap-6">
+        <div className="hidden lg:block flex-shrink-0">
+          <LibrarySidebar />
+        </div>
+        <div className="flex-1 min-w-0">
+          <LibraryTable />
+        </div>
+      </div>
+
+      <ShareDialog
+        open={shareDialogOpen}
+        onOpenChange={setShareDialogOpen}
+        itemName="Biblioteca"
+        itemType="pasta"
+      />
     </div>
   );
 }

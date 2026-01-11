@@ -60,7 +60,7 @@ class ChatMessage(Base):
     
     attachments: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     thinking: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    msg_metadata: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

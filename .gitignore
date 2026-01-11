@@ -10,7 +10,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# lib/
 lib64/
 parts/
 sdist/
@@ -50,10 +50,10 @@ yarn-debug.log*
 yarn-error.log*
 
 # Env
-.env
+# .env
 .env.local
 .env.*.local
-*.env
+# *.env
 
 # Database
 *.db
@@ -113,3 +113,44 @@ chroma/
 
 # Docker
 docker-compose.override.yml
+
+# Local/dev artifacts & media
+.env
+.env.*
+.cursor/
+.turbo/
+.cache_vomo*/
+tmp/
+venv*/
+.venv/
+apostilas_unified/
+tests/test_results/
+*.ytdl
+gen-lang-client-*.json
+@status.md
+pasta sem t*/
+*.mp3
+*.wav
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.part
+*.docx
+*.pdf
+~$*.docx
+*_RAW*.txt
+*_APOSTILA*.md
+*_FIDELIDADE*.md
+*_AUDITORIA*.md
+*_DIARIZATION.json
+*_validacao.txt
+*_verificacao.txt
+*_fidelidade.json
+*_SUGESTOES.json
+transcricao-*.md
+audit_*.md

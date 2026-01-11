@@ -33,8 +33,13 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   fetchDocuments: async () => {
     set({ isLoading: true });
     try {
-      const documents = await apiClient.getDocuments();
-      set({ documents, isLoading: false });
+      const { documents } = await apiClient.getDocuments();
+      const normalized = (documents || []).map((doc: any) => ({
+        ...doc,
+        file_size: doc.file_size ?? doc.size ?? 0,
+        created_at: doc.created_at ?? new Date().toISOString(),
+      }));
+      set({ documents: normalized, isLoading: false });
     } catch (error) {
       set({ isLoading: false });
       throw error;
@@ -45,11 +50,15 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     set({ isUploading: true });
     try {
       const document = await apiClient.uploadDocument(file, metadata);
+      const normalized = {
+        ...document,
+        file_size: document.file_size ?? document.size ?? 0,
+      };
       set((state) => ({
-        documents: [document, ...state.documents],
+        documents: [normalized, ...state.documents],
         isUploading: false,
       }));
-      return document;
+      return normalized as Document;
     } catch (error) {
       set({ isUploading: false });
       throw error;
@@ -98,4 +107,3 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
     }
   },
 }));
-

@@ -14,12 +14,24 @@ interface ContextSource {
   };
 }
 
+export interface ContextItem {
+  id: string;
+  type: 'file' | 'folder' | 'model' | 'legislation' | 'audio' | 'link' | 'jurisprudence';
+  name: string;
+  meta?: string;
+}
+
 interface ContextState {
   search: string;
   sources: ContextSource[];
+  items: ContextItem[];
+  activeTab: string;
   setSearch: (value: string) => void;
+  setActiveTab: (value: string) => void;
   toggleSource: (id: ContextSourceId) => void;
   toggleMeta: (id: ContextSourceId, key: 'ocr' | 'rigorous') => void;
+  addItem: (item: ContextItem) => void;
+  removeItem: (id: string) => void;
 }
 
 export const useContextStore = create<ContextState>((set) => ({
@@ -68,14 +80,18 @@ export const useContextStore = create<ContextState>((set) => ({
       sources: state.sources.map((source) =>
         source.id === id
           ? {
-              ...source,
-              meta: {
-                ...source.meta,
-                [key]: !source.meta?.[key],
-              },
-            }
+            ...source,
+            meta: {
+              ...source.meta,
+              [key]: !source.meta?.[key],
+            },
+          }
           : source
       ),
     })),
+  items: [],
+  activeTab: 'files',
+  setActiveTab: (value) => set({ activeTab: value }),
+  addItem: (item) => set((state) => ({ items: [...state.items, item] })),
+  removeItem: (id) => set((state) => ({ items: state.items.filter((i) => i.id !== id) })),
 }));
-

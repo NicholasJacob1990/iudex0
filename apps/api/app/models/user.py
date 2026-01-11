@@ -5,7 +5,7 @@ Modelo de Usuário
 from datetime import datetime
 from typing import Optional
 from sqlalchemy import String, DateTime, JSON, Enum as SQLEnum, Text
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
 
 from app.core.database import Base
@@ -91,6 +91,8 @@ class User(Base):
         onupdate=datetime.utcnow,
         nullable=False
     )
+
+    cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email}, name={self.name}, type={self.account_type})>"

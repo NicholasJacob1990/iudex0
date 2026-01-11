@@ -371,3 +371,7 @@ curl http://api.iudex.com/health
 
 **Nota**: Em caso de dúvidas, consulte a documentação do Alembic: https://alembic.sqlalchemy.org/
 
+
+
+
+

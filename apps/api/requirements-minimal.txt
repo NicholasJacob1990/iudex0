@@ -1,0 +1,61 @@
+# Dependências mínimas para rodar o servidor
+
+# FastAPI e servidor
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+python-multipart==0.0.17
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-dotenv==1.0.1
+
+# Banco de dados
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+
+# Redis e Celery
+redis==5.2.0
+celery==5.4.0
+
+# IA e ML - Provedores
+openai>=1.55.0
+anthropic>=0.39.0
+google-generativeai>=0.8.0
+
+# Processamento de Documentos Básico
+pypdf==5.1.0
+pdfplumber==0.11.4
+python-docx==1.1.2
+openpyxl==3.1.5
+chardet==5.2.0
+
+# OCR
+pytesseract==0.3.13
+Pillow==11.0.0
+
+# Web Scraping
+beautifulsoup4==4.12.3
+requests==2.32.3
+httpx==0.27.2
+
+# Utilidades
+pydantic==2.10.2
+pydantic-settings==2.6.1
+python-slugify==8.0.4
+pytz==2024.2
+
+# Validação e Schemas
+email-validator==2.2.0
+
+# Monitoring e Logging
+loguru==0.7.2
+
+# Segurança
+cryptography==43.0.3
+bcrypt==4.2.1
+
+
+
+
+

@@ -4,15 +4,24 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates
+from app.api.endpoints import auth, users, documents, chats, library, templates, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced
 
 api_router = APIRouter()
 
 # Incluir rotas
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
+api_router.include_router(cases.router, prefix="/cases", tags=["cases"])
 api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
 api_router.include_router(templates.router, prefix="/templates", tags=["templates"])
 api_router.include_router(chats.router, prefix="/chats", tags=["chats"])
+api_router.include_router(chat_integration.router, prefix="/chat", tags=["chat-docs"])
+api_router.include_router(chat.router, prefix="/multi-chat", tags=["multi-model-chat"])
 api_router.include_router(library.router, prefix="/library", tags=["library"])
-
+api_router.include_router(knowledge.router, prefix="/knowledge", tags=["knowledge"])
+api_router.include_router(transcription.router, prefix="/transcription", tags=["transcription"])
+api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
+api_router.include_router(audit.router, prefix="/audit", tags=["audit"])
+api_router.include_router(quality_control.router, prefix="/quality", tags=["quality-control"])
+api_router.include_router(rag.router, prefix="/rag", tags=["rag"])
+api_router.include_router(advanced.router, prefix="/advanced", tags=["advanced"])

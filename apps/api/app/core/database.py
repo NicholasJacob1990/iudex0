@@ -11,12 +11,20 @@ from loguru import logger
 from app.core.config import settings
 
 # Engine assíncrono
+# Configuração específica para SQLite vs PostgreSQL
+engine_kwargs = {
+    "echo": settings.DEBUG,
+    "pool_pre_ping": True,
+}
+
+# SQLite não suporta pool_size/max_overflow da mesma forma
+if "sqlite" not in settings.DATABASE_URL:
+    engine_kwargs["pool_size"] = settings.DATABASE_POOL_SIZE
+    engine_kwargs["max_overflow"] = settings.DATABASE_MAX_OVERFLOW
+
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=settings.DEBUG,
-    pool_size=settings.DATABASE_POOL_SIZE,
-    max_overflow=settings.DATABASE_MAX_OVERFLOW,
-    pool_pre_ping=True,
+    **engine_kwargs
 )
 
 # Session factory
@@ -41,7 +49,8 @@ async def init_db() -> None:
         # Isso garante que as tabelas sejam criadas
         from app.models.user import User
         from app.models.chat import Chat, ChatMessage
-        # from app.models.document import Document # Se existir
+        from app.models.document import Document
+        from app.models.library import LibraryItem
         
         # Testar conexão e criar tabelas
         async with engine.begin() as conn:

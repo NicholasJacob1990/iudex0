@@ -18,6 +18,7 @@ from app.core.security import (
     get_password_hash,
     verify_password,
     get_current_user,
+    get_current_user_from_refresh_token,
 )
 from app.models.user import User, UserRole, UserPlan, AccountType
 from app.schemas.user import UserCreate, UserLogin, TokenResponse, UserResponse
@@ -44,6 +45,16 @@ async def register(
         )
     
     # Preparar dados do usuário
+    # Normalizar account_type
+    account_type_str = user_in.account_type.upper() if isinstance(user_in.account_type, str) else str(user_in.account_type).upper()
+    
+    # Validar account_type
+    if account_type_str not in ["INDIVIDUAL", "INSTITUTIONAL"]:
+        account_type_str = "INDIVIDUAL"
+        
+    # Converter para Enum
+    account_type_enum = AccountType.INDIVIDUAL if account_type_str == "INDIVIDUAL" else AccountType.INSTITUTIONAL
+    
     user_data = {
         "id": str(uuid.uuid4()),
         "email": user_in.email,
@@ -51,7 +62,7 @@ async def register(
         "name": user_in.name,
         "role": UserRole.USER,
         "plan": UserPlan.FREE,
-        "account_type": AccountType(user_in.account_type),
+        "account_type": account_type_enum,
         "is_active": True,
         "is_verified": False,  # Requer confirmação de email futuramente
         "preferences": {
@@ -62,17 +73,25 @@ async def register(
     }
     
     # Adicionar campos específicos do perfil
-    if user_in.account_type == "INDIVIDUAL":
+    if account_type_str == "INDIVIDUAL":
         if user_in.oab:
             user_data["oab"] = user_in.oab
+        if user_in.oab_state:
+            user_data["oab_state"] = user_in.oab_state
         if user_in.cpf:
             user_data["cpf"] = user_in.cpf
+        if user_in.phone:
+            user_data["phone"] = user_in.phone
             
-    elif user_in.account_type == "INSTITUTIONAL":
+    elif account_type_str == "INSTITUTIONAL":
         if user_in.institution_name:
             user_data["institution_name"] = user_in.institution_name
         if user_in.cnpj:
             user_data["cnpj"] = user_in.cnpj
+        if user_in.position:
+            user_data["position"] = user_in.position
+        if user_in.department:
+            user_data["department"] = user_in.department
         # team_size é salvo nas preferências por enquanto, pois não tem campo no model
         if user_in.team_size:
             user_data["preferences"]["team_size"] = user_in.team_size
@@ -156,45 +175,50 @@ async def login(
     }
 
 
-@router.post("/logout")
-async def logout(
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Logout de usuário
-    """
-    # Em JWT stateless, logout é feito no frontend removendo o token.
-    # Futuramente pode-se implementar blacklist de tokens no Redis.
-    return {"message": "Logout realizado com sucesso"}
-
-
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh_token_endpoint(
-    current_user: dict = Depends(get_current_user),
+@router.post("/login-test", response_model=TokenResponse)
+async def login_test(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Renovar token de acesso
+    Login especial para testes/demonstração (Cria usuário se não existir)
     """
-    # current_user já vem do dependency que valida o token (mesmo que seja refresh se configurado)
-    # Mas aqui assumimos que o endpoint /refresh recebe um token de refresh no header Authorization
+    test_email = "teste@iudex.ai"
     
-    user_id = current_user["id"]
-    
-    # Buscar usuário atualizado
-    result = await db.execute(select(User).where(User.id == user_id))
+    # Verificar se usuário teste existe
+    result = await db.execute(select(User).where(User.email == test_email))
     user = result.scalars().first()
     
     if not user:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado")
-        
+        # Criar usuário de teste
+        user = User(
+            id=str(uuid.uuid4()),
+            email=test_email,
+            hashed_password=get_password_hash("teste123"),
+            name="Usuário de Teste",
+            role=UserRole.PREMIUM,
+            plan=UserPlan.PROFESSIONAL,
+            account_type=AccountType.INDIVIDUAL,
+            is_active=True,
+            is_verified=True,
+            oab="999999",
+            oab_state="SP",
+            preferences={
+                "theme": "system",
+                "language": "pt-BR",
+                "notifications_enabled": True
+            }
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    
+    # Gerar tokens (mesma lógica do login)
     access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value},
         expires_delta=access_token_expires
     )
     
-    # Opcional: Rotacionar refresh token também
     refresh_token = create_refresh_token(
         data={"sub": user.id, "type": "refresh"}
     )
@@ -208,19 +232,53 @@ async def refresh_token_endpoint(
     }
 
 
+@router.post("/logout")
+async def logout(
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Logout de usuário
+    """
+    # Em JWT stateless, logout é feito no frontend removendo o token.
+    # Futuramente pode-se implementar blacklist de tokens no Redis.
+    return {"message": "Logout realizado com sucesso"}
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_token_endpoint(
+    current_user: User = Depends(get_current_user_from_refresh_token)
+):
+    """
+    Renovar token de acesso
+    """
+    # current_user já é um objeto User retornado por get_current_user
+    
+    access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": current_user.id, "type": "access", "role": current_user.role.value, "plan": current_user.plan.value},
+        expires_delta=access_token_expires
+    )
+    
+    # Opcional: Rotacionar refresh token também
+    refresh_token = create_refresh_token(
+        data={"sub": current_user.id, "type": "refresh"}
+    )
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        "user": current_user
+    }
+
+
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
-    current_user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Obter informações do usuário atual
     """
-    user_id = current_user["id"]
-    result = await db.execute(select(User).where(User.id == user_id))
-    user = result.scalars().first()
-    
-    if not user:
-        raise HTTPException(status_code=404, detail="Usuário não encontrado")
-        
-    return user
+    # current_user já é um objeto User retornado por get_current_user
+    return current_user

@@ -14,6 +14,7 @@ interface AuthState {
   isAuthenticated: boolean;
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
+  loginTest: () => Promise<void>;
   register: (data: { name: string; email: string; password: string; account_type?: string; [key: string]: any }) => Promise<void>;
   logout: () => void;
   updateUser: (data: Partial<User>) => void;
@@ -37,6 +38,25 @@ export const useAuthStore = create<AuthState>()(
             isLoading: false,
           });
         } catch (error) {
+          set({ isLoading: false });
+          throw error;
+        }
+      },
+
+      loginTest: async () => {
+        console.log('[Auth Store] loginTest chamado');
+        set({ isLoading: true });
+        try {
+          const response = await apiClient.loginTest();
+          console.log('[Auth Store] Resposta recebida:', response.user?.email);
+          set({
+            user: response.user,
+            isAuthenticated: true,
+            isLoading: false,
+          });
+          console.log('[Auth Store] Estado atualizado - isAuthenticated: true');
+        } catch (error) {
+          console.error('[Auth Store] Erro no loginTest:', error);
           set({ isLoading: false });
           throw error;
         }

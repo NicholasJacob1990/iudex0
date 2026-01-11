@@ -484,3 +484,7 @@ O aplicativo está pronto para uso em produção após a migração do banco de 
 **Desenvolvido com ❤️ para a comunidade jurídica brasileira**  
 **Versão 0.3.0 - Novembro de 2025**
 
+
+
+
+

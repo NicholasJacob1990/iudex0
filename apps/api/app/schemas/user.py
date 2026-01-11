@@ -25,24 +25,18 @@ class UserCreate(UserBase):
     password: str = Field(..., min_length=8, max_length=100)
     account_type: str = Field(default="INDIVIDUAL", pattern="^(INDIVIDUAL|INSTITUTIONAL)$")
     
-    # Campos opcionais dependendo do tipo
-    institution_name: Optional[str] = None
-    team_size: Optional[str] = None
-    cnpj: Optional[str] = None
-    oab: Optional[str] = None
-    
-    # Campos opcionais dependendo do tipo
+    # Campos opcionais para conta Individual
     cpf: Optional[str] = None
     oab: Optional[str] = None
     oab_state: Optional[str] = None
     phone: Optional[str] = None
     
+    # Campos opcionais para conta Institucional
     institution_name: Optional[str] = None
     cnpj: Optional[str] = None
     position: Optional[str] = None
-    team_size: Optional[str] = None  # Recebido do frontend, pode ser mapeado ou ignorado se não estiver no model
-    
-    # Validadores podem ser adicionados aqui se necessário
+    team_size: Optional[str] = None
+    department: Optional[str] = None
 
 
 class UserLogin(BaseModel):

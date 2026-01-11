@@ -22,11 +22,19 @@ export default function RegisterPage() {
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
 
+  // Individual Details
+  const [cpf, setCpf] = useState('');
+  const [oab, setOab] = useState('');
+  const [oabState, setOabState] = useState('');
+  const [phone, setPhone] = useState('');
+
   // Institutional Details
   const [orgName, setOrgName] = useState('');
   const [teamSize, setTeamSize] = useState('');
   const [industry, setIndustry] = useState('');
   const [role, setRole] = useState('');
+  const [cnpj, setCnpj] = useState('');
+  const [department, setDepartment] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,9 +72,13 @@ export default function RegisterPage() {
         institution_name: profileType === 'institutional' ? orgName : undefined,
         team_size: profileType === 'institutional' ? teamSize : undefined,
         position: profileType === 'institutional' ? role : undefined,
-        // Individual data - TODO: Add inputs for these in the form
-        // cpf: ...,
-        // oab: ...,
+        cnpj: profileType === 'institutional' ? cnpj : undefined,
+        department: profileType === 'institutional' ? department : undefined,
+        // Individual data
+        cpf: profileType === 'individual' ? cpf : undefined,
+        oab: profileType === 'individual' ? oab : undefined,
+        oab_state: profileType === 'individual' ? oabState : undefined,
+        phone: phone || undefined,
       });
       toast.success('Conta criada com sucesso! Bem-vindo ao Iudex.');
       router.push('/generator'); // Redirect directly to generator for immediate value
@@ -148,6 +160,56 @@ export default function RegisterPage() {
                 />
               </div>
 
+              {profileType === 'individual' && (
+                <>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">CPF</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="000.000.000-00"
+                        value={cpf}
+                        onChange={(e) => setCpf(e.target.value)}
+                        disabled={isLoading}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">Telefone</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="(00) 00000-0000"
+                        value={phone}
+                        onChange={(e) => setPhone(e.target.value)}
+                        disabled={isLoading}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">OAB</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="000000"
+                        value={oab}
+                        onChange={(e) => setOab(e.target.value)}
+                        disabled={isLoading}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">UF OAB</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="SP"
+                        value={oabState}
+                        onChange={(e) => setOabState(e.target.value)}
+                        disabled={isLoading}
+                        maxLength={2}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+
               {profileType === 'institutional' && (
                 <>
                   <div className="space-y-2">
@@ -160,6 +222,28 @@ export default function RegisterPage() {
                       disabled={isLoading}
                       required
                     />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">CNPJ</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="00.000.000/0000-00"
+                        value={cnpj}
+                        onChange={(e) => setCnpj(e.target.value)}
+                        disabled={isLoading}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <label className="text-sm font-medium text-gray-300">Departamento</label>
+                      <Input
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        placeholder="Jurídico"
+                        value={department}
+                        onChange={(e) => setDepartment(e.target.value)}
+                        disabled={isLoading}
+                      />
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">

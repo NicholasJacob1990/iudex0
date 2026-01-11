@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import {
   Home,
+  Folder,
   PenTool,
   Upload,
   Layers,
@@ -23,6 +24,8 @@ import { useUIStore } from '@/stores';
 
 const mainNav = [
   { href: '/dashboard', label: 'Início', icon: Home },
+  { href: '/cases', label: 'Casos', icon: Folder },
+  { href: '/transcription', label: 'Transcrição', icon: Mic },
   { href: '/minuta', label: 'Minuta', icon: PenTool },
   { href: '/documents', label: 'Documentos', icon: Upload },
   { href: '/models', label: 'Modelos', icon: Layers },
@@ -30,6 +33,7 @@ const mainNav = [
   { href: '/jurisprudence', label: 'Jurisprudência', icon: Gavel },
   { href: '/web', label: 'Web', icon: Globe },
   { href: '/library', label: 'Biblioteca', icon: Library },
+  { href: '/bibliotecarios', label: 'Bibliotecários', icon: Users },
 ];
 
 const resourceIcons: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -47,8 +51,11 @@ export function SidebarPro() {
   return (
     <aside
       className={cn(
-        'flex h-full w-72 flex-col border-r border-white/5 bg-[#0F1115] text-sidebar-fg transition-all duration-300',
-        !sidebarOpen && 'lg:hidden'
+        // Mobile: behaves like a drawer (fixed + slide), so it does NOT squeeze the main content.
+        // Desktop: stays in the normal layout flow (static) as a sidebar.
+        'fixed inset-y-0 left-0 z-50 flex h-full w-72 flex-col border-r border-white/5 bg-[#0F1115] text-sidebar-fg',
+        'transform transition-transform duration-300 lg:static lg:z-auto lg:translate-x-0',
+        sidebarOpen ? 'translate-x-0' : '-translate-x-full'
       )}
     >
       {/* Header */}
@@ -102,7 +109,7 @@ export function SidebarPro() {
             Ferramentas Rápidas
           </p>
           <div className="space-y-1">
-            {resourceShortcuts.slice(0, 3).map((shortcut) => {
+            {resourceShortcuts.map((shortcut) => {
               const Icon = resourceIcons[shortcut.label] ?? Share2;
               return (
                 <button
@@ -116,6 +123,25 @@ export function SidebarPro() {
                 </button>
               )
             })}
+          </div>
+          <div className="mt-6 space-y-2">
+            <p className="px-2 text-[10px] font-bold uppercase tracking-widest text-muted-foreground/40">
+              Recentes
+            </p>
+            {minuteHistory.slice(0, 3).map((item) => (
+              <div
+                key={item.id}
+                className="flex items-center justify-between rounded-xl px-3 py-2 text-[11px] text-muted-foreground transition hover:bg-white/5 hover:text-white"
+              >
+                <div className="flex-1 overflow-hidden">
+                  <p className="truncate font-semibold text-white/90">{item.title}</p>
+                  <p className="text-[10px] leading-tight text-muted-foreground">
+                    {item.jurisdiction} • {formatDate(new Date(item.date))}
+                  </p>
+                </div>
+                <div className="ml-2 h-1.5 w-1.5 rounded-full bg-indigo-400" />
+              </div>
+            ))}
           </div>
         </div>
       </nav>
@@ -142,4 +168,3 @@ export function SidebarPro() {
     </aside>
   );
 }
-

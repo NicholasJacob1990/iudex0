@@ -16,6 +16,11 @@ import {
   Undo,
   Redo,
   Table,
+  Heading1,
+  Heading2,
+  Heading3,
+  Type,
+  Pilcrow
 } from 'lucide-react';
 
 interface EditorToolbarProps {
@@ -43,6 +48,42 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
         disabled={!editor.can().redo()}
       >
         <Redo className="h-4 w-4" />
+      </Button>
+
+      <div className="mx-1 h-6 w-px bg-border" />
+
+      {/* Headings - Font Size Simulation */}
+      <Button
+        variant={editor.isActive('heading', { level: 1 }) ? 'secondary' : 'ghost'}
+        size="icon"
+        onClick={() => editor.chain().focus().toggleHeading({ level: 1 }).run()}
+        title="Título 1 (H1)"
+      >
+        <Heading1 className="h-4 w-4" />
+      </Button>
+      <Button
+        variant={editor.isActive('heading', { level: 2 }) ? 'secondary' : 'ghost'}
+        size="icon"
+        onClick={() => editor.chain().focus().toggleHeading({ level: 2 }).run()}
+        title="Título 2 (H2)"
+      >
+        <Heading2 className="h-4 w-4" />
+      </Button>
+      <Button
+        variant={editor.isActive('heading', { level: 3 }) ? 'secondary' : 'ghost'}
+        size="icon"
+        onClick={() => editor.chain().focus().toggleHeading({ level: 3 }).run()}
+        title="Título 3 (H3)"
+      >
+        <Heading3 className="h-4 w-4" />
+      </Button>
+      <Button
+        variant={editor.isActive('paragraph') ? 'secondary' : 'ghost'}
+        size="icon"
+        onClick={() => editor.chain().focus().setParagraph().run()}
+        title="Texto Normal"
+      >
+        <Pilcrow className="h-4 w-4" />
       </Button>
 
       <div className="mx-1 h-6 w-px bg-border" />

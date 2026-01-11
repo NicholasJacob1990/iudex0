@@ -11,7 +11,7 @@ import { toast } from 'sonner';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, isLoading } = useAuthStore();
+  const { login, loginTest, isLoading } = useAuthStore();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
@@ -29,6 +29,23 @@ export default function LoginPage() {
       router.push('/dashboard');
     } catch (error) {
       // Erro já tratado pelo interceptor
+    }
+  };
+
+  const handleTestLogin = async () => {
+    try {
+      console.log('[Login Page] Iniciando login de teste...');
+      await loginTest();
+      console.log('[Login Page] Login de teste bem-sucedido!');
+      toast.success('Login de teste realizado!');
+      // Pequeno delay para garantir que o estado seja atualizado
+      setTimeout(() => {
+        router.push('/dashboard');
+      }, 100);
+    } catch (error: any) {
+      console.error('[Login Page] Erro no login de teste:', error);
+      const errorMessage = error.response?.data?.detail || error.message || 'Erro desconhecido';
+      toast.error(`Erro no login de teste: ${errorMessage}`);
     }
   };
 
@@ -75,7 +92,28 @@ export default function LoginPage() {
               {isLoading ? 'Entrando...' : 'Entrar'}
             </Button>
 
-            <div className="text-center text-sm">
+            <div className="relative my-4">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase">
+                <span className="bg-background px-2 text-muted-foreground">
+                  Ou
+                </span>
+              </div>
+            </div>
+
+            <Button 
+              type="button" 
+              variant="outline" 
+              className="w-full" 
+              disabled={isLoading}
+              onClick={handleTestLogin}
+            >
+              ⚡ Entrar como Visitante (Teste)
+            </Button>
+
+            <div className="text-center text-sm mt-4">
               <span className="text-muted-foreground">Não tem uma conta? </span>
               <Link href="/register" className="text-primary hover:underline">
                 Cadastre-se

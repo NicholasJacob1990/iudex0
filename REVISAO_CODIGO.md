@@ -383,3 +383,7 @@ O aplicativo está:
 
 **Próximo Passo**: Executar testes manuais de todos os fluxos (registro, login, geração de documentos) para validação final.
 
+
+
+
+

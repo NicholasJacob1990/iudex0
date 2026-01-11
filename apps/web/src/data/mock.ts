@@ -173,3 +173,25 @@ export const quickActions = [
   },
 ];
 
+export const librarians = [
+  {
+    id: 'lib-routines',
+    name: 'Rotinas Cíveis',
+    description: 'Documentos, modelos e teses usados em demandas cíveis',
+    resources: ['Documentos', 'Modelos', 'Jurisprudência'],
+    updatedAt: 'há 2h',
+  },
+  {
+    id: 'lib-saude',
+    name: 'Saúde Suplementar',
+    description: 'Base focada em planos de saúde e demandas consumeristas',
+    resources: ['Documentos', 'Jurisprudência', 'Legislação'],
+    updatedAt: 'há 1 dia',
+  },
+];
+
+export const contextMentions = [
+  { id: 'ctx-pje', label: '@PJe-Saude', description: 'Conjunto salvo para petições em saúde' },
+  { id: 'ctx-biblio', label: '@Bibliotecário Cível', description: 'Ativa todos os recursos civis' },
+  { id: 'ctx-modelo', label: '@Modelo Contrato', description: 'Modelo padronizado de contrato' },
+];
