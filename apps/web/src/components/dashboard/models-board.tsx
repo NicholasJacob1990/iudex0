@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { FileCheck } from 'lucide-react';
+import { FileCheck, HelpCircle } from 'lucide-react';
 import apiClient from '@/lib/api-client';
 import { useChatStore } from '@/stores';
 import { toast } from 'sonner';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface ModelsBoardProps {
   refreshKey?: number;
@@ -41,11 +42,43 @@ export function ModelsBoard({ refreshKey }: ModelsBoardProps) {
     toast.info('Modelo removido.');
   };
 
+  const handleDuplicate = async (model: any) => {
+    if (!model?.id) {
+      toast.error('Modelo inválido.');
+      return;
+    }
+    const baseName = model.name || model.title || 'Modelo';
+    const suggested = `${baseName} (copia)`;
+    const name = window.prompt('Nome da cópia do modelo:', suggested);
+    if (name === null) return;
+    const trimmed = name.trim();
+    try {
+      const created = await apiClient.duplicateTemplate(model.id, trimmed || undefined);
+      setModels((prev) => [created, ...prev]);
+      toast.success('Modelo duplicado com sucesso.');
+    } catch (e) {
+      console.error(e);
+      toast.error('Erro ao duplicar modelo.');
+    }
+  };
+
   return (
     <section className="rounded-3xl border border-white/70 bg-white/90 p-5 shadow-soft">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h2 className="font-display text-xl text-foreground">Modelos</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="font-display text-xl text-foreground">Modelos</h2>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <HelpCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs text-xs">
+                  Estes modelos são templates da biblioteca (Template ID). Diferem do Documento base (RAG), que apenas referencia um exemplo.
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
           <p className="text-sm text-muted-foreground">Arraste e solte o modelo a ser seguido.</p>
         </div>
         <div className="flex items-center gap-3 text-xs font-semibold uppercase">
@@ -78,8 +111,13 @@ export function ModelsBoard({ refreshKey }: ModelsBoardProps) {
                   <Button variant="outline" size="sm" className="rounded-full border-primary text-primary">
                     Expandir
                   </Button>
-                  <Button variant="ghost" size="sm" className="rounded-full border border-outline/50">
-                    Salvar
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="rounded-full border border-outline/50"
+                    onClick={() => handleDuplicate(model)}
+                  >
+                    Duplicar
                   </Button>
                   <Button
                     size="sm"

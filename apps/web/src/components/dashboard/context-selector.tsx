@@ -6,6 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 
 import { useContextStore } from '@/stores/context-store';
 import { useChatStore } from '@/stores/chat-store';
@@ -17,6 +18,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ChevronDown, Bot, Sparkles as SparklesIcon, Layout } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
+import { RichTooltip } from '@/components/ui/rich-tooltip';
 
 export function ContextSelector() {
     const { items, addItem, removeItem, activeTab, setActiveTab } = useContextStore();
@@ -31,7 +33,10 @@ export function ContextSelector() {
         promptExtra, setPromptExtra,
         documentType, setDocumentType,
         thesis, setThesis,
-        formattingOptions, setFormattingOptions
+        formattingOptions, setFormattingOptions,
+        ragSources, setRagSources,
+        ragTopK, setRagTopK,
+        audit, setAudit
     } = useChatStore();
     const [ocrEnabled, setOcrEnabled] = useState(false);
     const [rigorousSearch, setRigorousSearch] = useState(false);
@@ -39,6 +44,11 @@ export function ContextSelector() {
     const pageRangeLabel = (minPages > 0 || maxPages > 0)
         ? `${minPages}-${maxPages} págs`
         : `Auto (${effortRangeLabel} págs)`;
+    const hasContext = items.length > 0;
+    const contextStateLabel = hasContext ? 'Com Contexto' : 'Sem Contexto';
+    const contextDescription = hasContext
+        ? `${items.length} item(ns) carregado(s). A IA usará esses documentos como base para todas as respostas.`
+        : 'Nenhum item carregado. Adicione contexto para respostas mais precisas.';
     const applyPresetRange = (level: number, min: number, max: number) => {
         setEffortLevel(level);
         setPageRange({ minPages: min, maxPages: max });
@@ -102,7 +112,24 @@ export function ContextSelector() {
     return (
         <div className="flex flex-col gap-4 rounded-2xl border border-outline/30 bg-sand/20 p-4">
             <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold uppercase text-muted-foreground">Adicionar Contexto</span>
+                <RichTooltip
+                    title="Contexto ativo"
+                    description={contextDescription}
+                    badge={contextStateLabel}
+                    meta={hasContext ? `${items.length} item(ns)` : undefined}
+                >
+                    <div className="flex items-center gap-2">
+                        <span className="text-xs font-semibold uppercase text-muted-foreground">Adicionar Contexto</span>
+                        <span
+                            className={cn(
+                                "rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                                hasContext ? "bg-emerald-500/10 text-emerald-700" : "bg-slate-200 text-slate-600"
+                            )}
+                        >
+                            {contextStateLabel}
+                        </span>
+                    </div>
+                </RichTooltip>
             </div>
 
             <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
@@ -230,10 +257,10 @@ export function ContextSelector() {
             <div className="mt-4 pt-4 border-t border-outline/20">
                 <div className="flex items-center gap-2 mb-3">
                     <SparklesIcon className="h-3.5 w-3.5 text-amber-500" />
-                    <span className="text-xs font-semibold uppercase text-muted-foreground">Seleção de IA (Comitê de Agentes)</span>
+                    <span className="text-xs font-semibold uppercase text-muted-foreground">Seleção de IA (Modo Minuta)</span>
                 </div>
                 <p className="text-[10px] text-muted-foreground -mt-2 mb-3">
-                    Usado na geração em <strong>Comitê</strong> (Multi‑Agente). Não confundir com <strong>Comparar modelos</strong> (modo do chat).
+                    Usado na geração em <strong>Modo Minuta</strong> (Multi‑Agente). Não confundir com <strong>Comparar modelos</strong> (modo do chat).
                 </p>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -356,8 +383,8 @@ export function ContextSelector() {
                                     type="button"
                                     onClick={() => resetPageRange()}
                                     className={`flex-1 h-8 rounded-lg text-xs font-medium border transition-colors ${minPages === 0 && maxPages === 0
-                                            ? 'bg-primary text-primary-foreground border-primary'
-                                            : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
+                                        ? 'bg-primary text-primary-foreground border-primary'
+                                        : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
                                         }`}
                                 >
                                     Auto
@@ -366,8 +393,8 @@ export function ContextSelector() {
                                     type="button"
                                     onClick={() => applyPresetRange(1, 5, 8)}
                                     className={`flex-1 h-8 rounded-lg text-xs font-medium border transition-colors ${minPages === 5 && maxPages === 8
-                                            ? 'bg-primary text-primary-foreground border-primary'
-                                            : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
+                                        ? 'bg-primary text-primary-foreground border-primary'
+                                        : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
                                         }`}
                                 >
                                     Curta
@@ -376,8 +403,8 @@ export function ContextSelector() {
                                     type="button"
                                     onClick={() => applyPresetRange(2, 10, 15)}
                                     className={`flex-1 h-8 rounded-lg text-xs font-medium border transition-colors ${minPages === 10 && maxPages === 15
-                                            ? 'bg-primary text-primary-foreground border-primary'
-                                            : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
+                                        ? 'bg-primary text-primary-foreground border-primary'
+                                        : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
                                         }`}
                                 >
                                     Média
@@ -386,8 +413,8 @@ export function ContextSelector() {
                                     type="button"
                                     onClick={() => applyPresetRange(3, 20, 30)}
                                     className={`flex-1 h-8 rounded-lg text-xs font-medium border transition-colors ${minPages === 20 && maxPages === 30
-                                            ? 'bg-primary text-primary-foreground border-primary'
-                                            : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
+                                        ? 'bg-primary text-primary-foreground border-primary'
+                                        : 'bg-white text-muted-foreground border-outline/30 hover:bg-white/80'
                                         }`}
                                 >
                                     Longa
@@ -407,11 +434,10 @@ export function ContextSelector() {
                                         <div key={source} className="flex items-center space-x-1">
                                             <Checkbox
                                                 id={`source-${source}`}
-                                                checked={useChatStore().ragSources.includes(source)}
+                                                checked={ragSources.includes(source)}
                                                 onCheckedChange={(checked) => {
-                                                    const current = useChatStore().ragSources;
-                                                    if (checked) useChatStore().setRagSources([...current, source]);
-                                                    else useChatStore().setRagSources(current.filter(s => s !== source));
+                                                    if (checked) setRagSources([...ragSources, source]);
+                                                    else setRagSources(ragSources.filter(s => s !== source));
                                                 }}
                                             />
                                             <Label htmlFor={`source-${source}`} className="text-[10px] uppercase">{source}</Label>
@@ -423,8 +449,8 @@ export function ContextSelector() {
                                     <Input
                                         type="number"
                                         className="h-6 w-16 text-[10px] bg-white text-center"
-                                        value={useChatStore().ragTopK}
-                                        onChange={(e) => useChatStore().setRagTopK(parseInt(e.target.value) || 5)}
+                                        value={ragTopK}
+                                        onChange={(e) => setRagTopK(parseInt(e.target.value) || 5)}
                                     />
                                 </div>
                             </div>
@@ -438,7 +464,7 @@ export function ContextSelector() {
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
                                     <Button variant="outline" className="w-full h-9 justify-between rounded-xl border-outline/30 bg-white/50 px-3 text-xs font-medium hover:bg-white">
-                                        <span>{useChatStore().documentType}</span>
+                                        <span>{documentType}</span>
                                         <ChevronDown className="h-3 w-3 opacity-50" />
                                     </Button>
                                 </DropdownMenuTrigger>
@@ -503,32 +529,32 @@ export function ContextSelector() {
                                 <div className="flex items-center space-x-2">
                                     <Checkbox
                                         id="include-toc"
-                                        checked={useChatStore().formattingOptions.includeToc}
-                                        onCheckedChange={(checked) => useChatStore().setFormattingOptions({ includeToc: !!checked })}
+                                        checked={formattingOptions.includeToc}
+                                        onCheckedChange={(checked) => setFormattingOptions({ includeToc: !!checked })}
                                     />
                                     <Label htmlFor="include-toc" className="text-[10px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Sumário (TOC)</Label>
                                 </div>
                                 <div className="flex items-center space-x-2">
                                     <Checkbox
                                         id="include-summaries"
-                                        checked={useChatStore().formattingOptions.includeSummaries}
-                                        onCheckedChange={(checked) => useChatStore().setFormattingOptions({ includeSummaries: !!checked })}
+                                        checked={formattingOptions.includeSummaries}
+                                        onCheckedChange={(checked) => setFormattingOptions({ includeSummaries: !!checked })}
                                     />
                                     <Label htmlFor="include-summaries" className="text-[10px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Resumos por Seção</Label>
                                 </div>
                                 <div className="flex items-center space-x-2">
                                     <Checkbox
                                         id="include-summary-table"
-                                        checked={useChatStore().formattingOptions.includeSummaryTable}
-                                        onCheckedChange={(checked) => useChatStore().setFormattingOptions({ includeSummaryTable: !!checked })}
+                                        checked={formattingOptions.includeSummaryTable}
+                                        onCheckedChange={(checked) => setFormattingOptions({ includeSummaryTable: !!checked })}
                                     />
                                     <Label htmlFor="include-summary-table" className="text-[10px] font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70">Tabela de Resumo</Label>
                                 </div>
                                 <div className="flex items-center space-x-2 pt-1 border-t border-outline/10">
                                     <Checkbox
                                         id="run-audit"
-                                        checked={useChatStore().audit}
-                                        onCheckedChange={(checked) => useChatStore().setAudit(!!checked)}
+                                        checked={audit}
+                                        onCheckedChange={(checked) => setAudit(!!checked)}
                                         className="data-[state=checked]:bg-indigo-600 data-[state=checked]:border-indigo-600"
                                     />
                                     <Label htmlFor="run-audit" className="text-[10px] font-bold text-indigo-700 leading-none cursor-pointer flex items-center gap-1">

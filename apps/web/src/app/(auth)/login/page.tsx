@@ -45,7 +45,9 @@ export default function LoginPage() {
     } catch (error: any) {
       console.error('[Login Page] Erro no login de teste:', error);
       const errorMessage = error.response?.data?.detail || error.message || 'Erro desconhecido';
-      toast.error(`Erro no login de teste: ${errorMessage}`);
+      // Tentar mostrar URL base se possível para debug
+      const apiInfo = error.config?.baseURL || 'URL desconhecida';
+      toast.error(`Erro: ${errorMessage}. (API: ${apiInfo})`);
     }
   };
 
@@ -59,7 +61,7 @@ export default function LoginPage() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="space-y-2">
-              <label htmlFor="email" className="text-sm font-medium">
+              <label htmlFor="email" className="text-sm font-medium text-slate-700 dark:text-slate-200">
                 Email
               </label>
               <Input
@@ -70,11 +72,12 @@ export default function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={isLoading}
                 required
+                className="text-slate-900 dark:text-slate-100"
               />
             </div>
 
             <div className="space-y-2">
-              <label htmlFor="password" className="text-sm font-medium">
+              <label htmlFor="password" className="text-sm font-medium text-slate-700 dark:text-slate-200">
                 Senha
               </label>
               <Input
@@ -85,6 +88,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={isLoading}
                 required
+                className="text-slate-900 dark:text-slate-100"
               />
             </div>
 
@@ -94,7 +98,7 @@ export default function LoginPage() {
 
             <div className="relative my-4">
               <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t" />
+                <span className="w-full border-t border-slate-200 dark:border-slate-700" />
               </div>
               <div className="relative flex justify-center text-xs uppercase">
                 <span className="bg-background px-2 text-muted-foreground">
@@ -103,10 +107,10 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <Button 
-              type="button" 
-              variant="outline" 
-              className="w-full" 
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
               disabled={isLoading}
               onClick={handleTestLogin}
             >

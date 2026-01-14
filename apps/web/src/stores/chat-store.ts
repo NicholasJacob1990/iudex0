@@ -10,6 +10,35 @@ const MULTI_MODEL_VIEW_STORAGE_KEY = 'iudex_multi_model_view';
 const CHAT_PERSONALITY_KEY = 'iudex_chat_personality';
 const CHAT_DRAFTS_KEY_PREFIX = 'iudex_chat_drafts_';
 
+const describeApiError = (error: unknown) => {
+  const anyErr = error as any;
+  const message = typeof anyErr?.message === 'string' ? anyErr.message : '';
+  const status = anyErr?.response?.status;
+  const data = anyErr?.response?.data;
+  const method = typeof anyErr?.config?.method === 'string' ? anyErr.config.method.toUpperCase() : '';
+  const baseURL = typeof anyErr?.config?.baseURL === 'string' ? anyErr.config.baseURL : '';
+  const url = typeof anyErr?.config?.url === 'string' ? anyErr.config.url : '';
+
+  const dataStr =
+    typeof data === 'string'
+      ? data
+      : data
+        ? (() => {
+          try {
+            return JSON.stringify(data);
+          } catch {
+            return String(data);
+          }
+        })()
+        : '';
+
+  if (status || dataStr) {
+    const requestStr = [method, baseURL, url].filter(Boolean).join(' ');
+    return `HTTP ${status ?? '?'}${dataStr ? `: ${dataStr}` : ''}${requestStr ? ` (${requestStr})` : ''}`;
+  }
+  return message || String(error || 'Erro desconhecido');
+};
+
 type DraftMetadata = {
   processed_sections?: any[];
   has_any_divergence?: boolean;
@@ -18,6 +47,7 @@ type DraftMetadata = {
   models?: string[];
   consensus?: boolean;
   audit?: any;
+  committee_review_report?: any;
 };
 
 const getDraftStorageKey = (chatId: string) => `${CHAT_DRAFTS_KEY_PREFIX}${chatId}`;
@@ -27,7 +57,7 @@ const extractDraftMetadata = (metadata: any): DraftMetadata | null => {
   const processed = Array.isArray(metadata.processed_sections)
     ? metadata.processed_sections
     : [];
-  if (processed.length === 0 && !metadata.full_document && !metadata.divergence_summary) {
+  if (processed.length === 0 && !metadata.full_document && !metadata.divergence_summary && !metadata.committee_review_report) {
     return null;
   }
   return {
@@ -38,6 +68,7 @@ const extractDraftMetadata = (metadata: any): DraftMetadata | null => {
     models: metadata.models,
     consensus: metadata.consensus,
     audit: metadata.audit,
+    committee_review_report: metadata.committee_review_report,
   };
 };
 
@@ -108,6 +139,7 @@ interface Message {
   content: string;
   role: 'user' | 'assistant';
   timestamp: string;
+  thinking?: string;
   metadata?: any;
 }
 
@@ -116,9 +148,17 @@ type CanvasContext = {
   action: 'improve' | 'shorten' | null;
 };
 
+type DocumentChecklistItem = {
+  id?: string;
+  label: string;
+  critical: boolean;
+};
+
 interface Chat {
   id: string;
   title: string;
+  mode?: string;
+  context?: any;
   messages: Message[];
   created_at: string;
   updated_at: string;
@@ -133,8 +173,17 @@ interface ChatState {
   fetchChats: () => Promise<void>;
   setCurrentChat: (chatId: string | null) => Promise<void>;
   createChat: (title?: string) => Promise<Chat>;
+  duplicateChat: (chatId: string, title?: string) => Promise<Chat>;
   deleteChat: (chatId: string) => Promise<void>;
-  sendMessage: (content: string) => Promise<void>;
+  sendMessage: (
+    content: string,
+    options?: {
+      outline?: string[];
+      skipOutlineFetch?: boolean;
+      skipUserMessage?: boolean;
+      canvasWrite?: 'replace' | 'append';
+    }
+  ) => Promise<void>;
   generateDocument: (data: {
     prompt: string;
     context?: any;
@@ -160,6 +209,9 @@ interface ChatState {
   useMultiAgent: boolean;
   reasoningLevel: 'low' | 'medium' | 'high';
   webSearch: boolean;
+  multiQuery: boolean;
+  breadthFirst: boolean;
+  searchMode: 'shared' | 'native' | 'hybrid';
   ragTopK: number;
   ragSources: string[];
   minPages: number;
@@ -170,9 +222,8 @@ interface ChatState {
   agentStrategistModel: string;
   agentDrafterModels: string[];
   agentReviewerModels: string[];
-  setAgentStrategistModel: (model: string) => void;
-  setAgentDrafterModels: (models: string[]) => void;
-  setAgentReviewerModels: (models: string[]) => void;
+  // Setters defined later to avoid duplicates
+
 
   // Multi-Model V2
   chatMode: 'standard' | 'multi-model';
@@ -190,7 +241,17 @@ interface ChatState {
   setMultiModelView: (view: 'tabs' | 'columns') => void;
 
   denseResearch: boolean;
+  hilOutlineEnabled: boolean;
   hilTargetSections: string[];
+  auditMode: 'sei_only' | 'research';
+  qualityProfile: 'rapido' | 'padrao' | 'rigoroso' | 'auditoria';
+  qualityTargetSectionScore: number | null;
+  qualityTargetFinalScore: number | null;
+  qualityMaxRounds: number | null;
+  strictDocumentGateOverride: boolean | null;
+  hilSectionPolicyOverride: 'none' | 'optional' | 'required' | null;
+  hilFinalRequiredOverride: boolean | null;
+  documentChecklist: DocumentChecklistItem[];
 
   tenantId: string;
   // Context Management (v2)
@@ -213,8 +274,10 @@ interface ChatState {
     apenasClauseBank: boolean;
   };
   templateId: string | null;
+  templateDocumentId: string | null;
   templateVariables: Record<string, any>;
   templateName: string | null;
+  templateDocumentName: string | null;
   promptExtra: string;
   adaptiveRouting: boolean;
   cragGate: boolean;
@@ -235,13 +298,26 @@ interface ChatState {
   setUseMultiAgent: (use: boolean) => void;
   setReasoningLevel: (level: 'low' | 'medium' | 'high') => void;
   setWebSearch: (enabled: boolean) => void;
+  setMultiQuery: (enabled: boolean) => void;
+  setBreadthFirst: (enabled: boolean) => void;
+  setSearchMode: (mode: 'shared' | 'native' | 'hybrid') => void;
   setRagTopK: (k: number) => void;
   setRagSources: (sources: string[]) => void;
   setPageRange: (range: { minPages?: number; maxPages?: number }) => void;
   resetPageRange: () => void;
   setAttachmentMode: (mode: 'rag_local' | 'prompt_injection') => void;
   setDenseResearch: (enabled: boolean) => void;
+  setHilOutlineEnabled: (enabled: boolean) => void;
   setHilTargetSections: (sections: string[]) => void;
+  setAuditMode: (mode: 'sei_only' | 'research') => void;
+  setQualityProfile: (profile: 'rapido' | 'padrao' | 'rigoroso' | 'auditoria') => void;
+  setQualityTargetSectionScore: (value: number | null) => void;
+  setQualityTargetFinalScore: (value: number | null) => void;
+  setQualityMaxRounds: (value: number | null) => void;
+  setStrictDocumentGateOverride: (value: boolean | null) => void;
+  setHilSectionPolicyOverride: (value: 'none' | 'optional' | 'required' | null) => void;
+  setHilFinalRequiredOverride: (value: boolean | null) => void;
+  setDocumentChecklist: (items: DocumentChecklistItem[]) => void;
   setTenantId: (id: string) => void;
   setContextMode: (mode: 'rag_local' | 'upload_cache') => void;
   setContextFiles: (files: string[]) => void;
@@ -253,8 +329,10 @@ interface ChatState {
   setUseTemplates: (use: boolean) => void;
   setTemplateFilters: (filters: Partial<ChatState['templateFilters']>) => void;
   setTemplateId: (id: string | null) => void;
+  setTemplateDocumentId: (id: string | null) => void;
   setTemplateVariables: (vars: Record<string, any>) => void;
   setTemplateName: (name: string | null) => void;
+  setTemplateDocumentName: (name: string | null) => void;
   setPromptExtra: (prompt: string) => void;
   setAdaptiveRouting: (enabled: boolean) => void;
   setCragGate: (enabled: boolean) => void;
@@ -262,17 +340,28 @@ interface ChatState {
   setGraphRagEnabled: (enabled: boolean) => void;
   setGraphHops: (hops: number) => void;
   setChatPersonality: (personality: 'juridico' | 'geral') => void;
+  setChatOutlineReviewEnabled: (enabled: boolean) => void;
   // Audit State
   audit: boolean;
   setAudit: (enabled: boolean) => void;
   startAgentGeneration: (prompt: string, canvasContext?: CanvasContext | null) => Promise<void>;
   generateDocumentWithResult: (prompt: string, caseId?: string) => Promise<any>;
 
+  // Manual message injection (useful for system messages or optimistic updates)
+  addMessage: (message: Message) => void;
+
   // Job State
   currentJobId: string | null;
   jobEvents: any[];
   jobOutline: string[];
   reviewData: any | null;
+  // Chat (single-model): revisar/editar outline antes do streaming
+  chatOutlineReviewEnabled: boolean;
+  pendingChatOutline: {
+    content: string;
+    outline: string[];
+    model: string;
+  } | null;
   submitReview: (decision: any) => Promise<void>;
   startLangGraphJob: (prompt: string) => Promise<void>;
 
@@ -347,6 +436,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   useMultiAgent: true,
   reasoningLevel: 'medium',
   webSearch: false,
+  multiQuery: true,
+  breadthFirst: false,
+  searchMode: 'shared',
   ragTopK: 8,
   ragSources: ['lei', 'juris'],
   minPages: 0,
@@ -358,7 +450,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   agentReviewerModels: ['gpt-5.2', 'claude-4.5-sonnet', 'gemini-3-pro'],
 
   denseResearch: false,
+  hilOutlineEnabled: false,
   hilTargetSections: [],
+  auditMode: 'sei_only',
+  qualityProfile: 'padrao',
+  qualityTargetSectionScore: null,
+  qualityTargetFinalScore: null,
+  qualityMaxRounds: null,
+  strictDocumentGateOverride: null,
+  hilSectionPolicyOverride: null,
+  hilFinalRequiredOverride: null,
+  documentChecklist: [],
 
   // Multi-Model V2
   chatMode: 'standard' as const, // 'standard' | 'multi-model'
@@ -388,8 +490,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     apenasClauseBank: false,
   },
   templateId: null,
+  templateDocumentId: null,
   templateVariables: {},
   templateName: null,
+  templateDocumentName: null,
   promptExtra: '',
   adaptiveRouting: true, // Default ON for better experience
   cragGate: true,       // Default ON
@@ -403,6 +507,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   jobEvents: [],
   jobOutline: [],
   reviewData: null,
+  chatOutlineReviewEnabled: true,
+  pendingChatOutline: null,
 
   setContext: (context) => set({ activeContext: context }),
   setPendingCanvasContext: (context) => set({ pendingCanvasContext: context }),
@@ -421,7 +527,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       localStorage.setItem(CHAT_PERSONALITY_KEY, personality);
     }
   },
+  setChatOutlineReviewEnabled: (enabled) => set({ chatOutlineReviewEnabled: enabled }),
   setWebSearch: (enabled) => set({ webSearch: enabled }),
+  setMultiQuery: (enabled) => set({ multiQuery: enabled }),
+  setBreadthFirst: (enabled) => set({ breadthFirst: enabled }),
+  setSearchMode: (mode) => set({ searchMode: mode }),
   setRagTopK: (k) => set({ ragTopK: k }),
   setRagSources: (sources) => set({ ragSources: sources }),
   setPageRange: (range) =>
@@ -432,7 +542,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
   resetPageRange: () => set({ minPages: 0, maxPages: 0 }),
   setAttachmentMode: (mode) => set({ attachmentMode: mode }),
   setDenseResearch: (enabled) => set({ denseResearch: enabled }),
+  setHilOutlineEnabled: (enabled) => set({ hilOutlineEnabled: enabled }),
   setHilTargetSections: (sections) => set({ hilTargetSections: sections }),
+  setAuditMode: (mode) => set({ auditMode: mode }),
+  setQualityProfile: (profile) => set({ qualityProfile: profile }),
+  setQualityTargetSectionScore: (value) => set({ qualityTargetSectionScore: value }),
+  setQualityTargetFinalScore: (value) => set({ qualityTargetFinalScore: value }),
+  setQualityMaxRounds: (value) => set({ qualityMaxRounds: value }),
+  setStrictDocumentGateOverride: (value) => set({ strictDocumentGateOverride: value }),
+  setHilSectionPolicyOverride: (value) => set({ hilSectionPolicyOverride: value }),
+  setHilFinalRequiredOverride: (value) => set({ hilFinalRequiredOverride: value }),
+  setDocumentChecklist: (items) => set({ documentChecklist: items }),
   setAdaptiveRouting: (enabled) => set({ adaptiveRouting: enabled }),
   setCragGate: (enabled) => set({ cragGate: enabled }),
   setHydeEnabled: (enabled) => set({ hydeEnabled: enabled }),
@@ -441,7 +561,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
 
   // V2 Setters
-  setChatMode: (mode) => set({ chatMode: mode as any }),
+  setChatMode: (mode) => set((state) => ({
+    chatMode: mode as any,
+    selectedModels: mode === 'standard' && state.selectedModels.length > 0
+      ? [state.selectedModels[0]]
+      : state.selectedModels
+  })),
   setSelectedModels: (models) => set({ selectedModels: models }),
   setShowMultiModelComparator: (enabled) => set({ showMultiModelComparator: enabled }),
   setAutoConsolidate: (enabled) => set({ autoConsolidate: enabled }),
@@ -456,6 +581,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ multiModelView: view });
   },
   toggleModel: (modelId) => set((state) => {
+    if (state.chatMode === 'standard') {
+      return { selectedModels: [modelId] };
+    }
     const current = state.selectedModels;
     if (current.includes(modelId)) {
       return { selectedModels: current.filter(m => m !== modelId) };
@@ -478,8 +606,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     templateFilters: { ...state.templateFilters, ...filters }
   })),
   setTemplateId: (id) => set({ templateId: id }),
+  setTemplateDocumentId: (id) => set({ templateDocumentId: id }),
   setTemplateVariables: (vars) => set({ templateVariables: vars }),
   setTemplateName: (name) => set({ templateName: name }),
+  setTemplateDocumentName: (name) => set({ templateDocumentName: name }),
   setPromptExtra: (prompt) => set({ promptExtra: prompt }),
   setAudit: (enabled) => set({ audit: enabled }),
 
@@ -488,9 +618,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     try {
       const response = await apiClient.getChats();
       // @ts-ignore
-      set({ chats: response.chats || MOCK_CHATS, isLoading: false });
+      const nextChats = Array.isArray((response as any)?.chats) ? (response as any).chats : MOCK_CHATS;
+      set({ chats: nextChats, isLoading: false });
     } catch (error) {
-      console.error('Error fetching chats:', error);
+      console.error('[ChatStore] Error fetching chats:', describeApiError(error), error);
       set({ chats: MOCK_CHATS, isLoading: false });
     }
   },
@@ -552,7 +683,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }));
       return normalizedChat;
     } catch (error) {
-      console.error('Error creating chat:', error);
+      console.error('[ChatStore] Error creating chat:', describeApiError(error), error);
+      set({ isLoading: false });
+      throw error;
+    }
+  },
+
+  duplicateChat: async (chatId: string, title?: string) => {
+    set({ isLoading: true });
+    try {
+      const newChat = await apiClient.duplicateChat(chatId, title) as any;
+      const normalizedChat = {
+        ...newChat,
+        messages: newChat?.messages || []
+      };
+      set((state) => ({
+        chats: [normalizedChat, ...state.chats],
+        currentChat: normalizedChat,
+        isLoading: false,
+      }));
+      return normalizedChat;
+    } catch (error) {
+      console.error('[ChatStore] Error duplicating chat:', describeApiError(error), error);
       set({ isLoading: false });
       throw error;
     }
@@ -598,68 +750,379 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  sendMessage: async (content: string) => {
-    const { currentChat, chatMode, chatPersonality } = get();
+  sendMessage: async (
+    content: string,
+    options: {
+      outline?: string[];
+      skipOutlineFetch?: boolean;
+      skipUserMessage?: boolean;
+      canvasWrite?: 'replace' | 'append';
+    } = {}
+  ) => {
+    const {
+      currentChat,
+      chatMode,
+      chatPersonality,
+      selectedModels,
+      selectedModel,
+      minPages,
+      maxPages,
+      documentType,
+      thesis,
+      ragTopK,
+      ragSources,
+      attachmentMode,
+      contextMode,
+      contextFiles,
+      cacheTTL,
+      adaptiveRouting,
+      cragGate,
+      hydeEnabled,
+      graphRagEnabled,
+      graphHops,
+      denseResearch,
+      pendingCanvasContext,
+      chatOutlineReviewEnabled,
+    } = get();
     if (!currentChat) throw new Error('No chat selected');
     if (content.trim().length < 1) {
       toast.error('Digite uma mensagem.');
       return;
     }
 
-    if (chatMode === 'multi-model') {
+    if (chatMode === 'multi-model' && !options.canvasWrite) {
       try {
         await get().startMultiModelStream(content);
       } catch (error) {
-        toast.error("Erro ao enviar mensagem");
+        const msg = error instanceof Error ? error.message : String(error || '');
+        toast.error("Erro ao enviar mensagem", {
+          description: msg ? msg.slice(0, 220) : undefined,
+        });
+        console.error('[ChatStore] startMultiModelStream error:', error);
         throw error;
       }
       return;
     }
 
-    const canvasContext = get().pendingCanvasContext;
-
-    const userMessage: Message = {
-      id: nanoid(),
-      content,
-      role: 'user',
-      timestamp: new Date().toISOString(),
-      metadata: canvasContext ? { canvas_context: canvasContext } : undefined,
-    };
-
-    // Optimistic update
-    set((state) => ({
-      currentChat: state.currentChat
-        ? {
-          ...state.currentChat,
-          messages: [...(state.currentChat.messages || []), userMessage],
-        }
-        : null,
-      isSending: true,
-      pendingCanvasContext: null,
-    }));
-
-    try {
-      const response = await apiClient.sendMessage(currentChat.id, content, undefined, chatPersonality);
-      const aiMessage: Message = {
-        id: response.id || nanoid(),
-        content: response.content || '',
-        role: 'assistant',
-        timestamp: response.created_at || new Date().toISOString(),
-        metadata: response.metadata || undefined,
+    const shouldSkipUserMessage = Boolean(options.skipUserMessage);
+    if (!shouldSkipUserMessage) {
+      const userMessage: Message = {
+        id: nanoid(),
+        content,
+        role: 'user',
+        timestamp: new Date().toISOString(),
+        metadata: pendingCanvasContext ? { canvas_context: pendingCanvasContext } : undefined,
       };
 
       set((state) => ({
         currentChat: state.currentChat
           ? {
             ...state.currentChat,
-            messages: [...(state.currentChat.messages || []), aiMessage],
+            messages: [...(state.currentChat.messages || []), userMessage],
           }
           : null,
-        isSending: false,
+        pendingCanvasContext: null,
       }));
-    } catch (error) {
+    }
+
+    let assistantMessageId: string | null = null;
+    const canvasWriteMode = options.canvasWrite;
+    let canvasApplied = false;
+    try {
+      const fastModel = (selectedModels && selectedModels.length > 0)
+        ? selectedModels[0]
+        : selectedModel;
+      const hasPageRange = minPages > 0 || maxPages > 0;
+      let outline: string[] = Array.isArray(options.outline) ? options.outline : [];
+
+      if (!options.skipOutlineFetch && !outline.length && hasPageRange) {
+        try {
+          const outlineResponse = await apiClient.generateOutline(currentChat.id, {
+            prompt: content,
+            document_type: documentType,
+            thesis,
+            model: fastModel,
+            min_pages: minPages,
+            max_pages: maxPages,
+          });
+          outline = outlineResponse?.outline || [];
+        } catch (error) {
+          console.warn('Outline generation failed, proceeding without outline.', error);
+        }
+      }
+
+      if (!options.skipOutlineFetch && outline.length > 0 && hasPageRange && chatOutlineReviewEnabled) {
+        set({
+          reviewData: {
+            checkpoint: 'outline',
+            outline,
+            mode: 'chat',
+          },
+          pendingChatOutline: {
+            content,
+            outline,
+            model: fastModel,
+          },
+        });
+        toast.info('Revise o outline antes de enviar a resposta.');
+        return;
+      }
+
+      assistantMessageId = nanoid();
+      const assistantMessage: Message = {
+        id: assistantMessageId,
+        content: '',
+        role: 'assistant',
+        timestamp: new Date().toISOString(),
+      };
+
+      set((state) => ({
+        currentChat: state.currentChat
+          ? {
+            ...state.currentChat,
+            messages: [...(state.currentChat.messages || []), assistantMessage],
+          }
+          : null,
+        isSending: true,
+      }));
+
+      const payload: Record<string, any> = {
+        content,
+        attachments: [],
+        chat_personality: chatPersonality,
+        model: fastModel,
+        web_search: get().webSearch,
+        multi_query: get().multiQuery,
+        breadth_first: get().breadthFirst,
+        search_mode: get().searchMode,
+        rag_top_k: ragTopK,
+        rag_sources: ragSources,
+        attachment_mode: attachmentMode,
+        context_mode: contextMode,
+        context_files: contextMode === 'upload_cache' ? contextFiles : undefined,
+        cache_ttl: contextMode === 'upload_cache' ? cacheTTL : undefined,
+        adaptive_routing: adaptiveRouting,
+        crag_gate: cragGate,
+        hyde_enabled: hydeEnabled,
+        graph_rag_enabled: graphRagEnabled,
+        graph_hops: graphHops,
+        dense_research: denseResearch,
+      };
+      if (outline.length > 0) {
+        payload.outline = outline;
+      }
+
+      const response = await apiClient.fetchWithAuth(`/chats/${currentChat.id}/messages/stream`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok || !response.body) {
+        let detail = '';
+        try {
+          const raw = await response.text();
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw);
+              detail = parsed?.detail ? String(parsed.detail) : raw;
+            } catch {
+              detail = raw;
+            }
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(`Erro ao iniciar streaming (HTTP ${response.status}): ${detail || response.statusText}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      const applyCanvasWrite = (text: string | undefined) => {
+        if (!canvasWriteMode || canvasApplied) return;
+        const nextText = String(text || '').trim();
+        if (!nextText) return;
+        const canvasStore = useCanvasStore.getState();
+        const existing = String(canvasStore.content || '').trim();
+        const updated = canvasWriteMode === 'append' && existing
+          ? `${existing}\n\n${nextText}`
+          : nextText;
+        canvasStore.setContent(updated);
+        canvasStore.showCanvas();
+        canvasStore.setActiveTab('editor');
+        canvasApplied = true;
+      };
+
+      const updateAssistant = (updater: (message: Message) => Message) => {
+        set((state) => {
+          if (!state.currentChat) return {};
+          const updatedMessages = (state.currentChat.messages || []).map((message) =>
+            message.id === assistantMessageId ? updater(message) : message
+          );
+          return {
+            currentChat: {
+              ...state.currentChat,
+              messages: updatedMessages,
+            },
+          };
+        });
+      };
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames can arrive with LF or CRLF depending on proxy/runtime
+        const parts = buffer.split(/\r?\n\r?\n/);
+        buffer = parts.pop() || '';
+
+        for (const part of parts) {
+          const lines = part.split(/\r?\n/);
+          for (const line of lines) {
+            const trimmedLine = line.trimStart();
+            if (!trimmedLine.startsWith('data:')) continue;
+            const payload = trimmedLine.slice(5).trim();
+            if (!payload) continue;
+
+            let data: any;
+            try {
+              data = JSON.parse(payload);
+            } catch (err) {
+              console.error('Erro parse SSE', err);
+              continue;
+            }
+
+            if (data.type === 'search_started') {
+              const query = data.query ? `: ${data.query}` : '';
+              toast.info(`Buscando na web${query}...`);
+            } else if (data.type === 'search_done') {
+              const count = typeof data.count === 'number' ? data.count : 0;
+              const cached = data.cached ? ' (cache)' : '';
+              toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
+            }
+
+            // NEW: Handle thinking events
+            if (data.type === 'thinking' && data.delta) {
+              updateAssistant((message) => ({
+                ...message,
+                thinking: (message.thinking || '') + data.delta,
+                isThinking: true,
+              }));
+            } else if (data.type === 'token' && data.delta) {
+              updateAssistant((message) => ({
+                ...message,
+                content: (message.content || '') + data.delta,
+              }));
+            } else if (data.type === 'done') {
+              updateAssistant((message) => ({
+                ...message,
+                id: data.message_id || message.id,
+                content: data.full_text || message.content,
+                thinking: (() => {
+                  const streamed = typeof message.thinking === 'string' ? message.thinking : '';
+                  if (streamed.trim()) return streamed;
+                  return typeof data.thinking === 'string' ? data.thinking : message.thinking;
+                })(),  // Preserve streamed thinking; fallback to summary if none
+                isThinking: false,  // Stop thinking animation
+                metadata: (() => {
+                  const nextMetadata = {
+                    ...(message.metadata || {}),
+                    ...(data.model ? { model: data.model } : {}),
+                    ...(data.turn_id ? { turn_id: data.turn_id } : {}),
+                    ...(data.token_usage ? { token_usage: data.token_usage } : {}),
+                  };
+                  return Object.keys(nextMetadata).length ? nextMetadata : message.metadata;
+                })(),
+              }));
+              applyCanvasWrite(data.full_text);
+              set({ isSending: false });
+            } else if (data.type === 'error') {
+              updateAssistant((message) => ({
+                ...message,
+                content: data.error || 'Erro ao enviar mensagem',
+              }));
+              set({ isSending: false });
+              toast.error(data.error || 'Erro ao enviar mensagem');
+            }
+          }
+        }
+      }
+
+      if (buffer.trim()) {
+        const lines = buffer.split(/\r?\n/);
+        for (const line of lines) {
+          const trimmedLine = line.trimStart();
+          if (!trimmedLine.startsWith('data:')) continue;
+          const payload = trimmedLine.slice(5).trim();
+          if (!payload) continue;
+          try {
+            const data = JSON.parse(payload);
+            if (data.type === 'search_started') {
+              const query = data.query ? `: ${data.query}` : '';
+              toast.info(`Buscando na web${query}...`);
+            } else if (data.type === 'search_done') {
+              const count = typeof data.count === 'number' ? data.count : 0;
+              const cached = data.cached ? ' (cache)' : '';
+              toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
+            }
+            if (data.type === 'token' && data.delta) {
+              updateAssistant((message) => ({
+                ...message,
+                content: (message.content || '') + data.delta,
+              }));
+            } else if (data.type === 'done') {
+              updateAssistant((message) => ({
+                ...message,
+                id: data.message_id || message.id,
+                content: data.full_text || message.content,
+                thinking: (() => {
+                  const streamed = typeof message.thinking === 'string' ? message.thinking : '';
+                  if (streamed.trim()) return streamed;
+                  return typeof data.thinking === 'string' ? data.thinking : message.thinking;
+                })(),
+                metadata: (() => {
+                  const nextMetadata = {
+                    ...(message.metadata || {}),
+                    ...(data.model ? { model: data.model } : {}),
+                    ...(data.turn_id ? { turn_id: data.turn_id } : {}),
+                    ...(data.token_usage ? { token_usage: data.token_usage } : {}),
+                  };
+                  return Object.keys(nextMetadata).length ? nextMetadata : message.metadata;
+                })(),
+              }));
+              applyCanvasWrite(data.full_text);
+            }
+          } catch (err) {
+            console.error('Erro parse SSE (final)', err);
+          }
+        }
+      }
+
       set({ isSending: false });
-      toast.error("Erro ao enviar mensagem");
+    } catch (error) {
+      console.error('[ChatStore] sendMessage error:', error);
+      set((state) => {
+        if (!state.currentChat) return {};
+        const updatedMessages = assistantMessageId
+          ? (state.currentChat.messages || []).map((message) =>
+            message.id === assistantMessageId
+              ? { ...message, content: 'Erro ao enviar mensagem' }
+              : message
+          )
+          : (state.currentChat.messages || []);
+        return {
+          currentChat: {
+            ...state.currentChat,
+            messages: updatedMessages,
+          },
+        };
+      });
+      set({ isSending: false });
+      const msg = error instanceof Error ? error.message : String(error || '');
+      toast.error("Erro ao enviar mensagem", {
+        description: msg ? msg.slice(0, 220) : undefined,
+      });
       throw error;
     }
   },
@@ -702,6 +1165,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }, 2000);
 
     try {
+      const targetSectionScore = get().qualityTargetSectionScore;
+      const targetFinalScore = get().qualityTargetFinalScore;
+      const maxRounds = get().qualityMaxRounds;
+      const strictDocumentGateOverride = get().strictDocumentGateOverride;
+      const hilSectionPolicyOverride = get().hilSectionPolicyOverride;
+      const hilFinalRequiredOverride = get().hilFinalRequiredOverride;
+
       const response = await apiClient.generateDocument(currentChat.id, {
         prompt,
         context: { active_items: activeContext },
@@ -719,12 +1189,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         use_multi_agent: get().useMultiAgent,
         reasoning_level: get().reasoningLevel,
         web_search: get().webSearch,
+        search_mode: get().searchMode,
+        multi_query: get().multiQuery,
+        breadth_first: get().breadthFirst,
         dense_research: get().denseResearch, // Should be false if we reached here usually, but keeping for safety
         thinking_level: get().reasoningLevel,
         document_type: get().documentType,
         thesis: get().thesis,
         formatting_options: get().formattingOptions,
+        citation_style: get().citationStyle,
+        rag_top_k: get().ragTopK,
+        rag_sources: get().ragSources,
+        hil_outline_enabled: get().hilOutlineEnabled,
+        hil_target_sections: get().hilTargetSections,
+        audit_mode: get().auditMode,
+        quality_profile: get().qualityProfile,
+        ...(targetSectionScore != null ? { target_section_score: targetSectionScore } : {}),
+        ...(targetFinalScore != null ? { target_final_score: targetFinalScore } : {}),
+        ...(maxRounds != null ? { max_rounds: maxRounds } : {}),
+        ...(strictDocumentGateOverride != null ? { strict_document_gate: strictDocumentGateOverride } : {}),
+        ...(hilSectionPolicyOverride != null ? { hil_section_policy: hilSectionPolicyOverride } : {}),
+        ...(hilFinalRequiredOverride != null ? { hil_final_required: hilFinalRequiredOverride } : {}),
+        document_checklist_hint: get().documentChecklist,
         template_id: get().templateId || undefined,
+        template_document_id: get().templateDocumentId || undefined,
         variables: get().templateVariables,
         rag_config: {
           top_k: get().ragTopK,
@@ -733,6 +1221,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           use_templates: get().useTemplates,
           template_filters: get().templateFilters,
           template_id: get().templateId || undefined,
+          template_document_id: get().templateDocumentId || undefined,
           variables: get().templateVariables,
           prompt_extra: get().promptExtra,
           adaptive_routing: get().adaptiveRouting,
@@ -799,9 +1288,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     } catch (e) {
       clearInterval(stepsInterval);
-      console.error("StartAgentGeneration Error:", e);
-      // @ts-ignore
-      if (typeof window !== 'undefined') alert(`Erro na geração: ${e.message || JSON.stringify(e)}`);
+      const details = describeApiError(e);
+      console.error("[ChatStore] StartAgentGeneration Error:", details, e);
+      toast.error(`Erro na geração (Comitê): ${details}`);
 
       set(state => ({
         isAgentRunning: false,
@@ -821,6 +1310,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set({ isAgentRunning: true });
 
     try {
+      const targetSectionScore = get().qualityTargetSectionScore;
+      const targetFinalScore = get().qualityTargetFinalScore;
+      const maxRounds = get().qualityMaxRounds;
+      const strictDocumentGateOverride = get().strictDocumentGateOverride;
+      const hilSectionPolicyOverride = get().hilSectionPolicyOverride;
+      const hilFinalRequiredOverride = get().hilFinalRequiredOverride;
+
       const normalizedRange = normalizePageRange(get().minPages, get().maxPages);
       const hasPageRange = normalizedRange.minPages > 0 || normalizedRange.maxPages > 0;
       const contextDocumentIds = (get().activeContext || [])
@@ -831,6 +1327,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const jobRes = await apiClient.startJob({
         prompt,
         web_search: get().webSearch,
+        search_mode: get().searchMode,
+        multi_query: get().multiQuery,
+        breadth_first: get().breadthFirst,
         dense_research: true,
         effort_level: get().effortLevel,
         ...(hasPageRange ? { min_pages: normalizedRange.minPages, max_pages: normalizedRange.maxPages } : {}),
@@ -844,7 +1343,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
         formatting_options: get().formattingOptions,
         citation_style: get().citationStyle,
         hil_target_sections: get().hilTargetSections,
-        hil_outline_enabled: true,
+        hil_outline_enabled: get().hilOutlineEnabled,
+        audit_mode: get().auditMode,
+        quality_profile: get().qualityProfile,
+        ...(targetSectionScore != null ? { target_section_score: targetSectionScore } : {}),
+        ...(targetFinalScore != null ? { target_final_score: targetFinalScore } : {}),
+        ...(maxRounds != null ? { max_rounds: maxRounds } : {}),
+        ...(strictDocumentGateOverride != null ? { strict_document_gate: strictDocumentGateOverride } : {}),
+        ...(hilSectionPolicyOverride != null ? { hil_section_policy: hilSectionPolicyOverride } : {}),
+        ...(hilFinalRequiredOverride != null ? { hil_final_required: hilFinalRequiredOverride } : {}),
+        document_checklist_hint: get().documentChecklist,
         judge_model: get().selectedModel,
         gpt_model: get().gptModel,
         claude_model: get().claudeModel,
@@ -862,7 +1370,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ currentJobId: jobId, jobEvents: [], jobOutline: [], reviewData: null });
 
       // Start SSE Stream
-      const eventSource = new EventSource(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api'}/jobs/${jobId}/stream`);
+      const apiBase = process.env.NEXT_PUBLIC_API_URL || '/api';
+      const eventSource = new EventSource(`${apiBase}/jobs/${jobId}/stream`);
 
       const handleSse = (event: MessageEvent) => {
         if (!event?.data) return;
@@ -878,8 +1387,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
           jobOutline: data?.type === 'outline_done' ? (data.outline || []) : state.jobOutline,
         }));
 
+        if ((data?.type === 'outline_done' || data?.type === 'outline') && Array.isArray(data?.outline)) {
+          try {
+            useCanvasStore.getState().syncOutlineFromTitles(data.outline);
+          } catch {
+            // noop
+          }
+        }
+
         if (data?.type === 'human_review_required') {
-          set({ reviewData: { checkpoint: data.checkpoint, ...data.review_data } });
+          const payload = { checkpoint: data.checkpoint, ...data.review_data };
+          set({ reviewData: payload });
+          if ((payload as any).committee_review_report) {
+            try {
+              const { setMetadata, metadata } = useCanvasStore.getState();
+              const updatedMetadata = {
+                ...(metadata || {}),
+                committee_review_report: (payload as any).committee_review_report
+              };
+              setMetadata(updatedMetadata, null);
+              persistDraftMetadata(persistChatId, updatedMetadata);
+            } catch {
+              // noop
+            }
+          }
         }
 
         // NEW: Update Canvas Metadata in real-time for 'section' events
@@ -923,6 +1454,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
             };
             setMetadata(updatedMetadata, null);
             persistDraftMetadata(persistChatId, updatedMetadata);
+
+            const preview = typeof data.document_preview === 'string' ? data.document_preview : '';
+            if (preview.trim()) {
+              const { setContent: setCanvasContent, content: currentContent } = useCanvasStore.getState();
+              if (preview.trim() !== (currentContent || '').trim()) {
+                setCanvasContent(preview);
+              }
+            }
           } catch (e) {
             console.error("Error updating canvas metadata from stream", e);
           }
@@ -950,9 +1489,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
           try {
             const { setContent: setCanvasContent, setMetadata, metadata } = useCanvasStore.getState();
             setCanvasContent(data.markdown || '');
+            const decisionPayload = data.final_decision
+              ? {
+                final_decision: data.final_decision,
+                final_decision_reasons: data.final_decision_reasons || [],
+                final_decision_score: data.final_decision_score,
+                final_decision_target: data.final_decision_target,
+              }
+              : null;
             const updatedMetadata = {
               ...(metadata || {}),
-              full_document: data.markdown || metadata?.full_document
+              full_document: data.markdown || metadata?.full_document,
+              ...(decisionPayload ? { decision: decisionPayload } : {}),
             };
             setMetadata(updatedMetadata, null);
             persistDraftMetadata(persistChatId, updatedMetadata);
@@ -978,10 +1526,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         'debate',
         'granular',
         'audit',
+        'fact_check',
         'quality',
         'hil_decision',
         'corrections',
         'review',
+        'document_gate',
         'done',
         'error',
       ];
@@ -1021,6 +1571,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const hasContextDocs = contextDocumentIds.length > 0;
 
     try {
+      const targetSectionScore = get().qualityTargetSectionScore;
+      const targetFinalScore = get().qualityTargetFinalScore;
+      const maxRounds = get().qualityMaxRounds;
+      const strictDocumentGateOverride = get().strictDocumentGateOverride;
+      const hilSectionPolicyOverride = get().hilSectionPolicyOverride;
+      const hilFinalRequiredOverride = get().hilFinalRequiredOverride;
+
       const response = await apiClient.generateDocument(currentChat.id, {
         prompt,
         case_id: caseId,
@@ -1043,6 +1600,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         // Flags
         web_search: get().webSearch,
+        search_mode: get().searchMode,
+        multi_query: get().multiQuery,
+        breadth_first: get().breadthFirst,
         dense_research: get().denseResearch,
         thinking_level: get().reasoningLevel,
         audit: get().audit,
@@ -1051,6 +1611,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         document_type: get().documentType,
         thesis: get().thesis,
         formatting_options: get().formattingOptions,
+        citation_style: get().citationStyle,
+        hil_outline_enabled: get().hilOutlineEnabled,
+        hil_target_sections: get().hilTargetSections,
+        audit_mode: get().auditMode,
+        quality_profile: get().qualityProfile,
+        ...(targetSectionScore != null ? { target_section_score: targetSectionScore } : {}),
+        ...(targetFinalScore != null ? { target_final_score: targetFinalScore } : {}),
+        ...(maxRounds != null ? { max_rounds: maxRounds } : {}),
+        ...(strictDocumentGateOverride != null ? { strict_document_gate: strictDocumentGateOverride } : {}),
+        ...(hilSectionPolicyOverride != null ? { hil_section_policy: hilSectionPolicyOverride } : {}),
+        ...(hilFinalRequiredOverride != null ? { hil_final_required: hilFinalRequiredOverride } : {}),
+        document_checklist_hint: get().documentChecklist,
 
         // RAG Config (Flattened for Backend Adapter)
         rag_top_k: get().ragTopK,
@@ -1060,6 +1632,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         template_filters: get().templateFilters,
         prompt_extra: get().promptExtra,
         template_id: get().templateId || undefined,
+        template_document_id: get().templateDocumentId || undefined,
         variables: get().templateVariables,
         adaptive_routing: get().adaptiveRouting,
         crag_gate: get().cragGate,
@@ -1115,7 +1688,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   submitReview: async (decision) => {
-    const { currentJobId } = get();
+    const { currentJobId, pendingChatOutline, reviewData } = get();
+    const isChatOutline = reviewData?.mode === 'chat';
+
+    if (pendingChatOutline && decision?.checkpoint === 'outline' && isChatOutline) {
+      set({ reviewData: null, pendingChatOutline: null });
+
+      if (!decision?.approved) {
+        toast.info('Outline rejeitado. Mensagem cancelada.');
+        return;
+      }
+
+      const editsText = typeof decision?.edits === 'string' ? decision.edits : '';
+      const approvedOutline = editsText
+        ? editsText.split('\n').map((line: string) => line.trim()).filter(Boolean)
+        : pendingChatOutline.outline;
+
+      await get().sendMessage(pendingChatOutline.content, {
+        outline: approvedOutline,
+        skipOutlineFetch: true,
+        skipUserMessage: true,
+      });
+      return;
+    }
+
     if (!currentJobId) return;
 
     // Optimistic close
@@ -1127,6 +1723,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     await apiClient.resumeJob(currentJobId, decision);
   },
+
+  addMessage: (message: Message) => set((state) => ({
+    currentChat: state.currentChat
+      ? { ...state.currentChat, messages: [...(state.currentChat.messages || []), message] }
+      : null
+  })),
 
   // ===========================================================================
   // MULTI-MODEL STREAMING (V2)
@@ -1235,11 +1837,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body: JSON.stringify({
           message: actualContent,
           models: targetModels,
-          chat_personality: chatPersonality
+          chat_personality: chatPersonality,
+          web_search: get().webSearch,
+          multi_query: get().multiQuery,
+          breadth_first: get().breadthFirst,
+          search_mode: get().searchMode,
         })
       });
 
-      if (!response.body) throw new Error("No response body");
+      if (!response.ok || !response.body) {
+        let detail = '';
+        try {
+          const raw = await response.text();
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw);
+              detail = parsed?.detail ? String(parsed.detail) : raw;
+            } catch {
+              detail = raw;
+            }
+          }
+        } catch {
+          // ignore
+        }
+        throw new Error(`Erro no stream multi-modelo (HTTP ${response.status}): ${detail || response.statusText}`);
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -1247,14 +1869,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // Captura do texto completo por modelo para gerar "Consolidado" ao final (opcional)
       const fullTextByModel: Record<string, string> = {};
-      selectedModels.forEach((m) => {
+      targetModels.forEach((m) => {
         fullTextByModel[m] = '';
       });
 
       // Prepare placeholders for assistant responses
       // Map modelId -> messageId
       const modelMessageIds: Record<string, string> = {};
-      selectedModels.forEach(m => {
+      targetModels.forEach(m => {
         modelMessageIds[m] = nanoid();
       });
 
@@ -1262,7 +1884,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set(state => {
         if (!state.currentChat) return {};
 
-        const newMessages = selectedModels.map(m => ({
+        const newMessages = targetModels.map(m => ({
           id: modelMessageIds[m],
           role: 'assistant' as const,
           content: '',
@@ -1284,17 +1906,28 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
+        // SSE frames can arrive with LF or CRLF depending on proxy/runtime
+        const lines = buffer.split(/\r?\n\r?\n/);
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const jsonStr = line.slice(6);
+          const trimmedLine = line.trimStart();
+          if (trimmedLine.startsWith('data:')) {
+            const jsonStr = trimmedLine.replace(/^data:\s*/, '');
             if (jsonStr === '[DONE]') continue;
 
             try {
               const data = JSON.parse(jsonStr);
               // { type: "token", model: "gpt-4o", delta: "..." }
+
+              if (data.type === 'search_started') {
+                const query = data.query ? `: ${data.query}` : '';
+                toast.info(`Buscando na web${query}...`);
+              } else if (data.type === 'search_done') {
+                const count = typeof data.count === 'number' ? data.count : 0;
+                const cached = data.cached ? ' (cache)' : '';
+                toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
+              }
 
               if (data.type === 'token' && data.model && data.delta) {
                 const msgId = modelMessageIds[data.model];
@@ -1333,6 +1966,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }
               }
 
+              if (data.type === 'done' && data.model && data.full_text) {
+                const msgId = modelMessageIds[data.model];
+                if (msgId) {
+                  fullTextByModel[data.model] = data.full_text;
+                  set(state => {
+                    if (!state.currentChat) return {};
+                    const msgs = state.currentChat.messages.map(m => {
+                      if (m.id === msgId) {
+                        return { ...m, content: data.full_text };
+                      }
+                      return m;
+                    });
+                    return { currentChat: { ...state.currentChat, messages: msgs } };
+                  });
+                }
+              }
+
               if (data.type === 'error') {
                 toast.error(`Erro no modelo ${data.model}: ${data.error}`);
               }
@@ -1347,7 +1997,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Gerar resposta consolidada (juiz) — somente se comparador estiver ligado e houver 2+ respostas
       try {
         const { showMultiModelComparator, autoConsolidate } = get();
-        const candidates = selectedModels
+        const candidates = targetModels
           .map((m) => ({ model: m, text: (fullTextByModel[m] || '').trim() }))
           .filter((c) => c.text.length > 0);
 

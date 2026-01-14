@@ -142,7 +142,9 @@ Você é um Desembargador Sênior revisando TRÊS versões da seção "{{ titulo
 7. **REGRA DE CITAÇÃO OBRIGATÓRIA**: qualquer afirmação factual relevante deve ter [TIPO - Doc. X, p. Y]. Se não tiver, inclua a afirmação em `claims_requiring_citation` e marque no texto com [[PENDENTE: ...]].
 
 ## FORMATO DE RESPOSTA (OBRIGATÓRIO):
-Responda **EXCLUSIVAMENTE** com um JSON válido (sem markdown, sem comentários, sem texto antes/depois), seguindo este schema:
+Responda **EXCLUSIVAMENTE** com um JSON válido (sem markdown, sem comentários, sem texto antes/depois).
+O campo `quality_score` é **obrigatório** e deve ser um número de 0 a 10.
+Siga este schema:
 {
   "final_text": "string (markdown permitido)",
   "divergences": [
@@ -168,7 +170,8 @@ Responda **EXCLUSIVAMENTE** com um JSON válido (sem markdown, sem comentários,
       "why_removed": "string"
     }
   ],
-  "risk_flags": ["string"]
+  "risk_flags": ["string"],
+  "quality_score": "number (0-10)"
 }
 """
 

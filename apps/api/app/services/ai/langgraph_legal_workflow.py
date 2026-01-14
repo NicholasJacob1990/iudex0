@@ -32,13 +32,14 @@ import asyncio
 import sqlite3
 import os
 import re
+import json
 
-from app.services.web_search_service import web_search_service
+from app.services.web_search_service import web_search_service, build_web_context, is_breadth_first, plan_queries
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.job_manager import job_manager
 from app.services.ai.audit_service import AuditService
 from app.services.ai.hil_decision_engine import HILDecisionEngine, HILChecklist, hil_engine
-from app.services.ai.model_registry import get_api_model_name, DEFAULT_JUDGE_MODEL, DEFAULT_DEBATE_MODELS
+from app.services.ai.model_registry import get_api_model_name, get_model_config, DEFAULT_JUDGE_MODEL, DEFAULT_DEBATE_MODELS
 
 # Quality Pipeline (v2.25)
 from app.services.ai.quality_gate import quality_gate_node
@@ -86,6 +87,285 @@ def build_personality_instructions(personality: str) -> str:
             "- Use linguagem técnica e formal, com termos jurídicos adequados.\n"
             "- Estruture o texto conforme práticas forenses e normas aplicáveis.\n"
         )
+    return ""
+
+def build_evidence_policy(audit_mode: str) -> str:
+    if (audit_mode or "").lower() == "research":
+        return (
+            "## POLÍTICA DE EVIDÊNCIA (PESQUISA)\n"
+            "- SEI/autos do caso (RAG local + anexos) são a fonte de verdade para fatos administrativos.\n"
+            "- Fontes externas servem apenas para fundamentação normativa/jurisprudencial.\n"
+            "- Nunca trate fonte externa como prova de fato do processo.\n"
+            "- Separe claramente 'fato dos autos' vs 'fundamentação externa'.\n"
+        )
+    return (
+        "## POLÍTICA DE EVIDÊNCIA (AUDITORIA - SOMENTE SEI)\n"
+        "- Use exclusivamente o SEI/autos do caso (RAG local + anexos) para fatos e eventos administrativos.\n"
+        "- Não cite nem invente fontes externas para comprovar fatos.\n"
+        "- Se faltar prova no SEI, marque como [[PENDENTE: confirmar no SEI]].\n"
+    )
+
+
+def _clean_outline_line(line: str) -> str:
+    cleaned = re.sub(r"^[\s>*-]+", "", (line or "").strip())
+    cleaned = re.sub(r"^\d+[\.)-]\s*", "", cleaned).strip()
+    return cleaned
+
+
+def _parse_outline_response(text: str) -> List[str]:
+    if not text:
+        return []
+
+    # Try JSON array
+    json_block = None
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        json_block = text[start:end + 1]
+    if json_block:
+        try:
+            parsed = json.loads(json_block)
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+
+    # Fallback: parse lines
+    lines = []
+    for raw in text.splitlines():
+        line = _clean_outline_line(raw)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def _sections_for_pages(pages: int) -> int:
+    pages = int(pages or 0)
+    if pages <= 0:
+        return 0
+    sections = round(pages * 0.5) + 2
+    return max(3, min(sections, 14))
+
+
+def _outline_section_range(min_pages: int, max_pages: int) -> tuple[int, int]:
+    min_sections = _sections_for_pages(min_pages) if min_pages else 0
+    max_sections = _sections_for_pages(max_pages) if max_pages else 0
+
+    if min_sections and max_sections and max_sections < min_sections:
+        max_sections = min_sections
+    if min_sections and not max_sections:
+        max_sections = min(14, min_sections + 2)
+    if max_sections and not min_sections:
+        min_sections = max(3, max_sections - 2)
+
+    return min_sections, max_sections
+
+
+def _outline_size_guidance(min_pages: int, max_pages: int) -> str:
+    if not (min_pages or max_pages):
+        return ""
+
+    min_sections, max_sections = _outline_section_range(min_pages, max_pages)
+    if min_sections and max_sections:
+        sections_label = f"{min_sections}" if min_sections == max_sections else f"{min_sections}-{max_sections}"
+    else:
+        sections_label = None
+
+    if min_pages and max_pages:
+        pages_label = f"{min_pages}-{max_pages}"
+    elif min_pages:
+        pages_label = f"{min_pages}+"
+    else:
+        pages_label = f"até {max_pages}"
+
+    lines = [
+        "TAMANHO:",
+        f"- Documento entre {pages_label} páginas.",
+    ]
+    if sections_label:
+        lines.append(f"- Estruture o sumário com cerca de {sections_label} tópicos principais.")
+    lines.append("- Se for curto, agrupe itens; se for longo, subdivida.")
+    return "\n".join(lines)
+
+
+def _merge_outline_pair(outline: List[str], idx: int) -> List[str]:
+    left = _clean_outline_line(outline[idx]) if idx < len(outline) else ""
+    right = _clean_outline_line(outline[idx + 1]) if idx + 1 < len(outline) else ""
+    if left and right:
+        merged = f"{left} / {right}"
+    else:
+        merged = left or right or outline[idx]
+    return outline[:idx] + [merged] + outline[idx + 2:]
+
+
+def _shrink_outline(outline: List[str], max_sections: int) -> List[str]:
+    if max_sections <= 0:
+        return outline
+    current = list(outline)
+    while len(current) > max_sections and len(current) >= 2:
+        cleaned = [_clean_outline_line(item) for item in current]
+        best_idx = 0
+        best_score = None
+        for i in range(len(cleaned) - 1):
+            score = len(cleaned[i]) + len(cleaned[i + 1])
+            if best_score is None or score < best_score:
+                best_score = score
+                best_idx = i
+        current = _merge_outline_pair(current, best_idx)
+    return current
+
+
+def _expand_outline(outline: List[str], min_sections: int) -> List[str]:
+    if min_sections <= 0:
+        return outline
+
+    rules = [
+        (re.compile(r"\b(fatos|relat[oó]rio|s[ií]ntese)\b", re.I), "Contexto fático detalhado"),
+        (re.compile(r"\b(direito|fundamenta)\b", re.I), "Jurisprudência e precedentes"),
+        (re.compile(r"\bmérito\b", re.I), "Teses específicas do mérito"),
+        (re.compile(r"\bpreliminar\b", re.I), "Preliminares processuais"),
+        (re.compile(r"\bpedidos?|requerimentos?\b", re.I), "Pedidos subsidiários"),
+        (re.compile(r"\bconclus[aã]o|opini[aã]o|fecho\b", re.I), "Providências finais"),
+    ]
+
+    current = list(outline)
+    idx = 0
+    while len(current) < min_sections and idx < len(current):
+        title = current[idx]
+        added = False
+        for pattern, addition in rules:
+            if pattern.search(title):
+                if addition not in current:
+                    current.insert(idx + 1, addition)
+                    added = True
+                break
+        idx += 2 if added else 1
+
+    fallback_additions = ["Pontos complementares", "Observações finais"]
+    for addition in fallback_additions:
+        if len(current) >= min_sections:
+            break
+        if addition not in current:
+            current.append(addition)
+
+    return current
+
+
+def _adjust_outline_to_range(outline: List[str], min_pages: int, max_pages: int) -> List[str]:
+    if not (min_pages or max_pages):
+        return outline
+    min_sections, max_sections = _outline_section_range(min_pages, max_pages)
+    adjusted = list(outline)
+    if max_sections and len(adjusted) > max_sections:
+        adjusted = _shrink_outline(adjusted, max_sections)
+    if min_sections and len(adjusted) < min_sections:
+        adjusted = _expand_outline(adjusted, min_sections)
+    return adjusted
+
+
+async def _call_model_any_async(
+    model_id: str,
+    prompt: str,
+    *,
+    system_instruction: Optional[str] = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1200,
+    cached_content: Optional[Any] = None
+) -> str:
+    if not model_id:
+        return ""
+
+    cfg = get_model_config(model_id)
+    if not cfg:
+        return ""
+
+    api_model = get_api_model_name(model_id)
+
+    from app.services.ai.agent_clients import (
+        init_openai_client,
+        init_anthropic_client,
+        init_xai_client,
+        init_openrouter_client,
+        get_gemini_client,
+        call_openai_async,
+        call_anthropic_async,
+        call_vertex_gemini,
+        call_vertex_gemini_async,
+    )
+
+    if cfg.provider == "openai":
+        client = init_openai_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "anthropic":
+        client = init_anthropic_client()
+        if not client:
+            return ""
+        return await call_anthropic_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "google":
+        client = get_gemini_client()
+        if not client:
+            return ""
+        if cached_content:
+            return await asyncio.to_thread(
+                call_vertex_gemini,
+                client,
+                prompt,
+                model=model_id,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction,
+                cached_content=cached_content
+            ) or ""
+        return await call_vertex_gemini_async(
+            client,
+            prompt,
+            model=model_id,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "xai":
+        client = init_xai_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "openrouter":
+        client = init_openrouter_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+
+    logger.warning(f"⚠️ Provider não suportado para judge/strategist: {cfg.provider}")
     return ""
 
 def default_route_for_section(section_title: str, tipo_peca: str = "") -> Dict[str, Any]:
@@ -298,12 +578,30 @@ class DocumentState(TypedDict):
     # Config
     deep_research_enabled: bool
     web_search_enabled: bool
+    search_mode: str
+    research_mode: str
+    need_juris: bool
+    research_policy: str
+    planning_reasoning: Optional[str]
+    planned_queries: Optional[List[str]]  # Queries auto-generated by planner
+    multi_query: bool
+    breadth_first: bool
     use_multi_agent: bool
     thinking_level: str
     chat_personality: str
     target_pages: int
     min_pages: int
     max_pages: int
+    audit_mode: str
+    quality_profile: str
+    target_section_score: float
+    target_final_score: float
+    max_rounds: int
+    recursion_limit: int
+    refinement_round: int
+    strict_document_gate: bool
+    hil_section_policy: str
+    force_final_hil: bool
     
     # v4.1: CRAG Gate & Adaptive Routing (unified with CLI)
     crag_gate_enabled: bool
@@ -343,9 +641,15 @@ class DocumentState(TypedDict):
     # Research
     research_context: Optional[str]
     research_sources: List[Dict[str, Any]]
+    research_notes: Optional[str]
+    citations_map: Optional[Dict[str, Any]]
     # Deep Research UX (para SSE/UI)
     deep_research_thinking_steps: Optional[List[Dict[str, Any]]]
     deep_research_from_cache: Optional[bool]
+
+    # Research Verification
+    verifier_attempts: int
+    verification_retry: bool
     
     # Sections (processed)
     processed_sections: List[Dict[str, Any]]
@@ -359,6 +663,25 @@ class DocumentState(TypedDict):
     audit_status: Literal["aprovado", "aprovado_ressalvas", "reprovado"]
     audit_report: Optional[Dict[str, Any]]
     audit_issues: List[str]
+    sei_context: Optional[str]
+    fact_check_summary: Optional[str]
+    document_checklist_hint: Optional[List[Dict[str, Any]]]
+    document_checklist: Optional[Dict[str, Any]]
+    document_gate_status: Optional[str]
+    document_gate_missing: List[Dict[str, Any]]
+
+    # Style Check (editorial gate)
+    style_report: Optional[Dict[str, Any]]
+    style_score: Optional[float]
+    style_tone: Optional[str]
+    style_issues: List[str]
+    style_term_variations: List[Dict[str, Any]]
+    style_check_status: Optional[str]
+    style_check_payload: Optional[Dict[str, Any]]
+    style_instruction: Optional[str]
+    style_refine_round: int
+    style_refine_max_rounds: int
+    style_min_score: float
     
     # HIL Decision Engine
     hil_checklist: Optional[Dict[str, Any]]  # Serialized HILChecklist
@@ -387,8 +710,90 @@ class DocumentState(TypedDict):
     # Committee Review (v5.2)
     committee_review_report: Optional[Dict[str, Any]]
     
+    # Context Caching (v5.3)
+    context_cache_name: Optional[str]
+    context_cache_created: bool
+    
+    # Human Proposal Debate (v5.4)
+    human_proposal: Optional[str]
+    proposal_scope: Optional[str]  # "section" or "final"
+    proposal_target_section: Optional[str]
+    proposal_evaluation: Optional[Dict[str, Any]]
+    
     # Final
     final_markdown: str
+    final_decision: Optional[str]
+    final_decision_reasons: List[str]
+    final_decision_score: Optional[float]
+    final_decision_target: Optional[float]
+
+
+# --- FINAL DECISION HELPERS ---
+
+FINAL_DECISIONS = ("APPROVED", "NEED_EVIDENCE", "NEED_REWRITE", "NEED_HUMAN_REVIEW")
+
+def _collect_final_decision_reasons(state: DocumentState) -> Dict[str, Any]:
+    reasons: List[str] = []
+
+    checklist = state.get("document_checklist") or {}
+    missing_critical = checklist.get("missing_critical", []) or []
+    missing_noncritical = checklist.get("missing_noncritical", []) or []
+    if missing_critical:
+        reasons.append("missing_critical_docs")
+    if missing_noncritical:
+        reasons.append("missing_noncritical_docs")
+
+    audit_status = state.get("audit_status")
+    if audit_status == "reprovado":
+        reasons.append("audit_reprovado")
+    elif audit_status == "aprovado_ressalvas":
+        reasons.append("audit_ressalvas")
+
+    if state.get("has_any_divergence"):
+        reasons.append("divergence_detected")
+
+    if state.get("quality_gate_force_hil"):
+        reasons.append("quality_gate_force_hil")
+
+    report = state.get("committee_review_report") or {}
+    score = report.get("score")
+    if score is None:
+        try:
+            score = float(report.get("nota_consolidada"))
+        except Exception:
+            score = None
+    target = state.get("target_final_score")
+    try:
+        target = float(target) if target is not None else None
+    except Exception:
+        target = None
+    if score is not None and target is not None and score < target:
+        reasons.append("score_below_target")
+    if report.get("score_disagreement"):
+        reasons.append("agent_disagreement")
+
+    return {"reasons": reasons, "score": score, "target": target}
+
+
+def _with_final_decision(
+    state: DocumentState,
+    decision: str,
+    extra_reasons: Optional[List[str]] = None
+) -> DocumentState:
+    payload = _collect_final_decision_reasons(state)
+    reasons = payload["reasons"]
+    if extra_reasons:
+        for item in extra_reasons:
+            if item and item not in reasons:
+                reasons.append(item)
+
+    return {
+        **state,
+        "final_decision": decision,
+        "final_decision_reasons": reasons,
+        "final_decision_score": payload["score"],
+        "final_decision_target": payload["target"],
+    }
 
 
 # --- NODES ---
@@ -401,17 +806,35 @@ async def outline_node(state: DocumentState) -> DocumentState:
     
     # v5.0: Dynamic Outline Generation (Unification with CLI)
     try:
-        from app.services.ai.gemini_drafter import GeminiDrafterWrapper
-        # Initialize basic drafter for outline
-        strategist_model = state.get("strategist_model") or state.get("judge_model") or "gemini-1.5-pro"
-        drafter = GeminiDrafterWrapper(model_name=get_api_model_name(strategist_model))
-        
-        # Use the robust generate_outline from juridico_gemini logic
-        outline = drafter.generate_outline(
-            tipo_peca=mode,
-            resumo_caso=state.get("input_text", "")[:4000],
-            tese_usuario=state.get("tese", "")
+        strategist_model = state.get("strategist_model") or state.get("judge_model") or DEFAULT_JUDGE_MODEL
+        min_pages = int(state.get("min_pages") or 0)
+        max_pages = int(state.get("max_pages") or 0)
+        size_guidance = _outline_size_guidance(min_pages, max_pages)
+        prompt = f"""
+Você é um estrategista jurídico. Gere o sumário (outline) para um documento do tipo {mode}.
+
+REGRAS:
+- Retorne apenas os tópicos do sumário, um por linha.
+- Use numeração romana quando fizer sentido (ex.: I, II, III).
+- Não inclua explicações, notas ou comentários.
+
+{size_guidance}
+
+RESUMO DO CASO:
+{state.get("input_text", "")[:4000]}
+
+TESE/INSTRUÇÕES:
+{state.get("tese", "")}
+""".strip()
+
+        response = await _call_model_any_async(
+            strategist_model,
+            prompt,
+            temperature=0.2,
+            max_tokens=600
         )
+        outline = _parse_outline_response(response)
+        outline = _adjust_outline_to_range(outline, min_pages, max_pages)
         
         if not outline:
             logger.warning(f"⚠️ Dynamic outline failed for {mode}, using fallback.")
@@ -455,6 +878,10 @@ async def outline_node(state: DocumentState) -> DocumentState:
                 "II - DO DIREITO",
                 "III - DOS PEDIDOS"
             ]
+
+        min_pages = int(state.get("min_pages") or 0)
+        max_pages = int(state.get("max_pages") or 0)
+        outline = _adjust_outline_to_range(outline, min_pages, max_pages)
     
     return {**state, "outline": outline}
 
@@ -523,6 +950,25 @@ async def outline_hil_node(state: DocumentState) -> DocumentState:
     return {**state, "outline": outline, "hil_outline_payload": None}
 
 
+def _normalize_queries(queries: Optional[List[str]]) -> List[str]:
+    if not queries:
+        return []
+    cleaned = []
+    seen = set()
+    for item in queries:
+        text = str(item or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text)
+    return cleaned
+
+
+def _contains_keywords(text: str, keywords: List[str]) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
 async def deep_research_node(state: DocumentState) -> DocumentState:
     """Deep Research based on outline"""
     if not state.get("deep_research_enabled"):
@@ -531,12 +977,17 @@ async def deep_research_node(state: DocumentState) -> DocumentState:
     logger.info("🧠 [Phase2] Deep Research...")
     
     sections_summary = "\n".join([f"- {s}" for s in state.get("outline", [])])
-    query = f"""
+    planned_queries = _normalize_queries(state.get("planned_queries"))
+    base_query = f"""
 Pesquisa jurídica para {state['mode']}.
 TESE: {state['tese']}
 CONTEXTO: {state['input_text'][:1500]}
 SEÇÕES: {sections_summary}
 """
+    query = base_query
+    if planned_queries:
+        query += "\n\nFOCO DA PESQUISA (Queries Planejadas):\n"
+        query += "\n".join([f"- {q}" for q in planned_queries[:6]])
     
     res = await deep_research_service.run_research_task(query)
     
@@ -553,19 +1004,633 @@ async def web_search_node(state: DocumentState) -> DocumentState:
     """Simple web search"""
     if not state.get("web_search_enabled"):
         return state
-        
+
+    search_mode = (state.get("search_mode") or "hybrid").lower()
+    if search_mode not in ("shared", "native", "hybrid"):
+        search_mode = "hybrid"
+
     logger.info("🌐 [Phase2] Web Search...")
-    
-    query = f"{state['tese']} jurisprudência {state['mode']}"
-    results = await web_search_service.search(query, num_results=5)
-    
-    report = "\n".join([f"- {r.get('title')}: {r.get('body', '')[:200]}" for r in results])
-    
+
+    base_query = f"{state.get('tese', '')} jurisprudência {state.get('mode', '')}".strip()
+    planned_queries = _normalize_queries(state.get("planned_queries"))
+    query = planned_queries[0] if planned_queries else base_query
+    breadth_first = bool(state.get("breadth_first")) or is_breadth_first(query)
+    multi_query = bool(state.get("multi_query", True)) or breadth_first
+
+    if search_mode == "native":
+        try:
+            from app.services.ai.agent_clients import (
+                build_system_instruction,
+                get_gpt_client,
+                get_claude_client,
+                get_gemini_client,
+                _is_anthropic_vertex_client,
+                call_openai_async,
+                call_anthropic_async,
+                call_vertex_gemini_async
+            )
+            from app.services.ai.citations import to_perplexity
+            from app.services.ai.model_registry import get_api_model_name, get_model_config
+
+            judge_model = state.get("judge_model") or DEFAULT_JUDGE_MODEL
+            api_model = get_api_model_name(judge_model) or judge_model
+            cfg = get_model_config(judge_model)
+            provider = cfg.provider if cfg else ""
+            system_instruction = build_system_instruction(state.get("chat_personality"))
+            prompt_query = "; ".join(planned_queries[:4]) if planned_queries else query
+            prompt = f"Pesquise na web e resuma as fontes relevantes sobre: {prompt_query}. Cite as fontes."
+
+            if provider == "openai":
+                gpt_client = get_gpt_client()
+                if gpt_client and hasattr(gpt_client, "responses"):
+                    resp = gpt_client.responses.create(
+                        model=api_model,
+                        input=[
+                            {"role": "system", "content": system_instruction},
+                            {"role": "user", "content": prompt},
+                        ],
+                        tools=[{"type": "web_search"}],
+                        max_output_tokens=1200,
+                        temperature=0.3,
+                    )
+                    text = to_perplexity("openai", resp)
+                    if text:
+                        return {
+                            **state,
+                            "research_context": text,
+                            "research_sources": [],
+                        }
+
+            if provider == "anthropic":
+                claude_client = get_claude_client()
+                if claude_client:
+                    kwargs: Dict[str, Any] = {
+                        "model": api_model,
+                        "max_tokens": 1200,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "system": system_instruction,
+                        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+                    }
+                    beta_header = os.getenv("ANTHROPIC_WEB_SEARCH_BETA", "web-search-2025-03-05").strip()
+                    if beta_header:
+                        kwargs["extra_headers"] = {"anthropic-beta": beta_header}
+                    if _is_anthropic_vertex_client(claude_client):
+                        kwargs["anthropic_version"] = os.getenv("ANTHROPIC_VERTEX_VERSION", "vertex-2023-10-16")
+                    resp = claude_client.messages.create(**kwargs)
+                    text = to_perplexity("claude", resp)
+                    if text:
+                        return {
+                            **state,
+                            "research_context": text,
+                            "research_sources": [],
+                        }
+
+            if provider == "google":
+                gemini_client = get_gemini_client()
+                if gemini_client:
+                    from google.genai import types as genai_types
+
+                    tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
+                    config = genai_types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        tools=[tool],
+                        max_output_tokens=1200,
+                        temperature=0.3,
+                    )
+                    resp = gemini_client.models.generate_content(
+                        model=api_model,
+                        contents=prompt,
+                        config=config,
+                    )
+                    text = to_perplexity("gemini", resp) or (resp.text or "").strip()
+                    if text:
+                        return {
+                            **state,
+                            "research_context": text,
+                            "research_sources": [],
+                        }
+        except Exception as e:
+            logger.error(f"❌ [Phase2] Web Search nativo falhou: {e}")
+
+    if planned_queries:
+        logger.info(f"🌐 [Phase2] Using {len(planned_queries)} planned queries")
+        per_query = max(3, int(6 / max(1, len(planned_queries))))
+        tasks = [
+            web_search_service.search(q, num_results=per_query)
+            for q in planned_queries[:6]
+        ]
+        results_list = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        for payload in results_list:
+            if isinstance(payload, Exception):
+                logger.error(f"Erro search planejada: {payload}")
+                continue
+            for item in payload.get("results", []) or []:
+                results.append({**item, "query": payload.get("query")})
+        deduped = []
+        seen = set()
+        for item in results:
+            url = (item.get("url") or "").strip()
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            deduped.append(item)
+        payload = {
+            "results": deduped[:12],
+            "queries": planned_queries[:6],
+            "query": query,
+            "source": "multi-planned",
+        }
+    elif multi_query:
+        payload = await web_search_service.search_multi(query, num_results=6)
+    else:
+        payload = await web_search_service.search(query, num_results=6)
+
+    results = payload.get("results") or []
+    web_context = build_web_context(payload, max_items=6)
+
     return {
         **state,
-        "research_context": f"--- WEB SEARCH ---\n{report}\n",
+        "research_context": f"{web_context}\n",
         "research_sources": results
     }
+
+
+async def research_notes_node(state: DocumentState) -> DocumentState:
+    """
+    Summarize research sources into concise notes and build a citations map.
+    """
+    research_context = (state.get("research_context") or "").strip()
+    sources = state.get("research_sources") or []
+
+    if not research_context and not sources:
+        return {
+            **state,
+            "research_notes": None,
+            "citations_map": {},
+            "verification_retry": False,
+        }
+
+    citations_map: Dict[str, Any] = {}
+    lines = ["## NOTAS DE PESQUISA (use citações [n])"]
+
+    if sources:
+        for idx, src in enumerate(sources[:8], start=1):
+            title = src.get("title") or "Fonte"
+            url = src.get("url") or ""
+            snippet = src.get("snippet") or src.get("text") or ""
+            citations_map[str(idx)] = {
+                "title": title,
+                "url": url,
+                "snippet": snippet,
+                "query": src.get("query"),
+                "source": src.get("source"),
+            }
+            entry = f"[{idx}] {title}"
+            if url:
+                entry += f" — {url}"
+            lines.append(entry.strip())
+            if snippet:
+                lines.append(snippet.strip())
+    else:
+        lines.append(research_context[:4000])
+
+    notes_text = "\n".join(lines).strip()
+    combined_context = notes_text
+    if research_context and sources:
+        combined_context = f"{notes_text}\n\n## CONTEXTO ORIGINAL\n{research_context[:4000]}"
+
+    return {
+        **state,
+        "research_notes": notes_text,
+        "citations_map": citations_map,
+        "research_context": combined_context or research_context,
+        "verification_retry": False,
+    }
+
+
+async def research_verify_node(state: DocumentState) -> DocumentState:
+    """
+    Verify whether citations are present when jurisprudence is required.
+    """
+    if not state.get("need_juris"):
+        return {**state, "verification_retry": False}
+
+    if not (state.get("deep_research_enabled") or state.get("web_search_enabled")):
+        return {**state, "verification_retry": False}
+
+    attempts = int(state.get("verifier_attempts", 0) or 0)
+    if attempts >= 1:
+        return {**state, "verification_retry": False}
+
+    full_document = state.get("full_document", "") or ""
+    if not full_document:
+        return {**state, "verification_retry": False}
+
+    has_citations = bool(re.search(r"\[[0-9]{1,3}\]", full_document))
+    if has_citations:
+        return {**state, "verification_retry": False}
+
+    planned_queries = _normalize_queries(state.get("planned_queries"))
+    if not planned_queries:
+        seed = f"{state.get('tese', '')} {state.get('mode', '')}".strip()
+        planned_queries = plan_queries(seed, max_queries=4)
+
+    return {
+        **state,
+        "verification_retry": True,
+        "verifier_attempts": attempts + 1,
+        "planned_queries": planned_queries,
+    }
+
+
+async def fact_check_sei_node(state: DocumentState) -> DocumentState:
+    """
+    🔍 Fact-check SEI (RAG local como fonte de verdade)
+    """
+    logger.info("🔍 [Phase2] Fact-check SEI (RAG local)...")
+
+    def _normalize_key(text: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+    def _normalize_hint_items(hints: Any) -> List[Dict[str, Any]]:
+        normalized: List[Dict[str, Any]] = []
+        if not hints:
+            return normalized
+        for raw in hints:
+            if isinstance(raw, str):
+                label = raw.strip()
+                if not label:
+                    continue
+                normalized.append({
+                    "id": _normalize_key(label) or f"hint_{len(normalized)+1}",
+                    "label": label,
+                    "critical": False,
+                })
+                continue
+            if not isinstance(raw, dict):
+                continue
+            label = str(raw.get("label") or raw.get("name") or "").strip()
+            if not label:
+                continue
+            raw_id = str(raw.get("id") or "").strip()
+            item_id = _normalize_key(raw_id or label) or f"hint_{len(normalized)+1}"
+            normalized.append({
+                "id": item_id,
+                "label": label,
+                "critical": bool(raw.get("critical", False)),
+            })
+        return normalized
+
+    hint_items = _normalize_hint_items(state.get("document_checklist_hint") or [])
+
+    sei_context = (state.get("sei_context") or "").strip()
+    if not sei_context:
+        hint_output = []
+        for hint in hint_items:
+            hint_output.append({
+                "id": hint["id"],
+                "label": hint["label"],
+                "status": "uncertain",
+                "critical": bool(hint.get("critical", False)),
+                "evidence": "",
+                "notes": "Checklist complementar (usuario)."
+            })
+        missing_critical = [i for i in hint_output if i["status"] != "present" and i.get("critical")]
+        missing_noncritical = [i for i in hint_output if i["status"] != "present" and not i.get("critical")]
+        summary = "Sem contexto SEI disponível para validação factual."
+        if hint_output:
+            summary += f" {len(missing_critical)} crítico(s) e {len(missing_noncritical)} não crítico(s) pendentes."
+        return {
+            **state,
+            "fact_check_summary": summary,
+            "document_checklist": {
+                "items": hint_output,
+                "missing_critical": missing_critical,
+                "missing_noncritical": missing_noncritical,
+                "summary": summary,
+                "confirmados": [],
+                "nao_verificaveis": [],
+                "inconsistencias": [],
+            }
+        }
+
+    gpt_model = state.get("gpt_model") or "gpt-5.2"
+
+    hint_block = "\n".join(
+        f"- {item['label']} ({'critico' if item.get('critical') else 'nao_critico'})"
+        for item in hint_items
+    ) or "Nenhum checklist complementar informado."
+
+    prompt = f"""
+Você é um auditor jurídico. Valide fatos e documentos EXCLUSIVAMENTE com base no SEI abaixo.
+
+TAREFA:
+1) Liste fatos/IDs confirmados no SEI
+2) Liste pontos não verificáveis (sem documento)
+3) Liste inconsistências/alertas
+4) Gere um CHECKLIST documental com criticidade
+
+REGRAS:
+- Use somente SEI/autos locais como prova de fato.
+- Se faltar prova, marque como "missing" ou "uncertain".
+- Marque como critical se a ausência impede a conclusão jurídica.
+- Inclua os itens do checklist complementar do usuário, mesmo que não apareçam no SEI.
+
+CHECKLIST COMPLEMENTAR DO USUÁRIO:
+{hint_block}
+
+SEI (trecho):
+{sei_context[:12000]}
+
+FORMATO DE RESPOSTA (JSON puro):
+{{
+  "confirmados": ["..."],
+  "nao_verificaveis": ["..."],
+  "inconsistencias": ["..."],
+  "checklist": [
+    {{
+      "id": "ata_licitacao",
+      "label": "Ata de licitação",
+      "status": "present|missing|uncertain",
+      "critical": true,
+      "evidence": "SEI 12345, p. 3",
+      "notes": "..."
+    }}
+  ],
+  "summary": "..."
+}}
+""".strip()
+
+    response_text = ""
+    try:
+        from app.services.ai.agent_clients import init_openai_client, call_openai_async
+        from app.services.ai.model_registry import get_api_model_name
+        gpt_client = init_openai_client()
+        if gpt_client:
+            response_text = await call_openai_async(
+                gpt_client,
+                prompt,
+                model=get_api_model_name(gpt_model),
+                timeout=90
+            )
+    except Exception as e:
+        logger.warning(f"⚠️ Fact-check GPT falhou: {e}")
+
+    if not response_text:
+        try:
+            from app.services.ai.gemini_drafter import GeminiDrafterWrapper
+            drafter = GeminiDrafterWrapper()
+            resp = await asyncio.to_thread(drafter._generate_with_retry, prompt)
+            response_text = resp.text if resp else ""
+        except Exception as e:
+            logger.warning(f"⚠️ Fact-check Gemini falhou: {e}")
+
+    def _extract_json_obj(text: str) -> Optional[Dict[str, Any]]:
+        if not text:
+            return None
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == "{":
+                depth += 1
+            elif text[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except Exception:
+                        return None
+        return None
+
+    parsed = _extract_json_obj(response_text) or {}
+    items = []
+    for item in parsed.get("checklist", []) or []:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").lower()
+        if status not in ("present", "missing", "uncertain"):
+            status = "uncertain"
+        items.append({
+            "id": str(item.get("id") or "").strip() or f"doc_{len(items)+1}",
+            "label": str(item.get("label") or "Documento").strip(),
+            "status": status,
+            "critical": bool(item.get("critical", False)),
+            "evidence": str(item.get("evidence") or "").strip(),
+            "notes": str(item.get("notes") or "").strip()
+        })
+
+    if hint_items:
+        existing_by_key = {}
+        for existing in items:
+            key = _normalize_key(existing.get("id") or existing.get("label") or "")
+            if not key:
+                continue
+            existing_by_key[key] = existing
+        for hint in hint_items:
+            hint_key = _normalize_key(hint.get("id") or hint.get("label") or "")
+            if hint_key in existing_by_key:
+                if hint.get("critical") and not existing_by_key[hint_key].get("critical"):
+                    existing_by_key[hint_key]["critical"] = True
+                continue
+            items.append({
+                "id": hint.get("id") or f"doc_{len(items)+1}",
+                "label": hint.get("label") or "Documento",
+                "status": "uncertain",
+                "critical": bool(hint.get("critical", False)),
+                "evidence": "",
+                "notes": "Checklist complementar (usuario)."
+            })
+
+    missing_critical = [i for i in items if i["status"] != "present" and i.get("critical")]
+    missing_noncritical = [i for i in items if i["status"] != "present" and not i.get("critical")]
+
+    summary = parsed.get("summary") or f"{len(missing_critical)} crítico(s) e {len(missing_noncritical)} não crítico(s) pendentes."
+
+    return {
+        **state,
+        "fact_check_summary": summary,
+        "document_checklist": {
+            "items": items,
+            "missing_critical": missing_critical,
+            "missing_noncritical": missing_noncritical,
+            "summary": summary,
+            "confirmados": parsed.get("confirmados", []),
+            "nao_verificaveis": parsed.get("nao_verificaveis", []),
+            "inconsistencias": parsed.get("inconsistencias", []),
+        }
+    }
+
+
+async def planner_node(state: DocumentState) -> DocumentState:
+    """
+    🧠 Planner Node (Auto-Decision)
+    
+    Decides research strategy (Deep Search vs Web Search vs None) based on:
+    - Complexity of the thesis/facts
+    - Completeness of the outline
+    - User intent
+    """
+    logger.info("🧠 [Phase2] Planner: Analyzing research strategy...")
+    
+    # If user explicitly forced a mode via UI flags that we want to respect strictly,
+    # we could skip this. But here we want the Planner to be authoritative or at least augment.
+    # Let's check if we should skip if user ALREADY enabled deep_research manually?
+    # For now, we will RE-EVALUATE. If the user turned it on, the planner likely agrees. 
+    # If the user turned it off, the planner might turn it ON if needed.
+    
+    input_text = state.get("input_text", "")
+    thesis = state.get("tese", "")
+    mode = state.get("mode", "PETICAO")
+    outline = state.get("outline", [])
+    ui_deep = bool(state.get("deep_research_enabled"))
+    ui_web = bool(state.get("web_search_enabled"))
+    combined_text = f"{thesis}\n{input_text}"
+    
+    prompt = f"""## PLANEJADOR DE PESQUISA JURÍDICA
+
+Você é o estrategista sênior do escritório. Sua função é decidir a estratégia de pesquisa necessária.
+
+### CASO:
+Tipo: {mode}
+Tese: {thesis}
+Fatos (resumo): {input_text[:1000]}...
+
+### ESTRUTURA PROPÓSTA:
+{chr(10).join(f"- {s}" for s in outline)}
+
+### DECISÃO NECESSÁRIA:
+Precisamos de "Deep Research" (pesquisa profunda, lenta, múltiplos passos) ou apenas "Web Search" (busca rápida) ou nenhuma?
+
+Critérios:
+- **Deep Research**: Teses complexas, divergência jurisprudencial, temas inéditos, necessidade de encontrar precedentes específicos difíceis.
+- **Web Search**: Dúvidas pontuais, verificar lei atualizada, buscar fatos recentes.
+- **Nenhuma**: Matéria puramente de fato (narrada pelo cliente) ou questão jurídica óbvia/pacificada.
+
+### RESPONDA EM JSON:
+    ```json
+    {{
+        "raciocinio": "Explique brevemente por que...",
+        "precisa_jurisprudencia": true/false,
+        "precisa_deep_research": true/false,
+        "precisa_web_search": true/false,
+        "queries_sugeridas": ["query 1", "query 2"]
+    }}
+```
+"""
+
+    try:
+        from app.services.ai.agent_clients import init_openai_client, call_openai_async, get_api_model_name
+        
+        # We use a fast but smart model for planning (GPT-4o or similiar)
+        client = init_openai_client()
+        if not client:
+             # Fallback if no OpenAI
+            return state
+            
+        response = await call_openai_async(
+            client, 
+            prompt, 
+            model=get_api_model_name("gpt-5.2"),
+            temperature=0.2,
+            max_tokens=500
+        )
+        
+        import json
+        decision = {}
+        
+        # Extract JSON
+        json_match = re.search(r'\{[\s\S]*\}', response)
+        if json_match:
+            decision = json.loads(json_match.group())
+            
+        raciocinio = decision.get("raciocinio", "Sem raciocínio")
+        needs_deep = bool(decision.get("precisa_deep_research", False))
+        needs_web = bool(decision.get("precisa_web_search", False))
+        needs_juris = bool(decision.get("precisa_jurisprudencia", False))
+
+        logger.info(
+            f"🧠 Planner Decision: Deep={needs_deep}, Web={needs_web}, Juris={needs_juris}. Reason: {raciocinio}"
+        )
+
+        planned_queries = _normalize_queries(state.get("planned_queries"))
+        suggested_queries = _normalize_queries(decision.get("queries_sugeridas", []))
+        planned_queries = _normalize_queries(planned_queries + suggested_queries)
+
+        policy = (state.get("research_policy") or "auto").lower()
+        if policy not in ("auto", "force"):
+            policy = "auto"
+
+        if policy == "force":
+            deep_enabled = ui_deep
+            web_enabled = ui_web
+        else:
+            deep_enabled = ui_deep or needs_deep
+            web_enabled = ui_web or needs_web
+            if not deep_enabled and not web_enabled and needs_juris:
+                web_enabled = True
+
+        if not planned_queries and (deep_enabled or web_enabled):
+            seed = f"{thesis} {mode}".strip() or input_text[:200]
+            planned_queries = plan_queries(seed, max_queries=4)
+
+        updates = {
+            "planning_reasoning": raciocinio,
+            "planned_queries": planned_queries,
+            "deep_research_enabled": deep_enabled,
+            "web_search_enabled": web_enabled,
+            "need_juris": needs_juris or deep_enabled or web_enabled,
+            "research_mode": "deep" if deep_enabled else "light" if web_enabled else "none",
+        }
+
+        return {**state, **updates}
+        
+    except Exception as e:
+        logger.error(f"❌ Planner failed: {e}. Falling back to heuristic planning.")
+
+        juris_keywords = [
+            "jurisprudência", "jurisprudencia", "precedente", "stj", "stf",
+            "súmula", "sumula", "acórdão", "acordao", "tema repetitivo",
+            "repercussão geral", "repercussao geral", "ementa", "tese"
+        ]
+        deep_keywords = [
+            "fundamente", "fundamentar", "cite", "citação", "citacao",
+            "divergência", "divergencia", "comparar", "panorama", "mapa",
+            "contexto histórico", "contexto historico", "atualizado"
+        ]
+        needs_juris = _contains_keywords(combined_text, juris_keywords)
+        needs_deep = needs_juris and _contains_keywords(combined_text, deep_keywords)
+        needs_web = needs_juris and not needs_deep
+
+        policy = (state.get("research_policy") or "auto").lower()
+        if policy not in ("auto", "force"):
+            policy = "auto"
+
+        if policy == "force":
+            deep_enabled = ui_deep
+            web_enabled = ui_web
+        else:
+            deep_enabled = ui_deep or needs_deep
+            web_enabled = ui_web or needs_web
+            if not deep_enabled and not web_enabled and needs_juris:
+                web_enabled = True
+
+        planned_queries = _normalize_queries(state.get("planned_queries"))
+        if not planned_queries and (deep_enabled or web_enabled):
+            seed = f"{thesis} {mode}".strip() or input_text[:200]
+            planned_queries = plan_queries(seed, max_queries=4)
+
+        return {
+            **state,
+            "planning_reasoning": "Heurística (fallback)",
+            "planned_queries": planned_queries,
+            "deep_research_enabled": deep_enabled,
+            "web_search_enabled": web_enabled,
+            "need_juris": needs_juris or deep_enabled or web_enabled,
+            "research_mode": "deep" if deep_enabled else "light" if web_enabled else "none",
+        }
 
 
 async def debate_all_sections_node(state: DocumentState) -> DocumentState:
@@ -611,18 +1676,20 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
     personality_instr = build_personality_instructions(chat_personality)
     system_instruction = build_system_instruction(chat_personality)
 
-    # Initialize Drafter (Gemini Judge)
+    # Judge model (provider-agnostic)
     drafter = None
-    try:
-        from app.services.ai.gemini_drafter import GeminiDrafterWrapper
-        drafter = GeminiDrafterWrapper(model_name=get_api_model_name(judge_model))
-        logger.info("✅ GeminiDrafterWrapper initialized")
-    except ImportError as e:
-        logger.warning(f"⚠️ GeminiDrafterWrapper not available: {e}. Will use internal fallback.")
+    judge_cfg = get_model_config(judge_model)
+    if judge_cfg and judge_cfg.provider == "google":
+        try:
+            from app.services.ai.gemini_drafter import GeminiDrafterWrapper
+            drafter = GeminiDrafterWrapper(model_name=get_api_model_name(judge_model))
+            logger.info("✅ GeminiDrafterWrapper initialized (judge)")
+        except ImportError as e:
+            logger.warning(f"⚠️ GeminiDrafterWrapper not available: {e}.")
     
     # State extraction
     outline = state.get("outline", [])
-    research_context = state.get("research_context", "") or ""
+    research_context = state.get("research_notes") or state.get("research_context", "") or ""
     thesis = state.get("tese", "")
     mode = state.get("mode", "PETICAO")
     input_text = state.get("input_text", "")
@@ -652,6 +1719,39 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
         use_multi_agent = bool(state.get("use_multi_agent")) and (gpt_client or claude_client or drafter)
     else:
         use_multi_agent = state.get("use_multi_agent") and gpt_client and claude_client
+    
+    # v5.3: Context Caching for Gemini (reduces token usage by 40-60%)
+    from app.services.ai.agent_clients import get_or_create_context_cache, get_gemini_client
+    context_cache = None
+    context_cache_created = False
+    job_id = state.get("job_id", "")
+    
+    if judge_cfg and judge_cfg.provider == "google" and len(outline) >= 3 and job_id:
+        # Build unified context that will be reused across all sections
+        gemini_client = get_gemini_client()
+        if gemini_client:
+            unified_context = f"""## CONTEXTO FACTUAL DO CASO
+            
+{input_text[:20000]}
+
+## PESQUISA E FONTES (RAG)
+
+{research_context[:30000]}
+
+## TESE PRINCIPAL
+
+{thesis}
+"""
+            context_cache = get_or_create_context_cache(
+                client=gemini_client,
+                job_id=job_id,
+                context_content=unified_context,
+                model_name=get_api_model_name(judge_model),
+                num_sections=len(outline)
+            )
+            context_cache_created = context_cache is not None
+            if context_cache_created:
+                logger.info(f"📦 Context cache ativo para {len(outline)} seções")
     
     # Process each section
     for i, title in enumerate(outline):
@@ -684,6 +1784,10 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                     section_context = graph_context + "\n\n" + (research_context or "")
                     logger.info(f"   📊 GraphRAG: Enriched context for '{title}'")
         
+        evidence_policy = build_evidence_policy(state.get("audit_mode", "sei_only"))
+        fact_check_summary = (state.get("fact_check_summary") or "").strip()
+        fact_check_block = f"### FACT-CHECK SEI:\n{fact_check_summary}\n" if fact_check_summary else ""
+
         prompt_base = f"""
 ## SEÇÃO: {title}
 ## TIPO DE DOCUMENTO: {mode}
@@ -692,10 +1796,12 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
 {citation_instr}
 {personality_instr}
 {length_guidance}
+{evidence_policy}
 
 ### CONTEXTO FACTUAL (Extraído dos Autos):
 {input_text[:2000]}
 
+{fact_check_block}
 ### PESQUISA JURÍDICA:
 {section_context[:3000] if section_context else "Nenhuma pesquisa adicional disponível."}
 """
@@ -719,6 +1825,9 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                     reasoning_level=reasoning_level,  # ⭐ Now passed
                     thesis=thesis,  # ⭐ Now passed
                     web_search=state.get("web_search_enabled", False),  # ⭐ Now passed
+                    search_mode=state.get("search_mode", "hybrid"),
+                    multi_query=state.get("multi_query", True),
+                    breadth_first=state.get("breadth_first", False),
                     mode=mode,  # Unifica com prompts v2 (tipo de documento)
                     extra_agent_instructions="\n".join(
                         [part for part in [citation_instr, personality_instr] if part]
@@ -727,10 +1836,18 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                     previous_sections=[
                         f"### {p.get('section_title','Seção')}\n{(p.get('merged_content','') or '')[:800]}"
                         for p in processed_sections[-6:]
-                    ]  # Anticontradiction com trecho
+                    ],  # Anticontradiction com trecho
+                    cached_content=context_cache  # v5.3: Context Reuse
                 )
                 
                 # Store result with full observability
+                judge_structured = None
+                if isinstance(drafts, dict):
+                    judge_structured = drafts.get("judge_structured")
+                quality_score = None
+                if isinstance(judge_structured, dict):
+                    quality_score = judge_structured.get("quality_score")
+
                 processed_sections.append({
                     "section_title": title,
                     "merged_content": section_text,
@@ -739,7 +1856,8 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                     "drafts": drafts or {},
                     "claims_requiring_citation": (drafts or {}).get("claims_requiring_citation", []) if isinstance(drafts, dict) else [],
                     "removed_claims": (drafts or {}).get("removed_claims", []) if isinstance(drafts, dict) else [],
-                    "risk_flags": (drafts or {}).get("risk_flags", []) if isinstance(drafts, dict) else []
+                    "risk_flags": (drafts or {}).get("risk_flags", []) if isinstance(drafts, dict) else [],
+                    "quality_score": quality_score
                 })
                 
                 if divergencias:
@@ -755,7 +1873,8 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                     "merged_content": f"[Erro no comitê multi-agente: {str(e)}]",
                     "has_significant_divergence": True,
                     "divergence_details": str(e),
-                    "drafts": {}
+                    "drafts": {},
+                    "quality_score": None
                 })
                 has_divergence = True
                 divergence_parts.append(f"- **{title}**: ERRO - {str(e)[:100]}")
@@ -775,13 +1894,14 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                         contexto_rag=research_context[:5000],
                         tipo_peca=mode,
                         resumo_caso=input_text[:3000],
-                        tese_usuario=thesis
+                        tese_usuario=thesis,
+                        cached_content=context_cache
                     )
                 except Exception as e:
                     logger.warning(f"⚠️ Single-model robust generation failed: {e}. Falling back to simple.")
                     try:
-                        simple_prompt = f"Redija a seção '{title}' para um documento do tipo {mode}.\n\nTese: {thesis}\n\nContexto: {input_text[:1500]}"
-                        resp = drafter._generate_with_retry(simple_prompt)
+                        simple_prompt = f"Redija a seção '{title}' para um documento do tipo {mode}.\n\nTese: {thesis}\n\nContexto: {input_text[:1500] if not context_cache else '[CONTEXTO EM CACHE]'}"
+                        resp = drafter._generate_with_retry(simple_prompt, cached_content=context_cache)
                         if resp and resp.text:
                             fallback_content = resp.text
                     except:
@@ -792,7 +1912,8 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
                 "merged_content": fallback_content,
                 "has_significant_divergence": False,
                 "divergence_details": "",
-                "drafts": {}
+                "drafts": {},
+                "quality_score": None
             })
 
     # Assemble full document
@@ -811,7 +1932,9 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
         "processed_sections": processed_sections,
         "full_document": full_doc,
         "has_any_divergence": has_divergence,
-        "divergence_summary": divergence_summary
+        "divergence_summary": divergence_summary,
+        "context_cache_created": context_cache_created,
+        "context_cache_name": getattr(context_cache, 'name', None) if context_cache else None
     }
 
 
@@ -860,7 +1983,7 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
     
     # State extraction
     outline = state.get("outline", [])
-    research_context = state.get("research_context", "") or ""
+    research_context = state.get("research_notes") or state.get("research_context", "") or ""
     thesis = state.get("tese", "")
     mode = state.get("mode", "PETICAO")
     input_text = state.get("input_text", "")
@@ -881,6 +2004,10 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
     for i, title in enumerate(outline):
         logger.info(f"🔬 [{i+1}/{len(outline)}] Running sub-graph for: {title}")
         
+        evidence_policy = build_evidence_policy(state.get("audit_mode", "sei_only"))
+        fact_check_summary = (state.get("fact_check_summary") or "").strip()
+        fact_check_block = f"### FACT-CHECK SEI:\n{fact_check_summary}\n" if fact_check_summary else ""
+
         prompt_base = f"""
 ## SEÇÃO: {title}
 ## TIPO DE DOCUMENTO: {mode}
@@ -888,10 +2015,12 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
 
 {citation_instr}
 {length_guidance}
+{evidence_policy}
 
 ### CONTEXTO FACTUAL:
 {input_text[:2000]}
 
+{fact_check_block}
 ### PESQUISA JURÍDICA:
 {research_context[:3000] if research_context else "Nenhuma pesquisa."}
 """
@@ -933,7 +2062,8 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
                 "metrics": result.get("metrics", {}),
                 "claims_requiring_citation": result.get("claims_requiring_citation", []) or [],
                 "removed_claims": result.get("removed_claims", []) or [],
-                "risk_flags": result.get("risk_flags", []) or []
+                "risk_flags": result.get("risk_flags", []) or [],
+                "quality_score": (result.get("metrics", {}) or {}).get("quality_score"),
             })
             
             if result.get("divergencias"):
@@ -949,7 +2079,8 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
                 "merged_content": f"[Erro no sub-grafo: {e}]",
                 "has_significant_divergence": True,
                 "divergence_details": str(e),
-                "drafts": {}
+                "drafts": {},
+                "quality_score": None
             })
             has_divergence = True
             divergence_parts.append(f"- **{title}**: ERRO")
@@ -984,17 +2115,37 @@ async def section_hil_node(state: DocumentState) -> DocumentState:
     if state.get("auto_approve_hil", False):
         return {**state, "hil_section_payload": None}
 
-    targets = state.get("hil_target_sections") or []
-    if not targets:
+    policy = (state.get("hil_section_policy") or "optional").lower()
+    if policy == "none":
         return {**state, "hil_section_payload": None}
 
-    targets_set = set([t for t in targets if isinstance(t, str) and t.strip()])
-    if not targets_set:
-        return {**state, "hil_section_payload": None}
+    targets = state.get("hil_target_sections") or []
+
+    requested_targets = {t.strip() for t in targets if isinstance(t, str) and t.strip()}
 
     processed = state.get("processed_sections", []) or []
     if not isinstance(processed, list) or not processed:
         return {**state, "hil_section_payload": None}
+
+    processed_titles = {
+        p.get("section_title")
+        for p in processed
+        if isinstance(p, dict) and isinstance(p.get("section_title"), str) and p.get("section_title")
+    }
+
+    if policy == "required":
+        # If caller didn't provide targets (or provided only invalid titles), require review for all sections.
+        targets_set = requested_targets & processed_titles
+        if not targets_set:
+            targets_set = set(processed_titles)
+    else:
+        # Optional: only review explicitly targeted sections.
+        targets_set = requested_targets & processed_titles
+
+    if not targets_set:
+        return {**state, "hil_section_payload": None}
+
+    target_score = float(state.get("target_section_score") or 0)
 
     mode = state.get("mode", "PETICAO")
 
@@ -1133,6 +2284,9 @@ Saída: entregue somente o texto final da seção (sem cabeçalhos '##', sem pre
             reasoning_level=reasoning_level,
             thesis=thesis_local,
             web_search=state.get("web_search_enabled", False),
+            search_mode=state.get("search_mode", "hybrid"),
+            multi_query=state.get("multi_query", True),
+            breadth_first=state.get("breadth_first", False),
             mode=mode_local,
             previous_sections=prev_sections,
             system_instruction=system_instruction,
@@ -1146,6 +2300,12 @@ Saída: entregue somente o texto final da seção (sem cabeçalhos '##', sem pre
             continue
         title = sec.get("section_title") or ""
         if title not in targets_set:
+            continue
+        sec_score = sec.get("quality_score")
+        if sec_score is None and isinstance(sec.get("metrics"), dict):
+            sec_score = sec["metrics"].get("quality_score")
+        # Only gate by score when policy is optional. If section-level HIL is required, do not skip low-scoring sections.
+        if policy != "required" and target_score and (sec_score is None or float(sec_score) < target_score):
             continue
 
         # Keep interrupt payload also in state so the SSE layer can read it reliably.
@@ -1537,12 +2697,12 @@ async def final_committee_review_node(state: DocumentState) -> DocumentState:
     
     Holistic multi-agent review of the complete document before final approval.
     
-    GPT, Claude and Gemini review the entire document for:
+    GPT, Claude and the Judge model review the entire document for:
     - Global coherence (contradictions between sections)
     - Logical flow (smooth transitions)
     - Thesis strength (persuasive narrative)
     
-    The Judge (Gemini) synthesizes all reviews and produces final report.
+    The Judge synthesizes all reviews and produces final report.
     """
     logger.info("🤝 [Final Committee Review] Starting holistic document review...")
     
@@ -1556,7 +2716,6 @@ async def final_committee_review_node(state: DocumentState) -> DocumentState:
         init_openai_client,
         init_anthropic_client
     )
-    from app.services.ai.gemini_drafter import GeminiDrafterWrapper
     from app.services.ai.model_registry import get_api_model_name
     
     # Get model configs
@@ -1600,14 +2759,14 @@ Responda em JSON:
     # Initialize clients
     gpt_client = None
     claude_client = None
-    drafter = None
-    
     try:
         gpt_client = init_openai_client()
         claude_client = init_anthropic_client()
-        drafter = GeminiDrafterWrapper(model_name=get_api_model_name(judge_model))
     except Exception as e:
         logger.warning(f"⚠️ Could not initialize all clients for committee review: {e}")
+
+    judge_cfg = get_model_config(judge_model)
+    judge_label = judge_cfg.label if judge_cfg else judge_model
     
     reviews = {}
     
@@ -1652,17 +2811,20 @@ Responda em JSON:
             logger.warning(f"⚠️ Claude review failed: {e}")
             return None
     
-    async def get_gemini_review():
-        if not drafter:
-            return None
+    async def get_judge_review():
         try:
             prompt = review_prompt_template.format(mode=mode, thesis=thesis, document=doc_excerpt)
-            response = await asyncio.to_thread(drafter._generate_with_retry, prompt)
-            if response and response.text:
-                return {"agent": "Gemini", "response": response.text}
+            response = await _call_model_any_async(
+                judge_model,
+                prompt,
+                temperature=0.2,
+                max_tokens=1000
+            )
+            if response:
+                return {"agent": judge_label, "response": response}
             return None
         except Exception as e:
-            logger.warning(f"⚠️ Gemini review failed: {e}")
+            logger.warning(f"⚠️ Judge review failed: {e}")
             return None
     
     # Run reviews in parallel
@@ -1670,7 +2832,7 @@ Responda em JSON:
         results = await asyncio.gather(
             get_gpt_review(),
             get_claude_review(),
-            get_gemini_review(),
+            get_judge_review(),
             return_exceptions=True
         )
         
@@ -1687,6 +2849,75 @@ Responda em JSON:
         return {**state, "committee_review_report": {"status": "skipped", "reason": "no reviews completed"}}
     
     logger.info(f"📊 Reviews collected from: {list(reviews.keys())}")
+    
+    # v5.4: Judge consolidates all reviews and proposes final corrections
+    judge_synthesis = None
+    revised_document = None
+    
+    if len(reviews) >= 2:
+        logger.info("⚖️ Juiz consolidando revisões do comitê...")
+        
+        reviews_text = "\n\n".join([
+            f"### Revisão do {agent}:\n{response[:2000]}"
+            for agent, response in reviews.items()
+        ])
+        
+        judge_consolidation_prompt = f"""## TAREFA: CONSOLIDAÇÃO FINAL DO COMITÊ
+
+Você é o Juiz Final do comitê de revisão. Três agentes (GPT, Claude e Juiz) revisaram independentemente o documento abaixo.
+
+### DOCUMENTO ORIGINAL:
+{doc_excerpt[:8000]}
+
+### REVISÕES DOS AGENTES:
+{reviews_text}
+
+## INSTRUÇÕES:
+1. **SINTETIZE** os pontos fortes e fracos identificados pelos 3 agentes.
+2. **IDENTIFIQUE** consensos e divergências entre as revisões.
+3. **PROPONHA** correções específicas para os problemas mais críticos.
+4. **GERE** uma versão revisada do documento SE houver correções materiais a fazer.
+
+## FORMATO DE RESPOSTA (JSON):
+```json
+{{
+    "sintese_criticas": "string resumindo os principais pontos",
+    "consensos": ["lista de pontos em que todos concordam"],
+    "divergencias": ["lista de pontos em que os agentes discordam"],
+    "correcoes_propostas": [
+        {{"trecho_original": "...", "trecho_corrigido": "...", "justificativa": "..."}}
+    ],
+    "documento_revisado": "string com o documento completo revisado (ou null se não houver correções)",
+    "nota_consolidada": 8.5,
+    "recomendacao": "aprovar|revisar_humano|rejeitar"
+}}
+```
+"""
+        try:
+            judge_response = await _call_model_any_async(
+                judge_model,
+                judge_consolidation_prompt,
+                temperature=0.2,
+                max_tokens=1500
+            )
+            if judge_response:
+                judge_synthesis = judge_response
+                logger.info("✅ Juiz concluiu consolidação")
+                
+                # Try to extract revised document
+                try:
+                    json_match = re.search(r'\{[\s\S]*\}', judge_response)
+                    if json_match:
+                        judge_data = json.loads(json_match.group())
+                        if judge_data.get("documento_revisado"):
+                            revised_document = judge_data["documento_revisado"]
+                            logger.info("📝 Documento revisado pelo Juiz disponível")
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ Judge consolidation failed: {e}")
+
     
     # Parse scores and synthesize
     import json
@@ -1762,23 +2993,31 @@ Responda em JSON:
         "score_disagreement": score_disagreement,
         "requires_hil": requires_hil,
         "critical_problems": list(set(all_problems))[:5],
+        "judge_synthesis": judge_synthesis,  # v5.4: Consolidated by Judge
+        "revised_document": revised_document,  # v5.4: Document revised by Judge (if any)
         "markdown": f"""## Relatório do Comitê Final
 
 **Agentes Participantes**: {", ".join(reviews.keys())}
 **Nota Média**: {avg_score:.1f}/10
 **Divergência entre agentes**: {"Sim" if score_disagreement else "Não"} (Δ {score_spread:.1f})
 **Revisão Humana Obrigatória**: {"Sim" if requires_hil else "Não"}
+**Consolidação pelo Juiz**: {"Sim" if judge_synthesis else "Não"}
+**Documento Revisado Disponível**: {"Sim" if revised_document else "Não"}
 
 ### Problemas Identificados
 {chr(10).join(f"- {p}" for p in all_problems[:5]) if all_problems else "Nenhum problema crítico identificado."}
 """
     }
     
-    logger.info(f"✅ Committee Review Score: {avg_score:.1f}/10 (HIL: {requires_hil})")
+    logger.info(f"✅ Committee Review Score: {avg_score:.1f}/10 (HIL: {requires_hil}, Judge: {bool(judge_synthesis)})")
+    
+    # If judge produced a revised document, update full_document for finalize node
+    updated_full_document = revised_document or state.get("full_document", "")
     
     return {
         **state,
         "committee_review_report": committee_report,
+        "full_document": updated_full_document,  # v5.4: May be revised by Judge
         "quality_gate_force_hil": (
             requires_hil
             or score_disagreement
@@ -1787,19 +3026,552 @@ Responda em JSON:
     }
 
 
+async def refine_document_node(state: DocumentState) -> DocumentState:
+    """
+    ♻️ Refine document based on committee review feedback (full-auto).
+    """
+    logger.info("♻️ [Refine] Applying committee feedback...")
+
+    report = state.get("committee_review_report") or {}
+    full_document = state.get("full_document", "") or ""
+    if not full_document:
+        return {**state, "refinement_round": state.get("refinement_round", 0) + 1}
+
+    issues = report.get("critical_problems") or []
+    synthesis = report.get("judge_synthesis") or ""
+    score = report.get("score")
+
+    prompt = f"""
+Você é um revisor jurídico sênior. Melhore o documento abaixo com base nas críticas.
+
+NOTA ATUAL: {score}
+PROBLEMAS CRÍTICOS:
+{chr(10).join(f"- {p}" for p in issues) if issues else "- (não informado)"}
+
+SÍNTESE DO JUIZ (se houver):
+{synthesis or "(sem síntese)"}
+
+REGRAS:
+- Preserve fatos e citações com [TIPO - Doc. X, p. Y].
+- Não invente documentos ou fatos.
+- Se precisar de prova não presente no SEI, use [[PENDENTE: ...]].
+- Retorne o documento completo revisado.
+
+DOCUMENTO:
+{full_document[:18000]}
+""".strip()
+
+    updated_document = full_document
+    try:
+        from app.services.ai.gemini_drafter import GeminiDrafterWrapper
+        drafter = GeminiDrafterWrapper()
+        resp = await asyncio.to_thread(drafter._generate_with_retry, prompt)
+        if resp and resp.text:
+            updated_document = resp.text
+    except Exception as e:
+        logger.warning(f"⚠️ Refine document failed: {e}")
+
+    return {
+        **state,
+        "full_document": updated_document,
+        "refinement_round": state.get("refinement_round", 0) + 1
+    }
+
+
+def _parse_style_report(raw: str) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except Exception:
+        pass
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+    if not match:
+        return {}
+    try:
+        return json.loads(match.group(0))
+    except Exception:
+        return {}
+
+
+def _normalize_style_report(report: Dict[str, Any]) -> Dict[str, Any]:
+    score = report.get("score")
+    try:
+        score_val = float(score) if score is not None else None
+    except Exception:
+        score_val = None
+    tone = str(report.get("tone") or report.get("tone_detected") or "indefinido").strip()
+    thermometer = str(report.get("thermometer") or "").strip()
+    issues_raw = report.get("issues") or []
+    if isinstance(issues_raw, str):
+        issues = [issues_raw.strip()] if issues_raw.strip() else []
+    elif isinstance(issues_raw, list):
+        issues = [str(i).strip() for i in issues_raw if str(i).strip()]
+    else:
+        issues = []
+    term_variations_raw = report.get("term_variations") or report.get("terms_out_of_standard") or []
+    term_variations: List[Dict[str, Any]] = []
+    if isinstance(term_variations_raw, list):
+        for item in term_variations_raw:
+            if isinstance(item, dict):
+                term_variations.append({
+                    "term": str(item.get("term") or item.get("variant") or "").strip(),
+                    "preferred": str(item.get("preferred") or item.get("canonical") or "").strip(),
+                    "count": item.get("count"),
+                    "note": str(item.get("note") or "").strip()
+                })
+            elif isinstance(item, str) and item.strip():
+                term_variations.append({"term": item.strip()})
+    recommended_action = str(report.get("recommended_action") or report.get("action") or "").strip()
+    return {
+        "score": score_val,
+        "tone": tone,
+        "thermometer": thermometer,
+        "issues": issues,
+        "term_variations": term_variations,
+        "recommended_action": recommended_action
+    }
+
+
+async def style_check_node(state: DocumentState) -> DocumentState:
+    """
+    🎨 Style Check: avalia tom e consistência editorial antes do gate documental.
+    """
+    logger.info("🎨 [Style Check] Avaliando estilo editorial...")
+    full_document = state.get("full_document", "") or ""
+    if not full_document:
+        return {
+            **state,
+            "style_report": None,
+            "style_score": None,
+            "style_tone": None,
+            "style_issues": [],
+            "style_term_variations": [],
+            "style_check_status": "skipped",
+            "style_check_payload": None
+        }
+
+    excerpt = full_document[:12000]
+    if len(full_document) > 14000:
+        excerpt = f"{full_document[:10000]}\n...\n{full_document[-4000:]}"
+
+    prompt = f"""
+Você é um revisor de estilo jurídico. Avalie APENAS o estilo (clareza, formalidade, impessoalidade e consistência terminológica).
+NÃO avalie mérito jurídico nem fatos. Responda exclusivamente em JSON válido, sem markdown.
+
+Campos obrigatórios:
+- score (0-10)
+- tone (rótulo curto: ex. "formal/defensivo", "agressivo", "neutro")
+- thermometer ("Muito brando" | "Equilibrado" | "Agressivo")
+- issues (lista de até 5 problemas de estilo)
+- term_variations (lista de objetos {{term, preferred, count, note}}; pode ser vazia)
+- recommended_action (instrução curta para ajuste de tom)
+
+DOCUMENTO (amostra):
+{excerpt}
+""".strip()
+
+    raw = await _call_model_any_async(
+        "claude-4.5-opus",
+        prompt,
+        temperature=0.1,
+        max_tokens=800
+    )
+    report = _normalize_style_report(_parse_style_report(raw))
+    score_val = report.get("score")
+    min_score = float(state.get("style_min_score") or 8.0)
+
+    style_payload = {
+        "type": "style_review",
+        "checkpoint": "style_check",
+        "message": "Revise o tom editorial antes do gate documental.",
+        "tone_detected": report.get("tone"),
+        "thermometer": report.get("thermometer"),
+        "score": score_val,
+        "issues": report.get("issues"),
+        "term_variations": report.get("term_variations"),
+        "draft_snippet": excerpt[:1200],
+    }
+
+    base_state = {
+        **state,
+        "style_report": report,
+        "style_score": score_val,
+        "style_tone": report.get("tone"),
+        "style_issues": report.get("issues", []),
+        "style_term_variations": report.get("term_variations", []),
+        "style_check_payload": style_payload
+    }
+
+    if state.get("auto_approve_hil", False):
+        if score_val is not None and score_val < min_score:
+            instruction = report.get("recommended_action") or "Ajuste o tom para ficar mais formal, impessoal e consistente."
+            return {
+                **base_state,
+                "style_check_status": "needs_refine",
+                "style_instruction": instruction,
+                "style_check_payload": None
+            }
+        return {**base_state, "style_check_status": "approved", "style_check_payload": None}
+
+    state["style_check_payload"] = style_payload  # type: ignore[typeddict-item]
+    decision = interrupt(style_payload)
+
+    if decision.get("approved"):
+        return {**base_state, "style_check_status": "approved", "style_check_payload": None}
+
+    instruction = (decision.get("instructions") or "").strip()
+    if not instruction:
+        instruction = report.get("recommended_action") or "Ajuste o tom para ficar mais formal, impessoal e consistente."
+
+    return {
+        **base_state,
+        "style_check_status": "needs_refine",
+        "style_instruction": instruction,
+        "style_check_payload": None
+    }
+
+
+async def style_refine_node(state: DocumentState) -> DocumentState:
+    """
+    ✍️ Ajusta o tom/estilo do documento conforme instruções de Style Check.
+    """
+    instruction = (state.get("style_instruction") or "").strip()
+    full_document = state.get("full_document", "") or ""
+    if not full_document or not instruction:
+        return {**state, "style_check_status": "approved", "style_instruction": None}
+
+    logger.info("✍️ [Style Refine] Ajustando tom editorial...")
+    issues = state.get("style_issues") or []
+    tone = state.get("style_tone") or ""
+
+    prompt = f"""
+Você é um editor jurídico sênior. Ajuste APENAS o estilo e o tom do documento.
+
+INSTRUÇÕES DE TOM:
+{instruction}
+
+ACHADOS DE ESTILO:
+{chr(10).join(f"- {i}" for i in issues) if issues else "- (sem achados)"}
+
+TOM DETECTADO:
+{tone or "(não informado)"}
+
+REGRAS:
+- Preserve fatos, estrutura e citações [TIPO - Doc. X, p. Y].
+- Não invente documentos nem fatos.
+- Retorne o documento completo revisado.
+
+DOCUMENTO:
+{full_document[:18000]}
+""".strip()
+
+    updated_document = full_document
+    try:
+        from app.services.ai.gemini_drafter import GeminiDrafterWrapper
+        drafter = GeminiDrafterWrapper()
+        resp = await asyncio.to_thread(drafter._generate_with_retry, prompt)
+        if resp and resp.text:
+            updated_document = resp.text
+    except Exception as e:
+        logger.warning(f"⚠️ Style refine failed: {e}")
+
+    rounds = int(state.get("style_refine_round", 0) or 0)
+    return {
+        **state,
+        "full_document": updated_document,
+        "style_instruction": None,
+        "style_check_status": "refined",
+        "style_refine_round": rounds + 1
+    }
+
+
+async def document_gate_node(state: DocumentState) -> DocumentState:
+    """
+    🛑 Gate documental: bloqueia sem documentos críticos, permite HIL em faltas não críticas.
+    """
+    checklist = state.get("document_checklist") or {}
+    items = checklist.get("items") or []
+    strict_gate = bool(state.get("strict_document_gate", False))
+
+    missing_critical = [i for i in items if i.get("status") != "present" and i.get("critical")]
+    missing_noncritical = [i for i in items if i.get("status") != "present" and not i.get("critical")]
+
+    if strict_gate and (missing_critical or missing_noncritical):
+        missing_all = missing_critical + missing_noncritical
+        summary = checklist.get("summary") or "Documentos pendentes (modo auditoria)."
+        missing_labels = ", ".join([i.get("label") or i.get("id") for i in missing_all if isinstance(i, dict)]) or "Documentos pendentes"
+        return _with_final_decision({
+            **state,
+            "document_gate_status": "blocked",
+            "document_gate_missing": missing_all,
+            "final_markdown": f"⛔ Documento bloqueado.\n\n{summary}\n\nPendências: {missing_labels}"
+        }, "NEED_EVIDENCE")
+
+    if missing_critical:
+        summary = checklist.get("summary") or "Documentos críticos pendentes."
+        missing_labels = ", ".join([i.get("label") or i.get("id") for i in missing_critical if isinstance(i, dict)]) or "Documentos críticos pendentes"
+        return _with_final_decision({
+            **state,
+            "document_gate_status": "blocked",
+            "document_gate_missing": missing_critical,
+            "final_markdown": f"⛔ Documento bloqueado.\n\n{summary}\n\nPendências: {missing_labels}"
+        }, "NEED_EVIDENCE")
+
+    if missing_noncritical:
+        if state.get("auto_approve_hil", False):
+            return _with_final_decision({
+                **state,
+                "document_gate_status": "override_auto",
+                "document_gate_missing": missing_noncritical,
+            }, "APPROVED", extra_reasons=["override_noncritical_docs"])
+
+        decision = interrupt({
+            "type": "document_gate",
+            "checkpoint": "document_gate",
+            "message": "Faltam documentos NÃO críticos. Deseja prosseguir com ressalva?",
+            "missing_noncritical": missing_noncritical,
+            "summary": checklist.get("summary"),
+        })
+
+        if decision.get("approved"):
+            return _with_final_decision({
+                **state,
+                "document_gate_status": "override",
+                "document_gate_missing": missing_noncritical,
+            }, "APPROVED", extra_reasons=["override_noncritical_docs"])
+
+        return _with_final_decision({
+            **state,
+            "document_gate_status": "blocked",
+            "document_gate_missing": missing_noncritical,
+            "final_markdown": "⛔ Documento bloqueado por decisão humana."
+        }, "NEED_EVIDENCE", extra_reasons=["blocked_by_human"])
+
+    return {
+        **state,
+        "document_gate_status": "ok",
+        "document_gate_missing": [],
+    }
+
+
+async def human_proposal_debate_node(state: DocumentState) -> DocumentState:
+    """
+    v5.4: Debate node for evaluating human proposals.
+    
+    When user rejects with a proposal (section or final), the committee
+    evaluates it and the Judge model decides whether to accept, merge, or reject.
+    """
+    logger.info("💬 [Phase3] Human Proposal Debate Starting...")
+    
+    proposal = state.get("human_proposal", "")
+    scope = state.get("proposal_scope", "final")
+    target_section = state.get("proposal_target_section")
+    
+    if not proposal:
+        logger.warning("⚠️ No proposal found, skipping debate")
+        return {**state, "proposal_evaluation": {"status": "skipped", "reason": "no_proposal"}}
+    
+    # Get current document or section
+    if scope == "section" and target_section:
+        # Find the target section content
+        sections = state.get("processed_sections", [])
+        current_content = ""
+        section_idx = -1
+        for i, sec in enumerate(sections):
+            if sec.get("section_title") == target_section:
+                current_content = sec.get("merged_content", "")
+                section_idx = i
+                break
+        if not current_content:
+            current_content = f"[Seção '{target_section}' não encontrada]"
+    else:
+        current_content = state.get("full_document", "")[:8000]
+    
+    # Initialize clients
+    from app.services.ai.agent_clients import (
+        init_openai_client, init_anthropic_client,
+        call_openai_async, call_anthropic_async
+    )
+    from app.services.ai.model_registry import DEFAULT_JUDGE_MODEL
+    
+    gpt_client = init_openai_client()
+    claude_client = init_anthropic_client()
+    judge_model = state.get("judge_model") or DEFAULT_JUDGE_MODEL
+    
+    evaluation_prompt = f"""## AVALIAÇÃO DE PROPOSTA HUMANA
+
+O usuário rejeitou a versão atual e propôs uma alternativa.
+
+### VERSÃO ATUAL DO {'SEÇÃO: ' + target_section if scope == 'section' else 'DOCUMENTO'}:
+{current_content[:3000]}
+
+### PROPOSTA DO USUÁRIO:
+{proposal[:3000]}
+
+## INSTRUÇÕES:
+1. Compare a proposta com a versão atual.
+2. Avalie se a proposta:
+   - Resolve problemas existentes
+   - Mantém a coerência jurídica
+   - Está bem fundamentada
+3. Dê uma nota de 0-10 para a proposta.
+
+## RESPONDA EM JSON:
+```json
+{{
+    "nota": 8.0,
+    "analise": "A proposta do usuário...",
+    "pontos_fortes": ["..."],
+    "pontos_fracos": ["..."],
+    "recomendacao": "aceitar|merge|rejeitar"
+}}
+```
+"""
+    
+    evaluations = {}
+    
+    # Parallel evaluation by GPT and Claude
+    async def eval_gpt():
+        try:
+            resp = await call_openai_async(gpt_client, evaluation_prompt)
+            return {"agent": "GPT", "response": resp}
+        except Exception as e:
+            return {"agent": "GPT", "response": None, "error": str(e)}
+    
+    async def eval_claude():
+        try:
+            resp = await call_anthropic_async(claude_client, evaluation_prompt)
+            return {"agent": "Claude", "response": resp}
+        except Exception as e:
+            return {"agent": "Claude", "response": None, "error": str(e)}
+    
+    results = await asyncio.gather(eval_gpt(), eval_claude(), return_exceptions=True)
+    
+    for r in results:
+        if r and not isinstance(r, Exception) and r.get("response"):
+            evaluations[r["agent"]] = r["response"]
+    
+    logger.info(f"📊 Proposal evaluations from: {list(evaluations.keys())}")
+    
+    # Judge consolidates and decides
+    judge_prompt = f"""## DECISÃO FINAL SOBRE PROPOSTA HUMANA
+
+### PROPOSTA DO USUÁRIO:
+{proposal[:2000]}
+
+### VERSÃO ATUAL:
+{current_content[:2000]}
+
+### AVALIAÇÕES DOS AGENTES:
+{chr(10).join([f"**{a}**: {r[:1000]}" for a, r in evaluations.items()])}
+
+## INSTRUÇÕES:
+Você é o Juiz Final. Decida:
+1. **ACEITAR**: A proposta do usuário substitui completamente a versão atual.
+2. **MERGE**: Combine os melhores elementos de ambas as versões.
+3. **REJEITAR**: Mantém a versão atual, explicando os problemas da proposta.
+
+## RESPONDA EM JSON:
+```json
+{{
+    "decisao": "aceitar|merge|rejeitar",
+    "justificativa": "...",
+    "texto_final": "..." // O texto resultante (proposta, merge, ou original)
+}}
+```
+"""
+    
+    judge_response = await _call_model_any_async(
+        judge_model,
+        judge_prompt,
+        temperature=0.2,
+        max_tokens=1200
+    )
+    
+    # Parse judge decision
+    decision = "rejeitar"
+    final_text = current_content
+    justification = ""
+    
+    if judge_response:
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', judge_response)
+            if json_match:
+                judge_data = json.loads(json_match.group())
+                decision = judge_data.get("decisao", "rejeitar")
+                justification = judge_data.get("justificativa", "")
+                if judge_data.get("texto_final"):
+                    final_text = judge_data["texto_final"]
+        except (json.JSONDecodeError, AttributeError):
+            logger.warning("⚠️ Failed to parse judge decision, defaulting to reject")
+    
+    logger.info(f"⚖️ Judge decision: {decision}")
+    
+    # Build evaluation report
+    evaluation_report = {
+        "status": "completed",
+        "scope": scope,
+        "target_section": target_section,
+        "agent_evaluations": evaluations,
+        "judge_decision": decision,
+        "judge_justification": justification,
+        "accepted": decision in ["aceitar", "merge"]
+    }
+    
+    # Update document or section based on decision
+    updated_state = {
+        **state,
+        "proposal_evaluation": evaluation_report,
+        "human_proposal": None,  # Clear proposal after processing
+    }
+    
+    if decision in ["aceitar", "merge"]:
+        if scope == "section" and target_section and section_idx >= 0:
+            # Update specific section
+            sections = list(state.get("processed_sections", []))
+            if 0 <= section_idx < len(sections):
+                sections[section_idx]["merged_content"] = final_text
+                sections[section_idx]["human_revised"] = True
+            updated_state["processed_sections"] = sections
+            logger.info(f"✅ Section '{target_section}' updated with proposal")
+        else:
+            # Update full document
+            updated_state["full_document"] = final_text
+            logger.info("✅ Full document updated with proposal")
+    else:
+        logger.info("❌ Proposal rejected, keeping original")
+    
+    return updated_state
+
 
 async def finalize_hil_node(state: DocumentState) -> DocumentState:
     """HIL Checkpoint: Final approval"""
     logger.info("🛑 [Phase2] HIL: Final Approval")
 
-    force_hil = state.get("quality_gate_force_hil", False)
+    # v5.3: Cleanup context cache if it was created
+    job_id = state.get("job_id", "")
+    if state.get("context_cache_created") and job_id:
+        from app.services.ai.agent_clients import cleanup_job_cache
+        cleanup_job_cache(job_id)
 
-    if state.get("auto_approve_hil", False) and not force_hil:
-        return {
+    force_hil = bool(state.get("quality_gate_force_hil", False))
+    force_final_hil = bool(state.get("force_final_hil", False))
+
+    if not force_final_hil and not force_hil:
+        return _with_final_decision({
             **state,
             "human_approved_final": True,
             "final_markdown": state.get("full_document", "")
-        }
+        }, "APPROVED", extra_reasons=["final_hil_disabled"])
+
+    if state.get("auto_approve_hil", False) and force_final_hil:
+        logger.warning("⚠️ HIL final obrigatório, mas auto_approve_hil está ativo. Prosseguindo sem interrupção.")
+        return _with_final_decision({
+            **state,
+            "human_approved_final": True,
+            "final_markdown": state.get("full_document", "")
+        }, "APPROVED", extra_reasons=["force_final_hil"])
     
     decision = interrupt({
         "type": "final_approval",
@@ -1813,9 +3585,29 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
     
     if decision.get("approved"):
         final_md = decision.get("edits") or state.get("full_document", "")
-        return {**state, "human_approved_final": True, "final_markdown": final_md}
+        return _with_final_decision(
+            {**state, "human_approved_final": True, "final_markdown": final_md},
+            "APPROVED"
+        )
     
-    return {**state, "human_approved_final": False, "human_edits": decision.get("instructions")}
+    # v5.4: Check if user provided a proposal for committee debate
+    user_proposal = decision.get("proposal")
+    if user_proposal:
+        logger.info("📝 User provided proposal, routing to committee debate")
+        return _with_final_decision({
+            **state, 
+            "human_approved_final": False, 
+            "human_edits": decision.get("instructions"),
+            "human_proposal": user_proposal,
+            "proposal_scope": "final",
+            "proposal_target_section": None
+        }, "NEED_HUMAN_REVIEW", extra_reasons=["proposal_submitted"])
+
+    return _with_final_decision(
+        {**state, "human_approved_final": False, "human_edits": decision.get("instructions")},
+        "NEED_HUMAN_REVIEW",
+        extra_reasons=["final_rejected"]
+    )
 
 
 # --- GRAPH DEFINITION ---
@@ -1825,11 +3617,20 @@ workflow = StateGraph(DocumentState)
 # Nodes (renamed to avoid conflict with state keys)
 workflow.add_node("gen_outline", outline_node)
 workflow.add_node("outline_hil", outline_hil_node)
+workflow.add_node("planner", planner_node)
 workflow.add_node("deep_research", deep_research_node)
 workflow.add_node("web_search", web_search_node)
+workflow.add_node("research_notes_step", research_notes_node)
+workflow.add_node("research_verify", research_verify_node)
+workflow.add_node("fact_check", fact_check_sei_node)
 
 # Register debate node based on feature flag
 if USE_GRANULAR_DEBATE:
+    # Assuming debate_granular_node is available or imported conditionally. 
+    # If it was named differently in the original file, I might need to adjust.
+    # Checking previous context, it seemed to use 'debate_granular_node' in the text I saw.
+    # However, to be safe, I'll restrict it to what I saw in Step 55 view_file output.
+    # It was: workflow.add_node("debate", debate_granular_node)
     workflow.add_node("debate", debate_granular_node)
     logger.info("📊 Graph: Using GRANULAR debate node (8-node sub-graph)")
 else:
@@ -1850,28 +3651,56 @@ workflow.add_node("evaluate_hil", evaluate_hil_node)  # Universal HIL Decision
 workflow.add_node("propose_corrections", propose_corrections_node)
 workflow.add_node("correction_hil", correction_hil_node)
 workflow.add_node("final_committee_review", final_committee_review_node)  # v5.2: Holistic review
+workflow.add_node("refine_document", refine_document_node)
+workflow.add_node("style_check", style_check_node)
+workflow.add_node("style_refine", style_refine_node)
+workflow.add_node("document_gate", document_gate_node)
 workflow.add_node("finalize_hil", finalize_hil_node)
 
 # Entry
 workflow.set_entry_point("gen_outline")
 
+# Always go through outline_hil (no-op if not enabled)
+workflow.add_edge("gen_outline", "outline_hil")
+
 # Routing after outline approval
-def research_router(state: DocumentState) -> Literal["deep_research", "web_search", "debate"]:
+def research_router(state: DocumentState) -> Literal["deep_research", "web_search", "fact_check"]:
+    if (state.get("audit_mode") or "").lower() == "sei_only":
+        return "fact_check"
     if state.get("deep_research_enabled"):
         return "deep_research"
     if state.get("web_search_enabled"):
         return "web_search"
-    return "debate"
+    return "fact_check"
 
-# Always go through outline_hil (no-op if not enabled)
-workflow.add_edge("gen_outline", "outline_hil")
-workflow.add_conditional_edges("outline_hil", research_router)
-workflow.add_edge("deep_research", "debate")
-workflow.add_edge("web_search", "debate")
+
+def research_retry_router(state: DocumentState) -> Literal["deep_research", "web_search", "quality_gate"]:
+    if not state.get("verification_retry"):
+        return "quality_gate"
+    if state.get("deep_research_enabled"):
+        return "deep_research"
+    if state.get("web_search_enabled"):
+        return "web_search"
+    return "quality_gate"
+
+# Planner Flow: outline_hil -> planner -> router
+workflow.add_edge("outline_hil", "planner")
+workflow.add_conditional_edges("planner", research_router)
+
+# If Deep Research is done, do we still do Web Search?
+# Current logic: deep_research -> debate
+#                web_search -> debate
+# They are mutually exclusive in the router's current 'if/elif' logic.
+# If both are true, Deep Research wins (first if).
+workflow.add_edge("deep_research", "research_notes_step")
+workflow.add_edge("web_search", "research_notes_step")
+workflow.add_edge("research_notes_step", "fact_check")
+workflow.add_edge("fact_check", "debate")
 
 # Main flow with Quality Pipeline (v2.25)
 # debate → quality_gate → structural_fix → section_hil → divergence_hil → audit → targeted_patch → quality_report → evaluate_hil
-workflow.add_edge("debate", "quality_gate")
+workflow.add_edge("debate", "research_verify")
+workflow.add_conditional_edges("research_verify", research_retry_router)
 workflow.add_edge("quality_gate", "structural_fix")
 workflow.add_edge("structural_fix", "section_hil")
 workflow.add_edge("section_hil", "divergence_hil")
@@ -1902,8 +3731,71 @@ def hil_router(state: DocumentState) -> Literal["propose_corrections", "final_co
 workflow.add_conditional_edges("evaluate_hil", hil_router)
 workflow.add_edge("propose_corrections", "correction_hil")
 workflow.add_edge("correction_hil", "final_committee_review")  # v5.2: Committee review after corrections
-workflow.add_edge("final_committee_review", "finalize_hil")  # v5.2: Committee review before final
-workflow.add_edge("finalize_hil", END)
+
+def final_refine_router(state: DocumentState) -> Literal["refine_document", "style_check"]:
+    report = state.get("committee_review_report") or {}
+    score = report.get("score")
+    try:
+        score_val = float(score) if score is not None else 0.0
+    except Exception:
+        score_val = 0.0
+    target = float(state.get("target_final_score") or 0)
+    rounds = int(state.get("refinement_round", 0) or 0)
+    max_rounds = int(state.get("max_rounds", 0) or 0)
+
+    if max_rounds and rounds >= max_rounds:
+        return "style_check"
+    if target and score_val >= target:
+        return "style_check"
+    if not target and not max_rounds:
+        return "style_check"
+    return "refine_document"
+
+def document_gate_router(state: DocumentState) -> Literal["finalize_hil", "__end__"]:
+    if state.get("document_gate_status") == "blocked":
+        return "__end__"
+    return "finalize_hil"
+
+def style_check_router(state: DocumentState) -> Literal["style_refine", "document_gate"]:
+    status = state.get("style_check_status")
+    if status == "needs_refine":
+        rounds = int(state.get("style_refine_round", 0) or 0)
+        max_rounds = int(state.get("style_refine_max_rounds", 2) or 2)
+        if max_rounds and rounds >= max_rounds:
+            logger.warning("⚠️ Style refine max rounds reached; proceeding to document gate.")
+            return "document_gate"
+        return "style_refine"
+    return "document_gate"
+
+workflow.add_conditional_edges("final_committee_review", final_refine_router, {
+    "refine_document": "refine_document",
+    "style_check": "style_check",
+})
+workflow.add_edge("refine_document", "final_committee_review")
+workflow.add_conditional_edges("style_check", style_check_router, {
+    "style_refine": "style_refine",
+    "document_gate": "document_gate",
+})
+workflow.add_edge("style_refine", "style_check")
+workflow.add_conditional_edges("document_gate", document_gate_router, {
+    "__end__": END,
+    "finalize_hil": "finalize_hil",
+})
+
+# v5.4: Human Proposal Debate node and routing
+workflow.add_node("proposal_debate", human_proposal_debate_node)
+
+def finalize_hil_router(state: DocumentState) -> Literal["proposal_debate", "__end__"]:
+    """Route based on whether user provided a proposal."""
+    if state.get("human_proposal"):
+        return "proposal_debate"
+    if state.get("human_approved_final"):
+        return "__end__"
+    # If rejected without proposal, still end (user can restart)
+    return "__end__"
+
+workflow.add_conditional_edges("finalize_hil", finalize_hil_router)
+workflow.add_edge("proposal_debate", "finalize_hil")  # Loop back to HIL after proposal debate
 
 # Checkpointer
 if SqliteSaver is not None:

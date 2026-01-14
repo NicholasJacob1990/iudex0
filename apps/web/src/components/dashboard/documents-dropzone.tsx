@@ -1,23 +1,27 @@
 'use client';
 
-import { ChangeEvent, useState } from 'react';
-import { UploadCloud, FileText, Download, FolderDown, Mic, Link as LinkIcon, Type } from 'lucide-react';
+import { ChangeEvent, useEffect, useState } from 'react';
+import { UploadCloud, FileText, Download, FolderDown, Link as LinkIcon, Type } from 'lucide-react';
 import { useDocumentStore } from '@/stores';
-import { documentUploads } from '@/data/mock';
 import { formatFileSize } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
+import apiClient from '@/lib/api-client';
 
 export function DocumentsDropzone() {
-  const { uploadDocument, isUploading } = useDocumentStore();
+  const { uploadDocument, fetchDocuments, documents, total, isUploading } = useDocumentStore();
   const [urlDialogOpen, setUrlDialogOpen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
   const [url, setUrl] = useState('');
   const [textContent, setTextContent] = useState('');
   const [textTitle, setTextTitle] = useState('');
+
+  useEffect(() => {
+    fetchDocuments().catch(() => undefined);
+  }, [fetchDocuments]);
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -36,31 +40,46 @@ export function DocumentsDropzone() {
     toast.info('Funcionalidade de transcrição será implementada em breve');
   };
 
-  const handleUrlSubmit = () => {
+  const handleUrlSubmit = async () => {
     if (!url.trim()) {
       toast.error('Por favor, insira uma URL válida');
       return;
     }
-    toast.info(`Importando conteúdo de: ${url}`);
-    setTimeout(() => {
+    try {
+      toast.info(`Importando conteúdo de: ${url}`);
+      await apiClient.createDocumentFromUrl({ url: url.trim() });
+      await fetchDocuments();
       toast.success('Conteúdo importado com sucesso!');
       setUrl('');
       setUrlDialogOpen(false);
-    }, 1500);
+    } catch (error) {
+      toast.error('Erro ao importar a URL.');
+    }
   };
 
-  const handleTextSubmit = () => {
+  const handleTextSubmit = async () => {
     if (!textContent.trim()) {
       toast.error('Por favor, insira algum texto');
       return;
     }
-    toast.info('Salvando texto...');
-    setTimeout(() => {
+    if (!textTitle.trim()) {
+      toast.error('Informe um título para o texto.');
+      return;
+    }
+    try {
+      toast.info('Salvando texto...');
+      await apiClient.createDocumentFromText({
+        title: textTitle.trim(),
+        content: textContent.trim(),
+      });
+      await fetchDocuments();
       toast.success('Texto adicionado com sucesso!');
       setTextContent('');
       setTextTitle('');
       setTextDialogOpen(false);
-    }, 1000);
+    } catch (error) {
+      toast.error('Erro ao salvar texto.');
+    }
   };
 
   return (
@@ -107,15 +126,15 @@ export function DocumentsDropzone() {
           {isUploading ? 'Processando...' : 'Clique ou arraste arquivos'}
         </p>
         <p className="text-xs text-muted-foreground">PDF, DOCX, ODT, ZIP, HTML, imagens, áudio, vídeo até 500MB</p>
-        <p className="text-[10px] text-amber-600 mt-2">
-          ⚠️ ZIP, áudio e vídeo: upload aceito, processamento em desenvolvimento
+        <p className="text-[10px] text-muted-foreground mt-2">
+          OCR, áudio e vídeo são processados em segundo plano. Acompanhe o status no card do documento.
         </p>
       </label>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
           <Button variant="outline" className="rounded-full">
             <Download className="mr-2 h-4 w-4" />
-            Ver documentos salvos (112)
+            Ver documentos salvos ({total})
           </Button>
           <Button variant="ghost" className="rounded-full text-primary">
             <FolderDown className="mr-2 h-4 w-4" />
@@ -124,7 +143,7 @@ export function DocumentsDropzone() {
         </div>
 
         <div className="mt-6 grid gap-3 md:grid-cols-2">
-          {documentUploads.map((doc) => (
+          {documents.map((doc) => (
             <div
               key={doc.id}
               className="flex items-center justify-between rounded-2xl border border-outline/40 bg-white/80 px-4 py-3"
@@ -136,7 +155,7 @@ export function DocumentsDropzone() {
                 <div>
                   <p className="text-sm font-semibold text-foreground">{doc.name}</p>
                   <p className="text-xs text-muted-foreground">
-                    {doc.size ?? formatFileSize(0)} • {doc.status}
+                    {formatFileSize(doc.file_size ?? doc.size ?? 0)} • {doc.status}
                   </p>
                 </div>
               </div>
@@ -219,4 +238,3 @@ export function DocumentsDropzone() {
     </>
   );
 }
-

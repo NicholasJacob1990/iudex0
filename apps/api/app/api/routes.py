@@ -4,7 +4,7 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced
 
 api_router = APIRouter()
 
@@ -14,6 +14,7 @@ api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(cases.router, prefix="/cases", tags=["cases"])
 api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
 api_router.include_router(templates.router, prefix="/templates", tags=["templates"])
+api_router.include_router(clauses.router, prefix="/clauses", tags=["clauses"])
 api_router.include_router(chats.router, prefix="/chats", tags=["chats"])
 api_router.include_router(chat_integration.router, prefix="/chat", tags=["chat-docs"])
 api_router.include_router(chat.router, prefix="/multi-chat", tags=["multi-model-chat"])

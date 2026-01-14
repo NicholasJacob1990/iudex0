@@ -33,6 +33,8 @@ export function ModelSelector() {
     const openaiModels = listModels().filter(m => m.provider === 'openai');
     const anthropicModels = listModels().filter(m => m.provider === 'anthropic');
     const googleModels = listModels().filter(m => m.provider === 'google');
+    const xaiModels = listModels().filter(m => m.provider === 'xai');
+    const openrouterModels = listModels().filter(m => m.provider === 'openrouter');
     const internalModels = listModels().filter(m => m.provider === 'internal');
 
     // Helper to render icon
@@ -140,6 +142,22 @@ export function ModelSelector() {
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel>Google</DropdownMenuLabel>
                     {googleModels.map(renderModelItem)}
+
+                    {xaiModels.length > 0 && (
+                        <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuLabel>xAI</DropdownMenuLabel>
+                            {xaiModels.map(renderModelItem)}
+                        </>
+                    )}
+
+                    {openrouterModels.length > 0 && (
+                        <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuLabel>OpenRouter / Meta</DropdownMenuLabel>
+                            {openrouterModels.map(renderModelItem)}
+                        </>
+                    )}
 
                     <DropdownMenuSeparator />
                     <DropdownMenuLabel>Interno</DropdownMenuLabel>

@@ -2,12 +2,14 @@
 Granular Debate Sub-Graph - Production Version
 
 This is the fully granular LangGraph implementation of the multi-agent committee
-with 8 distinct nodes corresponding to the 4 rounds of debate:
+with 8 distinct nodes corresponding to the 4 rounds of debate, plus a conditional
+reflection loop if the quality score is below threshold.
 
-R1: Parallel Drafts (GPT, Claude, Gemini Blind)
+R1: Parallel Drafts (GPT, Claude, Judge Blind)
 R2: Cross-Critique (GPT critiques Claude, Claude critiques GPT)
 R3: Revision (GPT and Claude revise based on critique)
-R4: Judge Merge (Gemini consolidates all versions)
+R4: Judge Merge (model escolhido consolida todas as versões)
+Conditional: check logic -> Retry R1 if score < 8
 
 Each node can emit SSE events for real-time observability.
 """
@@ -31,6 +33,12 @@ from app.services.ai.prompts.debate_prompts import (
     PROMPT_GEMINI_BLIND_SYSTEM,
     PROMPT_GEMINI_JUDGE_SYSTEM,
     get_document_instructions
+)
+from app.services.ai.model_registry import (
+    DEFAULT_DEBATE_MODELS,
+    DEFAULT_JUDGE_MODEL,
+    get_model_config,
+    get_api_model_name,
 )
 
 
@@ -59,6 +67,12 @@ class DebateSectionState(TypedDict):
     drafter: Any
     gpt_model: str
     claude_model: str
+    judge_model: str
+    
+    # Reflection Control
+    retries: int 
+    max_retries: int
+    judge_feedback: Optional[str]
     
     # R1: Parallel Drafts
     draft_gpt_v1: Optional[str]
@@ -79,6 +93,8 @@ class DebateSectionState(TypedDict):
     claims_requiring_citation: List[Dict[str, Any]]
     removed_claims: List[Dict[str, Any]]
     risk_flags: List[str]
+    quality_score: int # 0-10
+    retry_reason: Optional[str]
     
     # Metrics
     metrics: Dict[str, Any]
@@ -99,7 +115,7 @@ async def call_gpt_async(client, prompt: str, model: str, system: str = None) ->
         prompt = f"{system}\n\n{prompt}"
     
     try:
-        result = await call_openai_async(client, prompt, model=model, timeout=60)
+        result = await call_openai_async(client, prompt, model=model, timeout=90)
         return result or ""
     except Exception as e:
         logger.error(f"GPT call failed: {e}")
@@ -114,23 +130,102 @@ async def call_claude_async(client, prompt: str, model: str, system: str = None)
         prompt = f"{system}\n\n{prompt}"
     
     try:
-        result = await call_anthropic_async(client, prompt, model=model, timeout=60)
+        result = await call_anthropic_async(client, prompt, model=model, timeout=90)
         return result or ""
     except Exception as e:
         logger.error(f"Claude call failed: {e}")
         return f"[Claude Error: {e}]"
 
 
-def call_gemini_sync(drafter, prompt: str) -> str:
-    """Call Gemini via drafter wrapper"""
-    try:
-        if drafter is None:
-            return "[Gemini não disponível - drafter=None]"
-        resp = drafter._generate_with_retry(prompt)
-        return resp.text if resp else ""
-    except Exception as e:
-        logger.error(f"Gemini call failed: {e}")
-        return f"[Gemini Error: {e}]"
+async def _call_model_any_async(
+    model_id: str,
+    prompt: str,
+    *,
+    system_instruction: Optional[str] = None,
+    temperature: float = 0.2,
+    max_tokens: int = 2000
+) -> str:
+    if not model_id:
+        return ""
+
+    cfg = get_model_config(model_id)
+    if not cfg:
+        return ""
+
+    from app.services.ai.agent_clients import (
+        init_openai_client,
+        init_anthropic_client,
+        init_xai_client,
+        init_openrouter_client,
+        get_gemini_client,
+        call_openai_async,
+        call_anthropic_async,
+        call_vertex_gemini_async,
+    )
+
+    api_model = get_api_model_name(model_id)
+
+    if cfg.provider == "openai":
+        client = init_openai_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "anthropic":
+        client = init_anthropic_client()
+        if not client:
+            return ""
+        return await call_anthropic_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "google":
+        client = get_gemini_client()
+        if not client:
+            return ""
+        return await call_vertex_gemini_async(
+            client,
+            prompt,
+            model=model_id,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "xai":
+        client = init_xai_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    if cfg.provider == "openrouter":
+        client = init_openrouter_client()
+        if not client:
+            return ""
+        return await call_openai_async(
+            client,
+            prompt,
+            model=api_model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            system_instruction=system_instruction
+        ) or ""
+    return ""
 
 
 # =============================================================================
@@ -139,7 +234,7 @@ def call_gemini_sync(drafter, prompt: str) -> str:
 
 async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     """R1: GPT generates initial draft (Critic perspective)"""
-    logger.info(f"🤖 [R1-GPT] Drafting: {state['section_title']}")
+    logger.info(f"🤖 [R1-GPT] Drafting: {state['section_title']} (Retry: {state['retries']})")
     start = time.time()
     
     # Get document type specific instructions
@@ -150,6 +245,11 @@ async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     system = t_sys.render(tipo_documento=state['mode'], instrucoes=instrucoes)
     
     prompt = f"{state['prompt_base']}"
+    
+    # Inject Judge Feedback if retrying
+    if state.get("judge_feedback") and state['retries'] > 0:
+        prompt += f"\n\n## FEEDBACK DA TENTATIVA ANTERIOR (IMPORTANTE):\n{state['judge_feedback']}\nCorrija os pontos acima prioritariamente."
+        
     draft = await call_gpt_async(
         state['gpt_client'], 
         prompt, 
@@ -169,7 +269,7 @@ async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
 
 async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     """R1: Claude generates initial draft (Defense perspective)"""
-    logger.info(f"🤖 [R1-Claude] Drafting: {state['section_title']}")
+    logger.info(f"🤖 [R1-Claude] Drafting: {state['section_title']} (Retry: {state['retries']})")
     start = time.time()
     
     instrucoes = get_document_instructions(state['mode'])
@@ -177,10 +277,15 @@ async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     system = t_sys.render(tipo_documento=state['mode'], instrucoes=instrucoes)
     
     prompt = f"{state['prompt_base']}"
+    
+    # Inject Judge Feedback if retrying
+    if state.get("judge_feedback") and state['retries'] > 0:
+        prompt += f"\n\n## FEEDBACK DA TENTATIVA ANTERIOR (IMPORTANTE):\n{state['judge_feedback']}\nCorrija os pontos acima prioritariamente."
+    
     draft = await call_claude_async(
         state['claude_client'], 
         prompt, 
-        state.get('claude_model', 'claude-sonnet-4-20250514'),
+        state.get('claude_model', 'claude-4.5-sonnet'),
         system=system
     )
     
@@ -195,19 +300,31 @@ async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
 
 
 async def gemini_blind_node(state: DebateSectionState) -> DebateSectionState:
-    """R1: Gemini generates independent draft (Blind Judge - doesn't see others)"""
-    logger.info(f"🤖 [R1-Gemini] Blind Draft: {state['section_title']}")
+    """R1: Judge generates independent draft (Blind Judge - doesn't see others)"""
+    logger.info(f"🤖 [R1-Judge] Blind Draft: {state['section_title']}")
     start = time.time()
+    
+    # Judge (Blind) usually runs once; we re-run with feedback to align with retries.
     
     instrucoes = get_document_instructions(state['mode'])
     t_sys = Template(PROMPT_GEMINI_BLIND_SYSTEM)
     system = t_sys.render(tipo_documento=state['mode'], instrucoes=instrucoes)
     
-    prompt = f"{system}\n\n{state['prompt_base']}"
-    draft = call_gemini_sync(state['drafter'], prompt)
+    prompt_content = state['prompt_base']
+    if state.get("judge_feedback") and state['retries'] > 0:
+         prompt_content += f"\n\n## FEEDBACK DA TENTATIVA ANTERIOR (IMPORTANTE):\n{state['judge_feedback']}\nCorrija os pontos acima prioritariamente."
+
+    judge_model = state.get("judge_model") or DEFAULT_JUDGE_MODEL
+    draft = await _call_model_any_async(
+        judge_model,
+        prompt_content,
+        system_instruction=system,
+        temperature=0.3,
+        max_tokens=2000
+    )
     
     latency = int((time.time() - start) * 1000)
-    logger.info(f"✅ [R1-Gemini] Done in {latency}ms")
+    logger.info(f"✅ [R1-Judge] Done in {latency}ms")
     
     return {
         **state,
@@ -269,7 +386,7 @@ async def claude_critique_node(state: DebateSectionState) -> DebateSectionState:
     critique = await call_claude_async(
         state['claude_client'], 
         prompt, 
-        state.get('claude_model', 'claude-sonnet-4-20250514')
+        state.get('claude_model', 'claude-4.5-sonnet')
     )
     
     latency = int((time.time() - start) * 1000)
@@ -337,7 +454,7 @@ async def claude_revise_node(state: DebateSectionState) -> DebateSectionState:
     revised = await call_claude_async(
         state['claude_client'], 
         prompt, 
-        state.get('claude_model', 'claude-sonnet-4-20250514')
+        state.get('claude_model', 'claude-4.5-sonnet')
     )
     
     latency = int((time.time() - start) * 1000)
@@ -355,13 +472,14 @@ async def claude_revise_node(state: DebateSectionState) -> DebateSectionState:
 # =============================================================================
 
 async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
-    """R4: Gemini Judge consolidates all versions"""
-    logger.info(f"⚖️ [R4-Judge] Consolidating: {state['section_title']}")
+    """R4: Judge model consolidates all versions"""
+    judge_model = state.get("judge_model", "claude-4.5-opus")
+    logger.info(f"⚖️ [R4-Judge] Consolidating: {state['section_title']} using {judge_model}")
     start = time.time()
     
     instrucoes = get_document_instructions(state['mode'])
     
-    # Build previous sections context (prefer excerpts, fallback to titles)
+    # Build previous sections context
     excerpts = state.get("previous_sections_excerpts")
     if excerpts:
         secoes_anteriores = excerpts
@@ -373,7 +491,6 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
     formatting_options = state.get("formatting_options") or {}
     diretrizes_formatacao = ""
     if formatting_options:
-        # Human-readable directives to reduce variability
         if formatting_options.get("include_toc"):
             diretrizes_formatacao += "- Incluir sumário (TOC) quando aplicável.\n"
         if formatting_options.get("include_summaries"):
@@ -400,54 +517,95 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
     )
     
     # Use Judge system prompt
-    t_sys = Template(PROMPT_GEMINI_JUDGE_SYSTEM)
+    t_sys = Template(PROMPT_GEMINI_JUDGE_SYSTEM)  # Reusing judge system prompt base
     system = t_sys.render(tipo_documento=state['mode'], instrucoes=instrucoes)
     
-    full_prompt = f"{system}\n\n{prompt}"
-    merged = call_gemini_sync(state['drafter'], full_prompt)
+    merged = await _call_model_any_async(
+        judge_model,
+        prompt,
+        system_instruction=system,
+        temperature=0.2,
+        max_tokens=2000
+    )
     
-    # Parse JSON (v2) with robust fallback
+    # Parse JSON
     final_content = ""
     divergencias = ""
     claims_requiring_citation: List[Dict[str, Any]] = []
     removed_claims: List[Dict[str, Any]] = []
     risk_flags: List[str] = []
+    quality_score = 10 # Default optimistic
+    quality_score_source = "heuristic"
+    judge_feedback_text = ""
+    retry_reason = ""
 
     def _extract_json(text: str) -> Optional[dict]:
-        if not text:
-            return None
+        if not text: return None
         s = text.strip()
-        # Remove code fences if any
         if s.startswith("```"):
             s = re.sub(r"^```(json)?", "", s, flags=re.IGNORECASE).strip()
             s = re.sub(r"```$", "", s).strip()
-        # Try direct JSON
         try:
             return json.loads(s)
         except Exception:
-            pass
-        # Try to extract first JSON object
-        m = re.search(r"\{[\s\S]*\}", s)
-        if not m:
-            return None
-        try:
-            return json.loads(m.group(0))
-        except Exception:
+            # Try regex
+            m = re.search(r"\{[\s\S]*\}", s)
+            if m:
+                try: 
+                    return json.loads(m.group(0))
+                except: 
+                    pass
             return None
 
     parsed = _extract_json(merged)
+    
     if isinstance(parsed, dict) and parsed.get("final_text"):
         final_content = parsed.get("final_text", "") or ""
-        # Keep divergences as compact markdown text (for UI), but preserve structured lists in state too
         divs = parsed.get("divergences") or []
         if isinstance(divs, list) and divs:
             divergencias = json.dumps(divs, ensure_ascii=False, indent=2)
+            
         claims_requiring_citation = parsed.get("claims_requiring_citation") or []
         removed_claims = parsed.get("removed_claims") or []
         risk_flags = parsed.get("risk_flags") or []
+        
+        parsed_score = parsed.get("quality_score")
+        if isinstance(parsed_score, (int, float)):
+            quality_score = max(0, min(10, int(round(parsed_score))))
+            quality_score_source = "judge"
+        else:
+            quality_score = 5
+            quality_score_source = "missing"
+            judge_feedback_text = "Quality score ausente no JSON do juiz."
+            retry_reason = "missing_quality_score"
+
+            # Infer quality from risk flags and missing citations
+            penalty = 0
+            if claims_requiring_citation:
+                penalty += 1
+            if removed_claims:
+                penalty += 1
+            if risk_flags:
+                penalty += len(risk_flags)
+            quality_score = min(quality_score, max(0, 10 - penalty))
+
+        if risk_flags or claims_requiring_citation:
+            retry_reason = (
+                f"risk_flags={len(risk_flags)}, missing_citations={len(claims_requiring_citation)}"
+            )
+            if risk_flags or claims_requiring_citation:
+                judge_feedback_text = (
+                    f"Riscos identificados: {', '.join(risk_flags)}. "
+                    f"Citações faltantes: {len(claims_requiring_citation)}."
+                )
+            
     else:
-        # Legacy fallback: treat as markdown with headers
+        # Legacy fallback
         final_content = merged
+        quality_score = 5 # Penalize format failure
+        quality_score_source = "format_error"
+        judge_feedback_text = "Falha na formatação JSON do output final."
+        retry_reason = "invalid_json"
         if "### VERSÃO FINAL" in merged:
             parts = merged.split("### VERSÃO FINAL")
             if len(parts) > 1:
@@ -458,9 +616,9 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
                     divergencias = parts[1].split("###")[0].strip()
     
     latency = int((time.time() - start) * 1000)
-    logger.info(f"✅ [R4-Judge] Done in {latency}ms")
+    logger.info(f"✅ [R4-Judge] Done in {latency}ms (Score: {quality_score}/10)")
     
-    # Collect all drafts for observability
+    # Collect all drafts
     all_drafts = {
         "gpt_v1": state.get("draft_gpt_v1", ""),
         "claude_v1": state.get("draft_claude_v1", ""),
@@ -479,9 +637,62 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
         "removed_claims": removed_claims if isinstance(removed_claims, list) else [],
         "risk_flags": risk_flags if isinstance(risk_flags, list) else [],
         "drafts": all_drafts,
-        "metrics": {**state.get("metrics", {}), "r4_judge_latency": latency}
+        "quality_score": quality_score,
+        "retry_reason": retry_reason or None,
+        "judge_feedback": judge_feedback_text,
+        "metrics": {
+            **state.get("metrics", {}),
+            "r4_judge_latency": latency,
+            "quality_score": quality_score,
+            "quality_score_source": quality_score_source,
+            "retry_reason": retry_reason or None,
+        }
     }
 
+
+# =============================================================================
+# CONDITIONAL LOGIC
+# =============================================================================
+
+def should_retry(state: DebateSectionState) -> Literal["prepare_retry", END]:
+    """
+    Decides whether to retry the draft loop based on quality score.
+    Target: Score >= 8/10
+    Max Retries: 2 (3 runs total)
+    """
+    score = state.get("quality_score", 10)
+    retries = state.get("retries", 0)
+    max_retries = state.get("max_retries", 2) # Default 2 retries (3 runs total)
+    try:
+        min_quality = int(os.getenv("DEBATE_MIN_QUALITY", "8"))
+    except ValueError:
+        min_quality = 8
+    min_quality = max(0, min(10, min_quality))
+    
+    if score < min_quality and retries < max_retries:
+        reason = state.get("retry_reason") or "quality_below_threshold"
+        logger.warning(
+            f"🔄 Low quality score ({score}/10 < {min_quality}). Retrying... "
+            f"(Attempt {retries + 2}/{max_retries+1}) reason={reason}"
+        )
+        # Increment retries in the state update (LangGraph usually handles this in the node return, 
+        # but for conditional edge, we need to modify state in the next node or update it here if possible. 
+        # Since conditional edges just return the route, we rely on the next node to see the count, 
+        # BUT we need to increment it. 
+        # HACK: We can't update state here. We will add a 'setup_retry' node or just rely on the next draft node to increment?
+        # Better: We add a pass-through node 'prepare_retry' to increment counter.
+        return "prepare_retry"
+    
+    return END
+
+def prepare_retry_node(state: DebateSectionState) -> DebateSectionState:
+    """Updates retry counter and clears previous drafts for clean run (optional)"""
+    return {
+        **state,
+        "retries": state.get("retries", 0) + 1,
+        # We keep drafts for history in 'drafts' dict, but might clear current slots?
+        # Actually better to overwrite them in next nodes.
+    }
 
 # =============================================================================
 # SUB-GRAPH DEFINITION
@@ -489,13 +700,7 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
 
 def create_debate_subgraph() -> StateGraph:
     """
-    Creates the full 4-round debate sub-graph.
-    
-    Flow:
-    R1: [gpt_v1, claude_v1, gemini_v1] (sequential for simplicity)
-    R2: [gpt_critique, claude_critique] (sequential)
-    R3: [gpt_v2, claude_v2] (sequential)
-    R4: [judge]
+    Creates the full granular debate sub-graph with reflection loop.
     """
     
     workflow = StateGraph(DebateSectionState)
@@ -516,16 +721,33 @@ def create_debate_subgraph() -> StateGraph:
     # R4: Judge
     workflow.add_node("judge", judge_merge_node)
     
-    # Sequential edges (for reliability; parallel would use Send API)
+    # Retry Setup
+    workflow.add_node("prepare_retry", prepare_retry_node)
+    
+    # Edges
     workflow.set_entry_point("gpt_v1")
+    
+    # Parallel simulation (sequential execution)
     workflow.add_edge("gpt_v1", "claude_v1")
     workflow.add_edge("claude_v1", "gemini_v1")
     workflow.add_edge("gemini_v1", "gpt_critique")
+    
     workflow.add_edge("gpt_critique", "claude_critique")
     workflow.add_edge("claude_critique", "gpt_v2")
     workflow.add_edge("gpt_v2", "claude_v2")
     workflow.add_edge("claude_v2", "judge")
-    workflow.add_edge("judge", END)
+    
+    # Conditional Edge from Judge
+    workflow.add_conditional_edges(
+        "judge",
+        should_retry,
+        {
+            "prepare_retry": "prepare_retry",
+            END: END
+        }
+    )
+    
+    workflow.add_edge("prepare_retry", "gpt_v1")
     
     return workflow
 
@@ -549,8 +771,9 @@ async def run_debate_for_section(
     claude_client,
     drafter,
     gpt_model: str = "gpt-4o",
-    claude_model: str = "claude-sonnet-4-20250514",
-    previous_sections: List[str] = None,  # Titles of already processed sections
+    claude_model: str = "claude-4.5-sonnet", # Updated default
+    judge_model: str = "claude-4.5-opus",    # Updated default
+    previous_sections: List[str] = None,  
     previous_sections_excerpts: Optional[str] = None,
     formatting_options: Optional[Dict[str, Any]] = None,
     template_structure: Optional[str] = None
@@ -558,9 +781,6 @@ async def run_debate_for_section(
     """
     Convenience function to run the full debate for one section.
     Returns the final state with merged_content, divergencias, and drafts.
-    
-    Args:
-        previous_sections: List of section titles already processed (for anticontradiction)
     """
     
     initial_state = DebateSectionState(
@@ -579,6 +799,11 @@ async def run_debate_for_section(
         drafter=drafter,
         gpt_model=gpt_model,
         claude_model=claude_model,
+        judge_model=judge_model,
+        retries=0,
+        max_retries=2, # Allow 2 retries (total 3 attempts)
+        judge_feedback=None,
+        retry_reason=None,
         draft_gpt_v1=None,
         draft_claude_v1=None,
         draft_gemini_v1=None,
@@ -591,6 +816,7 @@ async def run_debate_for_section(
         claims_requiring_citation=[],
         removed_claims=[],
         risk_flags=[],
+        quality_score=0,
         metrics={},
         drafts={}
     )

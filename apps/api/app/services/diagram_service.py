@@ -7,6 +7,9 @@ import os
 import uuid
 from typing import Optional
 from loguru import logger
+from pathlib import Path
+
+from app.core.config import settings
 
 
 class DiagramService:
@@ -19,9 +22,10 @@ class DiagramService:
     - Graphviz
     """
     
-    def __init__(self, storage_path: str = "storage/diagrams"):
-        self.storage_path = storage_path
-        os.makedirs(storage_path, exist_ok=True)
+    def __init__(self, storage_path: Optional[str] = None):
+        base_path = Path(storage_path) if storage_path else Path(settings.LOCAL_STORAGE_PATH) / "diagrams"
+        self.storage_path = str(base_path)
+        os.makedirs(self.storage_path, exist_ok=True)
     
     async def generate_diagram(
         self,

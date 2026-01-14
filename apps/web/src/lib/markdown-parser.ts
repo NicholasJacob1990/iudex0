@@ -36,6 +36,8 @@ function configureMarkedOnce() {
     marked.setOptions({
         mangle: false,
         headerIds: false,
+        gfm: true,
+        breaks: true,
     } as any);
 
     // Override do renderer para bloquear HTML bruto e higienizar links/imagens

@@ -24,7 +24,7 @@ export default function LibrariansPage() {
           item.name.toLowerCase().includes(query.toLowerCase()) ||
           item.description.toLowerCase().includes(query.toLowerCase())
       ),
-    [query]
+    [query, librarians]
   );
 
   return (

@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils';
 
 export function TopNav() {
   const { user } = useAuthStore();
-  const { toggleSidebar } = useUIStore();
+  const { sidebarState, toggleSidebar } = useUIStore();
   const { theme, setTheme } = useTheme();
 
   const firstName = user?.name?.split(' ')[0] ?? 'Usuário';
@@ -21,9 +21,11 @@ export function TopNav() {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white shadow-sm lg:hidden hover:bg-slate-50 transition"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-slate-200 bg-white shadow-sm hover:bg-slate-50 transition"
             onClick={toggleSidebar}
             aria-label="Alternar menu"
+            aria-controls="dashboard-sidebar"
+            aria-expanded={sidebarState !== 'hidden'}
           >
             <Menu className="h-4 w-4 text-slate-600" />
           </button>

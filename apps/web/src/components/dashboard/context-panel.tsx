@@ -1,10 +1,12 @@
 'use client';
 
+import { useEffect } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Search, FileText, Layers, Gavel, Scale, UploadCloud } from 'lucide-react';
 import { useContextStore } from '@/stores';
 import { cn } from '@/lib/utils';
+import apiClient from '@/lib/api-client';
 
 const ICONS = {
   documents: FileText,
@@ -14,7 +16,35 @@ const ICONS = {
 } as const;
 
 export function ContextPanel() {
-  const { search, setSearch, sources, toggleSource, toggleMeta } = useContextStore();
+  const { search, setSearch, sources, toggleSource, toggleMeta, setSourceCounts } = useContextStore();
+
+  useEffect(() => {
+    let mounted = true;
+    const loadCounts = async () => {
+      try {
+        const [docs, models, juris, legis] = await Promise.all([
+          apiClient.getDocuments(0, 1),
+          apiClient.getLibraryItems(0, 1, undefined, 'MODEL'),
+          apiClient.getLibraryItems(0, 1, undefined, 'JURISPRUDENCE'),
+          apiClient.getLibraryItems(0, 1, undefined, 'LEGISLATION'),
+        ]);
+        if (!mounted) return;
+        setSourceCounts({
+          documents: docs.total ?? 0,
+          models: models.total ?? 0,
+          jurisprudence: juris.total ?? 0,
+          legislation: legis.total ?? 0,
+        });
+      } catch {
+        // Silencioso: mantém contagens atuais
+      }
+    };
+
+    loadCounts();
+    return () => {
+      mounted = false;
+    };
+  }, [setSourceCounts]);
 
   return (
     <section className="rounded-3xl border border-white/70 bg-white/95 p-5 shadow-soft">
@@ -124,4 +154,3 @@ function TogglePill({
     </button>
   );
 }
-

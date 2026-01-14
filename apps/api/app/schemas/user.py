@@ -4,7 +4,7 @@ Schemas Pydantic para usuários
 
 from typing import Optional
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from enum import Enum
 
 
@@ -35,7 +35,7 @@ class UserCreate(UserBase):
     institution_name: Optional[str] = None
     cnpj: Optional[str] = None
     position: Optional[str] = None
-    team_size: Optional[str] = None
+    team_size: Optional[int] = None
     department: Optional[str] = None
 
 
@@ -86,8 +86,7 @@ class UserResponse(UserBase):
     position: Optional[str] = None
     department: Optional[str] = None
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TokenResponse(BaseModel):

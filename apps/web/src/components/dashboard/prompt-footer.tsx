@@ -1,16 +1,17 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Sparkles, Send, Mic, Loader2, PlusCircle, Settings2, Hash, Library, ChevronUp, ChevronDown, User, Scale } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { RichTooltip } from '@/components/ui/rich-tooltip';
 import { useChatStore, useContextStore } from '@/stores';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import { PREDEFINED_PROMPTS, type PredefinedPrompt } from '@/data/prompts';
 import { ContextSelector } from '@/components/dashboard/context-selector';
-import { SlashCommandMenu } from '@/components/chat/slash-command-menu';
-import { contextMentions } from '@/data/mock';
+import { SlashCommandMenu, type SystemCommand } from '@/components/chat/slash-command-menu';
+import apiClient from '@/lib/api-client';
 
 export function PromptFooter() {
   const {
@@ -36,7 +37,22 @@ export function PromptFooter() {
   const [customName, setCustomName] = useState('');
   const [customDescription, setCustomDescription] = useState('');
   const [showCustomBuilder, setShowCustomBuilder] = useState(false);
+  const [contextMentions, setContextMentions] = useState<{ id: string; label: string; description?: string }[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modeTooltips = {
+    Chat: {
+      title: 'Modo Chat',
+      description: 'Conversa livre e rápida. Ideal para tirar dúvidas pontuais ou pedir resumos.',
+      badge: 'Respostas diretas',
+      icon: <User className="h-3.5 w-3.5" />,
+    },
+    Minuta: {
+      title: 'Modo Minuta',
+      description: 'Geração de documentos complexos com múltiplos agentes verificando a consistência jurídica.',
+      badge: 'Documentos longos',
+      icon: <Scale className="h-3.5 w-3.5" />,
+    },
+  };
   const [collapsed, setCollapsed] = useState(() => {
     try {
       if (typeof window === 'undefined') return true;
@@ -48,6 +64,28 @@ export function PromptFooter() {
   });
 
   const allPrompts = useMemo(() => [...PREDEFINED_PROMPTS, ...customPrompts], [customPrompts]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadMentions = async () => {
+      try {
+        const data = await apiClient.getLibrarians(0, 10);
+        if (!mounted) return;
+        const mentions = (data.librarians || []).map((librarian: any) => ({
+          id: librarian.id,
+          label: `@${librarian.name}`,
+          description: librarian.description,
+        }));
+        setContextMentions(mentions);
+      } catch {
+        // Silencioso
+      }
+    };
+    loadMentions();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const tokenPreview = useMemo(() => {
     const tokens = prompt.split(/\s+/).filter(Boolean).length * 1.3;
@@ -107,7 +145,25 @@ export function PromptFooter() {
     }
   };
 
-  const handleSelectPrompt = (promptOption: PredefinedPrompt) => {
+  const handleSelectPrompt = (promptOption: PredefinedPrompt | SystemCommand) => {
+    if ('action' in promptOption) {
+      const action = promptOption.action as string;
+      if (action.startsWith('set-model:')) {
+        const modelId = action.split(':')[1];
+        setSelectedModels([modelId]);
+        setChatMode('standard');
+        toast.success(`Modelo alterado para ${promptOption.name.replace('Mudar para ', '')}`);
+      } else if (action === 'set-mode:multi-model') {
+        handleSetChatMode('multi-model');
+      } else if (action === 'set-mode:standard') {
+        handleSetChatMode('standard');
+      }
+      setPrompt('');
+      setShowSlashMenu(false);
+      textareaRef.current?.focus();
+      return;
+    }
+
     const cleaned = prompt.endsWith('/') ? prompt.slice(0, -1).trimEnd() : prompt.trimEnd();
     const spacer = cleaned ? ' ' : '';
     setPrompt(`${cleaned}${spacer}${promptOption.template}`);
@@ -159,28 +215,40 @@ export function PromptFooter() {
         <div className="flex items-center gap-2">
           {/* Always-visible chat mode toggle (discoverability) */}
           <div className="flex items-center gap-1 rounded-full border border-outline/40 bg-white/80 p-0.5">
-            <Button
-              type="button"
-              size="sm"
-              variant={chatMode !== 'multi-model' ? 'secondary' : 'ghost'}
-              className="h-7 rounded-full px-2 text-[11px]"
-              onClick={() => handleSetChatMode('standard')}
-              title="Chat normal (1 resposta por vez)"
+            <RichTooltip
+              title="Modo Chat"
+              description="Conversa livre e rápida. Ideal para tirar dúvidas pontuais ou pedir resumos."
+              badge="1 resposta por vez"
+              icon={<User className="h-3.5 w-3.5" />}
             >
-              <User className="mr-1.5 h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Normal</span>
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={chatMode === 'multi-model' ? 'secondary' : 'ghost'}
-              className="h-7 rounded-full px-2 text-[11px]"
-              onClick={() => handleSetChatMode('multi-model')}
-              title="Comparar modelos (2–3 respostas em paralelo)"
+              <Button
+                type="button"
+                size="sm"
+                variant={chatMode !== 'multi-model' ? 'secondary' : 'ghost'}
+                className="h-7 rounded-full px-2 text-[11px]"
+                onClick={() => handleSetChatMode('standard')}
+              >
+                <User className="mr-1.5 h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Normal</span>
+              </Button>
+            </RichTooltip>
+            <RichTooltip
+              title="Comparar modelos"
+              description="Respostas paralelas para avaliar argumentos e escolher a melhor abordagem."
+              badge="2–3 respostas"
+              icon={<Scale className="h-3.5 w-3.5" />}
             >
-              <Scale className="mr-1.5 h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Comparar</span>
-            </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant={chatMode === 'multi-model' ? 'secondary' : 'ghost'}
+                className="h-7 rounded-full px-2 text-[11px]"
+                onClick={() => handleSetChatMode('multi-model')}
+              >
+                <Scale className="mr-1.5 h-3.5 w-3.5" />
+                <span className="hidden sm:inline">Comparar</span>
+              </Button>
+            </RichTooltip>
           </div>
           <span className="hidden md:inline text-[11px] text-muted-foreground">
             Tokens: <strong className="text-primary">{tokenPreview}/{maxTokens}</strong>
@@ -219,14 +287,21 @@ export function PromptFooter() {
           <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground">
             <span className="chip bg-sand text-foreground">Use @ para ativar bibliotecas salvas</span>
             {contextMentions.map((mention) => (
-              <button
+              <RichTooltip
                 key={mention.id}
-                type="button"
-                onClick={() => appendMention(mention.label)}
-                className="rounded-full border border-outline/50 bg-white px-3 py-1 font-semibold transition hover:border-primary hover:text-primary"
+                title={`Ativar ${mention.label}`}
+                description={mention.description || 'Ative agentes especialistas para revisar pontos específicos da sua minuta.'}
+                badge="Bibliotecário"
+                icon={<Library className="h-3.5 w-3.5" />}
               >
-                {mention.label}
-              </button>
+                <button
+                  type="button"
+                  onClick={() => appendMention(mention.label)}
+                  className="rounded-full border border-outline/50 bg-white px-3 py-1 font-semibold transition hover:border-primary hover:text-primary"
+                >
+                  {mention.label}
+                </button>
+              </RichTooltip>
             ))}
           </div>
         </div>
@@ -253,7 +328,13 @@ export function PromptFooter() {
             <div className="flex flex-wrap items-center gap-2">
               <ModeToggle label="Perfil" options={['Sem perfil', 'Redação jurídica 01', 'Meu estilo']} value={profile} onChange={setProfile} />
               <ModeToggle label="Saída" options={['curto', 'longo']} value={mode} onChange={setMode} />
-              <ModeToggle label="Modo" options={['Chat', 'Minuta']} value={interactionMode} onChange={setInteractionMode} />
+              <ModeToggle
+                label="Modo"
+                options={['Chat', 'Minuta']}
+                value={interactionMode}
+                onChange={setInteractionMode}
+                tooltips={modeTooltips}
+              />
             </div>
 
             <div className="flex items-center gap-2">
@@ -314,7 +395,7 @@ export function PromptFooter() {
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
                 <Hash className="h-3 w-3" />
-                Prompts salvos aparecem ao digitar "/"
+                Prompts salvos aparecem ao digitar &quot;/&quot;
               </div>
               <Button size="sm" className="rounded-full" onClick={handleAddCustomPrompt}>
                 Salvar prompt
@@ -374,9 +455,20 @@ interface ModeToggleProps {
   options: string[];
   value?: string;
   onChange?: (value: any) => void;
+  tooltips?: Record<
+    string,
+    {
+      title: string;
+      description: string;
+      badge?: string;
+      meta?: ReactNode;
+      shortcut?: string;
+      icon?: ReactNode;
+    }
+  >;
 }
 
-function ModeToggle({ label, options, value, onChange }: ModeToggleProps) {
+function ModeToggle({ label, options, value, onChange, tooltips }: ModeToggleProps) {
   const [internalValue, setInternalValue] = useState(options[0]);
   const currentValue = value ?? internalValue;
 
@@ -386,6 +478,31 @@ function ModeToggle({ label, options, value, onChange }: ModeToggleProps) {
       <div className="flex gap-1 rounded-full border border-outline/50 bg-white/80 p-1">
         {options.map((option) => {
           const active = option === currentValue;
+          const tooltip = tooltips?.[option];
+
+          if (tooltip) {
+            return (
+              <RichTooltip key={option} {...tooltip}>
+                <button
+                  type="button"
+                  className={cn(
+                    'rounded-full px-3 py-1 text-[11px] font-semibold capitalize transition',
+                    active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                  )}
+                  onClick={() => {
+                    if (onChange) {
+                      onChange(option as any);
+                    } else {
+                      setInternalValue(option);
+                    }
+                  }}
+                >
+                  {option}
+                </button>
+              </RichTooltip>
+            );
+          }
+
           return (
             <button
               key={option}

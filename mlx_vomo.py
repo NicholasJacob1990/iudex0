@@ -392,13 +392,48 @@ def remover_eco_do_contexto(resposta_api, contexto_enviado):
 
 def _extract_style_context(text: str, max_chars: int = 2500) -> str:
     """
-    v2.24: Extrai um contexto de estilo maior, evitando que ele seja dominado por tabelas/quadros.
-    Isso melhora continuidade sem fazer o modelo "ver" apenas o fechamento.
+    v2.27: Extrai um contexto de estilo maior, INCLUINDO tabelas recentes para continuidade.
+    
+    Melhorias v2.27:
+    - Se houver tabela nas últimas 100 linhas, inclui a tabela COMPLETA no contexto
+    - Permite contexto maior (até 1.5x max_chars) quando há tabela
+    - Garante que o LLM veja a estrutura da tabela do chunk anterior
     """
     if not text:
         return ""
 
     lines = text.splitlines()
+    
+    # v2.27: Detectar se há tabela recente que deve ser incluída
+    last_table_start = None
+    last_table_end = None
+    search_range = min(100, len(lines))
+    
+    for i in range(len(lines) - 1, max(0, len(lines) - search_range), -1):
+        line = lines[i].strip()
+        if line.startswith('|') and line.endswith('|') and '---' not in line:
+            if last_table_end is None:
+                last_table_end = i
+            last_table_start = i
+        elif last_table_start is not None and not line.startswith('|'):
+            # Encontramos o início da tabela (linha antes não é tabela)
+            break
+    
+    # Se há tabela recente, incluir ela completa no contexto
+    if last_table_start is not None and last_table_end is not None:
+        # Incluir algumas linhas antes da tabela (título/contexto)
+        table_context_start = max(0, last_table_start - 5)
+        table_with_context = '\n'.join(lines[table_context_start:])
+        
+        # Permitir contexto maior se tiver tabela (até 1.5x)
+        extended_max = int(max_chars * 1.5)
+        if len(table_with_context) <= extended_max:
+            return table_with_context
+        else:
+            # Tabela é muito grande, pegar só as últimas linhas dela
+            return table_with_context[-extended_max:]
+    
+    # Fallback: comportamento original (filtrar tabelas do contexto de estilo)
     filtered = []
     for ln in lines:
         s = ln.strip()
@@ -1897,6 +1932,103 @@ def mover_tabelas_para_fim_de_secao(texto):
     return '\n'.join(resultado)
 
 
+def mesclar_tabelas_divididas(texto: str) -> str:
+    """
+    v2.27: Detecta tabelas que foram divididas entre chunks e as mescla.
+    
+    Padrão detectado:
+    | Col1 | Col2 |
+    |------|------|
+    | A    | B    |
+    
+    [... linhas em branco ...]
+    
+    | Col1 | Col2 |      <-- Mesma estrutura = tabela continuada
+    |------|------|
+    | C    | D    |
+    
+    A função identifica tabelas consecutivas com mesmo número de colunas
+    (separadas apenas por linhas em branco) e remove o header duplicado
+    da segunda tabela para criar uma tabela unificada.
+    """
+    logger.info("📊 Mesclando tabelas divididas (v2.27)...")
+    
+    lines = texto.split('\n')
+    result = []
+    i = 0
+    tables_merged = 0
+    
+    def is_table_line(line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith('|') and stripped.endswith('|')
+    
+    def is_separator_line(line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith('|') and set(stripped.replace('|', '').strip()).issubset({'-', ':', ' '})
+    
+    def count_columns(line: str) -> int:
+        return line.count('|') - 1 if '|' in line else 0
+    
+    while i < len(lines):
+        line = lines[i]
+        result.append(line)
+        
+        # Detectar fim de tabela (linha atual é tabela, próxima não é)
+        if is_table_line(line) and not is_separator_line(line):
+            # Verificar se a próxima linha não é tabela
+            if i + 1 < len(lines) and not is_table_line(lines[i + 1]):
+                last_table_cols = count_columns(line)
+                
+                # Encontrar o header da tabela atual (voltando até achar header + separator)
+                last_table_header = None
+                for back in range(len(result) - 1, -1, -1):
+                    if is_separator_line(result[back]) and back > 0:
+                        last_table_header = result[back - 1].strip()
+                        break
+                
+                # Procurar próxima tabela (pulando linhas em branco)
+                lookahead = 1
+                while i + lookahead < len(lines):
+                    next_line = lines[i + lookahead].strip()
+                    if next_line == '':
+                        lookahead += 1
+                        continue
+                    if next_line.startswith('#'):
+                        # Novo título = tabelas são de seções diferentes, NÃO mesclar
+                        break
+                    if is_table_line(lines[i + lookahead]):
+                        next_table_cols = count_columns(lines[i + lookahead])
+                        next_table_header = lines[i + lookahead].strip()
+                        
+                        # v2.27: Verificar se é continuação (mesmo número de colunas E mesmo header)
+                        headers_match = last_table_header == next_table_header if last_table_header else True
+                        if last_table_cols == next_table_cols and last_table_cols >= 2 and headers_match:
+                            # Verificar se a próxima linha é separator (header + separator = pular ambos)
+                            skip_count = 0
+                            if i + lookahead + 1 < len(lines) and is_separator_line(lines[i + lookahead + 1]):
+                                # Pular header duplicado e separator
+                                skip_count = 2
+                                tables_merged += 1
+                                print(f"   🔗 Mesclando tabela em linha {i + lookahead} ({next_table_cols} colunas)")
+                            
+                            if skip_count > 0:
+                                # Remover linhas em branco que já foram adicionadas ao result
+                                while result and result[-1].strip() == '':
+                                    result.pop()
+                                # Avançar para depois do header+separator da segunda tabela
+                                i += lookahead + skip_count - 1
+                    break
+        
+        i += 1
+    
+    if tables_merged > 0:
+        print(f"   ✅ {tables_merged} tabela(s) mesclada(s)")
+    else:
+        print(f"   ℹ️  Nenhuma tabela dividida detectada")
+    
+    return '\n'.join(result)
+
+
 def limpar_estrutura_para_review(mapping: str) -> str:
     """
     v2.25: Remove metadados de âncora (ABRE/FECHA) do mapeamento para uso em ai_structure_review.
@@ -2562,6 +2694,66 @@ Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **
 - PROIBIDO usar `|` dentro de células e evitar quebras de linha dentro das células.
 - Se não houver material de prova no bloco, **NÃO crie** esta Tabela 2."""
 
+    # --- AUDIÊNCIA MODE ---
+    PROMPT_HEAD_AUDIENCIA = """# DIRETRIZES DE TRANSCRIÇÃO JURÍDICA (MODO AUDIÊNCIA)
+
+## PAPEL
+VOCÊ É UM REDATOR TÉCNICO FORENSE.
+- **Tom:** objetivo, fiel e formal.
+- **Pessoa:** preserve a pessoa original da fala.
+- **Objetivo:** reproduzir a audiência/reunião de forma clara e organizada, SEM RESUMIR.
+
+## OBJETIVO
+- Transformar a transcrição em texto legível e coeso, mantendo a fidelidade integral.
+- **Tamanho:** saída entre **95% e 115%** do trecho original (apenas limpeza de oralidade).
+
+## NÃO FAZER
+1. **NÃO RESUMA**. Não omita falas, datas, valores, nomes, eventos.
+2. **NÃO ALTERE** a ordem dos fatos.
+3. **NÃO INVENTE** informações ausentes.
+4. **NÃO PADRONIZE** falas de pessoas diferentes: preserve o estilo de cada fala."""
+
+    PROMPT_STYLE_AUDIENCIA = """## ✅ DIRETRIZES DE ESTILO
+1. Corrija erros gramaticais leves sem alterar o sentido.
+2. Remova muletas orais (ex.: "né", "tá", "tipo").
+3. Preserve nomes, datas, valores, locais e referências a provas.
+4. Use parágrafos curtos e claros.
+5. Mantenha identificação de falantes quando presente (ex.: SPEAKER 1/2/3)."""
+
+    PROMPT_STRUCTURE_AUDIENCIA = """## 📝 ESTRUTURA E TÍTULOS
+- Mantenha a ordem cronológica das falas.
+- Use títulos Markdown (##, ###) apenas quando houver mudança clara de fase:
+  (ex.: Abertura, Depoimentos, Decisão, Encerramento).
+- Preserve perguntas e respostas em sequência."""
+
+    PROMPT_TABLE_AUDIENCIA = """## 📌 OBSERVAÇÃO SOBRE TABELAS
+Não gere quadros-síntese automaticamente. Só use tabelas se solicitado explicitamente."""
+
+    # --- DEPOIMENTO MODE ---
+    PROMPT_HEAD_DEPOIMENTO = """# DIRETRIZES DE TRANSCRIÇÃO JURÍDICA (MODO DEPOIMENTO)
+
+## PAPEL
+VOCÊ É UM REDATOR TÉCNICO FORENSE.
+- **Objetivo:** registrar depoimentos com fidelidade total.
+- **Tom:** objetivo, sem resumos ou interpretações.
+
+## REGRAS CRÍTICAS
+1. **NÃO RESUMA**. Preserve conteúdo integral.
+2. **PRESERVE** pausas, negações e afirmações relevantes.
+3. **MANTENHA** perguntas e respostas em sequência."""
+
+    PROMPT_STYLE_DEPOIMENTO = """## ✅ DIRETRIZES DE ESTILO
+1. Corrija apenas erros gramaticais leves.
+2. Preserve nomes, datas, valores e qualificações.
+3. Se houver identificação de falante, mantenha-a."""
+
+    PROMPT_STRUCTURE_DEPOIMENTO = """## 📝 ESTRUTURA
+- Mantenha a sequência das falas.
+- Use títulos apenas se houver blocos claros (ex.: Depoimento, Esclarecimentos)."""
+
+    PROMPT_TABLE_DEPOIMENTO = """## 📌 OBSERVAÇÃO SOBRE TABELAS
+Não gere quadros-síntese automaticamente."""
+
     # --- SHARED FOOTER (Anti-Duplication) ---
     PROMPT_FOOTER = """## ⚠️ REGRA ANTI-DUPLICAÇÃO (CRÍTICA)
 Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
@@ -3007,6 +3199,16 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             style = self.PROMPT_STYLE_FIDELIDADE
             structure = self.PROMPT_STRUCTURE_FIDELIDADE
             table = self.PROMPT_TABLE_FIDELIDADE
+        elif mode == "AUDIENCIA":
+            head = self.PROMPT_HEAD_AUDIENCIA
+            style = self.PROMPT_STYLE_AUDIENCIA
+            structure = self.PROMPT_STRUCTURE_AUDIENCIA
+            table = self.PROMPT_TABLE_AUDIENCIA
+        elif mode == "DEPOIMENTO":
+            head = self.PROMPT_HEAD_DEPOIMENTO
+            style = self.PROMPT_STYLE_DEPOIMENTO
+            structure = self.PROMPT_STRUCTURE_DEPOIMENTO
+            table = self.PROMPT_TABLE_DEPOIMENTO
         else:  # Default to APOSTILA
             head = self.PROMPT_HEAD_APOSTILA
             style = self.PROMPT_STYLE_APOSTILA
@@ -3275,6 +3477,214 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         return transcript_result
 
+    def transcribe_with_segments(self, audio_path):
+        """
+        Transcreve e retorna segmentos com timestamps e speaker_label quando diarização estiver disponível.
+        """
+        if not mlx_whisper:
+            raise ImportError("mlx_whisper não instalado.")
+
+        result = mlx_whisper.transcribe(
+            audio_path,
+            path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
+            language="pt",
+            temperature=0.0,
+            initial_prompt="Esta é uma transcrição de audiência ou reunião jurídica em português brasileiro.",
+            word_timestamps=True,
+            fp16=True,
+            no_speech_threshold=0.6,
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=2.4,
+            condition_on_previous_text=True,
+            suppress_tokens=[-1],
+            verbose=False
+        )
+
+        diarization_segments = []
+        diarization = None
+        labeled_segments = None
+        if Pipeline and torch and HF_TOKEN:
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=HF_TOKEN
+                )
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                pipeline.to(torch.device(device))
+                diarization = pipeline(audio_path)
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    speaker_id = speaker.split('_')[-1]
+                    diarization_segments.append({
+                        "start": float(turn.start),
+                        "end": float(turn.end),
+                        "speaker_label": f"SPEAKER {int(speaker_id) + 1}"
+                    })
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Erro na diarização (segments): {e}")
+
+        if diarization:
+            labeled_segments = self._assign_diarization_labels(result['segments'], diarization)
+        else:
+            labeled_segments = [
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"],
+                    "speaker_label": "SPEAKER 1"
+                }
+                for seg in result.get("segments", [])
+            ]
+
+        transcript_text = self._segments_to_text(labeled_segments)
+        return {
+            "text": transcript_text,
+            "segments": labeled_segments,
+            "diarization": diarization_segments
+        }
+
+    def transcribe_beam_with_segments(self, audio_path):
+        """
+        Transcrição Beam Search com retorno de segmentos.
+        """
+        if not FASTER_WHISPER_AVAILABLE:
+            return self.transcribe_with_segments(audio_path)
+
+        model_size = "large-v3-turbo"
+        model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        segments, info = model.transcribe(
+            audio_path,
+            language="pt",
+            beam_size=5,
+            best_of=5,
+            patience=1.0,
+            length_penalty=1.0,
+            temperature=0.0,
+            condition_on_previous_text=True,
+            no_speech_threshold=0.6,
+            compression_ratio_threshold=2.4,
+            initial_prompt="Esta é uma transcrição de audiência ou reunião jurídica em português brasileiro.",
+            word_timestamps=True,
+        )
+
+        asr_segments = [
+            {
+                "start": float(seg.start),
+                "end": float(seg.end),
+                "text": seg.text
+            }
+            for seg in segments
+        ]
+
+        diarization_segments = []
+        diarization = None
+        if Pipeline and torch and HF_TOKEN:
+            try:
+                pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=HF_TOKEN
+                )
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                pipeline.to(torch.device(device))
+                diarization = pipeline(audio_path)
+                for turn, _, speaker in diarization.itertracks(yield_label=True):
+                    speaker_id = speaker.split('_')[-1]
+                    diarization_segments.append({
+                        "start": float(turn.start),
+                        "end": float(turn.end),
+                        "speaker_label": f"SPEAKER {int(speaker_id) + 1}"
+                    })
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Erro na diarização (beam segments): {e}")
+
+        if diarization:
+            labeled_segments = self._assign_diarization_labels(asr_segments, diarization)
+        else:
+            labeled_segments = [
+                {
+                    "start": seg["start"],
+                    "end": seg["end"],
+                    "text": seg["text"],
+                    "speaker_label": "SPEAKER 1"
+                }
+                for seg in asr_segments
+            ]
+
+        transcript_text = self._segments_to_text(labeled_segments)
+        return {
+            "text": transcript_text,
+            "segments": labeled_segments,
+            "diarization": diarization_segments
+        }
+
+    def _segments_to_text(self, segments):
+        raw_output = []
+        current_speaker = None
+        last_timestamp = None
+        for segment in segments:
+            speaker_label = segment.get("speaker_label", "SPEAKER 1")
+            if speaker_label != current_speaker:
+                raw_output.append(f"\n{speaker_label}\n")
+                current_speaker = speaker_label
+            start = segment.get("start") or 0
+            if self._should_add_timestamp(start, last_timestamp, interval_minutes=20):
+                timestamp_str = f"[{self._format_timestamp(start)}] "
+                last_timestamp = start
+            else:
+                timestamp_str = ""
+            raw_output.append(f"{timestamp_str}{(segment.get('text') or '').strip()}")
+        return " ".join(raw_output)
+
+    def _assign_diarization_labels(self, segments, diarization_output):
+        try:
+            from intervaltree import IntervalTree
+        except ImportError:
+            return self._assign_diarization_labels_fallback(segments, diarization_output)
+
+        tree = IntervalTree()
+        for turn, _, speaker in diarization_output.itertracks(yield_label=True):
+            tree[turn.start:turn.end] = speaker
+
+        labeled_segments = []
+        for segment in segments:
+            start, end = segment['start'], segment['end']
+            overlaps = tree[start:end]
+            if overlaps:
+                best_overlap = max(
+                    overlaps,
+                    key=lambda interval: min(end, interval.end) - max(start, interval.begin)
+                )
+                speaker_id = best_overlap.data.split('_')[-1]
+                best_speaker = f"SPEAKER {int(speaker_id) + 1}"
+            else:
+                best_speaker = "SPEAKER 0"
+            labeled_segments.append({
+                "start": float(start),
+                "end": float(end),
+                "text": segment.get("text", ""),
+                "speaker_label": best_speaker,
+            })
+        return labeled_segments
+
+    def _assign_diarization_labels_fallback(self, segments, diarization_output):
+        diarization_segments = [(t.start, t.end, s) for t, _, s in diarization_output.itertracks(yield_label=True)]
+        labeled_segments = []
+        for segment in segments:
+            start, end = segment['start'], segment['end']
+            best_speaker = "SPEAKER 0"
+            max_overlap = 0
+            for d_start, d_end, d_speaker in diarization_segments:
+                overlap = max(0, min(end, d_end) - max(start, d_start))
+                if overlap > max_overlap:
+                    max_overlap = overlap
+                    best_speaker = f"SPEAKER {int(d_speaker.split('_')[-1]) + 1}"
+            labeled_segments.append({
+                "start": float(start),
+                "end": float(end),
+                "text": segment.get("text", ""),
+                "speaker_label": best_speaker,
+            })
+        return labeled_segments
+
     def _format_timestamp(self, seconds):
         m, s = divmod(seconds, 60)
         h, m = divmod(m, 60)
@@ -3484,6 +3894,53 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         except:
             pass
 
+    def _detect_open_table_state(self, text: str) -> dict:
+        """
+        v2.27: Detecta se o texto termina com uma tabela/quadro aberto mas não concluído.
+        
+        Casos detectados:
+        1. Título de quadro-síntese (#### 📋 Quadro-síntese) sem tabela depois
+        2. Tabela iniciada mas incompleta (menos linhas que o esperado)
+        
+        Returns:
+            dict com 'needs_table_continuation' e 'context_hint' se aberto, {} se fechado
+        """
+        if not text or len(text) < 100:
+            return {}
+        
+        lines = text.strip().splitlines()
+        last_50 = lines[-50:] if len(lines) > 50 else lines
+        
+        # Caso 1: Título de quadro-síntese sem tabela
+        for i, line in enumerate(last_50):
+            if re.match(r'^#{3,5}\s*📋.*[Qq]uadro', line):
+                # Há um título de quadro, verifica se tabela foi gerada depois
+                remaining = last_50[i+1:]
+                has_table = any('|' in l and l.strip().startswith('|') for l in remaining)
+                if not has_table:
+                    section_title = line.strip()
+                    return {
+                        "needs_table_continuation": True,
+                        "open_section_title": section_title,
+                        "context_hint": f"\n\n⚠️ **CONTINUAÇÃO OBRIGATÓRIA**: O chunk anterior terminou com o título '{section_title}' mas SEM a tabela correspondente. Você DEVE gerar a tabela Markdown para esse quadro-síntese ANTES de qualquer novo conteúdo."
+                    }
+        
+        # Caso 2: Última linha é tabela (pode precisar continuação se poucos dados)
+        # Apenas logamos, não adicionamos instrução explícita neste caso
+        
+        # Caso 3: Célula amputada (corte no meio da frase dentro da tabela)
+        # Ex: "| Item 1 | O princípio da legalidade define que" (sem pipe final)
+        if lines:
+            last_line = lines[-1].strip()
+            if last_line.startswith('|') and not last_line.endswith('|'):
+                return {
+                    "needs_table_continuation": True,
+                    "open_section_title": "Tabela cortada no meio",
+                    "context_hint": f"\n\n⚠️ CONTINUE a tabela de onde parou: '{last_line[-60:]}...' → complete a frase, feche com '|', continue normalmente."
+                }
+        
+        return {}
+
     async def _format_chunk_async(self, chunk_text, idx, prompt=None, total=1, context="", depth=0, **kwargs):
         """Wrapper de compatibilidade para process_chunk_async que aceita prompt (ignorado)"""
         return await self.process_chunk_async(
@@ -3637,7 +4094,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         try:
             # Configuração de Segurança (Block None) e Parâmetros
-            max_output_tokens = max_output_tokens_override or 8192
+            max_output_tokens = max_output_tokens_override or 16384  # v2.27: Aumentado de 8k para 16k
             safety_config = [
                 types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
                 types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -4912,8 +5369,16 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     if info.get('instituto_continua') and info.get('instituto_nome'):
                         continuidade_nota = f"\n\n⚠️ AVISO: O instituto '{info['instituto_nome']}' continua no próximo chunk. NÃO gere o Quadro-síntese final ainda — ele será completado na próxima parte."
                     
-                    # Contexto final com nota de continuidade (se aplicável)
-                    contexto_final = contexto_estilo + continuidade_nota
+                    # v2.27: Detectar se chunk anterior terminou com tabela/quadro aberto
+                    tabela_aberta_nota = ""
+                    if i > 0 and ordered_results:
+                        table_state = self._detect_open_table_state(ordered_results[-1])
+                        if table_state.get('needs_table_continuation'):
+                            tabela_aberta_nota = table_state.get('context_hint', '')
+                            print(f"{Fore.YELLOW}   📋 Tabela aberta detectada: {table_state.get('open_section_title', '')[:50]}...")
+                    
+                    # Contexto final com notas de continuidade (se aplicável)
+                    contexto_final = contexto_estilo + continuidade_nota + tabela_aberta_nota
 
                     # v2.19: Process Chunk Async (New Interface)
                     formatted = await self.process_chunk_async(
@@ -4980,6 +5445,10 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         
         print("  Passada 2.6: Removendo títulos órfãos (v2.17)...")
         full_formatted = remover_titulos_orfaos(full_formatted)
+        
+        print("  Passada 2.7: Mesclando tabelas divididas (v2.27)...")
+        await emit("formatting", 97, "Passada 2.7: Mesclando tabelas divididas...")
+        full_formatted = mesclar_tabelas_divididas(full_formatted)
         
         print("  Passada 3: Normalizando títulos similares...")
         await emit("formatting", 97, "Passada 3: Normalizando títulos...")

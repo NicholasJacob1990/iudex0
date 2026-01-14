@@ -2,7 +2,7 @@ from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
-from datetime import datetime
+from app.core.time_utils import utcnow
 import enum
 
 from app.core.database import Base
@@ -32,8 +32,8 @@ class Case(Base):
     
     status = Column(String, default=CaseStatus.ACTIVE)
     
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=utcnow)
+    updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
 
     # Relacionamentos
     user = relationship("User", back_populates="cases")

@@ -1,6 +1,5 @@
 export { ApplyTemplateDialog } from './apply-template-dialog';
 export { CanvasContainer } from './canvas-container';
-export { ChatInterface } from './chat-interface';
 export { ContextPanel } from './context-panel';
 export { ContextSelector } from './context-selector';
 export { DiagramViewer } from './diagram-viewer';

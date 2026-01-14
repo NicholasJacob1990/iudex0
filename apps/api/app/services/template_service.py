@@ -11,6 +11,7 @@ import shutil
 import uuid
 from docx import Document
 from app.core.config import settings
+from app.schemas.smart_template import SmartTemplate, TemplateRenderInput, BlockType
 
 class TemplateService:
     """Serviço para manipulação de templates DOCX"""
@@ -137,6 +138,53 @@ class TemplateService:
         except Exception as e:
             logger.error(f"Erro ao extrair variáveis: {e}")
             return []
+
+    def assemble_smart_template(self, template: SmartTemplate, input_data: TemplateRenderInput) -> str:
+        """
+        Monta um documento final a partir de um SmartTemplate e inputs do usuário.
+        Respeita as regras de bloqueio (lock) e permissões de edição.
+        """
+        doc_parts = []
+        
+        for block in template.blocks:
+            # 1. Verificar Condição
+            if block.condition:
+                cond_val = input_data.variables.get(block.condition)
+                if cond_val is False:
+                    continue
+            
+            block_content = ""
+            
+            # 2. Resolver Conteúdo Base
+            if block.type == BlockType.FIXED:
+                block_content = block.content or ""
+                
+            elif block.type == BlockType.VARIABLE:
+                var_name = block.variable_name
+                val = input_data.variables.get(var_name)
+                if val:
+                    block_content = str(val)
+                else:
+                    block_content = f"[{var_name}]"
+                    
+            elif block.type == BlockType.AI:
+                block_content = f"> [IA: {block.title}]"
+            
+            elif block.type == BlockType.CLAUSE:
+                block_content = block.content or f"[Cláusula: {block.title}]"
+
+            # 3. Aplicar Overrides (Edições do Usuário ou Conteúdo Gerado)
+            if block.id in input_data.overrides:
+                override_text = input_data.overrides[block.id]
+                
+                if block.type == BlockType.FIXED and not block.user_can_edit:
+                    logger.warning(f"Tentativa de sobrescrever bloco fixo {block.id} ignorada.")
+                else:
+                    block_content = override_text
+
+            doc_parts.append(block_content)
+            
+        return "\n\n".join(doc_parts)
 
 # Instância global
 template_service = TemplateService()

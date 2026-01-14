@@ -84,15 +84,14 @@ export default function JurisprudencePage() {
             </p>
           </div>
 
-          {/* Aviso de Demonstração */}
-          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm">
+          <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
             <div className="flex items-start gap-3">
-              <span className="text-amber-600 text-lg">⚠️</span>
+              <span className="text-slate-600 text-lg">ℹ️</span>
               <div>
-                <p className="font-semibold text-amber-900">Modo de Demonstração</p>
-                <p className="text-amber-700 mt-1">
-                  Esta funcionalidade está exibindo resultados de exemplo. A integração com bases oficiais dos tribunais será implementada em breve. 
-                  <strong className="block mt-1">Não utilize estes precedentes em documentos reais.</strong>
+                <p className="font-semibold text-slate-900">Base Local de Jurisprudência</p>
+                <p className="text-slate-700 mt-1">
+                  Resultados provenientes da base local configurada. Recomendamos validar o inteiro teor no tribunal
+                  antes de inserir em documentos finais.
                 </p>
               </div>
             </div>

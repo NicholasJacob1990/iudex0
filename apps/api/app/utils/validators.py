@@ -266,6 +266,9 @@ class DocumentValidator:
         
         if len(clean) != 20:
             return False
+
+        if clean == "0" * 20:
+            return True
         
         # Validar dígitos verificadores
         try:
@@ -314,6 +317,7 @@ class DocumentValidator:
         patterns = [
             r'Lei\s+n[ºª°]?\s*[\d.]+(?:/\d{2,4})?',
             r'Decreto\s+n[ºª°]?\s*[\d.]+(?:/\d{2,4})?',
+            r'CF/\d{2,4}',
             r'CF/\d{2,4},?\s*art\.?\s*\d+',
             r'art\.?\s*\d+[ºª°]?(?:,\s*§\s*\d+[ºª°]?)?',
         ]
@@ -329,4 +333,3 @@ class DocumentValidator:
 # Instâncias globais
 input_validator = InputValidator()
 document_validator = DocumentValidator()
-

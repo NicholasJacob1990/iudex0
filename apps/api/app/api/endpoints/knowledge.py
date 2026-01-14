@@ -5,6 +5,10 @@ Retornam resultados mockados para demonstração funcional.
 
 from fastapi import APIRouter, Depends, Query
 from app.core.security import get_current_user
+from app.services.legislation_service import legislation_service
+from app.services.jurisprudence_service import jurisprudence_service
+from app.services.web_search_service import web_search_service
+import hashlib
 
 router = APIRouter()
 
@@ -12,75 +16,102 @@ router = APIRouter()
 @router.get("/legislation/search")
 async def search_legislation(
     query: str = Query(..., min_length=2),
+    tipo: str | None = None,
+    limit: int = 10,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Pesquisa semântica de legislação (mock).
+    Pesquisa semântica de legislação (base local).
     """
-    results = [
-        {
-            "id": "leg-1",
-            "title": "Lei Geral de Proteção de Dados (Lei 13.709/2018)",
-            "excerpt": "Dispõe sobre o tratamento de dados pessoais...",
-            "status": "Consolidada",
-            "updated_at": "2024-04-01T10:00:00Z",
-        },
-        {
-            "id": "leg-2",
-            "title": "Lei nº 14.133/2021 - Nova Lei de Licitações",
-            "excerpt": "Institui normas gerais de licitação e contratação...",
-            "status": "Atualizada em 34 minutos",
-            "updated_at": "2024-04-10T09:30:00Z",
-        },
-    ]
-    return {"items": results, "total": len(results), "query": query}
+    payload = await legislation_service.search(query, tipo=tipo, limit=limit)
+    raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+
+    items = []
+    for law in raw_results:
+        law_id = law.get("id") or hashlib.md5(
+            f"{law.get('numero', '')}-{law.get('nome', '')}".encode()
+        ).hexdigest()[:10]
+        items.append(
+            {
+                "id": law_id,
+                "title": law.get("nome") or law.get("titulo") or law.get("numero") or "Lei",
+                "excerpt": law.get("ementa") or law.get("resumo") or "",
+                "status": law.get("status") or law.get("tipo") or "Atualizada",
+                "updated_at": law.get("updated_at") or law.get("ano"),
+                "numero": law.get("numero"),
+                "tipo": law.get("tipo"),
+                "url": law.get("url"),
+                "source": "local_database",
+            }
+        )
+
+    return {"items": items, "total": len(items), "query": query, "tipo": tipo}
 
 
 @router.get("/jurisprudence/search")
 async def search_jurisprudence(
     query: str = Query(..., min_length=2),
     court: str | None = None,
+    tema: str | None = None,
+    limit: int = 10,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Pesquisa de jurisprudência (mock).
+    Pesquisa de jurisprudência (base local).
     """
-    data = [
-        {
-            "id": "jp-1",
-            "court": "STJ",
-            "title": "Dano Moral por Negativação Indevida",
-            "summary": "Caracteriza dano moral in re ipsa a inscrição indevida...",
-            "date": "2024-03-15",
-            "tags": ["Dano Moral", "Consumidor"],
-            "processNumber": "REsp 1.234.567/SP",
-        },
-        {
-            "id": "jp-2",
-            "court": "STF",
-            "title": "Tema 1234 - Repercussão Geral",
-            "summary": "Inconstitucional a exigência de garantia para impressão de notas fiscais...",
-            "date": "2024-02-10",
-            "tags": ["Tributário", "Livre Iniciativa"],
-            "processNumber": "RE 987.654/RJ",
-        },
-    ]
-    if court:
-        data = [item for item in data if item["court"] == court]
-    return {"items": data, "total": len(data), "query": query, "court": court}
+    return await jurisprudence_service.search(
+        query=query,
+        court=court,
+        tema=tema,
+        limit=limit
+    )
 
 
 @router.get("/web/search")
 async def search_web(
     query: str = Query(..., min_length=2),
+    limit: int = 10,
+    multi_query: bool = True,
+    use_cache: bool = True,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Pesquisa web simplificada (mock).
+    Pesquisa web real com cache (Serper ou DuckDuckGo).
     """
-    results = [
-        {"id": "web-1", "title": "Resumo sobre repercussão geral", "url": "https://example.com/artigo", "snippet": "Entenda como funciona a repercussão geral no STF..."},
-        {"id": "web-2", "title": "Guia prático de temas repetitivos", "url": "https://example.com/guia", "snippet": "Saiba como localizar e citar temas repetitivos do STJ..."},
-    ]
-    return {"items": results, "total": len(results), "query": query}
+    if multi_query:
+        payload = await web_search_service.search_multi(
+            query=query,
+            num_results=limit,
+            use_cache=use_cache
+        )
+    else:
+        payload = await web_search_service.search(
+            query=query,
+            num_results=limit,
+            use_cache=use_cache
+        )
 
+    raw_results = payload.get("results", []) if isinstance(payload, dict) else []
+    items = []
+    for idx, result in enumerate(raw_results):
+        url = result.get("url", "")
+        item_id = result.get("id") or (
+            hashlib.md5(url.encode()).hexdigest()[:10] if url else f"web-{idx + 1}"
+        )
+        items.append(
+            {
+                "id": item_id,
+                "title": result.get("title") or url,
+                "url": url,
+                "snippet": result.get("snippet"),
+                "source": result.get("source") or payload.get("source"),
+            }
+        )
+
+    return {
+        "items": items,
+        "total": len(items),
+        "query": query,
+        "source": payload.get("source"),
+        "cached": payload.get("cached", False),
+    }

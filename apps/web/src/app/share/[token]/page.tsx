@@ -1,6 +1,6 @@
 import { FileText, Clock, Lock, ExternalLink } from 'lucide-react';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
 
 interface SharedDocument {
     id: string;
@@ -51,6 +51,10 @@ export default async function SharePage({ params }: { params: { token: string } 
     }
 
     const displayContent = doc.content || doc.extracted_text || "Documento sem conteúdo de texto disponível.";
+    const rawContent = String(displayContent || '').trim();
+    const looksLikeHtml = /<(p|h1|h2|h3|h4|h5|h6|div|ul|ol|li|table|thead|tbody|tr|td|th|blockquote|strong|em|span)(\s|>)/i.test(
+        rawContent
+    );
     const createdDate = new Date(doc.created_at).toLocaleDateString('pt-BR');
 
     return (
@@ -89,9 +93,11 @@ export default async function SharePage({ params }: { params: { token: string } 
             <main className="max-w-4xl mx-auto px-4 py-8">
                 <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
                     <div className="p-6 md:p-8">
-                        <pre className="whitespace-pre-wrap font-sans text-slate-700 text-sm leading-relaxed">
-                            {displayContent}
-                        </pre>
+                        {looksLikeHtml ? (
+                            <div className="editor-output" dangerouslySetInnerHTML={{ __html: rawContent }} />
+                        ) : (
+                            <pre className="editor-output whitespace-pre-wrap">{displayContent}</pre>
+                        )}
                     </div>
                 </div>
 

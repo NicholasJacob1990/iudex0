@@ -3,6 +3,7 @@ Modelo de Documento
 """
 
 from datetime import datetime
+from app.core.time_utils import utcnow
 from typing import Optional
 from sqlalchemy import String, Integer, DateTime, JSON, Boolean, Text, Enum as SQLEnum, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
@@ -83,16 +84,15 @@ class Document(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
     
     def __repr__(self) -> str:
         return f"<Document(id={self.id}, name={self.name}, status={self.status})>"
-

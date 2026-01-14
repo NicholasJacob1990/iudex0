@@ -135,7 +135,8 @@ export function ApplyTemplateDialog({ open, onOpenChange }: ApplyTemplateDialogP
                 <DialogHeader>
                     <DialogTitle>Aplicar Template DOCX</DialogTitle>
                     <DialogDescription>
-                        Preencha variáveis em seus documentos automaticamente.
+                        Gere um DOCX automaticamente a partir de um template com variáveis (ex.: <span className="font-mono">{'{{'}nome_cliente{'}}'}</span>).
+                        <span className="block mt-1">Passo a passo: 1) Envie o template 2) Preencha os campos 3) Baixe o documento gerado.</span>
                     </DialogDescription>
                 </DialogHeader>
 

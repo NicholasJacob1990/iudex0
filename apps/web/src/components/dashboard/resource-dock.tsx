@@ -1,6 +1,5 @@
 'use client';
 
-import { resourceShortcuts } from '@/data/mock';
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
 import { Mic, Share2, Scale, Bot, Users } from 'lucide-react';
@@ -12,6 +11,14 @@ const dockIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   'Metadados CNJ': Scale,
   'Comunicações DJEN': Bot,
 };
+
+const resourceShortcuts = [
+  { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
+  { id: 'diagrams', label: 'Diagramas', description: 'Mapas mentais automáticos', icon: 'Share2' },
+  { id: 'sharing', label: 'Compartilhamentos', description: 'Pastas e grupos', icon: 'Users' },
+  { id: 'cnj', label: 'Metadados CNJ', description: 'Processos oficiais', icon: 'Scale' },
+  { id: 'djen', label: 'Comunicações DJEN', description: 'Diário de Justiça', icon: 'Newspaper' },
+];
 
 export function ResourceDock() {
   const [enabled, setEnabled] = useState({
@@ -73,4 +80,3 @@ export function ResourceDock() {
     </aside>
   );
 }
-

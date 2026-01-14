@@ -58,6 +58,23 @@ MODEL_REGISTRY = {
         "provider": "openai"
     },
 
+    # === XAI (GROK) ===
+    "grok-4": {
+        "context_window": 128_000,
+        "max_output": 8_192,
+        "provider": "xai"
+    },
+    "grok-4-fast": {
+        "context_window": 2_000_000,
+        "max_output": 8_192,
+        "provider": "xai"
+    },
+    "grok-4.1-fast": {
+        "context_window": 2_000_000,
+        "max_output": 8_192,
+        "provider": "xai"
+    },
+
     # === ANTHROPIC (CLAUDE) ===
     # Fonte: https://docs.anthropic.com/en/docs/about-claude/models
     "claude-sonnet-4-5-20250514": {
@@ -91,6 +108,12 @@ MODEL_REGISTRY = {
         "context_window": 200_000,
         "max_output": 8_192,
         "provider": "anthropic"
+    },
+    # === META (LLAMA) ===
+    "llama-4": {
+        "context_window": 128_000,
+        "max_output": 8_192,
+        "provider": "openrouter"
     }
 }
 

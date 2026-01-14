@@ -4,9 +4,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
-import { AlertTriangle, Check, X, Edit2, ShieldAlert, GitBranch, FileCheck, FileWarning, Plus, RotateCcw, Trash2, GripVertical, ListOrdered } from 'lucide-react';
+import { AlertTriangle, Check, X, Edit2, ShieldAlert, GitBranch, FileCheck, FileWarning, Plus, RotateCcw, Trash2, GripVertical, ListOrdered, Users, PenTool } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Reorder, useDragControls, motion, AnimatePresence } from 'framer-motion';
+import { cn } from '@/lib/utils';
 
 interface DivergenceItem {
     secao: string;
@@ -17,7 +18,7 @@ interface DivergenceItem {
 interface HumanReviewModalProps {
     isOpen: boolean;
     data: {
-        checkpoint: 'divergence' | 'final' | 'correction' | 'section' | 'outline';
+        checkpoint: 'divergence' | 'final' | 'correction' | 'section' | 'outline' | 'document_gate' | 'style_check';
         document?: string;
         document_preview?: string;
         audit_status?: string;
@@ -29,6 +30,10 @@ interface HumanReviewModalProps {
             individual_reviews: Record<string, string>;
             critical_problems: string[];
             markdown: string;
+            score_spread?: number;  // v5.4
+            score_disagreement?: boolean;  // v5.4
+            judge_synthesis?: string;  // v5.4
+            revised_document?: string;  // v5.4
         };
         divergencias?: DivergenceItem[];
         suspicious?: any[];
@@ -46,12 +51,29 @@ interface HumanReviewModalProps {
         proposed_corrections?: string;
         corrections_diff?: string;
         audit_issues?: string[];
+        // Document gate
+        summary?: string;
+        missing_critical?: any[];
+        missing_noncritical?: any[];
+        // Style check
+        tone_detected?: string;
+        thermometer?: string;
+        score?: number;
+        issues?: string[];
+        term_variations?: Array<{
+            term?: string;
+            preferred?: string;
+            count?: number;
+            note?: string;
+        }>;
+        draft_snippet?: string;
     } | null;
     onSubmit: (decision: {
         checkpoint: string;
         approved: boolean;
         edits?: string;
         instructions?: string;
+        proposal?: string;  // v5.4: User proposal for committee debate
         hil_target_sections?: string[];
     }) => void;
 }
@@ -115,6 +137,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
     const [originalOutline, setOriginalOutline] = useState<string[]>([]);
     const [hilTargets, setHilTargets] = useState<string[]>([]);
     const [activeTab, setActiveTab] = useState<string | null>(null);
+    const [proposal, setProposal] = useState('');  // v5.4: User proposal for committee
 
     // Reset state when data changes
     useEffect(() => {
@@ -148,6 +171,18 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
     const isCorrectionCheckpoint = data.checkpoint === 'correction';
     const isSectionCheckpoint = data.checkpoint === 'section';
     const isOutlineCheckpoint = data.checkpoint === 'outline';
+    const isDocumentGateCheckpoint = data.checkpoint === 'document_gate';
+    const isStyleCheckpoint = data.checkpoint === 'style_check';
+
+    const toneBucket = (() => {
+        const bucket = String(data.thermometer || '').trim();
+        if (bucket) return bucket;
+        const tone = String(data.tone_detected || '').toLowerCase();
+        if (!tone) return 'Equilibrado';
+        if (tone.includes('agress') || tone.includes('combativ') || tone.includes('hostil')) return 'Agressivo';
+        if (tone.includes('brando') || tone.includes('subserv') || tone.includes('submis')) return 'Muito brando';
+        return 'Equilibrado';
+    })();
 
     const handleApprove = () => {
         const outlineText = outlineItems.map((s) => (s || '').trim()).filter(Boolean).join('\n');
@@ -164,7 +199,8 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
         onSubmit({
             checkpoint: data.checkpoint,
             approved: false,
-            instructions
+            instructions,
+            proposal: proposal || undefined  // v5.4: Include proposal for committee debate
         });
     };
 
@@ -203,6 +239,16 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                 <FileWarning className="h-5 w-5 text-orange-500" />
                                 Correções Baseadas na Auditoria
                             </>
+                        ) : isStyleCheckpoint ? (
+                            <>
+                                <PenTool className="h-5 w-5 text-emerald-600" />
+                                Style Check
+                            </>
+                        ) : isDocumentGateCheckpoint ? (
+                            <>
+                                <ShieldAlert className="h-5 w-5 text-amber-500" />
+                                Gate Documental
+                            </>
                         ) : (
                             <>
                                 <FileCheck className="h-5 w-5 text-blue-500" />
@@ -219,12 +265,165 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                     ? `Revise e aprove a seção ${data.section_title ? `"${data.section_title}"` : ""}. Se você rejeitar com instruções, o sistema refaz a seção por IA e reabre a aprovação.`
                                     : isCorrectionCheckpoint
                                         ? "A auditoria encontrou problemas. Revise as correções propostas antes de aplicar."
-                                        : "O documento está pronto. Aprove para gerar a versão final."
+                                        : isStyleCheckpoint
+                                            ? "Revise o tom e a consistência editorial antes do gate documental."
+                                            : isDocumentGateCheckpoint
+                                            ? "Faltam documentos não críticos. Você pode prosseguir com ressalva ou bloquear."
+                                            : "O documento está pronto. Aprove para gerar a versão final."
                         }
                     </DialogDescription>
                 </DialogHeader>
 
                 <div className="flex-1 overflow-y-auto py-4 space-y-4">
+
+                    {isStyleCheckpoint && (
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="border rounded-lg p-3 bg-muted/40">
+                                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Tom detectado</div>
+                                    <div className="text-sm font-semibold">{data.tone_detected || 'Não informado'}</div>
+                                </div>
+                                <div className="border rounded-lg p-3 bg-muted/40">
+                                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Nota de estilo</div>
+                                    <div className="text-sm font-semibold">{Number.isFinite(Number(data.score)) ? Number(data.score).toFixed(1) : '—'}</div>
+                                </div>
+                                <div className="border rounded-lg p-3 bg-muted/40">
+                                    <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Termômetro</div>
+                                    <div className="text-sm font-semibold">{toneBucket}</div>
+                                </div>
+                            </div>
+
+                            <div className="border rounded-lg p-3">
+                                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                                    <span>Muito brando</span>
+                                    <span>Equilibrado</span>
+                                    <span>Agressivo</span>
+                                </div>
+                                <div className="relative mt-2 h-2 rounded-full bg-gradient-to-r from-emerald-200 via-amber-200 to-rose-200">
+                                    <span
+                                        className={cn(
+                                            "absolute -top-1 h-4 w-4 rounded-full border-2 border-background shadow",
+                                            toneBucket === 'Muito brando'
+                                                ? 'left-0 bg-emerald-500'
+                                                : toneBucket === 'Agressivo'
+                                                    ? 'right-0 bg-rose-500'
+                                                    : 'left-1/2 -translate-x-1/2 bg-amber-500'
+                                        )}
+                                    />
+                                </div>
+                            </div>
+
+                            {Array.isArray(data.issues) && data.issues.length > 0 && (
+                                <Alert variant="default" className="bg-amber-50 border-amber-200">
+                                    <AlertTriangle className="h-4 w-4 text-amber-600" />
+                                    <AlertTitle>Alertas de estilo</AlertTitle>
+                                    <AlertDescription className="mt-2 space-y-1 text-xs text-amber-800">
+                                        {data.issues.map((issue, idx) => (
+                                            <div key={`style-issue-${idx}`} className="flex gap-2">
+                                                <span>•</span>
+                                                <span>{issue}</span>
+                                            </div>
+                                        ))}
+                                    </AlertDescription>
+                                </Alert>
+                            )}
+
+                            {Array.isArray(data.term_variations) && data.term_variations.length > 0 && (
+                                <div className="border rounded-lg p-3">
+                                    <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Termos fora do padrão</div>
+                                    <div className="mt-2 space-y-2 text-xs">
+                                        {data.term_variations.map((item, idx) => (
+                                            <div key={`term-${idx}`} className="flex items-center justify-between gap-4">
+                                                <div>
+                                                    <div className="font-medium">{item.term || 'Termo'}</div>
+                                                    {item.preferred && (
+                                                        <div className="text-muted-foreground">Preferir: {item.preferred}</div>
+                                                    )}
+                                                    {item.note && (
+                                                        <div className="text-muted-foreground">{item.note}</div>
+                                                    )}
+                                                </div>
+                                                {item.count != null && (
+                                                    <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
+                                                        {item.count}x
+                                                    </span>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
+
+                            {data.draft_snippet && (
+                                <div className="whitespace-pre-wrap bg-muted/50 p-3 rounded-md text-xs font-mono border max-h-[220px] overflow-y-auto">
+                                    {data.draft_snippet}
+                                </div>
+                            )}
+
+                            <div className="flex flex-wrap gap-2">
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                        setInstructions('Suavizar o tom e reduzir linguagem agressiva.');
+                                        setMode('reject');
+                                    }}
+                                >
+                                    Suavizar tom
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                        setInstructions('Tornar o tom mais incisivo, mantendo formalidade.');
+                                        setMode('reject');
+                                    }}
+                                >
+                                    Tornar mais incisivo
+                                </Button>
+                                <Button
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => {
+                                        setInstructions('Padronizar termos e reforçar impessoalidade.');
+                                        setMode('reject');
+                                    }}
+                                >
+                                    Padronizar termos
+                                </Button>
+                            </div>
+                        </div>
+                    )}
+
+                    {isDocumentGateCheckpoint && (
+                        <Alert variant="destructive">
+                            <ShieldAlert className="h-4 w-4" />
+                            <AlertTitle>Documentos pendentes</AlertTitle>
+                            <AlertDescription className="space-y-2">
+                                {data.summary && <div className="text-xs">{data.summary}</div>}
+                                {Array.isArray(data.missing_noncritical) && data.missing_noncritical.length > 0 && (
+                                    <div className="text-xs">
+                                        <p className="font-medium">Não críticos:</p>
+                                        <ul className="list-disc list-inside">
+                                            {data.missing_noncritical.map((item, idx) => (
+                                                <li key={`nc-${idx}`}>{item?.label || item?.id || 'Documento'}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                {Array.isArray(data.missing_critical) && data.missing_critical.length > 0 && (
+                                    <div className="text-xs">
+                                        <p className="font-medium">Críticos:</p>
+                                        <ul className="list-disc list-inside">
+                                            {data.missing_critical.map((item, idx) => (
+                                                <li key={`c-${idx}`}>{item?.label || item?.id || 'Documento'}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                            </AlertDescription>
+                        </Alert>
+                    )}
 
                     {/* Final Committee Review Report */}
                     {isFinalCheckpoint && data.committee_review_report && (
@@ -233,7 +432,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                 <div>
                                     <h4 className="font-semibold text-sm flex items-center gap-2">
                                         <Users className="h-4 w-4 text-indigo-600" />
-                                        Relatório do Comitê de Agentes
+                                        Relatório do Modo Minuta (Agentes)
                                     </h4>
                                     <p className="text-xs text-muted-foreground mt-1">
                                         Revisão realizada por: {data.committee_review_report.agents_participated.join(", ")}
@@ -466,7 +665,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                         >
                                             <ListOrdered className="h-10 w-10 text-muted-foreground/40 mb-3" />
                                             <p className="text-sm text-muted-foreground">Nenhum tópico ainda</p>
-                                            <p className="text-xs text-muted-foreground/60">Clique em "Adicionar" para começar</p>
+                                            <p className="text-xs text-muted-foreground/60">Clique em &quot;Adicionar&quot; para começar</p>
                                         </motion.div>
                                     ) : (
                                         <Reorder.Group
@@ -543,7 +742,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                     )}
 
                     {/* Document Preview / Edit (for non-correction checkpoints in view mode) */}
-                    {!isCorrectionCheckpoint && !isSectionCheckpoint && !isOutlineCheckpoint && mode === 'view' && (
+                    {!isCorrectionCheckpoint && !isSectionCheckpoint && !isOutlineCheckpoint && !isStyleCheckpoint && mode === 'view' && (
                         <div className="whitespace-pre-wrap bg-muted/50 p-4 rounded-md text-sm font-mono border max-h-[300px] overflow-y-auto">
                             {data.document || data.document_preview || "[Documento não disponível]"}
                         </div>
@@ -576,18 +775,42 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                     )}
 
                     {mode === 'reject' && (
-                        <div className="space-y-2">
-                            <label className="text-sm font-medium">
-                                {isSectionCheckpoint ? 'Instruções para Refazer com IA:' : 'Instruções para Correção:'}
-                            </label>
-                            <Textarea
-                                value={instructions}
-                                onChange={(e) => setInstructions(e.target.value)}
-                                placeholder={isSectionCheckpoint
-                                    ? "Ex: Reescreva esta seção com base no art. X, inclua jurisprudência do STJ, remova afirmações sem fonte..."
-                                    : "Ex: Refaça a seção 2 focando em tal lei, ajuste a fundamentação..."}
-                                className="min-h-[200px]"
-                            />
+                        <div className="space-y-4">
+                            <div className="space-y-2">
+                                <label className="text-sm font-medium">
+                                    {isStyleCheckpoint
+                                        ? 'Instruções para Ajuste de Tom:'
+                                        : isSectionCheckpoint
+                                            ? 'Instruções para Refazer com IA:'
+                                            : 'Instruções para Correção:'}
+                                </label>
+                                <Textarea
+                                    value={instructions}
+                                    onChange={(e) => setInstructions(e.target.value)}
+                                    placeholder={isStyleCheckpoint
+                                        ? "Ex: Suavizar tom, reduzir adjetivos, padronizar termos para impessoalidade."
+                                        : isSectionCheckpoint
+                                            ? "Ex: Reescreva esta seção com base no art. X, inclua jurisprudência do STJ, remova afirmações sem fonte..."
+                                            : "Ex: Refaça a seção 2 focando em tal lei, ajuste a fundamentação..."}
+                                    className="min-h-[120px]"
+                                />
+                            </div>
+                            {!isStyleCheckpoint && (
+                                <div className="space-y-2">
+                                <label className="text-sm font-medium text-amber-600">
+                                    💡 Proposta Alternativa (Opcional):
+                                </label>
+                                <p className="text-xs text-muted-foreground">
+                                    Se preferir, escreva sua versão. Os agentes irão avaliar e decidir se aceita, mescla, ou mantém a original.
+                                </p>
+                                <Textarea
+                                    value={proposal}
+                                    onChange={(e) => setProposal(e.target.value)}
+                                    placeholder="Cole aqui sua versão alternativa do texto..."
+                                    className="min-h-[150px]"
+                                />
+                                </div>
+                            )}
                         </div>
                     )}
 
@@ -595,27 +818,51 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
 
                 <DialogFooter className="gap-2 sm:gap-0">
                     {mode === 'view' && (
-                        <>
-                            <Button variant="destructive" onClick={() => setMode('reject')}>
-                                <X className="mr-2 h-4 w-4" /> Rejeitar / Corrigir
-                            </Button>
-                            <Button variant="outline" onClick={() => setMode('edit')}>
-                                <Edit2 className="mr-2 h-4 w-4" /> Editar Manualmente
-                            </Button>
-                            <Button className="bg-green-600 hover:bg-green-700" onClick={handleApprove}>
-                                <Check className="mr-2 h-4 w-4" />
-                                {isDivergenceCheckpoint
-                                    ? "Aprovar e Continuar"
-                                    : isCorrectionCheckpoint
-                                        ? "Aplicar Correções"
-                                        : isSectionCheckpoint
-                                            ? "Aprovar Seção"
-                                            : isOutlineCheckpoint
-                                                ? "Aprovar Outline"
-                                                : "Aprovar Documento Final"
-                                }
-                            </Button>
-                        </>
+                        isDocumentGateCheckpoint ? (
+                            <>
+                                <Button variant="destructive" onClick={handleReject}>
+                                    <X className="mr-2 h-4 w-4" /> Bloquear
+                                </Button>
+                                <Button className="bg-amber-600 hover:bg-amber-700" onClick={handleApprove}>
+                                    <Check className="mr-2 h-4 w-4" /> Prosseguir com ressalva
+                                </Button>
+                            </>
+                        ) : (
+                            <>
+                                {isStyleCheckpoint ? (
+                                    <>
+                                        <Button variant="outline" onClick={() => setMode('reject')}>
+                                            <Edit2 className="mr-2 h-4 w-4" /> Ajustar Tom
+                                        </Button>
+                                        <Button className="bg-green-600 hover:bg-green-700" onClick={handleApprove}>
+                                            <Check className="mr-2 h-4 w-4" /> Aprovar Estilo
+                                        </Button>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Button variant="destructive" onClick={() => setMode('reject')}>
+                                            <X className="mr-2 h-4 w-4" /> Rejeitar / Corrigir
+                                        </Button>
+                                        <Button variant="outline" onClick={() => setMode('edit')}>
+                                            <Edit2 className="mr-2 h-4 w-4" /> Editar Manualmente
+                                        </Button>
+                                        <Button className="bg-green-600 hover:bg-green-700" onClick={handleApprove}>
+                                            <Check className="mr-2 h-4 w-4" />
+                                            {isDivergenceCheckpoint
+                                                ? "Aprovar e Continuar"
+                                                : isCorrectionCheckpoint
+                                                    ? "Aplicar Correções"
+                                                    : isSectionCheckpoint
+                                                        ? "Aprovar Seção"
+                                                        : isOutlineCheckpoint
+                                                            ? "Aprovar Outline"
+                                                            : "Aprovar Documento Final"
+                                            }
+                                        </Button>
+                                    </>
+                                )}
+                            </>
+                        )
                     )}
 
                     {mode === 'edit' && (

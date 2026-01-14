@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans+Text:wght@400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -98,6 +100,10 @@
     @apply bg-card/85 border border-white/60 shadow-soft backdrop-blur-xl;
   }
 
+  .font-google-sans-text {
+    font-family: "Google Sans Text", "Google Sans", var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
   .glass-premium {
     @apply bg-white/5 border border-white/10 shadow-xl backdrop-blur-2xl;
   }
@@ -109,10 +115,133 @@
   .chip {
     @apply rounded-full px-3 py-1 text-xs font-medium bg-secondary text-secondary-foreground;
   }
+
+  .chat-markdown {
+    @apply text-[12px] leading-relaxed text-black;
+  }
+
+  .chat-markdown p {
+    @apply mb-2;
+  }
+
+  .chat-markdown p:last-child {
+    @apply mb-0;
+  }
+
+  .chat-markdown ul {
+    @apply mb-2 list-disc pl-5;
+  }
+
+  .chat-markdown ol {
+    @apply mb-2 list-decimal pl-5;
+  }
+
+  .chat-markdown li {
+    @apply mb-1;
+  }
+
+  .chat-markdown blockquote {
+    @apply mb-3 border-l-2 border-slate-300 pl-3 text-slate-700;
+  }
+
+  .chat-markdown pre {
+    @apply my-3 overflow-auto rounded-md bg-slate-100 p-3 text-[11px] leading-relaxed;
+  }
+
+  .chat-markdown code {
+    @apply rounded bg-slate-100 px-1 py-0.5 text-[11px];
+  }
+
+  .chat-markdown pre code {
+    @apply bg-transparent p-0 text-[11px];
+  }
+
+  .chat-markdown table {
+    @apply my-3 w-full border-collapse border border-slate-200 text-[12px];
+  }
+
+  .chat-markdown th,
+  .chat-markdown td {
+    @apply border border-slate-200 px-2 py-1 align-top;
+  }
+
+  .chat-markdown th {
+    @apply bg-slate-100 font-semibold;
+  }
+
+  .chat-markdown hr {
+    @apply my-4 border-slate-200;
+  }
+
+  .chat-markdown strong {
+    @apply font-semibold;
+  }
+
+  .chat-markdown em {
+    @apply italic;
+  }
+
+  .chat-markdown a {
+    @apply text-blue-600 underline underline-offset-2;
+  }
+
+  .chat-markdown h1 {
+    @apply mb-2 text-[16px] font-semibold;
+  }
+
+  .chat-markdown h2 {
+    @apply mb-2 text-[14px] font-semibold;
+  }
+
+  .chat-markdown h3 {
+    @apply mb-2 text-[13px] font-semibold;
+  }
+
+  .chat-markdown h4,
+  .chat-markdown h5,
+  .chat-markdown h6 {
+    @apply mb-2 text-[12px] font-semibold;
+  }
+
+  .tiptap-code-block {
+    @apply my-3;
+  }
+
+  .tiptap-code-block-pre {
+    @apply overflow-auto rounded-md bg-slate-100 p-3;
+  }
+
+  .tiptap-code-block-content {
+    @apply block whitespace-pre-wrap font-mono text-[11px] leading-relaxed;
+  }
+
+  .tiptap-mermaid-block {
+    @apply my-3 rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm;
+  }
+
+  .tiptap-mermaid-preview {
+    @apply rounded-md bg-white p-2;
+  }
+
+  .tiptap-mermaid-toolbar {
+    @apply mb-2 flex items-center justify-between text-[11px] text-slate-600;
+  }
+
+  .tiptap-mermaid-label {
+    @apply rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-700;
+  }
+
+  .tiptap-mermaid-toggle {
+    @apply rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100;
+  }
 }
 
 .ProseMirror {
-  @apply min-h-[300px] p-4 focus:outline-none;
+  @apply min-h-[300px] p-4 focus:outline-none overflow-x-auto text-[12px] leading-relaxed text-black;
+}
+
+.editor-output {
+  @apply overflow-x-auto text-[12px] leading-relaxed text-black;
 }
 
 .ProseMirror p.is-editor-empty:first-child::before {
@@ -123,13 +252,76 @@
   height: 0;
 }
 
-.ProseMirror table {
-  @apply border-collapse border border-border;
+.ProseMirror p,
+.editor-output p {
+  @apply mb-2;
+}
+
+.ProseMirror p:last-child,
+.editor-output p:last-child {
+  @apply mb-0;
+}
+
+.ProseMirror ul,
+.editor-output ul {
+  @apply list-disc pl-5;
+}
+
+.ProseMirror ol,
+.editor-output ol {
+  @apply list-decimal pl-5;
+}
+
+.ProseMirror li,
+.editor-output li {
+  @apply mb-1;
+}
+
+.ProseMirror pre,
+.editor-output pre {
+  @apply my-3 overflow-auto rounded-md bg-slate-100 p-3 text-[11px] leading-relaxed;
+}
+
+.ProseMirror code,
+.editor-output code {
+  @apply rounded bg-slate-100 px-1 py-0.5 text-[11px];
+}
+
+.ProseMirror pre code,
+.editor-output pre code {
+  @apply bg-transparent p-0 text-[11px];
+}
+
+.ProseMirror blockquote,
+.editor-output blockquote {
+  @apply mb-3 border-l-2 border-slate-300 pl-3 text-slate-700;
+}
+
+.ProseMirror table,
+.editor-output table {
+  @apply w-full border-collapse border border-border text-[12px];
 }
 
 .ProseMirror th,
-.ProseMirror td {
-  @apply border border-border px-3 py-2;
+.ProseMirror td,
+.editor-output th,
+.editor-output td {
+  @apply border border-border px-3 py-2 align-top;
+}
+
+.ProseMirror th,
+.editor-output th {
+  @apply bg-muted font-semibold;
+}
+
+.ProseMirror table tr:nth-child(even) td,
+.editor-output table tr:nth-child(even) td {
+  @apply bg-muted/40;
+}
+
+.ProseMirror img,
+.editor-output img {
+  @apply max-w-full rounded-lg border border-border shadow-sm;
 }
 
 ::-webkit-scrollbar {

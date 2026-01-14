@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from loguru import logger
@@ -67,6 +69,15 @@ app.add_middleware(
 # Compressão
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
+# Arquivos estáticos (podcasts, diagramas)
+storage_root = Path(settings.LOCAL_STORAGE_PATH)
+podcasts_dir = storage_root / "podcasts"
+diagrams_dir = storage_root / "diagrams"
+podcasts_dir.mkdir(parents=True, exist_ok=True)
+diagrams_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/podcasts", StaticFiles(directory=str(podcasts_dir)), name="podcasts")
+app.mount("/diagrams", StaticFiles(directory=str(diagrams_dir)), name="diagrams")
+
 # Incluir rotas
 app.include_router(api_router, prefix="/api")
 
@@ -89,4 +100,3 @@ async def root():
         "version": "0.1.0",
         "docs": "/docs",
     }
-

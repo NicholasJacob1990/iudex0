@@ -3,7 +3,8 @@ Configurações da aplicação usando Pydantic Settings
 """
 
 from typing import List, Optional
-from pydantic import Field, field_validator
+import os
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -79,7 +80,11 @@ class Settings(BaseSettings):
     ANTHROPIC_MAX_TOKENS: int = 4000
     
     # Google (Gemini)
-    GOOGLE_API_KEY: str
+    GOOGLE_CLOUD_PROJECT: Optional[str] = None
+    VERTEX_AI_LOCATION: Optional[str] = None
+    GOOGLE_API_KEY: Optional[str] = None
+    # Alias comum em setups locais (aceitar também)
+    GEMINI_API_KEY: Optional[str] = None
     GOOGLE_MODEL: str = "gemini-2.5-pro"
     GOOGLE_TEMPERATURE: float = 0.7
     GOOGLE_MAX_TOKENS: int = 4000
@@ -172,6 +177,22 @@ class Settings(BaseSettings):
     def ACCESS_TOKEN_EXPIRE_MINUTES(self) -> int:
         """Alias para JWT_ACCESS_TOKEN_EXPIRE_MINUTES"""
         return self.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+
+    @model_validator(mode="after")
+    def validate_google_api_key(self):
+        # Aceitar GEMINI_API_KEY como alias de GOOGLE_API_KEY para compatibilidade.
+        if not self.GOOGLE_API_KEY and self.GEMINI_API_KEY:
+            self.GOOGLE_API_KEY = self.GEMINI_API_KEY
+
+        # Último fallback: ler do ambiente (caso Pydantic ignore por config)
+        if not self.GOOGLE_API_KEY:
+            env_alias = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+            if env_alias:
+                self.GOOGLE_API_KEY = env_alias
+
+        if not self.GOOGLE_API_KEY and not self.GOOGLE_CLOUD_PROJECT:
+            raise ValueError("GOOGLE_API_KEY (ou GEMINI_API_KEY) é obrigatória quando GOOGLE_CLOUD_PROJECT não está definido")
+        return self
 
 
 # Instância global de configurações

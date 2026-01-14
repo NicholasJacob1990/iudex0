@@ -2,15 +2,17 @@ import React, { useEffect, useRef } from 'react';
 import mermaid from 'mermaid';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Download, ZoomIn, ZoomOut, RefreshCw } from 'lucide-react';
+import { Download, ZoomIn, ZoomOut } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface DiagramViewerProps {
     code: string;
     title?: string;
     type?: string;
+    compact?: boolean;
 }
 
-export function DiagramViewer({ code, title = 'Diagrama', type = 'mermaid' }: DiagramViewerProps) {
+export function DiagramViewer({ code, title = 'Diagrama', type = 'mermaid', compact = false }: DiagramViewerProps) {
     const elementRef = useRef<HTMLDivElement>(null);
     const [scale, setScale] = React.useState(1);
     const [error, setError] = React.useState<string | null>(null);
@@ -63,25 +65,27 @@ export function DiagramViewer({ code, title = 'Diagrama', type = 'mermaid' }: Di
     };
 
     return (
-        <Card className="w-full overflow-hidden">
-            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                <CardTitle className="text-sm font-medium">
-                    {title}
-                    {type && <span className="ml-2 text-xs text-muted-foreground uppercase">({type})</span>}
-                </CardTitle>
-                <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" onClick={() => setScale(s => Math.max(0.5, s - 0.1))}>
-                        <ZoomOut className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={() => setScale(s => Math.min(2, s + 0.1))}>
-                        <ZoomIn className="h-4 w-4" />
-                    </Button>
-                    <Button variant="ghost" size="icon" onClick={handleDownload}>
-                        <Download className="h-4 w-4" />
-                    </Button>
-                </div>
-            </CardHeader>
-            <CardContent>
+        <Card className={cn("w-full overflow-hidden", compact && "border-slate-200 shadow-none")}>
+            {!compact && (
+                <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+                    <CardTitle className="text-sm font-medium">
+                        {title}
+                        {type && <span className="ml-2 text-xs text-muted-foreground uppercase">({type})</span>}
+                    </CardTitle>
+                    <div className="flex items-center gap-1">
+                        <Button variant="ghost" size="icon" onClick={() => setScale(s => Math.max(0.5, s - 0.1))}>
+                            <ZoomOut className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={() => setScale(s => Math.min(2, s + 0.1))}>
+                            <ZoomIn className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon" onClick={handleDownload}>
+                            <Download className="h-4 w-4" />
+                        </Button>
+                    </div>
+                </CardHeader>
+            )}
+            <CardContent className={cn(compact && "p-3 pt-3")}>
                 <div className="overflow-auto flex justify-center min-h-[200px] p-4 bg-white/50 dark:bg-black/20 rounded-lg">
                     {error ? (
                         <div className="text-red-500 text-sm flex flex-col items-center justify-center gap-2">

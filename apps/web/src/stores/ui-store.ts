@@ -2,14 +2,16 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 
 type TabType = 'home' | 'minuta' | 'documents' | 'models' | 'legislation' | 'jurisprudence';
+type SidebarState = 'expanded' | 'collapsed' | 'hidden';
 
 interface UIState {
   activeTab: TabType;
-  sidebarOpen: boolean;
+  sidebarState: SidebarState;
   theme: 'light' | 'dark' | 'system';
   setActiveTab: (tab: TabType) => void;
   toggleSidebar: () => void;
-  setSidebarOpen: (open: boolean) => void;
+  toggleSidebarCollapse: () => void;
+  setSidebarState: (state: SidebarState) => void;
   setTheme: (theme: 'light' | 'dark' | 'system') => void;
 }
 
@@ -17,14 +19,22 @@ export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       activeTab: 'home',
-      sidebarOpen: true,
+      sidebarState: 'expanded',
       theme: 'system',
 
       setActiveTab: (tab) => set({ activeTab: tab }),
 
-      toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
+      toggleSidebar: () =>
+        set((state) => ({
+          sidebarState: state.sidebarState === 'hidden' ? 'expanded' : 'hidden',
+        })),
 
-      setSidebarOpen: (open) => set({ sidebarOpen: open }),
+      toggleSidebarCollapse: () =>
+        set((state) => ({
+          sidebarState: state.sidebarState === 'collapsed' ? 'expanded' : 'collapsed',
+        })),
+
+      setSidebarState: (state) => set({ sidebarState: state }),
 
       setTheme: (theme) => set({ theme }),
     }),
@@ -33,4 +43,3 @@ export const useUIStore = create<UIState>()(
     }
   )
 );
-

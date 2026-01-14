@@ -9,6 +9,7 @@ import TextAlign from '@tiptap/extension-text-align';
 import TextStyle from '@tiptap/extension-text-style';
 import { Color } from '@tiptap/extension-color';
 import { FontFamily } from '@tiptap/extension-font-family';
+import Image from '@tiptap/extension-image';
 import Table from '@tiptap/extension-table';
 import TableRow from '@tiptap/extension-table-row';
 import TableCell from '@tiptap/extension-table-cell';
@@ -16,9 +17,11 @@ import TableHeader from '@tiptap/extension-table-header';
 import { EditorToolbar } from './editor-toolbar';
 import { CitationMark } from './extensions/citation-mark';
 import { SuggestionHighlight } from './extensions/suggestion-highlight';
+import { MermaidCodeBlock } from './extensions/mermaid-code-block';
 import { Sparkles, Scissors, MessageSquare, Wand2, Scale } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import { useCanvasStore } from '@/stores/canvas-store';
 
 interface DocumentEditorProps {
   content?: string;
@@ -44,7 +47,10 @@ export function DocumentEditor({
   const ignoreNextUpdateRef = useRef(false);
   const editor = useEditor({
     extensions: [
-      StarterKit,
+      StarterKit.configure({
+        codeBlock: false,
+      }),
+      MermaidCodeBlock,
       Placeholder.configure({
         placeholder,
       }),
@@ -55,6 +61,10 @@ export function DocumentEditor({
       TextStyle,
       Color,
       FontFamily,
+      Image.configure({
+        inline: false,
+        allowBase64: true,
+      }),
       Table.configure({
         resizable: true,
       }),
@@ -73,6 +83,21 @@ export function DocumentEditor({
         return;
       }
       onChange?.(editor.getHTML());
+    },
+    onSelectionUpdate: ({ editor }) => {
+      const { from, to } = editor.state.selection;
+      const text = editor.state.doc.textBetween(from, to, ' ').trim();
+      if (!text) {
+        useCanvasStore.getState().setSelectedText('', null, null, null);
+        return;
+      }
+
+      const docSize = editor.state.doc.content.size;
+      const beforeStart = Math.max(0, from - 200);
+      const afterEnd = Math.min(docSize, to + 200);
+      const before = editor.state.doc.textBetween(beforeStart, from, ' ').trim();
+      const after = editor.state.doc.textBetween(to, afterEnd, ' ').trim();
+      useCanvasStore.getState().setSelectedText(text, null, { from, to }, { before, after });
     },
   });
 
@@ -99,25 +124,72 @@ export function DocumentEditor({
       }
     }
   }, [content, editor]);
+  // Handle pending edits from store
+  const pendingEdit = useCanvasStore(state => state.pendingEdit);
+  const clearPendingEdit = useCanvasStore(state => state.clearPendingEdit);
+  const pushHistory = useCanvasStore(state => state.pushHistory);
+
+  useEffect(() => {
+    if (!editor || !pendingEdit) return;
+    if (!pendingEdit.range || pendingEdit.range.from === pendingEdit.range.to) {
+      clearPendingEdit();
+      return;
+    }
+
+    try {
+      const rangeText = editor.state.doc
+        .textBetween(pendingEdit.range.from, pendingEdit.range.to, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const expectedText = (pendingEdit.original || '').replace(/\s+/g, ' ').trim();
+
+      if (expectedText && rangeText && rangeText !== expectedText) {
+        const fallback = useCanvasStore.getState().applyTextReplacement(
+          pendingEdit.original,
+          pendingEdit.replacement,
+          pendingEdit.label || 'Sugestão aplicada',
+          null
+        );
+        if (!fallback.success) {
+          toast.error("Falha ao aplicar edição no editor.");
+        } else {
+          toast.success("Edição aplicada!");
+        }
+        return;
+      }
+
+      editor.chain().focus().setTextSelection(pendingEdit.range).insertContent(pendingEdit.replacement).run();
+      const nextHtml = editor.getHTML();
+      pushHistory(nextHtml, pendingEdit.label || 'Sugestão aplicada');
+      toast.success("Edição aplicada!");
+    } catch (e) {
+      console.error("Failed to apply edit", e);
+      toast.error("Falha ao aplicar edição no editor.");
+    } finally {
+      clearPendingEdit();
+    }
+  }, [editor, pendingEdit, clearPendingEdit, pushHistory]);
+
+  // Sync editor content when prop changes externally (e.g., AI regeneration)
 
   // Get canvas store for context-aware chat
-  const setSelectedText = (text: string, action: 'improve' | 'shorten') => {
-    // Dynamically import to avoid circular deps
-    import('@/stores/canvas-store').then(({ useCanvasStore }) => {
-      useCanvasStore.getState().setSelectedText(text, action);
-    });
-  };
+  const setSelectedText = useCanvasStore(state => state.setSelectedText);
 
   const handleImprove = () => {
     if (!editor) return;
     const { from, to } = editor.state.selection;
     const selectedText = editor.state.doc.textBetween(from, to, ' ');
     if (selectedText.trim()) {
+      const docSize = editor.state.doc.content.size;
+      const beforeStart = Math.max(0, from - 200);
+      const afterEnd = Math.min(docSize, to + 200);
+      const before = editor.state.doc.textBetween(beforeStart, from, ' ').trim();
+      const after = editor.state.doc.textBetween(to, afterEnd, ' ').trim();
       if (onRequestImprove) {
         onRequestImprove(selectedText);
       } else {
         // Context-aware: set in store for ChatInput to pick up
-        setSelectedText(selectedText, 'improve');
+        setSelectedText(selectedText, 'improve', { from, to }, { before, after });
         toast.success('Texto selecionado! Digite no chat para refinar.', {
           description: `"${selectedText.slice(0, 50)}${selectedText.length > 50 ? '...' : ''}"`,
         });
@@ -130,11 +202,16 @@ export function DocumentEditor({
     const { from, to } = editor.state.selection;
     const selectedText = editor.state.doc.textBetween(from, to, ' ');
     if (selectedText.trim()) {
+      const docSize = editor.state.doc.content.size;
+      const beforeStart = Math.max(0, from - 200);
+      const afterEnd = Math.min(docSize, to + 200);
+      const before = editor.state.doc.textBetween(beforeStart, from, ' ').trim();
+      const after = editor.state.doc.textBetween(to, afterEnd, ' ').trim();
       if (onRequestShorten) {
         onRequestShorten(selectedText);
       } else {
         // Context-aware: set in store for ChatInput to pick up
-        setSelectedText(selectedText, 'shorten');
+        setSelectedText(selectedText, 'shorten', { from, to }, { before, after });
         toast.success('Texto selecionado! Digite no chat para resumir.', {
           description: `"${selectedText.slice(0, 50)}${selectedText.length > 50 ? '...' : ''}"`,
         });
@@ -156,7 +233,7 @@ export function DocumentEditor({
     // Call backend API for inline verification
     const toastId = toast.loading('Verificando citações...');
     try {
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+      const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
       const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
 
       const response = await fetch(`${API_URL}/audit/verify-snippet`, {
@@ -343,7 +420,7 @@ export function DocumentEditor({
       <div className="min-h-[1100px] w-full max-w-[850px] bg-white shadow-lg ring-1 ring-black/5 transition-all duration-300 ease-in-out print:shadow-none">
         <EditorContent
           editor={editor}
-          className="prose prose-slate max-w-none p-[96px] font-serif text-lg leading-relaxed focus:outline-none print:p-0"
+          className="prose prose-slate max-w-none p-[96px] font-google-sans-text text-lg leading-relaxed focus:outline-none print:p-0"
         />
       </div>
     </div>

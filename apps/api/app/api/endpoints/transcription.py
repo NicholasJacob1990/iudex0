@@ -6,7 +6,7 @@ import os
 import uuid
 import logging
 import io
-from app.schemas.transcription import TranscriptionRequest
+from app.schemas.transcription import TranscriptionRequest, HearingSpeakersUpdateRequest
 from app.services.transcription_service import TranscriptionService
 from docx import Document
 from pydantic import BaseModel
@@ -472,3 +472,134 @@ O usuário aprovou as seguintes correções de CONTEÚDO para aplicar ao texto:
     except Exception as e:
         logger.error(f"Erro ao aplicar revisões HIL: {e}")
         raise HTTPException(status_code=500, detail=f"Falha na revisão: {str(e)}")
+
+
+@router.post("/hearing/stream")
+async def transcribe_hearing_stream(
+    file: UploadFile = File(...),
+    case_id: str = Form(...),
+    goal: str = Form("alegacoes_finais"),
+    thinking_level: str = Form("medium"),
+    model_selection: str = Form("gemini-3-flash-preview"),
+    high_accuracy: bool = Form(False),
+    format_mode: str = Form("AUDIENCIA"),
+    custom_prompt: Optional[str] = Form(None),
+    format_enabled: bool = Form(True),
+):
+    """
+    SSE endpoint for hearings/reunions transcription (structured JSON + evidence).
+    """
+    from sse_starlette.sse import EventSourceResponse
+    import json
+    import asyncio
+
+    temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
+
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    logger.info(f"📁 HEARING SSE: Arquivo recebido: {file.filename} (case_id={case_id})")
+
+    async def event_generator():
+        progress_queue = asyncio.Queue()
+        final_result = {"payload": None, "error": None}
+
+        async def on_progress(stage: str, progress: int, message: str):
+            await progress_queue.put({
+                "event": "progress",
+                "data": {"stage": stage, "progress": progress, "message": message}
+            })
+
+        async def process_task():
+            try:
+                result = await service.process_hearing_with_progress(
+                    file_path=temp_file_path,
+                    case_id=case_id,
+                    goal=goal,
+                    thinking_level=thinking_level,
+                    model_selection=model_selection,
+                    high_accuracy=high_accuracy,
+                    format_mode=format_mode,
+                    custom_prompt=custom_prompt,
+                    format_enabled=format_enabled,
+                    on_progress=on_progress,
+                )
+                final_result["payload"] = result
+            except Exception as e:
+                final_result["error"] = str(e)
+            finally:
+                await progress_queue.put(None)
+
+        task = asyncio.create_task(process_task())
+
+        try:
+            while True:
+                item = await progress_queue.get()
+                if item is None:
+                    break
+                yield {
+                    "event": item["event"],
+                    "data": json.dumps(item["data"])
+                }
+
+            await task
+
+            if final_result["error"]:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"error": final_result["error"]})
+                }
+            else:
+                yield {
+                    "event": "complete",
+                    "data": json.dumps({
+                        "status": "success",
+                        "filename": file.filename,
+                        "payload": final_result["payload"],
+                    })
+                }
+        finally:
+            if os.path.exists(temp_file_path):
+                os.remove(temp_file_path)
+
+    return EventSourceResponse(
+        event_generator(),
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "Content-Encoding": "identity",
+        }
+    )
+
+
+@router.post("/hearing/speakers")
+async def update_hearing_speakers(request: HearingSpeakersUpdateRequest):
+    """
+    Update hearing speaker registry (manual edits).
+    """
+    if not request.speakers:
+        raise HTTPException(status_code=400, detail="Nenhum falante informado")
+    speakers = service.update_hearing_speakers(request.case_id, [s.model_dump() for s in request.speakers])
+    return {"status": "success", "speakers": speakers}
+
+
+@router.post("/hearing/enroll")
+async def enroll_hearing_speaker(
+    file: UploadFile = File(...),
+    case_id: str = Form(...),
+    name: str = Form(...),
+    role: str = Form("outro"),
+):
+    """
+    Enroll speaker audio for a case (voice profile seed).
+    """
+    temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
+    with open(temp_file_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+    try:
+        speaker = service.enroll_hearing_speaker(case_id=case_id, name=name, role=role, file_path=temp_file_path)
+        return {"status": "success", "speaker": speaker}
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)

@@ -1,6 +1,6 @@
 'use client';
 
-import { quickActions } from '@/data/mock';
+import Link from 'next/link';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Feather, Upload, Gavel } from 'lucide-react';
@@ -11,6 +11,30 @@ const iconMap: Record<string, LucideIcon> = {
   Upload,
   Gavel,
 };
+
+const quickActions = [
+  {
+    id: 'action-1',
+    title: 'Nova Minuta',
+    description: 'Gere petições completas com revisão cruzada',
+    icon: 'Feather',
+    href: '/minuta',
+  },
+  {
+    id: 'action-2',
+    title: 'Importar Documentos',
+    description: 'Junte PDFs, DOCX, ZIP e imagens',
+    icon: 'Upload',
+    href: '/documents',
+  },
+  {
+    id: 'action-3',
+    title: 'Buscar Jurisprudência STF',
+    description: 'Entregue precedentes com repercussão geral',
+    icon: 'Gavel',
+    href: '/jurisprudence',
+  },
+];
 
 export function QuickActions() {
   return (
@@ -35,8 +59,8 @@ export function QuickActions() {
                 <Icon className="h-5 w-5" />
               </span>
             </div>
-            <Button className="mt-4 rounded-2xl bg-primary text-primary-foreground shadow-soft">
-              Acessar
+            <Button asChild className="mt-4 rounded-2xl bg-primary text-primary-foreground shadow-soft">
+              <Link href={action.href}>Acessar</Link>
             </Button>
           </div>
         );
@@ -44,4 +68,3 @@ export function QuickActions() {
     </section>
   );
 }
-

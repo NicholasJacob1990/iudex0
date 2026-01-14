@@ -14,16 +14,21 @@ import { toast } from 'sonner';
 
 interface MultiModelResponseProps {
     messages: any[]; // Using any to avoid type duplication issues, matches ChatMessage structure
+    onCopy?: (message: any) => void;
+    onRegenerate?: (message: any) => void;
+    disableRegenerate?: boolean;
 }
 
-export function MultiModelResponse({ messages }: MultiModelResponseProps) {
-    if (!messages || messages.length === 0) return null;
+export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRegenerate }: MultiModelResponseProps) {
+    const { multiModelView, setMultiModelView, setChatMode, setSelectedModels, setSelectedModel, consolidateTurn } = useChatStore();
+    const [isConsolidating, setIsConsolidating] = useState(false);
 
     const isConsolidated = (msg: any) =>
         msg?.metadata?.is_consolidated || String(msg?.metadata?.model || '').toLowerCase() === 'consolidado';
 
     const ordered = useMemo(() => {
-        return [...messages].sort((a, b) => {
+        const list = messages ? [...messages] : [];
+        return list.sort((a, b) => {
             const ac = isConsolidated(a) ? 0 : 1;
             const bc = isConsolidated(b) ? 0 : 1;
             if (ac !== bc) return ac - bc;
@@ -31,14 +36,13 @@ export function MultiModelResponse({ messages }: MultiModelResponseProps) {
         });
     }, [messages]);
 
+    if (ordered.length === 0) return null;
+
     const consolidated = ordered.find((m) => isConsolidated(m)) || null;
     const candidates = ordered.filter((m) => !isConsolidated(m));
     const uniqueCandidateModels = new Set(candidates.map((m) => m?.metadata?.model).filter(Boolean));
     const canConsolidate = !consolidated && uniqueCandidateModels.size >= 2;
     const turnId = (ordered[0] as any)?.metadata?.turn_id as string | undefined;
-
-    const { multiModelView, setMultiModelView, setChatMode, setSelectedModels, setSelectedModel, consolidateTurn } = useChatStore();
-    const [isConsolidating, setIsConsolidating] = useState(false);
 
     // Find default: prefer consolidated if present
     const defaultTab = ordered[0].id;
@@ -169,7 +173,12 @@ export function MultiModelResponse({ messages }: MultiModelResponseProps) {
                                     </Button>
                                 </div>
                             )}
-                            <ChatMessage message={msg} />
+                            <ChatMessage
+                                message={msg}
+                                onCopy={onCopy}
+                                onRegenerate={onRegenerate}
+                                disableRegenerate={disableRegenerate}
+                            />
                         </TabsContent>
                     ))}
                 </Tabs>
@@ -183,7 +192,12 @@ export function MultiModelResponse({ messages }: MultiModelResponseProps) {
                                 </div>
                                 Consolidado
                             </div>
-                            <ChatMessage message={consolidated} />
+                            <ChatMessage
+                                message={consolidated}
+                                onCopy={onCopy}
+                                onRegenerate={onRegenerate}
+                                disableRegenerate={disableRegenerate}
+                            />
                         </div>
                     )}
 
@@ -223,7 +237,12 @@ export function MultiModelResponse({ messages }: MultiModelResponseProps) {
                                             Escolher esta resposta
                                         </Button>
                                     </div>
-                                    <ChatMessage message={msg} />
+                                    <ChatMessage
+                                        message={msg}
+                                        onCopy={onCopy}
+                                        onRegenerate={onRegenerate}
+                                        disableRegenerate={disableRegenerate}
+                                    />
                                 </div>
                             );
                         })}

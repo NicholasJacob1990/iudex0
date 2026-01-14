@@ -2,7 +2,7 @@
 Utilitários de segurança e autenticação
 """
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Dict, Any
 
 from jose import JWTError, jwt
@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.database import get_db
+from app.core.time_utils import utcnow
 from app.models.user import User
 
 # Contexto para hashing de senhas
@@ -48,9 +49,9 @@ def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta]
     to_encode = data.copy()
     
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = utcnow() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(
+        expire = utcnow() + timedelta(
             minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
         )
     
@@ -70,7 +71,7 @@ def create_refresh_token(data: Dict[str, Any]) -> str:
     Cria token de refresh JWT
     """
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     to_encode.update({"exp": expire, "type": "refresh"})
     
     encoded_jwt = jwt.encode(

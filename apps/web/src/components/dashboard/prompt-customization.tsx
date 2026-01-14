@@ -260,7 +260,7 @@ Elabore uma petição de usucapião contendo:
                                     rows={12}
                                 />
                                 <p className="text-xs text-muted-foreground">
-                                    Este texto será inserido quando você selecionar este prompt usando "/"
+                                    Este texto será inserido quando você selecionar este prompt usando &quot;/&quot;
                                 </p>
                             </div>
                         </div>

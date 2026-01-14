@@ -6,7 +6,7 @@ import os
 import shutil
 import uuid
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional, Dict, Any
 import tempfile
 
@@ -15,11 +15,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from loguru import logger
 from sqlalchemy.future import select
+from sqlalchemy import func
 from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.security import get_current_user
+from app.core.time_utils import utcnow
 from app.models.user import User
 from app.models.document import Document, DocumentType, DocumentStatus
 from app.schemas.document import (
@@ -39,15 +41,18 @@ from app.services.ai.model_registry import (
 from app.services.document_processor import (
     extract_text_from_pdf,
     extract_text_from_docx,
-    extract_text_from_image,
     extract_text_from_odt,
     extract_text_from_zip,
-    extract_text_from_pdf_with_ocr,
-    transcribe_audio_video
 )
 
-from app.services.podcast_service import podcast_service
 from app.services.docs_utils import save_as_word_juridico
+from app.workers.tasks.document_tasks import (
+    ocr_document_task,
+    transcribe_audio_task,
+    generate_podcast_task,
+    generate_diagram_task,
+    process_document_task,
+)
 
 router = APIRouter()
 
@@ -112,13 +117,36 @@ async def list_documents(
     if search:
         query = query.where(Document.name.ilike(f"%{search}%"))
         
+    count_query = select(func.count()).select_from(Document).where(Document.user_id == current_user.id)
+    if search:
+        count_query = count_query.where(Document.name.ilike(f"%{search}%"))
+
+    total = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(
         query.order_by(Document.created_at.desc())
         .offset(skip)
         .limit(limit)
     )
     documents = result.scalars().all()
-    return {"documents": documents, "total": len(documents)}
+    return {"documents": documents, "total": total}
+
+
+@router.get("/{document_id}")
+async def get_document(
+    document_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Obter documento específico
+    """
+    result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+    )
+    document = result.scalars().first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+    return document
 
 
 @router.post("/upload")
@@ -212,23 +240,26 @@ async def upload_document(
         
         # Extrair texto baseado no tipo de documento
         extracted_text = ""
+        queued_task = False
+        ocr_flag = parsed_metadata.get("ocr")
+        transcribe_flag = parsed_metadata.get("transcribe")
         try:
             if doc_type == DocumentType.PDF:
                 extracted_text = await extract_text_from_pdf(file_path)
-                # Fallback para OCR se PDF estiver vazio (digitalizado)
-                if not extracted_text or len(extracted_text.strip()) < 50:
-                    logger.info(f"PDF com pouco texto detectado, aplicando OCR: {file_path}")
-                    try:
-                        ocr_text = await extract_text_from_pdf_with_ocr(file_path)
-                        if ocr_text and len(ocr_text.strip()) > len(extracted_text.strip()):
-                            extracted_text = ocr_text
-                            document.doc_metadata = {**document.doc_metadata, "ocr_applied": True}
-                            logger.info(f"OCR aplicado com sucesso: {len(extracted_text)} caracteres")
-                        else:
-                            logger.warning("OCR não melhorou extração de texto")
-                    except Exception as ocr_error:
-                        logger.error(f"Erro ao aplicar OCR: {ocr_error}")
-                        # Manter texto extraído original (mesmo que vazio)
+                # OCR assíncrono quando solicitado ou quando o PDF tem pouco texto
+                needs_ocr = ocr_flag is True or (
+                    ocr_flag is None and (not extracted_text or len(extracted_text.strip()) < 50)
+                )
+                if needs_ocr:
+                    logger.info(f"PDF com pouco texto detectado, enfileirando OCR: {file_path}")
+                    task = ocr_document_task.delay(document.id, file_path, settings.TESSERACT_LANG)
+                    document.doc_metadata = {
+                        **document.doc_metadata,
+                        "ocr_status": "queued",
+                        "ocr_task_id": task.id,
+                        "ocr_requested": bool(ocr_flag),
+                    }
+                    queued_task = True
 
                     
             elif doc_type == DocumentType.DOCX:
@@ -238,16 +269,45 @@ async def upload_document(
                 extracted_text = await extract_text_from_odt(file_path)
                 
             elif doc_type == DocumentType.IMAGE:
-                extracted_text = await extract_text_from_image(file_path)
-                document.doc_metadata = {**document.doc_metadata, "ocr_applied": True}
+                if ocr_flag is False:
+                    logger.info(f"OCR desativado para imagem: {file_path}")
+                else:
+                    task = ocr_document_task.delay(document.id, file_path, settings.TESSERACT_LANG)
+                    document.doc_metadata = {
+                        **document.doc_metadata,
+                        "ocr_status": "queued",
+                        "ocr_task_id": task.id,
+                        "ocr_requested": True,
+                    }
+                    queued_task = True
                 
             elif doc_type == DocumentType.AUDIO:
-                extracted_text = await transcribe_audio_video(file_path, media_type="audio")
-                document.doc_metadata = {**document.doc_metadata, "transcribed": True}
+                task = transcribe_audio_task.delay(
+                    document.id,
+                    file_path,
+                    parsed_metadata.get("identify_speakers", False),
+                )
+                document.doc_metadata = {
+                    **document.doc_metadata,
+                    "transcription_status": "queued",
+                    "transcription_task_id": task.id,
+                    "transcribe_requested": bool(transcribe_flag),
+                }
+                queued_task = True
                 
             elif doc_type == DocumentType.VIDEO:
-                extracted_text = await transcribe_audio_video(file_path, media_type="video")
-                document.doc_metadata = {**document.doc_metadata, "transcribed": True}
+                task = transcribe_audio_task.delay(
+                    document.id,
+                    file_path,
+                    parsed_metadata.get("identify_speakers", False),
+                )
+                document.doc_metadata = {
+                    **document.doc_metadata,
+                    "transcription_status": "queued",
+                    "transcription_task_id": task.id,
+                    "transcribe_requested": bool(transcribe_flag),
+                }
+                queued_task = True
                 
             elif doc_type == DocumentType.ZIP:
                 zip_result = await extract_text_from_zip(file_path)
@@ -259,10 +319,12 @@ async def upload_document(
                     "zip_errors": zip_result.get("errors", [])
                 }
             
-            # Atualizar status do documento
             if extracted_text:
                 document.extracted_text = extracted_text
-                document.status = DocumentStatus.READY
+
+            # Atualizar status do documento
+            if queued_task:
+                document.status = DocumentStatus.PROCESSING
             else:
                 # Documento aceito mas sem texto extraído (pode ser áudio, vídeo, etc)
                 document.status = DocumentStatus.READY
@@ -465,10 +527,18 @@ async def apply_ocr(
     if not document:
         raise HTTPException(status_code=404, detail="Documento não encontrado")
 
+    if not document.url or not os.path.exists(document.url):
+        raise HTTPException(status_code=400, detail="Arquivo do documento não encontrado")
+
+    task = ocr_document_task.delay(document.id, document.url, settings.TESSERACT_LANG)
     document.status = DocumentStatus.PROCESSING
-    document.doc_metadata = {**document.doc_metadata, "ocr": "queued"}
+    document.doc_metadata = {
+        **document.doc_metadata,
+        "ocr_status": "queued",
+        "ocr_task_id": task.id,
+    }
     await db.commit()
-    return {"message": "OCR initiated", "document_id": document_id}
+    return {"message": "OCR queued", "document_id": document_id, "task_id": task.id}
 
 
 @router.post("/{document_id}/summary")
@@ -507,9 +577,18 @@ async def transcribe_audio(
     if not document:
         raise HTTPException(status_code=404, detail="Documento não encontrado")
 
-    document.doc_metadata = {**document.doc_metadata, "transcription": "queued"}
+    if not document.url or not os.path.exists(document.url):
+        raise HTTPException(status_code=400, detail="Arquivo do documento não encontrado")
+
+    task = transcribe_audio_task.delay(document.id, document.url, False)
+    document.status = DocumentStatus.PROCESSING
+    document.doc_metadata = {
+        **document.doc_metadata,
+        "transcription_status": "queued",
+        "transcription_task_id": task.id,
+    }
     await db.commit()
-    return {"message": "Transcription initiated", "document_id": document_id}
+    return {"message": "Transcription queued", "document_id": document_id, "task_id": task.id}
 
 
 @router.post("/{document_id}/podcast")
@@ -532,28 +611,48 @@ async def generate_podcast(
     text = document.extracted_text or document.content
     if not text:
         raise HTTPException(status_code=400, detail="Documento não possui texto para conversão")
-    
-    # Limitar tamanho do texto (TTS APIs têm limites)
-    max_chars = 5000
-    if len(text) > max_chars:
-        text = text[:max_chars] + "..."
-    
-    # Gerar podcast
-    podcast_result = await podcast_service.generate_podcast(
-        text=text,
-        title=f"Podcast: {document.name}"
-    )
-    
-    # Atualizar metadata do documento
+
+    task = generate_podcast_task.delay(document.id)
     document.doc_metadata = {
         **document.doc_metadata,
-        "podcast_url": podcast_result.get("url"),
-        "podcast_id": podcast_result.get("id"),
-        "podcast_status": podcast_result.get("status")
+        "podcast_status": "queued",
+        "podcast_task_id": task.id,
     }
     await db.commit()
-    
-    return podcast_result
+
+    return {"message": "Podcast queued", "document_id": document_id, "task_id": task.id}
+
+
+@router.post("/{document_id}/diagram")
+async def generate_diagram(
+    document_id: str,
+    diagram_type: str = "flowchart",
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Gerar diagrama Mermaid a partir do documento
+    """
+    result = await db.execute(
+        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+    )
+    document = result.scalars().first()
+    if not document:
+        raise HTTPException(status_code=404, detail="Documento não encontrado")
+
+    text = document.extracted_text or document.content
+    if not text:
+        raise HTTPException(status_code=400, detail="Documento não possui texto para diagrama")
+
+    task = generate_diagram_task.delay(document.id, diagram_type)
+    document.doc_metadata = {
+        **document.doc_metadata,
+        "diagram_status": "queued",
+        "diagram_task_id": task.id,
+        "diagram_type": diagram_type,
+    }
+    await db.commit()
+    return {"message": "Diagram queued", "document_id": document_id, "task_id": task.id}
 
 
 @router.post("/{document_id}/process")
@@ -573,10 +672,19 @@ async def process_document(
     if not document:
         raise HTTPException(status_code=404, detail="Documento não encontrado")
 
+    if not document.url or not os.path.exists(document.url):
+        raise HTTPException(status_code=400, detail="Arquivo do documento não encontrado")
+
+    task = process_document_task.delay(document_id, str(current_user.id), document.url, options or {})
     document.status = DocumentStatus.PROCESSING
-    document.doc_metadata = {**document.doc_metadata, "processing_options": options or {}}
+    document.doc_metadata = {
+        **document.doc_metadata,
+        "processing_options": options or {},
+        "processing_task_id": task.id,
+        "processing_status": "queued",
+    }
     await db.commit()
-    return {"message": "Processamento iniciado", "document_id": document_id}
+    return {"message": "Processamento enfileirado", "document_id": document_id, "task_id": task.id}
 
 
 @router.post("/generate", response_model=DocumentGenerationResponse)
@@ -712,7 +820,7 @@ async def audit_document(
             **document.doc_metadata,
             "audit_report_md": audit_result["markdown_path"],
             "audit_report_docx": audit_result["docx_path"],
-            "audit_date": datetime.utcnow().isoformat()
+            "audit_date": utcnow().isoformat()
         }
         await db.commit()
         
@@ -853,7 +961,7 @@ async def share_document(
         document.share_token = secrets.token_urlsafe(32)
     
     document.is_shared = True
-    document.share_expires_at = datetime.utcnow() + timedelta(days=expires_in_days)
+    document.share_expires_at = utcnow() + timedelta(days=expires_in_days)
     document.share_access_level = access_level
     
     await db.commit()
@@ -912,7 +1020,7 @@ async def get_shared_document(
     if not document.is_shared:
         raise HTTPException(status_code=404, detail="Este link de compartilhamento foi desativado")
         
-    if document.share_expires_at and document.share_expires_at < datetime.utcnow():
+    if document.share_expires_at and document.share_expires_at < utcnow():
         raise HTTPException(status_code=410, detail="Este link de compartilhamento expirou")
         
     return {

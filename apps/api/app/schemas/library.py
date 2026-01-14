@@ -4,7 +4,7 @@ Schemas Pydantic para biblioteca
 
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class LibraryItemBase(BaseModel):
@@ -32,8 +32,7 @@ class LibraryItemResponse(LibraryItemBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class FolderBase(BaseModel):
@@ -59,8 +58,7 @@ class FolderResponse(FolderBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class LibrarianBase(BaseModel):
@@ -84,8 +82,7 @@ class LibrarianResponse(LibrarianBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # Schemas de Compartilhamento
@@ -145,8 +142,7 @@ class ShareRecordResponse(BaseModel):
     created_at: datetime
     accepted_at: Optional[datetime]
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class AcceptShareRequest(BaseModel):
@@ -164,7 +160,6 @@ class UpdatePermissionRequest(BaseModel):
     """Request para atualizar permissão"""
     share_id: str
     permission: str = Field(..., pattern='^(view|edit)$')
-
 
 
 

@@ -8,6 +8,9 @@ import uuid
 from typing import Optional
 from loguru import logger
 import asyncio
+from pathlib import Path
+
+from app.core.config import settings
 
 
 class PodcastService:
@@ -21,9 +24,10 @@ class PodcastService:
     - ElevenLabs (se configurado)
     """
     
-    def __init__(self, storage_path: str = "storage/podcasts"):
-        self.storage_path = storage_path
-        os.makedirs(storage_path, exist_ok=True)
+    def __init__(self, storage_path: Optional[str] = None):
+        base_path = Path(storage_path) if storage_path else Path(settings.LOCAL_STORAGE_PATH) / "podcasts"
+        self.storage_path = str(base_path)
+        os.makedirs(self.storage_path, exist_ok=True)
         
         # Verificar APIs disponíveis
         self.google_credentials = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")

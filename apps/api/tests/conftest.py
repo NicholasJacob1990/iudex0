@@ -3,11 +3,12 @@ Configurações e fixtures para testes
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 from typing import Generator, AsyncGenerator
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
 
 from app.main import app
 from app.core.database import Base, get_db
@@ -15,11 +16,11 @@ from app.models.user import User, UserRole, UserPlan, AccountType
 from app.core.security import get_password_hash
 
 
-# URL do banco de teste (usar SQLite em memória para testes)
-TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+# URL do banco de teste (SQLite em memória compartilhada)
+TEST_DATABASE_URL = "sqlite+aiosqlite:///file::memory:?cache=shared"
 
 
-@pytest.fixture(scope="session")
+@pytest_asyncio.fixture(scope="session")
 def event_loop() -> Generator:
     """Create event loop for async tests"""
     loop = asyncio.get_event_loop_policy().new_event_loop()
@@ -27,13 +28,14 @@ def event_loop() -> Generator:
     loop.close()
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def db_engine():
     """Create test database engine"""
     engine = create_async_engine(
         TEST_DATABASE_URL,
         echo=False,
-        poolclass=NullPool,
+        connect_args={"check_same_thread": False, "uri": True},
+        poolclass=StaticPool,
     )
     
     async with engine.begin() as conn:
@@ -47,7 +49,7 @@ async def db_engine():
     await engine.dispose()
 
 
-@pytest.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function")
 async def db_session(db_engine) -> AsyncGenerator[AsyncSession, None]:
     """Create test database session"""
     async_session = async_sessionmaker(
@@ -75,7 +77,7 @@ def client(db_session: AsyncSession) -> TestClient:
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_user(db_session: AsyncSession) -> User:
     """Create test user"""
     user = User(
@@ -99,7 +101,7 @@ async def test_user(db_session: AsyncSession) -> User:
     return user
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def test_admin_user(db_session: AsyncSession) -> User:
     """Create test admin user"""
     user = User(
@@ -157,4 +159,3 @@ def admin_auth_headers(client: TestClient, test_admin_user: User) -> dict:
     token = data["access_token"]
     
     return {"Authorization": f"Bearer {token}"}
-

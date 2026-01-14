@@ -6,6 +6,7 @@ interface Document {
   name: string;
   file_type: string;
   file_size: number;
+  size?: number;
   status: 'pending' | 'processing' | 'completed' | 'error';
   content?: string;
   metadata?: any;
@@ -14,6 +15,7 @@ interface Document {
 
 interface DocumentState {
   documents: Document[];
+  total: number;
   currentDocument: Document | null;
   isLoading: boolean;
   isUploading: boolean;
@@ -26,6 +28,7 @@ interface DocumentState {
 
 export const useDocumentStore = create<DocumentState>((set, get) => ({
   documents: [],
+  total: 0,
   currentDocument: null,
   isLoading: false,
   isUploading: false,
@@ -33,13 +36,13 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   fetchDocuments: async () => {
     set({ isLoading: true });
     try {
-      const { documents } = await apiClient.getDocuments();
+      const { documents, total } = await apiClient.getDocuments();
       const normalized = (documents || []).map((doc: any) => ({
         ...doc,
         file_size: doc.file_size ?? doc.size ?? 0,
         created_at: doc.created_at ?? new Date().toISOString(),
       }));
-      set({ documents: normalized, isLoading: false });
+      set({ documents: normalized, total: total ?? normalized.length, isLoading: false });
     } catch (error) {
       set({ isLoading: false });
       throw error;
@@ -56,6 +59,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       };
       set((state) => ({
         documents: [normalized, ...state.documents],
+        total: state.total + 1,
         isUploading: false,
       }));
       return normalized as Document;
@@ -71,6 +75,7 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       set((state) => ({
         documents: state.documents.filter((d) => d.id !== id),
         currentDocument: state.currentDocument?.id === id ? null : state.currentDocument,
+        total: Math.max(0, state.total - 1),
       }));
     } catch (error) {
       throw error;

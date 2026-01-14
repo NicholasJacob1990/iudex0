@@ -10,6 +10,7 @@ import re
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from app.services.docs_utils import save_as_word_juridico
+from app.services.ai.genai_utils import extract_genai_text
 
 # Logger precisa existir antes de qualquer try/except que o use
 logger = logging.getLogger("AuditService")
@@ -172,12 +173,13 @@ Trecho: "{text[:500]}"
                     )
                 )
                 
-                if response.text:
+                text = extract_genai_text(response)
+                if text:
                     # Try to parse JSON from response
                     import json
                     try:
                         # Extract JSON from response
-                        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+                        json_match = re.search(r'\{.*\}', text, re.DOTALL)
                         if json_match:
                             return json.loads(json_match.group())
                     except json.JSONDecodeError:
@@ -186,7 +188,7 @@ Trecho: "{text[:500]}"
                     # Fallback: return raw analysis
                     return {
                         "status": "analyzed",
-                        "message": response.text[:300],
+                        "message": text[:300],
                         "citations": []
                     }
             except Exception as e:
@@ -243,10 +245,10 @@ Trecho: "{text[:500]}"
                 )
              )
              
-             if not response.text:
+             relatorio = extract_genai_text(response)
+             if not relatorio:
                  return {"error": "Empty response from Audit Model"}
                  
-             relatorio = response.text
              full_content = f"<!-- Auditoria: {data_atual} -->\n\n{relatorio}"
              if rag_report:
                  full_content += rag_report

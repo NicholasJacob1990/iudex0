@@ -11,7 +11,7 @@ from app.services.ai.agents import ClaudeAgent, GeminiAgent, GPTAgent
 from app.services.ai.base_agent import AgentResponse, AgentReview
 from app.services.ai.langgraph_workflow import MinutaWorkflow
 from app.services.legal_prompts import LegalPrompts
-from app.services.web_search_service import web_search_service
+from app.services.web_search_service import web_search_service, is_breadth_first
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.ai.model_registry import get_api_model_name
 
@@ -98,6 +98,9 @@ class MultiAgentOrchestrator:
         reviewer_models: Optional[List[str]] = None,
         reasoning_level: str = "medium",
         web_search: bool = False,
+        search_mode: str = "hybrid",
+        multi_query: bool = True,
+        breadth_first: bool = False,
         thesis: Optional[str] = None,
         formatting_options: Dict[str, bool] = None,
         run_audit: bool = True,
@@ -148,6 +151,9 @@ class MultiAgentOrchestrator:
                     judge_model=model,
                     reasoning_level=reasoning_level,
                     web_search=web_search,
+                    search_mode=search_mode,
+                    multi_query=multi_query,
+                    breadth_first=breadth_first,
                     thesis=thesis,
                     formatting_options=formatting_options,
                     template_structure=context.get('template_structure'),
@@ -250,20 +256,29 @@ class MultiAgentOrchestrator:
                        web_search = True # Fallback
 
                 if web_search and not web_search_instruction: # Only run if Deep Research didn't already populate
-                    web_search_instruction = "\n\n[INFO]: Pesquisa na Web ativada. Considere fatos recentes."
-                    # Execute Web Search Injection (Unified)
-                    try:
-                        search_term = prompt[:200].replace('\n', ' ')
-                        logger.info(f"🔍 [Simple Mode] Searching web for: {search_term[:50]}...")
-                        results = await web_search_service.search(search_term, num_results=10) # Default 10 sources
-                        if results.get('success') and results.get('results'):
-                            web_context = "\n\n## PESQUISA WEB RECENTE (Contexto Adicional):\n"
-                            for res in results['results']:
-                                web_context += f"- [{res['title']}]({res['url']}): {res['snippet']}\n"
-                            web_search_instruction += web_context
-                            logger.info(f"✅ [Simple Mode] Web context injected.")
-                    except Exception as e:
-                        logger.error(f"❌ [Simple Mode] Web search failed: {e}")
+                    search_mode = (search_mode or "hybrid").lower()
+                    if search_mode not in ("shared", "native", "hybrid"):
+                        search_mode = "hybrid"
+                    if search_mode != "native":
+                        web_search_instruction = "\n\n[INFO]: Pesquisa na Web ativada. Considere fatos recentes."
+                        # Execute Web Search Injection (Unified)
+                        try:
+                            search_term = prompt[:200].replace('\n', ' ')
+                            logger.info(f"🔍 [Simple Mode] Searching web for: {search_term[:50]}...")
+                            breadth_first = bool(breadth_first) or is_breadth_first(search_term)
+                            use_multi_query = bool(multi_query) or breadth_first
+                            if use_multi_query:
+                                results = await web_search_service.search_multi(search_term, num_results=10)
+                            else:
+                                results = await web_search_service.search(search_term, num_results=10)
+                            if results.get('success') and results.get('results'):
+                                web_context = "\n\n## PESQUISA WEB RECENTE (Contexto Adicional):\n"
+                                for res in results['results']:
+                                    web_context += f"- [{res['title']}]({res['url']}): {res['snippet']}\n"
+                                web_search_instruction += web_context
+                                logger.info(f"✅ [Simple Mode] Web context injected.")
+                        except Exception as e:
+                            logger.error(f"❌ [Simple Mode] Web search failed: {e}")
                 
                 enhanced_prompt = f"{prompt}\n\n{bundle_context}{reasoning_instruction}{web_search_instruction}"
                 
@@ -420,11 +435,31 @@ class MultiAgentOrchestrator:
         Comandos: @gpt, @claude, @gemini, @todos
         """
         logger.info(f"💬 Chat Message: {message[:50]}...")
-        
+
+        def _format_history_block(history: Optional[List[Dict[str, Any]]], summary_text: Optional[str]) -> str:
+            parts: List[str] = []
+            if summary_text:
+                parts.append("### RESUMO DA CONVERSA")
+                parts.append(str(summary_text).strip())
+            if history:
+                parts.append("### ÚLTIMAS MENSAGENS")
+                for item in history[-12:]:
+                    role = str(item.get("role") or "").strip().lower()
+                    content = str(item.get("content") or "").strip()
+                    if not content:
+                        continue
+                    label = "Usuário" if role == "user" else "Assistente"
+                    parts.append(f"{label}: {content}")
+            if not parts:
+                return ""
+            return "\n".join(parts).strip()
+
         # 1. Detectar Menções
         message_lower = message.lower()
         target_models = []
-        
+
+        chat_personality = (context.get("chat_personality") or "juridico").lower()
+
         if "@todos" in message_lower or "@all" in message_lower:
             target_models = ["gpt", "claude", "gemini"]
         else:
@@ -448,11 +483,10 @@ class MultiAgentOrchestrator:
                     target_models = ["gpt"]
                 else:
                     target_models = ["gemini"]
-            
+
         # 2. Extrair configs do contexto
         reasoning_level = context.get("reasoning_level", "medium")
         web_search = context.get("web_search", False)
-        chat_personality = (context.get("chat_personality") or "juridico").lower()
 
         from app.services.ai.agent_clients import build_system_instruction
         system_instruction = build_system_instruction(chat_personality)
@@ -463,7 +497,9 @@ class MultiAgentOrchestrator:
         if web_search:
             system_instruction += "\n- Considere que há pesquisa recente disponível quando pertinente."
 
-        enhanced_message = message
+        summary_text = context.get("conversation_summary")
+        history_block = _format_history_block(conversation_history, summary_text)
+        enhanced_message = f"{history_block}\n\n### MENSAGEM ATUAL\n{message}" if history_block else message
         max_tokens = 700 if chat_personality == "geral" else 1800
         temperature = 0.6 if chat_personality == "geral" else 0.3
         

@@ -3,6 +3,7 @@ Modelos de Biblioteca
 """
 
 from datetime import datetime
+from app.core.time_utils import utcnow
 from typing import Optional
 from sqlalchemy import String, DateTime, JSON, Boolean, Text, Integer, Enum as SQLEnum, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
@@ -14,6 +15,7 @@ from app.core.database import Base
 class LibraryItemType(str, enum.Enum):
     DOCUMENT = "DOCUMENT"
     MODEL = "MODEL"
+    CLAUSE = "CLAUSE"
     PROMPT = "PROMPT"
     JURISPRUDENCE = "JURISPRUDENCE"
     LEGISLATION = "LEGISLATION"
@@ -41,13 +43,13 @@ class LibraryItem(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
     
@@ -73,13 +75,13 @@ class Folder(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
     
@@ -104,13 +106,13 @@ class Librarian(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
     
@@ -146,11 +148,10 @@ class Share(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     accepted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     
     def __repr__(self) -> str:
         return f"<Share(id={self.id}, resource={self.resource_type}:{self.resource_id}, permission={self.permission})>"
-

@@ -268,108 +268,108 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                         <Card>
                                             <CardContent className="p-4 space-y-4">
                                                 <div className="space-y-2">
-                                                <div className="flex justify-between">
-                                                    <Label>Intervalo de páginas</Label>
-                                                    <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">
-                                                        {pageRangeLabel}
-                                                    </span>
-                                                </div>
-                                                <div className="flex gap-1 pt-2">
-                                                    {[1, 2, 3].map(level => (
-                                                        <div
-                                                            key={level}
+                                                    <div className="flex justify-between">
+                                                        <Label>Intervalo de páginas</Label>
+                                                        <span className="text-xs font-mono bg-muted px-2 py-0.5 rounded">
+                                                            {pageRangeLabel}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex gap-1 pt-2">
+                                                        {[1, 2, 3].map(level => (
+                                                            <div
+                                                                key={level}
+                                                                onClick={() => {
+                                                                    const preset = level === 1 ? [5, 8] : level === 2 ? [10, 15] : [20, 30];
+                                                                    store.setEffortLevel(level);
+                                                                    store.setPageRange({ minPages: preset[0], maxPages: preset[1] });
+                                                                }}
+                                                                className={cn(
+                                                                    "flex-1 h-2 rounded-full cursor-pointer transition-colors",
+                                                                    store.effortLevel >= level ? "bg-primary" : "bg-muted"
+                                                                )}
+                                                            />
+                                                        ))}
+                                                    </div>
+                                                    <div className="grid grid-cols-2 gap-2 pt-2">
+                                                        <div className="space-y-1">
+                                                            <Label className="text-[10px] text-muted-foreground">Mín.</Label>
+                                                            <Input
+                                                                type="number"
+                                                                min={0}
+                                                                className="h-7 text-[11px] bg-white"
+                                                                placeholder="Auto"
+                                                                value={store.minPages === 0 ? '' : store.minPages}
+                                                                onChange={(e) => {
+                                                                    const next = parseInt(e.target.value, 10);
+                                                                    store.setPageRange({ minPages: Number.isNaN(next) ? 0 : next });
+                                                                }}
+                                                            />
+                                                        </div>
+                                                        <div className="space-y-1">
+                                                            <Label className="text-[10px] text-muted-foreground">Máx.</Label>
+                                                            <Input
+                                                                type="number"
+                                                                min={0}
+                                                                className="h-7 text-[11px] bg-white"
+                                                                placeholder="Auto"
+                                                                value={store.maxPages === 0 ? '' : store.maxPages}
+                                                                onChange={(e) => {
+                                                                    const next = parseInt(e.target.value, 10);
+                                                                    store.setPageRange({ maxPages: Number.isNaN(next) ? 0 : next });
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex gap-1 pt-2">
+                                                        <Button
+                                                            type="button"
+                                                            variant={store.minPages === 0 && store.maxPages === 0 ? "default" : "outline"}
+                                                            className="h-7 text-[10px] px-2"
+                                                            onClick={() => store.resetPageRange()}
+                                                        >
+                                                            Auto
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            variant={store.minPages === 5 && store.maxPages === 8 ? "default" : "outline"}
+                                                            className="h-7 text-[10px] px-2"
                                                             onClick={() => {
-                                                                const preset = level === 1 ? [5, 8] : level === 2 ? [10, 15] : [20, 30];
-                                                                store.setEffortLevel(level);
-                                                                store.setPageRange({ minPages: preset[0], maxPages: preset[1] });
+                                                                store.setEffortLevel(1);
+                                                                store.setPageRange({ minPages: 5, maxPages: 8 });
                                                             }}
-                                                            className={cn(
-                                                                "flex-1 h-2 rounded-full cursor-pointer transition-colors",
-                                                                store.effortLevel >= level ? "bg-primary" : "bg-muted"
-                                                            )}
-                                                        />
-                                                    ))}
-                                                </div>
-                                                <div className="grid grid-cols-2 gap-2 pt-2">
-                                                    <div className="space-y-1">
-                                                        <Label className="text-[10px] text-muted-foreground">Mín.</Label>
-                                                        <Input
-                                                            type="number"
-                                                            min={0}
-                                                            className="h-7 text-[11px] bg-white"
-                                                            placeholder="Auto"
-                                                            value={store.minPages === 0 ? '' : store.minPages}
-                                                            onChange={(e) => {
-                                                                const next = parseInt(e.target.value, 10);
-                                                                store.setPageRange({ minPages: Number.isNaN(next) ? 0 : next });
+                                                        >
+                                                            Curta
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            variant={store.minPages === 10 && store.maxPages === 15 ? "default" : "outline"}
+                                                            className="h-7 text-[10px] px-2"
+                                                            onClick={() => {
+                                                                store.setEffortLevel(2);
+                                                                store.setPageRange({ minPages: 10, maxPages: 15 });
                                                             }}
-                                                        />
+                                                        >
+                                                            Média
+                                                        </Button>
+                                                        <Button
+                                                            type="button"
+                                                            variant={store.minPages === 20 && store.maxPages === 30 ? "default" : "outline"}
+                                                            className="h-7 text-[10px] px-2"
+                                                            onClick={() => {
+                                                                store.setEffortLevel(3);
+                                                                store.setPageRange({ minPages: 20, maxPages: 30 });
+                                                            }}
+                                                        >
+                                                            Longa
+                                                        </Button>
                                                     </div>
-                                                    <div className="space-y-1">
-                                                        <Label className="text-[10px] text-muted-foreground">Máx.</Label>
-                                                        <Input
-                                                            type="number"
-                                                            min={0}
-                                                            className="h-7 text-[11px] bg-white"
-                                                            placeholder="Auto"
-                                                            value={store.maxPages === 0 ? '' : store.maxPages}
-                                                            onChange={(e) => {
-                                                                const next = parseInt(e.target.value, 10);
-                                                                store.setPageRange({ maxPages: Number.isNaN(next) ? 0 : next });
-                                                            }}
-                                                        />
-                                                    </div>
+                                                    <p className="text-[10px] text-muted-foreground pt-1">
+                                                        Se vazio, usa o esforço para estimar o tamanho.
+                                                    </p>
                                                 </div>
-                                                <div className="flex gap-1 pt-2">
-                                                    <Button
-                                                        type="button"
-                                                        variant={store.minPages === 0 && store.maxPages === 0 ? "default" : "outline"}
-                                                        className="h-7 text-[10px] px-2"
-                                                        onClick={() => store.resetPageRange()}
-                                                    >
-                                                        Auto
-                                                    </Button>
-                                                    <Button
-                                                        type="button"
-                                                        variant={store.minPages === 5 && store.maxPages === 8 ? "default" : "outline"}
-                                                        className="h-7 text-[10px] px-2"
-                                                        onClick={() => {
-                                                            store.setEffortLevel(1);
-                                                            store.setPageRange({ minPages: 5, maxPages: 8 });
-                                                        }}
-                                                    >
-                                                        Curta
-                                                    </Button>
-                                                    <Button
-                                                        type="button"
-                                                        variant={store.minPages === 10 && store.maxPages === 15 ? "default" : "outline"}
-                                                        className="h-7 text-[10px] px-2"
-                                                        onClick={() => {
-                                                            store.setEffortLevel(2);
-                                                            store.setPageRange({ minPages: 10, maxPages: 15 });
-                                                        }}
-                                                    >
-                                                        Média
-                                                    </Button>
-                                                    <Button
-                                                        type="button"
-                                                        variant={store.minPages === 20 && store.maxPages === 30 ? "default" : "outline"}
-                                                        className="h-7 text-[10px] px-2"
-                                                        onClick={() => {
-                                                            store.setEffortLevel(3);
-                                                            store.setPageRange({ minPages: 20, maxPages: 30 });
-                                                        }}
-                                                    >
-                                                        Longa
-                                                    </Button>
-                                                </div>
-                                                <p className="text-[10px] text-muted-foreground pt-1">
-                                                    Se vazio, usa o esforço para estimar o tamanho.
-                                                </p>
-                                            </div>
-                                        </CardContent>
-                                    </Card>
-                                </div>
+                                            </CardContent>
+                                        </Card>
+                                    </div>
 
                                     <div>
                                         <h3 className="text-sm font-semibold uppercase text-muted-foreground mb-4 flex items-center gap-2">
@@ -380,7 +380,7 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                 <div className="flex items-center justify-between">
                                                     <div className="space-y-0.5">
                                                         <Label>Modo Agente</Label>
-                                                        <p className="text-[10px] text-muted-foreground">Comitê GPT + Claude</p>
+                                                        <p className="text-[10px] text-muted-foreground">Minuta (Agentes)</p>
                                                     </div>
                                                     <Switch
                                                         checked={store.useMultiAgent}
@@ -434,7 +434,7 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                         <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
                                                     </TooltipTrigger>
                                                     <TooltipContent side="right" className="max-w-xs text-xs">
-                                                        <p>No modo básico você escolhe só as fontes. No modo avançado aparecem técnicas extras de busca (Adaptive, HyDE, CRAG, GraphRAG).</p>
+                                                        <p>No modo básico você escolhe só as fontes. RAG básico busca trechos relevantes e responde com base neles. No modo avançado aparecem estratégias extras de recuperação. Passe o mouse nos ícones para detalhes técnicos.</p>
                                                     </TooltipContent>
                                                 </Tooltip>
                                             </TooltipProvider>
@@ -542,17 +542,17 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                     <div className="flex items-center justify-between">
                                                         <div className="space-y-0.5">
                                                             <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Roteamento Inteligente</Label>
+                                                                <Label className="text-xs font-semibold text-indigo-900">Estratégia automática</Label>
                                                                 <TooltipProvider>
                                                                     <Tooltip>
                                                                         <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
                                                                         <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>O sistema escolhe automaticamente a melhor estratégia de busca para cada seção do documento.</p>
+                                                                            <p>Nome técnico: Adaptive Routing. Escolhe automaticamente a melhor estratégia de busca para cada seção.</p>
                                                                         </TooltipContent>
                                                                     </Tooltip>
                                                                 </TooltipProvider>
                                                             </div>
-                                                            <p className="text-[10px] text-indigo-700">Escolhe a melhor estratégia por seção</p>
+                                                            <p className="text-[10px] text-indigo-700">Recomendado para a maioria dos casos</p>
                                                         </div>
                                                         <Switch
                                                             checked={store.adaptiveRouting}
@@ -563,17 +563,17 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                     <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
                                                         <div className="space-y-0.5">
                                                             <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Busca por Texto Hipotético (HyDE)</Label>
+                                                                <Label className="text-xs font-semibold text-indigo-900">Rascunho inteligente</Label>
                                                                 <TooltipProvider>
                                                                     <Tooltip>
                                                                         <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
                                                                         <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>Cria um texto hipotético para melhorar a busca semântica. Útil quando o pedido é genérico.</p>
+                                                                            <p>HyDE (Hypothetical Document Embeddings). Cria um rascunho para recuperar melhor quando o pedido é vago.</p>
                                                                         </TooltipContent>
                                                                     </Tooltip>
                                                                 </TooltipProvider>
                                                             </div>
-                                                            <p className="text-[10px] text-indigo-700">Melhora busca semântica para pedidos genéricos</p>
+                                                            <p className="text-[10px] text-indigo-700">Ajuda quando o pedido é vago</p>
                                                         </div>
                                                         <Switch
                                                             checked={store.hydeEnabled}
@@ -584,17 +584,17 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                     <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
                                                         <div className="space-y-0.5">
                                                             <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Filtro de Qualidade (CRAG)</Label>
+                                                                <Label className="text-xs font-semibold text-indigo-900">Verificação extra</Label>
                                                                 <TooltipProvider>
                                                                     <Tooltip>
                                                                         <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
                                                                         <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>Filtro de Qualidade. Valida se os resultados são bons o suficiente antes de usar. Evita alucinações e informações irrelevantes.</p>
+                                                                            <p>CRAG (Corrective RAG). Reavalia a qualidade das evidências antes de responder.</p>
                                                                         </TooltipContent>
                                                                     </Tooltip>
                                                                 </TooltipProvider>
                                                             </div>
-                                                            <p className="text-[10px] text-indigo-700">Evita usar fontes fracas</p>
+                                                            <p className="text-[10px] text-indigo-700">Checagem extra das fontes</p>
                                                         </div>
                                                         <Switch
                                                             checked={store.cragGate}
@@ -606,17 +606,17 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                         <div className="flex items-center justify-between">
                                                             <div className="space-y-0.5">
                                                                 <div className="flex items-center gap-1">
-                                                                    <Label className="text-xs font-semibold text-indigo-900">Busca por Conexões (GraphRAG)</Label>
+                                                                    <Label className="text-xs font-semibold text-indigo-900">Relações entre fatos</Label>
                                                                     <TooltipProvider>
                                                                         <Tooltip>
                                                                             <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
                                                                             <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                                <p>Busca por conexões entre entidades (qual lei cita qual súmula, etc). Ideal para casos complexos. Hops = profundidade das relações.</p>
+                                                                                <p>GraphRAG. Conecta documentos e conceitos relacionados para ampliar o contexto. Profundidade define os saltos nas relações.</p>
                                                                             </TooltipContent>
                                                                         </Tooltip>
                                                                     </TooltipProvider>
                                                                 </div>
-                                                                <p className="text-[10px] text-indigo-700">Explora relações entre leis e precedentes</p>
+                                                                <p className="text-[10px] text-indigo-700">Conecta documentos e conceitos relacionados</p>
                                                             </div>
                                                             <Switch
                                                                 checked={store.graphRagEnabled}
@@ -626,7 +626,7 @@ export function GeneratorWizard({ caseId, caseThesis }: { caseId: string, caseTh
                                                         {store.graphRagEnabled && (
                                                             <div className="space-y-2 pt-1 animate-in slide-in-from-top-1">
                                                                 <div className="flex justify-between items-center text-[10px]">
-                                                                    <span className="text-indigo-600">Hops (Profundidade)</span>
+                                                                    <span className="text-indigo-600">Profundidade</span>
                                                                     <span className="font-mono bg-white px-1 rounded border">{store.graphHops}</span>
                                                                 </div>
                                                                 <Slider

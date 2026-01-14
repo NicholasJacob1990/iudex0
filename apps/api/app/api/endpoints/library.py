@@ -7,9 +7,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 
 from app.core.database import get_db
 from app.core.security import get_current_user
+from app.core.time_utils import utcnow
 from app.models.library import LibraryItem, Folder, Librarian, LibraryItemType
 from app.models.user import User
 from app.utils.token_counter import estimate_tokens
@@ -50,9 +52,16 @@ async def list_items_root(
     if search:
         query = query.where(LibraryItem.name.ilike(f"%{search}%"))
         
+    count_query = select(func.count()).select_from(LibraryItem).where(LibraryItem.user_id == current_user.id)
+    if item_type:
+        count_query = count_query.where(LibraryItem.type == LibraryItemType(item_type))
+    if search:
+        count_query = count_query.where(LibraryItem.name.ilike(f"%{search}%"))
+
+    total = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(query.offset(skip).limit(limit))
     items = result.scalars().all()
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": total}
 
 
 @router.post("/", response_model=LibraryItemResponse, status_code=status.HTTP_201_CREATED)
@@ -119,11 +128,13 @@ async def list_library_items(
     """
     Listar itens da biblioteca
     """
+    count_query = select(func.count()).select_from(LibraryItem).where(LibraryItem.user_id == current_user.id)
+    total = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(
         select(LibraryItem).where(LibraryItem.user_id == current_user.id).order_by(LibraryItem.created_at.desc())
     )
     items = result.scalars().all()
-    return {"items": items, "total": len(items)}
+    return {"items": items, "total": total}
 
 
 @router.post("/items", response_model=LibraryItemResponse, status_code=status.HTTP_201_CREATED)
@@ -170,11 +181,13 @@ async def list_folders(
     """
     Listar pastas
     """
+    count_query = select(func.count()).select_from(Folder).where(Folder.user_id == current_user.id)
+    total = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(
         select(Folder).where(Folder.user_id == current_user.id).order_by(Folder.created_at.desc())
     )
     folders = result.scalars().all()
-    return {"folders": folders, "total": len(folders)}
+    return {"folders": folders, "total": total}
 
 
 @router.post("/folders", response_model=FolderResponse, status_code=status.HTTP_201_CREATED)
@@ -211,11 +224,13 @@ async def list_librarians(
     """
     Listar bibliotecários (assistentes personalizados)
     """
+    count_query = select(func.count()).select_from(Librarian).where(Librarian.user_id == current_user.id)
+    total = (await db.execute(count_query)).scalar() or 0
     result = await db.execute(
         select(Librarian).where(Librarian.user_id == current_user.id).order_by(Librarian.created_at.desc())
     )
     librarians = result.scalars().all()
-    return {"librarians": librarians, "total": len(librarians)}
+    return {"librarians": librarians, "total": total}
 
 
 @router.post("/librarians", response_model=LibrarianResponse, status_code=status.HTTP_201_CREATED)
@@ -502,7 +517,6 @@ async def accept_share(
     Aceitar compartilhamento pendente
     """
     from app.models.library import Share, ShareStatus
-    from datetime import datetime
     
     result = await db.execute(
         select(Share).where(
@@ -517,7 +531,7 @@ async def accept_share(
         raise HTTPException(status_code=404, detail="Compartilhamento não encontrado ou já processado")
     
     share.status = ShareStatus.ACCEPTED
-    share.accepted_at = datetime.utcnow()
+    share.accepted_at = utcnow()
     
     await db.commit()
     
@@ -581,4 +595,3 @@ async def revoke_share(
     await db.commit()
     
     return {"success": True, "message": f"Compartilhamento revogado para {len(request.user_emails)} usuário(s)"}
-

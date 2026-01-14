@@ -22,7 +22,6 @@ export default function CaseDetailPage() {
     const router = useRouter();
     const id = params.id as string;
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const [caseData, setCaseData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
 

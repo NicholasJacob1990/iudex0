@@ -70,7 +70,7 @@ export function DeepResearchViewer({ jobId, isVisible, events }: DeepResearchVie
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
 
-    }, [events, isVisible]);
+    }, [events, isVisible, jobId]);
 
     if (!isVisible || status === 'idle') return null;
 

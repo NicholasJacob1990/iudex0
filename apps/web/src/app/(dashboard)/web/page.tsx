@@ -12,14 +12,13 @@ export default function WebPage() {
           O Iudex consulta fontes confiáveis automaticamente antes de gerar uma minuta.
         </p>
 
-        {/* Aviso de Demonstração */}
-        <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm">
+        <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm">
           <div className="flex items-start gap-3">
-            <span className="text-amber-600 text-lg">⚠️</span>
+            <span className="text-slate-600 text-lg">ℹ️</span>
             <div>
-              <p className="font-semibold text-amber-900">Modo de Demonstração</p>
-              <p className="text-amber-700 mt-1">
-                Esta funcionalidade está exibindo resultados de exemplo. A integração com motores de busca reais será implementada em breve.
+              <p className="font-semibold text-slate-900">Pesquisa Ativa</p>
+              <p className="text-slate-700 mt-1">
+                Resultados obtidos via motores de busca com cache inteligente. Valide sempre as fontes antes de citar.
               </p>
             </div>
           </div>
@@ -30,4 +29,3 @@ export default function WebPage() {
     </div>
   );
 }
-

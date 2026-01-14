@@ -26,7 +26,7 @@ export function DocumentCanvas({ content }: DocumentCanvasProps) {
   return (
     <div className="relative h-full overflow-hidden rounded-[32px] border border-outline/50 bg-sand/70 shadow-soft">
       <div className="absolute inset-0 -z-10 rounded-[32px] bg-dotted-grid opacity-60" />
-      <div className="h-full w-full overflow-y-auto p-8">
+      <div className="h-full w-full overflow-auto p-8">
         <div className="mx-auto flex min-h-full max-w-[980px] flex-col items-center gap-6 pb-16">
           {hasContent ? (
             <DocumentEditor content={htmlContent} editable={true} />
@@ -44,4 +44,3 @@ export function DocumentCanvas({ content }: DocumentCanvasProps) {
     </div>
   );
 }
-

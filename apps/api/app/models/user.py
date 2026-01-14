@@ -3,6 +3,7 @@ Modelo de Usuário
 """
 
 from datetime import datetime
+from app.core.time_utils import utcnow
 from typing import Optional
 from sqlalchemy import String, DateTime, JSON, Enum as SQLEnum, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -82,13 +83,13 @@ class User(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
 
@@ -126,4 +127,3 @@ class User(Base):
                 "signature_image": self.signature_image,
                 "signature_text": self.signature_text or f"{self.name}\n{self.position}\n{self.institution_name}"
             }
-

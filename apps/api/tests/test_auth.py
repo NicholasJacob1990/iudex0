@@ -134,7 +134,7 @@ def test_get_current_user_unauthorized(client: TestClient):
     """Teste de obtenção do usuário sem autenticação"""
     response = client.get("/api/auth/me")
     
-    assert response.status_code == 401
+    assert response.status_code == 403
 
 
 def test_logout(client: TestClient, auth_headers: dict):
@@ -146,4 +146,3 @@ def test_logout(client: TestClient, auth_headers: dict):
     
     assert response.status_code == 200
     assert "sucesso" in response.json()["message"]
-

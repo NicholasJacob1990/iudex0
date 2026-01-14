@@ -14,7 +14,7 @@ export default function DashboardLayout({
   const router = useRouter();
   const pathname = usePathname();
   const { isAuthenticated, fetchProfile, isLoading } = useAuthStore();
-  const { sidebarOpen, setSidebarOpen } = useUIStore();
+  const { sidebarState, setSidebarState } = useUIStore();
   const [isHydrated, setIsHydrated] = useState(false);
 
   // Aguardar hidratação do Zustand persist
@@ -25,7 +25,9 @@ export default function DashboardLayout({
   useEffect(() => {
     if (!isHydrated || isLoading) return;
 
-    if (!isAuthenticated) {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+
+    if (!isAuthenticated && !token) {
       router.push('/login');
     } else {
       fetchProfile();
@@ -44,22 +46,24 @@ export default function DashboardLayout({
     );
   }
 
-  if (!isAuthenticated) {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+
+  if (!isAuthenticated && !token) {
     return null;
   }
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
       <div
-        className={`fixed inset-0 z-30 bg-black/20 transition-opacity lg:hidden ${sidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
+        className={`fixed inset-0 z-30 bg-black/20 transition-opacity lg:hidden ${sidebarState !== 'hidden' ? 'opacity-100' : 'pointer-events-none opacity-0'
           }`}
-        onClick={() => setSidebarOpen(false)}
+        onClick={() => setSidebarState('hidden')}
       />
       <SidebarPro />
       <div className="flex flex-1 flex-col">
         <TopNav />
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          <main className={`flex-1 min-h-0 ${pathname === '/minuta' ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>{children}</main>
+          <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>{children}</main>
         </div>
       </div>
     </div>

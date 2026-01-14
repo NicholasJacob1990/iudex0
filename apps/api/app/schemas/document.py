@@ -4,7 +4,7 @@ Schemas Pydantic para documentos
 
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class DocumentBase(BaseModel):
@@ -52,8 +52,7 @@ class DocumentResponse(DocumentBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class DocumentSummaryRequest(BaseModel):
@@ -85,6 +84,7 @@ class DocumentGenerationRequest(BaseModel):
     attachment_mode: str = Field(default="rag_local", pattern="^(rag_local|prompt_injection)$", description="Como usar anexos (rag_local|prompt_injection)")
     include_signature: bool = Field(default=True, description="Incluir assinatura no documento")
     template_id: Optional[str] = Field(None, description="ID do template a ser usado")
+    template_document_id: Optional[str] = Field(None, description="ID do documento base para modelo/estrutura")
     variables: Dict[str, Any] = Field(default_factory=dict, description="Variáveis do template")
     language: str = "pt-BR"
     tone: str = Field(default="formal", description="Tom do documento (formal, informal, técnico)")
@@ -100,11 +100,17 @@ class DocumentGenerationRequest(BaseModel):
     chat_personality: str = Field(default="juridico", pattern="^(juridico|geral)$", description="Personalidade do chat (juridico|geral)")
     reasoning_level: str = Field(default="medium", pattern="^(low|medium|high)$", description="Nível de raciocínio")
     web_search: bool = Field(default=False, description="Ativar pesquisa na web")
+    search_mode: str = Field(default="hybrid", pattern="^(shared|native|hybrid)$", description="Modo de busca (shared|native|hybrid)")
+    multi_query: bool = Field(default=True, description="Ativar multi-query para busca web")
+    breadth_first: bool = Field(default=False, description="Ativar breadth-first para perguntas amplas")
+    research_policy: str = Field(default="auto", pattern="^(auto|force)$", description="Política de pesquisa (auto|force)")
     thesis: Optional[str] = Field(None, description="Tese jurídica ou instruções livres")
     formatting_options: Dict[str, bool] = Field(default_factory=dict, description="Opções de formatação (include_toc, include_summaries, include_summary_table)")
     citation_style: str = Field(default="forense", pattern="^(forense|abnt|hibrido)$", description="Estilo de citação (forense|abnt|hibrido)")
     use_templates: bool = Field(default=False, description="Ativar uso de modelos de peça (RAG)")
     template_filters: Dict[str, Any] = Field(default_factory=dict, description="Filtros para busca de modelos (tipo_peca, area, rito, apenas_clause_bank)")
+    rag_sources: Optional[List[str]] = Field(default=None, description="Fontes RAG (lei, juris, pecas_modelo)")
+    rag_top_k: Optional[int] = Field(default=None, ge=1, le=50, description="Top K resultados do RAG")
     prompt_extra: Optional[str] = Field(None, description="Instruções adicionais para a redação")
     audit: bool = Field(default=True, description="Executar auditoria jurídica ao final")
     use_langgraph: bool = Field(default=True, description="Usar workflow LangGraph para geração")
@@ -120,6 +126,16 @@ class DocumentGenerationRequest(BaseModel):
     risco: str = Field(default="baixo", pattern="^(baixo|medio|alto)$")
     hil_outline_enabled: bool = Field(default=False, description="Habilitar revisão humana do outline (LangGraph)")
     hil_target_sections: List[str] = Field(default_factory=list, description="Seções alvo para HIL (LangGraph)")
+    audit_mode: str = Field(default="sei_only", pattern="^(sei_only|research)$")
+    quality_profile: str = Field(default="padrao", pattern="^(rapido|padrao|rigoroso|auditoria)$")
+    target_section_score: Optional[float] = Field(default=None, ge=0, le=10)
+    target_final_score: Optional[float] = Field(default=None, ge=0, le=10)
+    max_rounds: Optional[int] = Field(default=None, ge=1, le=10)
+    strict_document_gate: Optional[bool] = Field(default=None)
+    hil_section_policy: Optional[str] = Field(default=None, pattern="^(none|optional|required)$")
+    hil_final_required: Optional[bool] = Field(default=None)
+    recursion_limit: Optional[int] = Field(default=None, ge=20, le=500)
+    document_checklist_hint: List[Dict[str, Any]] = Field(default_factory=list, description="Checklist complementar do usuário")
 
 
 class DocumentGenerationResponse(BaseModel):
@@ -132,8 +148,7 @@ class DocumentGenerationResponse(BaseModel):
     cost_info: Dict[str, Any]
     signature_data: Optional[Dict[str, Any]] = None
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TemplateVariable(BaseModel):
@@ -162,8 +177,7 @@ class DocumentTemplate(BaseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SignatureRequest(BaseModel):

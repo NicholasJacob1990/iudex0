@@ -1,4 +1,6 @@
 import re
+from pathlib import Path
+import pytest
 
 def segment_by_speaker(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -76,6 +78,8 @@ def segment_by_speaker(file_path):
 
 def test_segmentation():
     file_path = "/Users/nicholasjacob/Documents/Aplicativos/Iudex/Aulas_PGM_RJ/01_Aula_Inaugural_YouTube_RAW.txt"
+    if not Path(file_path).exists():
+        pytest.skip("Arquivo local de teste não encontrado.")
     segments = segment_by_speaker(file_path)
     
     print(f"Found {len(segments)} major segments:")

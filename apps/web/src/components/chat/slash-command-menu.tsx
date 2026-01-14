@@ -1,11 +1,12 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { Search, FileText, ChevronRight, Star } from 'lucide-react';
+import { Search, FileText, ChevronRight, Star, HelpCircle } from 'lucide-react';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
 import { PREDEFINED_PROMPTS, type PredefinedPrompt } from '@/data/prompts';
 import type { CustomPrompt } from '@/components/dashboard/prompt-customization';
 import { cn } from '@/lib/utils';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 import { Zap, Scale, Box } from 'lucide-react';
 
@@ -18,6 +19,7 @@ export interface SystemCommand {
     description: string;
     action: string; // Identifier for the action
     icon?: any;
+    tooltip?: string;
 }
 
 const SYSTEM_COMMANDS: SystemCommand[] = [
@@ -60,6 +62,87 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         description: 'Volta para chat com um único modelo',
         action: 'set-mode:standard',
         icon: Box
+    },
+    {
+        id: 'cmd-canvas-edit',
+        category: 'Comandos do Sistema',
+        name: 'Editar documento (Canvas)',
+        description: 'Insere /canvas <instrução>',
+        action: 'insert-text:/canvas ',
+        icon: FileText,
+        tooltip: 'Aplica a instrução ao documento inteiro.'
+    },
+    {
+        id: 'cmd-canvas-append',
+        category: 'Comandos do Sistema',
+        name: 'Adicionar ao documento',
+        description: 'Insere /canvas append <conteúdo>',
+        action: 'insert-text:/canvas append ',
+        icon: FileText,
+        tooltip: 'Pede para anexar conteúdo ao final do documento.'
+    },
+    {
+        id: 'cmd-canvas-replace',
+        category: 'Comandos do Sistema',
+        name: 'Substituir documento',
+        description: 'Insere /canvas replace <instrução>',
+        action: 'insert-text:/canvas replace ',
+        icon: FileText,
+        tooltip: 'Pede para reescrever o documento inteiro.'
+    },
+    {
+        id: 'cmd-templates-on',
+        category: 'Comandos do Sistema',
+        name: 'Ativar modelos de peça (RAG)',
+        description: 'Insere /templates on',
+        action: 'insert-text:/templates on',
+        icon: Zap,
+        tooltip: 'Habilita o RAG de pecas_modelo para esta conversa.'
+    },
+    {
+        id: 'cmd-templates-off',
+        category: 'Comandos do Sistema',
+        name: 'Desativar modelos de peça',
+        description: 'Insere /templates off',
+        action: 'insert-text:/templates off',
+        icon: Box,
+        tooltip: 'Desliga o uso de modelos de peça no chat.'
+    },
+    {
+        id: 'cmd-template-id',
+        category: 'Comandos do Sistema',
+        name: 'Definir Template ID',
+        description: 'Insere /template_id <id>',
+        action: 'insert-text:/template_id ',
+        icon: Zap,
+        tooltip: 'Molde da biblioteca com marcadores (minuta/CONTENT). Aceita @[Nome](id:lib).'
+    },
+    {
+        id: 'cmd-template-doc',
+        category: 'Comandos do Sistema',
+        name: 'Definir Documento base (RAG)',
+        description: 'Insere /template_doc <id>',
+        action: 'insert-text:/template_doc ',
+        icon: Zap,
+        tooltip: 'Usa um documento real como referência (não aplica marcadores). Aceita @[Nome](id:doc).'
+    },
+    {
+        id: 'cmd-template-filters',
+        category: 'Comandos do Sistema',
+        name: 'Filtrar modelos do RAG',
+        description: 'Insere /template_filters tipo= area= rito= clause=off',
+        action: 'insert-text:/template_filters tipo= area= rito= clause=off',
+        icon: Zap,
+        tooltip: 'Restringe modelos por tipo, área e rito. clause=on usa só clause bank.'
+    },
+    {
+        id: 'cmd-template-clear',
+        category: 'Comandos do Sistema',
+        name: 'Limpar configs de template',
+        description: 'Insere /template_clear',
+        action: 'insert-text:/template_clear',
+        icon: Box,
+        tooltip: 'Remove template_id, template_doc e filtros do chat.'
     }
 ];
 
@@ -123,7 +206,7 @@ export function SlashCommandMenu({ onSelect, onClose, position }: SlashCommandMe
         };
     }, [onClose]);
 
-    const handleSelect = (prompt: PredefinedPrompt) => {
+    const handleSelect = (prompt: AnyPrompt | SystemCommand) => {
         onSelect(prompt);
         onClose();
     };
@@ -199,8 +282,27 @@ export function SlashCommandMenu({ onSelect, onClose, position }: SlashCommandMe
                                                         </span>
                                                     )}
                                                 </div>
-                                                <div className="text-xs text-muted-foreground line-clamp-1">
-                                                    {item.description}
+                                                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                                                    <span className="line-clamp-1">{item.description}</span>
+                                                    {item.tooltip && (
+                                                        <TooltipProvider>
+                                                            <Tooltip>
+                                                                <TooltipTrigger asChild>
+                                                                    <button
+                                                                        type="button"
+                                                                        className="text-muted-foreground hover:text-foreground"
+                                                                        onClick={(event) => event.stopPropagation()}
+                                                                        onMouseDown={(event) => event.stopPropagation()}
+                                                                    >
+                                                                        <HelpCircle className="h-3.5 w-3.5" />
+                                                                    </button>
+                                                                </TooltipTrigger>
+                                                                <TooltipContent side="right" className="max-w-xs text-xs">
+                                                                    {item.tooltip}
+                                                                </TooltipContent>
+                                                            </Tooltip>
+                                                        </TooltipProvider>
+                                                    )}
                                                 </div>
                                             </div>
                                         </div>

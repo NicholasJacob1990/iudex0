@@ -51,7 +51,11 @@ async def send_message(
     thread_id: str,
     message: str = Body(...),
     models: List[str] = Body(...),
-    chat_personality: str = Body("juridico")
+    chat_personality: str = Body("juridico"),
+    web_search: bool = Body(False),
+    multi_query: bool = Body(True),
+    breadth_first: bool = Body(False),
+    search_mode: str = Body("hybrid")
 ):
     """
     Send message to one or more models.
@@ -61,7 +65,16 @@ async def send_message(
     
     async def event_generator():
         try:
-            async for event in chat_service.dispatch_turn(thread_id, message, models, chat_personality=chat_personality):
+            async for event in chat_service.dispatch_turn(
+                thread_id,
+                message,
+                models,
+                chat_personality=chat_personality,
+                web_search=web_search,
+                multi_query=multi_query,
+                breadth_first=breadth_first,
+                search_mode=search_mode
+            ):
                 yield sse_event(event)
         except Exception as e:
             logger.error(f"Stream error: {e}")
@@ -93,3 +106,61 @@ async def consolidate_turn(
     except Exception as e:
         logger.error(f"Consolidate error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/threads/{thread_id}/edit")
+async def edit_document(
+    thread_id: str,
+    message: str = Body(..., description="Edit command from user"),
+    document: str = Body(..., description="Full document or section to edit"),
+    selection: str = Body(None, description="Optional selected text to focus on"),
+    selection_context_before: str = Body(None, description="Optional selection context before"),
+    selection_context_after: str = Body(None, description="Optional selection context after"),
+    models: List[str] = Body(None, description="Models to use. None=committee, ['model']=fast mode"),
+    mode: str = Body("committee", description="Mode: committee, fast, debate, engineering")
+):
+    """
+    v5.4: Edit document via agent committee or single model.
+    
+    Pass models=None for full committee (GPT + Claude + Gemini Judge).
+    Pass models=["gemini-3-flash"] for single-model.
+    Pass mode="engineering" for Agentic Engineering Pipeline.
+    """
+    effective_mode = mode
+    if models and len(models) == 1:
+        effective_mode = "fast"
+    elif not mode or mode == "committee":
+        if not models:
+             effective_mode = "committee"
+    
+    mode_label = effective_mode
+    logger.info(f"📝 Edit request [{mode_label}] in {thread_id}: {message[:50]}...")
+    
+    async def event_generator():
+        try:
+            async for event in chat_service.dispatch_document_edit(
+                thread_id,
+                message,
+                document,
+                selection,
+                models,
+                None,
+                None,
+                selection_context_before,
+                selection_context_after,
+                use_debate=(mode == "debate"),
+                mode=mode
+            ):
+                yield sse_event(event)
+        except Exception as e:
+            logger.error(f"Edit stream error: {e}")
+            yield sse_event({"type": "error", "error": str(e)})
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    )

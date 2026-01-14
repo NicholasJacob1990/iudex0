@@ -9,11 +9,14 @@ Includes:
 - Flags for agents and juridico use
 """
 
+import os
 from typing import Dict, Any, Literal, List, Optional
 from dataclasses import dataclass, field
 
 LatencyTier = Literal["low", "medium", "high", "depends_self_host"]
 CostTier = Literal["low", "medium", "medium_high", "high", "infra_only"]
+# NEW: Thinking implementation category
+ThinkingCategory = Literal["native", "xml", "agent", "none"]
 
 @dataclass
 class ModelConfig:
@@ -31,6 +34,7 @@ class ModelConfig:
     icon: str = ""
     api_model: str = ""  # Actual API model name if different from id
     supports_streaming: bool = True
+    thinking_category: ThinkingCategory = "xml"  # NEW: How to implement thinking
 
 # =============================================================================
 # REGISTRY
@@ -52,6 +56,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="openai.svg",
         api_model="gpt-5.2-chat-latest",
+        thinking_category="xml",  # Uses XML parsing
     ),
     "gpt-5": ModelConfig(
         id="gpt-5",
@@ -82,6 +87,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="openai.svg",
         api_model="gpt-5-mini",
+        thinking_category="agent",  # Light model: use agent-based
     ),
     "gpt-4o": ModelConfig(
         id="gpt-4o",
@@ -99,13 +105,60 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         api_model="gpt-4o",
     ),
 
+    # ---------- XAI ----------
+    "grok-4": ModelConfig(
+        id="grok-4",
+        provider="xai",
+        family="grok-4",
+        label="Grok 4",
+        context_window=128_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "analysis", "agents"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="xai.svg",
+        api_model=os.getenv("GROK_4_API_MODEL", "grok-4"),
+    ),
+    "grok-4-fast": ModelConfig(
+        id="grok-4-fast",
+        provider="xai",
+        family="grok-4",
+        label="Grok 4 Fast",
+        context_window=2_000_000,
+        latency_tier="medium",
+        cost_tier="high",
+        capabilities=["chat", "analysis", "agents"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="xai.svg",
+        api_model=os.getenv("GROK_4_FAST_API_MODEL", "grok-4-fast"),
+    ),
+    "grok-4.1-fast": ModelConfig(
+        id="grok-4.1-fast",
+        provider="xai",
+        family="grok-4",
+        label="Grok 4.1 Fast",
+        context_window=2_000_000,
+        latency_tier="medium",
+        cost_tier="high",
+        capabilities=["chat", "analysis", "agents"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="xai.svg",
+        api_model=os.getenv("GROK_4_1_FAST_API_MODEL", "grok-4.1-fast"),
+    ),
+
     # ---------- ANTHROPIC ----------
     "claude-4.5-opus": ModelConfig(
         id="claude-4.5-opus",
         provider="anthropic",
         family="claude-4.5",
         label="Claude 4.5 Opus",
-        context_window=1_000_000,
+        context_window=200_000,
         latency_tier="high",
         cost_tier="high",
         capabilities=["chat", "code", "agents", "deep_reasoning"],
@@ -114,13 +167,14 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="anthropic.svg",
         api_model="claude-opus-4-5@20250929",
+        thinking_category="xml",  # Opus uses XML parsing
     ),
     "claude-4.5-sonnet": ModelConfig(
         id="claude-4.5-sonnet",
         provider="anthropic",
         family="claude-4.5",
         label="Claude 4.5 Sonnet",
-        context_window=1_000_000,
+        context_window=200_000,
         latency_tier="medium",
         cost_tier="medium",
         capabilities=["chat", "code", "analysis"],
@@ -129,6 +183,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=True,
         icon="anthropic.svg",
         api_model="claude-sonnet-4-5@20250929",
+        thinking_category="native",  # Extended Thinking via API
     ),
     "claude-4.5-haiku": ModelConfig(
         id="claude-4.5-haiku",
@@ -144,6 +199,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="anthropic.svg",
         api_model="claude-haiku-4-5@20250929",
+        thinking_category="agent",  # Light model: use agent-based
     ),
 
     # ---------- GEMINI ----------
@@ -152,7 +208,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         provider="google",
         family="gemini-3",
         label="Gemini 3 Pro",
-        context_window=200_000,
+        context_window=1_000_000,
         latency_tier="medium",
         cost_tier="medium",
         capabilities=["chat", "code", "agents", "multimodal"],
@@ -160,7 +216,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=True,
         icon="gemini.svg",
-        api_model="gemini-3-pro",
+        api_model=os.getenv("GEMINI_3_PRO_API_MODEL", "gemini-2.5-pro-preview-05-06"),
+        thinking_category="native",  # Native include_thoughts API
     ),
     "gemini-3-flash": ModelConfig(
         id="gemini-3-flash",
@@ -175,7 +232,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="gemini.svg",
-        api_model="gemini-3-flash-preview",
+        api_model=os.getenv("GEMINI_3_FLASH_API_MODEL", "gemini-2.0-flash"),
+        thinking_category="native",  # Native include_thoughts API (Gemini 2.0+ supports it)
     ),
     "gemini-2.5-pro": ModelConfig(
         id="gemini-2.5-pro",
@@ -206,6 +264,23 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="gemini.svg",
         api_model="gemini-2.5-flash-preview-05-20",
+    ),
+
+    # ---------- OPENROUTER / META ----------
+    "llama-4": ModelConfig(
+        id="llama-4",
+        provider="openrouter",
+        family="llama-4",
+        label="Llama 4",
+        context_window=128_000,
+        latency_tier="medium",
+        cost_tier="medium",
+        capabilities=["chat", "analysis"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="meta.svg",
+        api_model=os.getenv("LLAMA_4_API_MODEL", "meta-llama/llama-4-maverick"),
     ),
 
     # ---------- INTERNAL ----------
@@ -241,6 +316,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="deepseek.svg",
         api_model="deepseek-reasoner",
+        thinking_category="native",  # Native reasoning_content field
     ),
 }
 
@@ -256,6 +332,20 @@ def get_api_model_name(model_id: str) -> str:
     """Get the actual API model name to use in provider calls"""
     config = MODEL_REGISTRY.get(model_id)
     return config.api_model if config else model_id
+
+def get_thinking_category(model_id: str) -> str:
+    """Get the thinking implementation category for a model.
+    
+    Returns:
+        'native': Model has native API support (reasoning_content, thinking_delta, include_thoughts)
+        'xml': Model should use XML <thinking> tags via prompt engineering
+        'agent': Light model, use 2-step agent approach
+        'none': No thinking support
+    """
+    config = MODEL_REGISTRY.get(model_id)
+    if not config:
+        return "xml"  # Default fallback
+    return config.thinking_category
 
 def validate_model_id(model_id: Optional[str], *, for_juridico: bool = False, for_agents: bool = False, field_name: str = "model") -> str:
     """

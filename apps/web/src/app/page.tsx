@@ -73,7 +73,7 @@ export default function HomePage() {
       <section className="relative pt-32 pb-20 lg:pt-48 lg:pb-32 overflow-hidden">
         <div className="container mx-auto px-6 relative z-10">
           <motion.div
-            initial="hidden"
+            initial={false}
             animate="visible"
             variants={containerVariants}
             className="max-w-4xl mx-auto text-center"

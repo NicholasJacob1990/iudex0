@@ -25,6 +25,11 @@ from app.services.ai.model_registry import (
     validate_model_id,
     validate_model_list,
 )
+from app.services.ai.quality_profiles import resolve_quality_profile
+from app.services.ai.checklist_parser import (
+    parse_document_checklist_from_prompt,
+    merge_document_checklist_hints,
+)
 try:
     from langgraph.types import Command
 except ImportError:
@@ -159,6 +164,8 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
         try:
             # Check if job exists
             current_state = legal_workflow_app.get_state(config)
+            recursion_limit = int(current_state.values.get("recursion_limit") or 200) if current_state.values else 200
+            config["recursion_limit"] = recursion_limit
             
             if not current_state.values:
                 yield sse_event({"type": "info", "message": "Aguardando início do job..."}, event="status")
@@ -174,7 +181,9 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                 
                 for node_name, node_output in event.items():
                     
-                    if node_name == "outline":
+                    # NOTE: workflow node was renamed to "gen_outline" to avoid conflict with the state key "outline".
+                    # Keep backward-compatible handling for older graphs still emitting "outline".
+                    if node_name in ("outline", "gen_outline"):
                         yield sse_event({
                             "type": "outline_done", 
                             "outline": node_output.get("outline", [])
@@ -251,7 +260,22 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                     elif "revise" in node_name:
                         yield sse_event({"type": "revision", "agent": node_name}, event="granular")
                     elif node_name == "judge":
-                        yield sse_event({"type": "judging", "agent": "Gemini Judge"}, event="granular")
+                        yield sse_event({
+                            "type": "judging",
+                            "agent": node_output.get("judge_model", "Judge"),
+                            "quality_score": node_output.get("quality_score"),
+                            "retry_reason": node_output.get("retry_reason"),
+                            "retries": node_output.get("retries"),
+                            "max_retries": node_output.get("max_retries"),
+                        }, event="granular")
+                    elif node_name == "prepare_retry":
+                        yield sse_event({
+                            "type": "retry",
+                            "retries": node_output.get("retries"),
+                            "max_retries": node_output.get("max_retries"),
+                            "retry_reason": node_output.get("retry_reason"),
+                            "quality_score": node_output.get("quality_score"),
+                        }, event="granular")
 
                     elif node_name == "audit":
                         yield sse_event({
@@ -260,6 +284,20 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                             "issues_count": len(node_output.get("audit_issues", [])),
                             "report": node_output.get("audit_report")
                         }, event="audit")
+                    elif node_name == "fact_check":
+                        checklist = node_output.get("document_checklist", {}) or {}
+                        yield sse_event({
+                            "type": "fact_check_done",
+                            "summary": checklist.get("summary"),
+                            "missing_critical": checklist.get("missing_critical", []),
+                            "missing_noncritical": checklist.get("missing_noncritical", []),
+                        }, event="fact_check")
+                    elif node_name == "document_gate":
+                        yield sse_event({
+                            "type": "document_gate_done",
+                            "status": node_output.get("document_gate_status"),
+                            "missing": node_output.get("document_gate_missing", []),
+                        }, event="document_gate")
 
                     # Quality Pipeline (v2.25)
                     elif node_name == "quality_gate":
@@ -288,7 +326,8 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                             "patches_applied": details[:15] if isinstance(details, list) else [],
                         }, event="quality")
 
-                    elif node_name == "quality_report":
+                    # NOTE: workflow node was renamed to "gen_quality_report" to avoid conflict with the state key.
+                    elif node_name in ("quality_report", "gen_quality_report"):
                         report = node_output.get("quality_report", {}) or {}
                         md = (node_output.get("quality_report_markdown") or "")
                         yield sse_event({
@@ -403,7 +442,40 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                         "review_data": {
                             "document": final_snapshot.values.get("full_document"),
                             "audit_status": final_snapshot.values.get("audit_status"),
-                            "audit_report": final_snapshot.values.get("audit_report")
+                            "audit_report": final_snapshot.values.get("audit_report"),
+                            "committee_review_report": final_snapshot.values.get("committee_review_report")
+                        }
+                    }, event="review")
+                    return
+                elif "style_check" in str(next_nodes):
+                    payload = final_snapshot.values.get("style_check_payload") or {}
+                    report = final_snapshot.values.get("style_report") or {}
+                    issues = payload.get("issues") or report.get("issues") or []
+                    term_variations = payload.get("term_variations") or report.get("term_variations") or []
+                    yield sse_event({
+                        "type": "human_review_required",
+                        "checkpoint": "style_check",
+                        "job_id": jobid,
+                        "review_data": {
+                            "tone_detected": payload.get("tone_detected") or report.get("tone"),
+                            "thermometer": payload.get("thermometer") or report.get("thermometer"),
+                            "score": payload.get("score") or report.get("score"),
+                            "issues": issues,
+                            "term_variations": term_variations,
+                            "draft_snippet": payload.get("draft_snippet") or (final_snapshot.values.get("full_document", "") or "")[:1200],
+                        }
+                    }, event="review")
+                    return
+                elif "document_gate" in str(next_nodes):
+                    checklist = final_snapshot.values.get("document_checklist", {}) or {}
+                    yield sse_event({
+                        "type": "human_review_required",
+                        "checkpoint": "document_gate",
+                        "job_id": jobid,
+                        "review_data": {
+                            "summary": checklist.get("summary"),
+                            "missing_critical": checklist.get("missing_critical", []),
+                            "missing_noncritical": checklist.get("missing_noncritical", []),
                         }
                     }, event="review")
                     return
@@ -412,7 +484,11 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
             if not final_snapshot.next:
                 yield sse_event({
                     "type": "done",
-                    "markdown": final_snapshot.values.get("final_markdown")
+                    "markdown": final_snapshot.values.get("final_markdown"),
+                    "final_decision": final_snapshot.values.get("final_decision"),
+                    "final_decision_reasons": final_snapshot.values.get("final_decision_reasons", []),
+                    "final_decision_score": final_snapshot.values.get("final_decision_score"),
+                    "final_decision_target": final_snapshot.values.get("final_decision_target"),
                 }, event="done")
 
         except Exception as e:
@@ -486,6 +562,41 @@ async def start_job(
     if attachment_prompt_context:
         prompt_text = f"{prompt_text}\n\n{attachment_prompt_context}"
 
+    audit_mode = request.get("audit_mode", "sei_only")
+    strict_document_gate_override = request.get("strict_document_gate")
+    if not isinstance(strict_document_gate_override, bool):
+        strict_document_gate_override = None
+    hil_section_policy = request.get("hil_section_policy")
+    if hil_section_policy not in ("none", "optional", "required"):
+        hil_section_policy = None
+    hil_final_required_override = request.get("hil_final_required")
+    if not isinstance(hil_final_required_override, bool):
+        hil_final_required_override = None
+    recursion_limit_override = request.get("recursion_limit")
+    try:
+        recursion_limit_override = int(recursion_limit_override) if recursion_limit_override is not None else None
+    except (TypeError, ValueError):
+        recursion_limit_override = None
+    profile_config = resolve_quality_profile(
+        request.get("quality_profile", "padrao"),
+        {
+            "target_section_score": request.get("target_section_score"),
+            "target_final_score": request.get("target_final_score"),
+            "max_rounds": request.get("max_rounds"),
+            "strict_document_gate": strict_document_gate_override,
+            "hil_section_policy": hil_section_policy,
+            "hil_final_required": hil_final_required_override,
+            "recursion_limit": recursion_limit_override,
+        }
+    )
+    config["recursion_limit"] = int(profile_config.get("recursion_limit", 200))
+    sei_context = attachment_prompt_context or attachment_rag_context or None
+    prompt_checklist_hint = parse_document_checklist_from_prompt(request.get("prompt", ""))
+    merged_checklist_hint = merge_document_checklist_hints(
+        request.get("document_checklist_hint", []) or [],
+        prompt_checklist_hint,
+    )
+
     # Initial State
     initial_state = {
         "input_text": prompt_text,
@@ -493,7 +604,15 @@ async def start_job(
         "tese": request.get("thesis", ""),
         "job_id": jobid,
         "deep_research_enabled": bool(request.get("dense_research", False)),
-        "web_search_enabled": bool(request.get("web_search", False)),
+        "web_search_enabled": bool(request.get("web_search", False)) and audit_mode != "sei_only",
+        "search_mode": request.get("search_mode", "hybrid"),
+        "research_policy": request.get("research_policy", "auto"),
+        "research_mode": "none",
+        "need_juris": False,
+        "planning_reasoning": None,
+        "planned_queries": [],
+        "multi_query": bool(request.get("multi_query", True)),
+        "breadth_first": bool(request.get("breadth_first", False)),
         "use_multi_agent": request.get("use_multi_agent", False),
         "thinking_level": request.get("reasoning_level", "medium"),
         "auto_approve_hil": False,
@@ -527,14 +646,44 @@ async def start_job(
         "full_document": "",
         "research_context": attachment_rag_context or None,
         "research_sources": [],
+        "research_notes": None,
+        "citations_map": {},
         "deep_research_thinking_steps": [],
         "deep_research_from_cache": False,
+        "verifier_attempts": 0,
+        "verification_retry": False,
         "has_any_divergence": False,
         "divergence_summary": "",
         "audit_status": "aprovado",
         "audit_report": None,
         "audit_issues": [],
         "hil_checklist": None,
+        "audit_mode": audit_mode,
+        "sei_context": sei_context,
+        "document_checklist_hint": merged_checklist_hint,
+        "document_checklist": None,
+        "document_gate_status": None,
+        "document_gate_missing": [],
+        "style_report": None,
+        "style_score": None,
+        "style_tone": None,
+        "style_issues": [],
+        "style_term_variations": [],
+        "style_check_status": None,
+        "style_check_payload": None,
+        "style_instruction": None,
+        "style_refine_round": 0,
+        "style_refine_max_rounds": 2,
+        "style_min_score": 8.0,
+        "quality_profile": request.get("quality_profile", "padrao"),
+        "target_section_score": float(profile_config["target_section_score"]),
+        "target_final_score": float(profile_config["target_final_score"]),
+        "max_rounds": int(profile_config["max_rounds"]),
+        "recursion_limit": int(profile_config.get("recursion_limit", 200)),
+        "refinement_round": 0,
+        "strict_document_gate": bool(profile_config.get("strict_document_gate", False)),
+        "hil_section_policy": profile_config.get("hil_section_policy", "optional"),
+        "force_final_hil": bool(profile_config.get("hil_final_required", True)),
 
         # Correções / HIL
         "proposed_corrections": None,
@@ -554,7 +703,11 @@ async def start_job(
         "human_approved_divergence": False,
         "human_approved_final": False,
         "human_edits": None,
-        "final_markdown": ""
+        "final_markdown": "",
+        "final_decision": None,
+        "final_decision_reasons": [],
+        "final_decision_score": None,
+        "final_decision_target": None
         ,
         # Section-level HIL
         "hil_target_sections": request.get("hil_target_sections", []) or [],
@@ -592,6 +745,12 @@ async def resume_job(
     """
     logger.info(f"▶️ Resuming job {jobid} with decision: {decision}")
     config = {"configurable": {"thread_id": jobid}}
+    try:
+        current_state = legal_workflow_app.get_state(config)
+        recursion_limit = int(current_state.values.get("recursion_limit") or 200) if current_state.values else 200
+        config["recursion_limit"] = recursion_limit
+    except Exception:
+        config["recursion_limit"] = 200
     
     checkpoint = decision.get("checkpoint", "unknown")
     approved = decision.get("approved", False)

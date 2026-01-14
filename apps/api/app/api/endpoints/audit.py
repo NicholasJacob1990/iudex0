@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from app.core.security import get_current_user
+from app.core.time_utils import utcnow
 from app.models.user import User
 from app.services.ai.audit_service import AuditService
 from app.services.document_processor import (
@@ -210,7 +211,6 @@ async def create_edit_proposal(
         )
     
     import uuid
-    from datetime import datetime
     
     proposal_id = str(uuid.uuid4())
     
@@ -229,7 +229,7 @@ async def create_edit_proposal(
     return {
         "proposal_id": proposal_id,
         "document_id": document_id,
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utcnow().isoformat(),
         "agent": agent,
         "sources_used": sources_used,
         "reason": reason,
@@ -277,4 +277,3 @@ async def reject_edit_proposal(
         "status": "rejected",
         "message": "Edição rejeitada.",
     }
-

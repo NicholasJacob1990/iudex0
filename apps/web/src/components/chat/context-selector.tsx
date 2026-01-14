@@ -4,6 +4,7 @@ import { useState, useCallback } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { Upload, FileText, X, Paperclip, Mic, Link as LinkIcon, Gavel, Search, Database, Folder } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { RichTooltip } from '@/components/ui/rich-tooltip';
 import { cn } from '@/lib/utils';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
@@ -35,7 +36,20 @@ export function ContextSelector({ onContextChange }: ContextSelectorProps) {
         return Math.ceil(sizeBytes / 4);
     };
 
+    const formatTokenCount = (count: number) => {
+        if (count >= 1000) {
+            return `${(count / 1000).toFixed(1)}k`;
+        }
+        return count.toString();
+    };
+
     const totalTokens = files.reduce((sum, file) => sum + (file.estimatedTokens || estimateTokens(file.size)), 0);
+    const contextDescription = files.length > 0
+        ? `${files.length} arquivo(s) anexado(s). A IA usará esses documentos como base para todas as respostas.`
+        : 'Nenhum arquivo anexado. Adicione documentos para respostas mais precisas.';
+    const contextBadge = files.length > 0 ? `${files.length} arquivos` : 'Sem arquivos';
+    const contextMeta = totalTokens > 0 ? `~${formatTokenCount(totalTokens)} tokens` : undefined;
+    const contextStateLabel = files.length > 0 ? 'Com Contexto' : 'Sem Contexto';
 
     const onDrop = useCallback((acceptedFiles: File[]) => {
         const newFiles = acceptedFiles.map(file => ({
@@ -63,28 +77,36 @@ export function ContextSelector({ onContextChange }: ContextSelectorProps) {
         });
     };
 
-    const formatTokenCount = (count: number) => {
-        if (count >= 1000) {
-            return `${(count / 1000).toFixed(1)}k`;
-        }
-        return count.toString();
-    };
-
     return (
         <div className="border-b border-border/50 bg-background/50 p-4 backdrop-blur-sm">
             <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-foreground">
-                    <Paperclip className="h-4 w-4 text-primary" />
-                    <span>Contexto</span>
-                    <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary">
-                        {files.length}
-                    </span>
-                    {totalTokens > 0 && (
-                        <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-600">
-                            ~{formatTokenCount(totalTokens)} tokens
+                <RichTooltip
+                    title="Contexto ativo"
+                    description={contextDescription}
+                    badge={contextBadge}
+                    meta={contextMeta}
+                >
+                    <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                        <Paperclip className="h-4 w-4 text-primary" />
+                        <span>Contexto</span>
+                        <span
+                            className={cn(
+                                "rounded-full px-2 py-0.5 text-[10px] font-semibold",
+                                files.length > 0 ? "bg-emerald-500/10 text-emerald-700" : "bg-slate-200 text-slate-600"
+                            )}
+                        >
+                            {contextStateLabel}
                         </span>
-                    )}
-                </div>
+                        <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] text-primary">
+                            {files.length}
+                        </span>
+                        {totalTokens > 0 && (
+                            <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-600">
+                                ~{formatTokenCount(totalTokens)} tokens
+                            </span>
+                        )}
+                    </div>
+                </RichTooltip>
                 <Button
                     variant="ghost"
                     size="sm"

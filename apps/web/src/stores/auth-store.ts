@@ -15,7 +15,7 @@ interface AuthState {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   loginTest: () => Promise<void>;
-  register: (data: { name: string; email: string; password: string; account_type?: string; [key: string]: any }) => Promise<void>;
+  register: (data: { name: string; email: string; password: string; account_type: string; [key: string]: any }) => Promise<void>;
   logout: () => void;
   updateUser: (data: Partial<User>) => void;
   fetchProfile: () => Promise<void>;
@@ -96,6 +96,7 @@ export const useAuthStore = create<AuthState>()(
           const user = await apiClient.getProfile();
           set({ user, isAuthenticated: true });
         } catch (error) {
+          apiClient.logout();
           set({ user: null, isAuthenticated: false });
         }
       },
@@ -109,4 +110,3 @@ export const useAuthStore = create<AuthState>()(
     }
   )
 );
-

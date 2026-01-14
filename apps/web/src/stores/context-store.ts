@@ -30,6 +30,7 @@ interface ContextState {
   setActiveTab: (value: string) => void;
   toggleSource: (id: ContextSourceId) => void;
   toggleMeta: (id: ContextSourceId, key: 'ocr' | 'rigorous') => void;
+  setSourceCounts: (counts: Partial<Record<ContextSourceId, number>>) => void;
   addItem: (item: ContextItem) => void;
   removeItem: (id: string) => void;
 }
@@ -42,7 +43,7 @@ export const useContextStore = create<ContextState>((set) => ({
       label: 'Documentos',
       description: 'Integra PDF, DOCX, ZIP e imagens',
       enabled: true,
-      count: 112,
+      count: 0,
       meta: { ocr: true },
     },
     {
@@ -50,7 +51,7 @@ export const useContextStore = create<ContextState>((set) => ({
       label: 'Modelos',
       description: 'Siga pareceres e referências',
       enabled: true,
-      count: 32,
+      count: 0,
       meta: { rigorous: true },
     },
     {
@@ -58,14 +59,14 @@ export const useContextStore = create<ContextState>((set) => ({
       label: 'Jurisprudência',
       description: 'Inclua precedentes STF/STJ',
       enabled: false,
-      count: 18,
+      count: 0,
     },
     {
       id: 'legislation',
       label: 'Legislação',
       description: 'Adicione artigos oficiais',
       enabled: false,
-      count: 24,
+      count: 0,
     },
   ],
   setSearch: (value) => set({ search: value }),
@@ -87,6 +88,12 @@ export const useContextStore = create<ContextState>((set) => ({
             },
           }
           : source
+      ),
+    })),
+  setSourceCounts: (counts) =>
+    set((state) => ({
+      sources: state.sources.map((source) =>
+        counts[source.id] === undefined ? source : { ...source, count: counts[source.id] ?? source.count }
       ),
     })),
   items: [],

@@ -4,7 +4,7 @@ Schemas Pydantic para chat e minutas
 
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 
 
 class ChatBase(BaseModel):
@@ -16,6 +16,11 @@ class ChatBase(BaseModel):
 class ChatCreate(ChatBase):
     """Schema para criação de chat"""
     context: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatDuplicate(BaseModel):
+    """Schema para duplicação de chat"""
+    title: Optional[str] = None
 
 
 class ChatUpdate(BaseModel):
@@ -34,8 +39,7 @@ class ChatResponse(ChatBase):
     created_at: datetime
     updated_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MessageBase(BaseModel):
@@ -47,6 +51,27 @@ class MessageCreate(MessageBase):
     """Schema para criação de mensagem"""
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
     chat_personality: str = Field(default="juridico", pattern="^(juridico|geral)$")
+    model: Optional[str] = None
+    web_search: bool = False
+    multi_query: bool = True
+    breadth_first: bool = False
+    search_mode: str = Field(default="hybrid", pattern="^(shared|native|hybrid)$")
+    rag_sources: Optional[List[str]] = None
+    rag_top_k: Optional[int] = Field(default=None, ge=1, le=50)
+    attachment_mode: str = Field(default="rag_local", pattern="^(rag_local|prompt_injection)$")
+    context_mode: str = Field(default="rag_local", pattern="^(rag_local|upload_cache)$")
+    context_files: List[str] = Field(default_factory=list)
+    cache_ttl: int = 60
+    adaptive_routing: bool = False
+    crag_gate: bool = False
+    crag_min_best_score: float = 0.45
+    crag_min_avg_score: float = 0.35
+    hyde_enabled: bool = False
+    graph_rag_enabled: bool = False
+    graph_hops: int = Field(default=1, ge=1, le=5)
+    dense_research: bool = False
+    outline: Optional[List[str]] = None
+    reasoning_level: str = Field(default="medium", pattern="^(low|medium|high)$")  # NEW: Thinking level
 
 
 class MessageResponse(MessageBase):
@@ -56,11 +81,10 @@ class MessageResponse(MessageBase):
     role: str
     attachments: List[Dict[str, Any]]
     thinking: Optional[str] = None
-    metadata: Dict[str, Any]
+    metadata: Dict[str, Any] = Field(default_factory=dict, validation_alias="msg_metadata")
     created_at: datetime
     
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class GenerateDocumentRequest(BaseModel):
@@ -85,6 +109,10 @@ class GenerateDocumentRequest(BaseModel):
     min_pages: Optional[int] = Field(default=None, ge=0)
     max_pages: Optional[int] = Field(default=None, ge=0)
     web_search: bool = False
+    search_mode: str = Field(default="hybrid", pattern="^(shared|native|hybrid)$")
+    multi_query: bool = True
+    breadth_first: bool = False
+    research_policy: str = Field(default="auto", pattern="^(auto|force)$")
     dense_research: bool = False
     thinking_level: str = "medium" # low, medium, high
     thesis: Optional[str] = None
@@ -93,8 +121,11 @@ class GenerateDocumentRequest(BaseModel):
     template_filters: Dict[str, Any] = Field(default_factory=dict)
     prompt_extra: Optional[str] = None
     template_id: Optional[str] = None
+    template_document_id: Optional[str] = None
     variables: Dict[str, Any] = Field(default_factory=dict)
     rag_config: Optional[Dict[str, Any]] = None
+    rag_sources: Optional[List[str]] = None
+    rag_top_k: Optional[int] = Field(default=None, ge=1, le=50)
     use_langgraph: bool = True
     adaptive_routing: bool = False
     crag_gate: bool = False
@@ -107,6 +138,16 @@ class GenerateDocumentRequest(BaseModel):
     risco: str = "baixo"
     hil_outline_enabled: bool = False
     hil_target_sections: List[str] = Field(default_factory=list)
+    audit_mode: str = Field(default="sei_only", pattern="^(sei_only|research)$")
+    quality_profile: str = Field(default="padrao", pattern="^(rapido|padrao|rigoroso|auditoria)$")
+    target_section_score: Optional[float] = Field(default=None, ge=0, le=10)
+    target_final_score: Optional[float] = Field(default=None, ge=0, le=10)
+    max_rounds: Optional[int] = Field(default=None, ge=1, le=10)
+    strict_document_gate: Optional[bool] = Field(default=None)
+    hil_section_policy: Optional[str] = Field(default=None, pattern="^(none|optional|required)$")
+    hil_final_required: Optional[bool] = Field(default=None)
+    recursion_limit: Optional[int] = Field(default=None, ge=20, le=500)
+    document_checklist_hint: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class GenerateDocumentResponse(BaseModel):
@@ -115,6 +156,22 @@ class GenerateDocumentResponse(BaseModel):
     docx_path: Optional[str] = None
     audit_report_path: Optional[str] = None
     metrics: Dict[str, Any] = Field(default_factory=dict)
+
+
+class OutlineRequest(BaseModel):
+    """Schema para geração leve de outline (modo chat)"""
+    prompt: str = Field(..., min_length=1)
+    document_type: str = Field(default="PETICAO")
+    thesis: Optional[str] = None
+    model: Optional[str] = None
+    min_pages: Optional[int] = Field(default=0, ge=0)
+    max_pages: Optional[int] = Field(default=0, ge=0)
+
+
+class OutlineResponse(BaseModel):
+    """Schema de resposta de outline"""
+    outline: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
 
 
 class ChatWithDocsRequest(BaseModel):

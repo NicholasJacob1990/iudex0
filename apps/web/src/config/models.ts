@@ -5,6 +5,9 @@ export type ModelId =
     | "gpt-5"
     | "gpt-5-mini"
     | "gpt-4o"
+    | "grok-4"
+    | "grok-4-fast"
+    | "grok-4.1-fast"
     | "claude-4.5-opus"
     | "claude-4.5-sonnet"
     | "claude-4.5-haiku"
@@ -12,9 +15,10 @@ export type ModelId =
     | "gemini-3-flash"
     | "gemini-2.5-pro"
     | "gemini-2.5-flash"
+    | "llama-4"
     | "internal-rag";
 
-export type Provider = "openai" | "anthropic" | "google" | "internal";
+export type Provider = "openai" | "anthropic" | "google" | "xai" | "openrouter" | "internal";
 export type LatencyTier = "low" | "medium" | "high";
 export type CostTier = "low" | "medium" | "medium_high" | "high";
 
@@ -91,13 +95,57 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         icon: "/logos/openai.svg",
     },
 
+    // ---------- XAI ----------
+    "grok-4": {
+        id: "grok-4",
+        provider: "xai",
+        family: "grok-4",
+        label: "Grok 4",
+        contextWindow: 128_000,
+        latencyTier: "high",
+        costTier: "high",
+        capabilities: ["chat", "analysis", "agents"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/xai.svg",
+    },
+    "grok-4-fast": {
+        id: "grok-4-fast",
+        provider: "xai",
+        family: "grok-4",
+        label: "Grok 4 Fast",
+        contextWindow: 2_000_000,
+        latencyTier: "medium",
+        costTier: "high",
+        capabilities: ["chat", "analysis", "agents"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/xai.svg",
+    },
+    "grok-4.1-fast": {
+        id: "grok-4.1-fast",
+        provider: "xai",
+        family: "grok-4",
+        label: "Grok 4.1 Fast",
+        contextWindow: 2_000_000,
+        latencyTier: "medium",
+        costTier: "high",
+        capabilities: ["chat", "analysis", "agents"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/xai.svg",
+    },
+
     // ---------- ANTHROPIC ----------
     "claude-4.5-opus": {
         id: "claude-4.5-opus",
         provider: "anthropic",
         family: "claude-4.5",
         label: "Claude 4.5 Opus",
-        contextWindow: 1_000_000,
+        contextWindow: 200_000,
         latencyTier: "high",
         costTier: "high",
         capabilities: ["chat", "code", "agents", "deep_reasoning"],
@@ -110,7 +158,7 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         provider: "anthropic",
         family: "claude-4.5",
         label: "Claude 4.5 Sonnet",
-        contextWindow: 1_000_000,
+        contextWindow: 200_000,
         latencyTier: "medium",
         costTier: "medium",
         capabilities: ["chat", "code", "analysis"],
@@ -139,7 +187,7 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         provider: "google",
         family: "gemini-3",
         label: "Gemini 3 Pro",
-        contextWindow: 200_000,
+        contextWindow: 1_000_000,
         latencyTier: "medium",
         costTier: "medium",
         capabilities: ["chat", "code", "agents", "multimodal"],
@@ -188,6 +236,22 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         icon: "/logos/gemini.svg",
     },
 
+    // ---------- OPENROUTER / META ----------
+    "llama-4": {
+        id: "llama-4",
+        provider: "openrouter",
+        family: "llama-4",
+        label: "Llama 4",
+        contextWindow: 128_000,
+        latencyTier: "medium",
+        costTier: "medium",
+        capabilities: ["chat", "analysis"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/meta.svg",
+    },
+
     // ---------- INTERNAL ----------
     "internal-rag": {
         id: "internal-rag",
@@ -230,5 +294,7 @@ export const PROVIDER_COLORS: Record<Provider, string> = {
     openai: "#10a37f",      // OpenAI green
     anthropic: "#d97706",   // Claude orange
     google: "#4285f4",      // Google blue
+    xai: "#0f172a",         // xAI ink
+    openrouter: "#0ea5a4",  // OpenRouter teal
     internal: "#6366f1",    // Iudex purple
 };

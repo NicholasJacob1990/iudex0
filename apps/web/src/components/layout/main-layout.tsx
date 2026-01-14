@@ -11,7 +11,7 @@ interface MainLayoutProps {
 }
 
 export function MainLayout({ children }: MainLayoutProps) {
-    const { sidebarOpen, setSidebarOpen } = useUIStore();
+    const { sidebarState, setSidebarState } = useUIStore();
 
     return (
         <div className="flex h-screen overflow-hidden bg-background">
@@ -19,16 +19,19 @@ export function MainLayout({ children }: MainLayoutProps) {
             <div
                 className={cn(
                     'fixed inset-0 z-40 bg-black/50 backdrop-blur-sm transition-opacity lg:hidden',
-                    sidebarOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
+                    sidebarState !== 'hidden' ? 'opacity-100' : 'pointer-events-none opacity-0'
                 )}
-                onClick={() => setSidebarOpen(false)}
+                onClick={() => setSidebarState('hidden')}
             />
 
             {/* Sidebar */}
             <div
                 className={cn(
                     'fixed inset-y-0 left-0 z-50 w-72 transform transition-transform duration-300 ease-in-out lg:static lg:translate-x-0',
-                    sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+                    sidebarState !== 'hidden' ? 'translate-x-0' : '-translate-x-full',
+                    sidebarState === 'collapsed' && 'lg:w-16',
+                    sidebarState === 'expanded' && 'lg:w-72',
+                    sidebarState === 'hidden' && 'lg:w-0 lg:pointer-events-none'
                 )}
             >
                 <SidebarPro />
@@ -42,7 +45,7 @@ export function MainLayout({ children }: MainLayoutProps) {
                         <Button
                             variant="ghost"
                             size="icon"
-                            onClick={() => setSidebarOpen(true)}
+                            onClick={() => setSidebarState('expanded')}
                             className="lg:hidden"
                         >
                             <Menu className="h-5 w-5" />

@@ -3,10 +3,11 @@ Serviço de Geração de Documentos com Assinatura
 Integra IA multi-agente com templates e dados do usuário
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 import os
 import time
 import uuid
+import json
 from datetime import datetime
 from loguru import logger
 import re
@@ -21,6 +22,14 @@ from app.models.document import Document
 from app.models.library import LibraryItem, LibraryItemType
 from app.schemas.document import DocumentGenerationRequest, DocumentGenerationResponse
 from app.services.ai.quality_pipeline import apply_quality_pipeline, get_quality_summary
+from app.services.ai.quality_profiles import resolve_quality_profile
+from app.services.ai.checklist_parser import (
+    parse_document_checklist_from_prompt,
+    merge_document_checklist_hints,
+)
+from app.core.time_utils import utcnow
+from app.services.web_search_service import web_search_service, build_web_context, is_breadth_first
+from app.services.legal_templates import legal_template_library
 
 # Import JuridicoGeminiAdapter (primary generation engine)
 try:
@@ -92,6 +101,8 @@ class DocumentGenerator:
 
         # 0.1 Busca Antecipada de Template (para injeção no contexto)
         template_structure = None
+        template_meta = None
+        template_body = None
         if request.template_id and db:
              try:
                 from app.models.library import LibraryItem, LibraryItemType
@@ -103,16 +114,93 @@ class DocumentGenerator:
                 )
                 template_item = result.scalars().first()
                 if template_item and template_item.description:
-                    # Também processar variáveis na estrutura do template
-                    template_structure = self._process_prompt_variables(template_item.description, request.variables, user)
+                    template_meta, template_body = self._parse_template_frontmatter(template_item.description)
+                    if not template_body:
+                        template_body = template_item.description
+                    template_body = self._process_prompt_variables(template_body, request.variables, user)
+                    template_structure = self._build_template_structure_from_meta(
+                        template_meta,
+                        template_body,
+                        request.variables,
+                        user
+                    )
                     logger.info(f"Template '{template_item.name}' carregado como referência estrutural")
              except Exception as e:
                 logger.error(f"Erro ao buscar template antecipadamente: {e}")
+
+        # 0.1.1 Fallback: Verificar se template_id é um template legal pré-definido
+        # NOTA: Templates legais usam {var} que não é compatível com {{var}} do motor.
+        # O usuário deve importar via POST /templates/legal/{id}/import primeiro.
+        if not template_structure and request.template_id:
+            legal_template = legal_template_library.get_template(request.template_id)
+            if legal_template:
+                logger.warning(
+                    f"Template legal '{request.template_id}' detectado mas NÃO IMPORTADO. "
+                    f"Use POST /templates/legal/{request.template_id}/import para importar primeiro. "
+                    f"Aplicando conversão automática de '{{var}}' por best effort."
+                )
+                # Tentar usar mesmo assim (best effort) - converte {var} para {{var}}
+                template_body = legal_template.structure
+                # Converter {var} → {{var}}
+                template_body = re.sub(r'(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})', r'{{\1}}', template_body)
+                template_body = self._process_prompt_variables(template_body, request.variables, user)
+                template_structure = template_body
+                template_meta = {
+                    "id": legal_template.id,
+                    "document_type": legal_template.document_type.value,
+                    "instructions": legal_template.instructions,
+                }
+                logger.info(f"Template legal '{legal_template.name}' usado com conversão automática (fallback)")
+
+        if not template_structure and request.template_document_id and db:
+            try:
+                result = await db.execute(
+                    select(Document).where(
+                        Document.id == request.template_document_id,
+                        Document.user_id == user.id
+                    )
+                )
+                template_doc = result.scalars().first()
+                if template_doc:
+                    raw_text = template_doc.extracted_text or template_doc.content or ""
+                    if raw_text.strip():
+                        template_structure = self._process_prompt_variables(raw_text, request.variables, user)
+                        logger.info(f"Documento '{template_doc.name}' carregado como modelo estrutural")
+                    else:
+                        logger.warning("Documento de modelo sem texto extraído ou conteúdo disponível")
+                else:
+                    logger.warning("Documento de modelo não encontrado ou sem acesso")
+            except Exception as e:
+                logger.error(f"Erro ao buscar documento modelo: {e}")
+
+        if template_structure:
+            template_structure = template_structure.strip()[:12000]
 
         # Preparar contexto completo
         context = self._prepare_context(request, user, context_data)
         if template_structure:
             context["template_structure"] = template_structure
+
+        template_pref = self._get_template_preferences(user, request.template_id, template_meta)
+        locked_blocks_pref = template_pref.get("locked_blocks") if isinstance(template_pref, dict) else None
+        if not isinstance(locked_blocks_pref, list):
+            locked_blocks_pref = []
+        locked_blocks_req = request.variables.get("locked_blocks") if isinstance(request.variables, dict) else None
+        if not isinstance(locked_blocks_req, list):
+            locked_blocks_req = []
+        locked_blocks_hint = list(dict.fromkeys(locked_blocks_pref + locked_blocks_req))
+
+        block_output_instructions = self._build_block_output_instructions(
+            template_meta,
+            template_body,
+            locked_blocks_hint
+        )
+        if block_output_instructions:
+            existing_instr = (context.get("extra_agent_instructions") or "").strip()
+            if existing_instr:
+                context["extra_agent_instructions"] = existing_instr + "\n" + block_output_instructions
+            else:
+                context["extra_agent_instructions"] = block_output_instructions
 
         target_pages, min_pages, max_pages = self._resolve_page_range(request)
 
@@ -151,7 +239,21 @@ class DocumentGenerator:
 
         # 0.2 RAG Global (pecas_modelo / lei / juris)
         rag_context = ""
-        if self.rag_manager and (request.use_templates or request.context_documents):
+        audit_mode = getattr(request, "audit_mode", "sei_only")
+        raw_rag_sources = request.rag_sources or []
+        rag_sources = [str(src).strip() for src in raw_rag_sources if str(src).strip()]
+        if audit_mode == "sei_only":
+            rag_sources = []
+        else:
+            if not rag_sources:
+                rag_sources = ["lei", "juris", "pecas_modelo"]
+            if request.use_templates and "pecas_modelo" not in rag_sources:
+                rag_sources.append("pecas_modelo")
+            rag_sources = list(dict.fromkeys(rag_sources))
+        rag_top_k = request.rag_top_k if request.rag_top_k else 8
+        rag_top_k = max(1, min(int(rag_top_k), 50))
+
+        if audit_mode != "sei_only" and self.rag_manager and rag_sources and (request.use_templates or request.context_documents):
             try:
                 logger.info(f"🔍 Executando RAG Global (use_templates={request.use_templates})")
                 
@@ -178,12 +280,10 @@ class DocumentGenerator:
                 rag_query = f"{request.document_type}: {request.prompt[:500]}"
                 
                 # Determinar fontes
-                rag_sources = ["pecas_modelo", "lei", "juris"]
-                
                 results = self.rag_manager.hybrid_search(
                     query=rag_query,
                     sources=rag_sources,
-                    top_k=8,
+                    top_k=rag_top_k,
                     filters={"pecas_modelo": pecas_filter} if pecas_filter else None,
                     tenant_id="default" # Ajustar se necessário
                 )
@@ -207,6 +307,40 @@ class DocumentGenerator:
             if local_rag_context:
                 rag_context = f"{local_rag_context}\n\n{rag_context}".strip()
 
+        search_mode = (getattr(request, "search_mode", "hybrid") or "hybrid").lower()
+        if search_mode not in ("shared", "native", "hybrid"):
+            search_mode = "hybrid"
+        breadth_first = bool(getattr(request, "breadth_first", False)) or (
+            request.web_search and is_breadth_first(request.prompt)
+        )
+        multi_query = bool(getattr(request, "multi_query", True)) or breadth_first
+        allow_native_search = bool(request.web_search) and search_mode in ("native", "hybrid")
+        use_shared_search = bool(request.web_search) and search_mode in ("shared", "hybrid")
+        if audit_mode == "sei_only":
+            allow_native_search = False
+            use_shared_search = False
+
+        shared_web_context = ""
+        if use_shared_search and request.web_search:
+            try:
+                search_query = request.thesis or request.prompt[:300]
+                search_query = f"{request.document_type} {search_query}".strip()
+                logger.info(f"🔎 Busca web compartilhada (doc): {search_query[:80]}")
+                if multi_query:
+                    search_payload = await web_search_service.search_multi(search_query, num_results=8)
+                else:
+                    search_payload = await web_search_service.search(search_query, num_results=8)
+                results = search_payload.get("results") or []
+                if search_payload.get("success") and results:
+                    shared_web_context = build_web_context(search_payload, max_items=8)
+            except Exception as e:
+                logger.error(f"Erro na busca web compartilhada: {e}")
+
+        if shared_web_context:
+            rag_context = f"{shared_web_context}\n\n{rag_context}".strip()
+
+        engine_web_search = allow_native_search
+
         # Criar CaseBundle que passará para o orchestrator
         case_bundle = CaseBundle(
             processo_id=f"UserRequest-{user.id[:8]}",
@@ -218,6 +352,11 @@ class DocumentGenerator:
         context["case_bundle"] = case_bundle
         context["rag_context"] = rag_context
         context["chat_personality"] = getattr(request, "chat_personality", "juridico")
+        sei_context = ""
+        if docs:
+            sei_context = self._build_attachment_prompt_context(docs, max_chars=12000, per_doc_chars=3000)
+        if not sei_context and case_bundle and getattr(case_bundle, "text_pack", ""):
+            sei_context = (case_bundle.text_pack or "")[:12000]
         
         # Adicionar Prompt Extra e Instruções de Uso de Modelos se habilitado
         if request.use_templates:
@@ -229,7 +368,12 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
 3. NÃO copie trechos que entrem em conflito com os fatos dos autos. Adapte sempre que necessário.
 4. Mantenha a coerência com o tipo de peça solicitada.
 """
-            context["extra_agent_instructions"] = prompt_extra_instr + regra_modelos
+            existing_instr = (context.get("extra_agent_instructions") or "").strip()
+            merged = (prompt_extra_instr + regra_modelos).strip()
+            if existing_instr:
+                context["extra_agent_instructions"] = existing_instr + "\n" + merged
+            else:
+                context["extra_agent_instructions"] = merged
         
         # Preparar prompt com informações do usuário
         enhanced_prompt = self._enhance_prompt_with_user_data(
@@ -243,6 +387,9 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
             if attachment_text:
                 enhanced_prompt += "\n\n" + attachment_text
 
+        if block_output_instructions:
+            enhanced_prompt += "\n\n" + block_output_instructions
+
         langgraph_input_text = enhanced_prompt
 
         personality = (getattr(request, "chat_personality", "juridico") or "juridico").lower()
@@ -254,6 +401,30 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 context["extra_agent_instructions"] = existing_instr + "\n" + personality_instr
             else:
                 context["extra_agent_instructions"] = personality_instr
+
+        evidence_policy = ""
+        if audit_mode == "research":
+            evidence_policy = (
+                "## POLÍTICA DE EVIDÊNCIA (PESQUISA)\n"
+                "- SEI/autos do caso (RAG local + anexos) são a fonte de verdade para fatos administrativos.\n"
+                "- Fontes externas servem apenas para fundamentação normativa/jurisprudencial.\n"
+                "- Nunca trate fonte externa como prova de fato do processo.\n"
+                "- Separe claramente 'fato dos autos' vs 'fundamentação externa'.\n"
+            )
+        else:
+            evidence_policy = (
+                "## POLÍTICA DE EVIDÊNCIA (AUDITORIA - SOMENTE SEI)\n"
+                "- Use exclusivamente o SEI/autos do caso (RAG local + anexos) para fatos e eventos administrativos.\n"
+                "- Não cite nem invente fontes externas para comprovar fatos.\n"
+                "- Se faltar prova no SEI, marque como [[PENDENTE: confirmar no SEI]].\n"
+            )
+        if evidence_policy:
+            enhanced_prompt += "\n\n" + evidence_policy
+            existing_instr = (context.get("extra_agent_instructions") or "").strip()
+            if existing_instr:
+                context["extra_agent_instructions"] = existing_instr + "\n" + evidence_policy
+            else:
+                context["extra_agent_instructions"] = evidence_policy
 
         # Estilo de citação (ABNT/Híbrido) — instruções para o gerador
         citation_style = (getattr(request, "citation_style", None) or "forense").lower()
@@ -271,6 +442,16 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 "Autos: preserve [TIPO - Doc. X, p. Y].\n"
                 "Acadêmico: (AUTOR, ano) + REFERÊNCIAS ABNT ao final.\n"
             )
+
+        if shared_web_context:
+            search_instruction = (
+                "## ORIENTAÇÕES PARA FONTES DA WEB\n"
+                "- Use as fontes numeradas quando relevante.\n"
+                "- Cite no texto com [n] e finalize com uma seção 'Fontes:' listando apenas URLs citadas.\n"
+            )
+            enhanced_prompt += "\n\n" + search_instruction + "\n" + shared_web_context
+            existing_instr = (context.get("extra_agent_instructions") or "").strip()
+            context["extra_agent_instructions"] = (existing_instr + "\n" + search_instruction).strip()
         
         # =====================================================================
         # GERAÇÃO: LangGraph (prioritário), JuridicoGeminiAdapter ou Orchestrator (fallback)
@@ -304,13 +485,40 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 if case_text:
                     input_text += "\n\n--- CONTEXTO DOS AUTOS (DOCUMENTOS) ---\n" + case_text[:6000]
 
+                profile_config = resolve_quality_profile(
+                    getattr(request, "quality_profile", "padrao"),
+                    {
+                        "target_section_score": getattr(request, "target_section_score", None),
+                        "target_final_score": getattr(request, "target_final_score", None),
+                        "max_rounds": getattr(request, "max_rounds", None),
+                        "strict_document_gate": getattr(request, "strict_document_gate", None),
+                        "hil_section_policy": getattr(request, "hil_section_policy", None),
+                        "hil_final_required": getattr(request, "hil_final_required", None),
+                        "recursion_limit": getattr(request, "recursion_limit", None),
+                    }
+                )
+
+                prompt_checklist_hint = parse_document_checklist_from_prompt(request.prompt or "")
+                merged_checklist_hint = merge_document_checklist_hints(
+                    getattr(request, "document_checklist_hint", []) or [],
+                    prompt_checklist_hint,
+                )
+
                 initial_state = {
                     "input_text": input_text,
                     "mode": request.document_type,
                     "tese": request.thesis or "",
                     "job_id": document_id,
                     "deep_research_enabled": bool(getattr(request, "dense_research", False)),
-                    "web_search_enabled": bool(request.web_search),
+                    "web_search_enabled": bool(engine_web_search),
+                    "search_mode": search_mode,
+                    "research_policy": getattr(request, "research_policy", "auto"),
+                    "research_mode": "none",
+                    "need_juris": False,
+                    "planning_reasoning": None,
+                    "planned_queries": [],
+                    "multi_query": bool(multi_query),
+                    "breadth_first": bool(breadth_first),
                     "use_multi_agent": bool(request.use_multi_agent),
                     "thinking_level": request.reasoning_level,
                     "chat_personality": personality,
@@ -334,14 +542,44 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "full_document": "",
                     "research_context": rag_context or None,
                     "research_sources": [],
+                    "research_notes": None,
+                    "citations_map": {},
                     "deep_research_thinking_steps": [],
                     "deep_research_from_cache": False,
+                    "verifier_attempts": 0,
+                    "verification_retry": False,
                     "has_any_divergence": False,
                     "divergence_summary": "",
                     "audit_status": "aprovado",
                     "audit_report": None,
                     "audit_issues": [],
                     "hil_checklist": None,
+                    "audit_mode": audit_mode,
+                    "sei_context": sei_context or None,
+                    "document_checklist_hint": merged_checklist_hint,
+                    "document_checklist": None,
+                    "document_gate_status": None,
+                    "document_gate_missing": [],
+                    "style_report": None,
+                    "style_score": None,
+                    "style_tone": None,
+                    "style_issues": [],
+                    "style_term_variations": [],
+                    "style_check_status": None,
+                    "style_check_payload": None,
+                    "style_instruction": None,
+                    "style_refine_round": 0,
+                    "style_refine_max_rounds": 2,
+                    "style_min_score": 8.0,
+                    "quality_profile": getattr(request, "quality_profile", "padrao"),
+                    "target_section_score": float(profile_config["target_section_score"]),
+                    "target_final_score": float(profile_config["target_final_score"]),
+                    "max_rounds": int(profile_config["max_rounds"]),
+                    "recursion_limit": int(profile_config.get("recursion_limit", 160)),
+                    "refinement_round": 0,
+                    "strict_document_gate": bool(profile_config.get("strict_document_gate", False)),
+                    "hil_section_policy": profile_config.get("hil_section_policy", "optional"),
+                    "force_final_hil": bool(profile_config.get("hil_final_required", True)),
                     "proposed_corrections": None,
                     "corrections_diff": None,
                     "human_approved_corrections": False,
@@ -358,6 +596,10 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "human_approved_final": False,
                     "human_edits": None,
                     "final_markdown": "",
+                    "final_decision": None,
+                    "final_decision_reasons": [],
+                    "final_decision_score": None,
+                    "final_decision_target": None,
                     "hil_target_sections": getattr(request, "hil_target_sections", []) or [],
                     "hil_section_payload": None,
                     "hil_outline_enabled": bool(getattr(request, "hil_outline_enabled", False)),
@@ -371,7 +613,10 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "auto_approve_hil": True
                 }
 
-                config = {"configurable": {"thread_id": document_id}}
+                config = {
+                    "configurable": {"thread_id": document_id},
+                    "recursion_limit": int(profile_config.get("recursion_limit", 160))
+                }
                 result = await legal_workflow_app.ainvoke(initial_state, config)
                 snapshot = legal_workflow_app.get_state(config)
                 state_values = {}
@@ -385,6 +630,12 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 citations_log = (audit_data or {}).get("citations", [])
 
                 agents_used = self._infer_agents_from_langgraph(state_values, request)
+                decision_payload = {
+                    "final_decision": state_values.get("final_decision"),
+                    "final_decision_reasons": state_values.get("final_decision_reasons", []),
+                    "final_decision_score": state_values.get("final_decision_score"),
+                    "final_decision_target": state_values.get("final_decision_target"),
+                }
 
                 cost_info = {
                     "total_tokens": 0,
@@ -395,7 +646,8 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "target_pages": target_pages,
                     "min_pages": min_pages,
                     "max_pages": max_pages,
-                    "engine": "langgraph"
+                    "engine": "langgraph",
+                    **decision_payload
                 }
 
                 quality_payload = {
@@ -435,7 +687,7 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     max_pages=max_pages,
                     local_files=local_files,
                     use_rag=request.use_templates,
-                    rag_sources=["lei", "juris", "pecas_modelo"],
+                    rag_sources=rag_sources,
                     tenant_id="default",
                     use_multi_agent=request.use_multi_agent,
                     gpt_model=request.model_gpt or "gpt-5.2",
@@ -448,7 +700,7 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     crag_min_best=request.crag_min_best_score,
                     crag_min_avg=request.crag_min_avg_score,
                     deep_research=request.dense_research,
-                    web_search=request.web_search,
+                    web_search=engine_web_search,
                     hyde_enabled=request.hyde_enabled,
                     graph_rag_enabled=request.graph_rag_enabled,
                     graph_hops=request.graph_hops
@@ -503,7 +755,10 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 drafter_models=getattr(request, "drafter_models", []) or [],
                 reviewer_models=getattr(request, "reviewer_models", []) or [],
                 reasoning_level=request.reasoning_level,
-                web_search=request.web_search,
+                web_search=engine_web_search,
+                search_mode=search_mode,
+                multi_query=multi_query,
+                breadth_first=breadth_first,
                 dense_research=request.dense_research,
                 thesis=request.thesis,
                 formatting_options=request.formatting_options,
@@ -594,12 +849,18 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 "template_id": request.template_id,
                 "user_id": user.id,
                 "user_account_type": user.account_type.value,
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": utcnow().isoformat(),
                 "engine": cost_info.get("engine", "unknown"),
                 "audit": audit_data,
                 "citations_log": citations_log,
                 "agents_used": agents_used or cost_info.get("agents_used", []),
                 "fallback_reason": fallback_reason,
+                "decision": {
+                    "final_decision": cost_info.get("final_decision"),
+                    "final_decision_reasons": cost_info.get("final_decision_reasons", []),
+                    "final_decision_score": cost_info.get("final_decision_score"),
+                    "final_decision_target": cost_info.get("final_decision_target"),
+                },
                 # Quality Pipeline (v2.25)
                 "quality": quality_payload
             },
@@ -867,6 +1128,409 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
             
         return content
 
+    def _parse_template_frontmatter(self, text: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Extrai frontmatter JSON e retorna (meta, corpo)."""
+        if not text:
+            return None, ""
+
+        match = re.match(
+            r"\s*<!--\s*IUDX_TEMPLATE_V1(?P<json>.*?)-->\s*(?P<body>.*)",
+            text,
+            flags=re.S
+        )
+        if not match:
+            return None, text
+
+        raw_json = (match.group("json") or "").strip()
+        body = match.group("body") or ""
+
+        if not raw_json:
+            return None, body
+
+        if raw_json.startswith("{") and raw_json.endswith("}"):
+            try:
+                meta = json.loads(raw_json)
+                if isinstance(meta, dict):
+                    return meta, body
+            except Exception as e:
+                logger.warning(f"Frontmatter invalido (ignorado): {e}")
+                return None, text
+
+        return None, text
+
+    def _strip_template_placeholders(self, text: str) -> str:
+        if not text:
+            return text
+        stripped = re.sub(r"{{\s*BLOCK:[^}]+}}", "", text)
+        stripped = stripped.replace("{{CONTENT}}", "")
+        stripped = stripped.replace("{{minuta}}", "")
+        stripped = stripped.replace("(minuta)", "")
+        return stripped
+
+    def _build_template_structure_from_meta(
+        self,
+        meta: Optional[Dict[str, Any]],
+        body: str,
+        variables: Dict[str, Any],
+        user: User
+    ) -> str:
+        if not meta:
+            return body
+
+        parts: List[str] = []
+        system_instructions = meta.get("system_instructions") or meta.get("instructions") or ""
+        output_format = meta.get("output_format") or meta.get("structure") or ""
+
+        if system_instructions:
+            parts.append(str(system_instructions).strip())
+        if output_format:
+            parts.append("FORMATO DE SAIDA:\n" + str(output_format).strip())
+
+        blocks = meta.get("blocks") or []
+        if isinstance(blocks, list) and blocks:
+            lines = ["BLOCOS DISPONIVEIS:"]
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                block_id = str(block.get("id") or "").strip()
+                if not block_id:
+                    continue
+                title = block.get("title") or block.get("titulo") or block_id
+                lines.append(f"- {block_id}: {title}")
+            parts.append("\n".join(lines))
+
+        combined = "\n\n".join([p for p in parts if p])
+        if not combined:
+            combined = body
+
+        combined = self._process_prompt_variables(combined, variables, user)
+        return self._strip_template_placeholders(combined)
+
+    def _template_body_has_blocks(self, body: Optional[str]) -> bool:
+        if not body:
+            return False
+        return bool(re.search(r"{{\s*BLOCK:", body))
+
+    def _normalize_block_kind(self, block: Dict[str, Any]) -> str:
+        raw_kind = block.get("kind") or block.get("type") or block.get("block_type") or ""
+        kind = str(raw_kind).strip().lower()
+        if kind in ("fixed_text", "fixed"):
+            return "fixed"
+        if kind in ("llm_generated", "llm", "llm_assisted"):
+            return "llm"
+        if kind in ("clause_reference", "clause", "clause_ref"):
+            return "clause"
+        if kind in ("variable", "editable"):
+            return "variable"
+        return kind or "variable"
+
+    def _build_block_output_instructions(
+        self,
+        meta: Optional[Dict[str, Any]],
+        body: Optional[str],
+        locked_blocks: Optional[List[str]] = None
+    ) -> str:
+        if not meta:
+            return ""
+
+        blocks = meta.get("blocks") or []
+        if not isinstance(blocks, list) or not blocks:
+            return ""
+
+        output_mode = str(meta.get("output_mode") or "").strip().lower()
+        if output_mode != "blocks" and not self._template_body_has_blocks(body):
+            return ""
+
+        locked_set = set(locked_blocks or [])
+        llm_blocks = []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_id = str(block.get("id") or "").strip()
+            kind = self._normalize_block_kind(block)
+            lockable = block.get("lockable")
+            if lockable is None:
+                lockable = block.get("user_can_lock")
+            if lockable is None:
+                lockable = kind in ("llm", "variable", "clause")
+            lockable = bool(lockable)
+            if block_id and block_id in locked_set and lockable:
+                continue
+            if kind in ("llm", "variable"):
+                llm_blocks.append(block)
+
+        if not llm_blocks:
+            return ""
+
+        lines = [
+            "## SAIDA POR BLOCOS (OBRIGATORIO)",
+            "Responda exatamente neste formato:",
+            "[BLOCK:identificador]",
+            "conteudo do bloco",
+            "[/BLOCK:identificador]",
+            "",
+            "BLOCOS A PREENCHER:"
+        ]
+        for block in llm_blocks:
+            block_id = str(block.get("id") or "").strip()
+            if not block_id:
+                continue
+            title = block.get("title") or block.get("titulo") or block_id
+            hint = block.get("prompt_fragment") or block.get("ai_instructions") or ""
+            line = f"- {block_id}: {title}"
+            if hint:
+                line += f" | {hint}"
+            lines.append(line)
+
+        return "\n".join(lines)
+
+    def _parse_block_output(self, text: str) -> Dict[str, str]:
+        blocks: Dict[str, str] = {}
+        if not text:
+            return blocks
+
+        pattern = re.compile(
+            r"\[BLOCK:(?P<id>[A-Za-z0-9_-]+)\](?P<content>.*?)\[/BLOCK:\s*(?P=id)\]",
+            flags=re.S
+        )
+        for match in pattern.finditer(text):
+            block_id = match.group("id")
+            content = (match.group("content") or "").strip()
+            if block_id:
+                blocks[block_id] = content
+        return blocks
+
+    def _get_template_preferences(
+        self,
+        user: User,
+        template_id: Optional[str],
+        meta: Optional[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        prefs = user.preferences or {}
+        template_prefs = prefs.get("template_prefs") or prefs.get("templates") or {}
+        if not isinstance(template_prefs, dict):
+            return {}
+
+        merged: Dict[str, Any] = {}
+
+        def merge_pref(data: Any) -> None:
+            if not isinstance(data, dict):
+                return
+            for key, value in data.items():
+                if key == "locked_blocks":
+                    existing = merged.get(key)
+                    if not isinstance(existing, list):
+                        existing = []
+                    if isinstance(value, list):
+                        merged[key] = list(dict.fromkeys(existing + value))
+                    continue
+                if key == "block_overrides":
+                    existing = merged.get(key)
+                    if not isinstance(existing, dict):
+                        existing = {}
+                    if isinstance(value, dict):
+                        merged[key] = {**existing, **value}
+                    continue
+                merged[key] = value
+
+        if template_id and template_id in template_prefs:
+            merge_pref(template_prefs.get(template_id))
+
+        meta_id = None
+        if isinstance(meta, dict):
+            meta_id = meta.get("id") or meta.get("template_id")
+        if meta_id and meta_id in template_prefs and meta_id != template_id:
+            merge_pref(template_prefs.get(meta_id))
+
+        return merged
+
+    def _apply_block_placeholders(self, body: str, block_context: Dict[str, str]) -> str:
+        if not body:
+            return ""
+
+        def replace_block(match: re.Match) -> str:
+            block_id = match.group(1).strip()
+            return str(block_context.get(block_id, ""))
+
+        return re.sub(r"{{\s*BLOCK:([\w\-]+)\s*}}", replace_block, body)
+
+    def _evaluate_block_condition(self, condition: Any, variables: Dict[str, Any]) -> bool:
+        if condition is None:
+            return True
+        if isinstance(condition, bool):
+            return condition
+        cond = str(condition).strip()
+        if not cond:
+            return True
+
+        if "==" in cond:
+            left, right = cond.split("==", 1)
+            left = left.strip()
+            right = right.strip().strip("'\"")
+            return str(variables.get(left, "")) == right
+        if "!=" in cond:
+            left, right = cond.split("!=", 1)
+            left = left.strip()
+            right = right.strip().strip("'\"")
+            return str(variables.get(left, "")) != right
+
+        return bool(variables.get(cond))
+
+    async def _resolve_clause_text(
+        self,
+        clause_id: Optional[str],
+        user: User,
+        db: Optional[AsyncSession]
+    ) -> str:
+        if not clause_id or not db:
+            return ""
+
+        try:
+            result = await db.execute(
+                select(LibraryItem).where(
+                    LibraryItem.id == clause_id,
+                    LibraryItem.type == LibraryItemType.CLAUSE,
+                    LibraryItem.user_id == user.id
+                )
+            )
+            item = result.scalars().first()
+            if not item:
+                result = await db.execute(
+                    select(LibraryItem).where(
+                        LibraryItem.name == clause_id,
+                        LibraryItem.type == LibraryItemType.CLAUSE,
+                        LibraryItem.user_id == user.id
+                    )
+                )
+                item = result.scalars().first()
+            return item.description if item and item.description else ""
+        except Exception as e:
+            logger.warning(f"Falha ao resolver clausula {clause_id}: {e}")
+            return ""
+
+    async def _build_block_context(
+        self,
+        meta: Optional[Dict[str, Any]],
+        variables: Dict[str, Any],
+        user: User,
+        db: Optional[AsyncSession],
+        generated_blocks: Dict[str, str],
+        template_id: Optional[str] = None
+    ) -> Dict[str, str]:
+        block_context: Dict[str, str] = {}
+        if not meta:
+            return block_context
+
+        blocks = meta.get("blocks") or []
+        if not isinstance(blocks, list):
+            return block_context
+
+        block_permissions: Dict[str, Dict[str, bool]] = {}
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_id = str(block.get("id") or "").strip()
+            if not block_id:
+                continue
+            kind = self._normalize_block_kind(block)
+            lockable = block.get("lockable")
+            if lockable is None:
+                lockable = block.get("user_can_lock")
+            if lockable is None:
+                lockable = kind in ("llm", "variable", "clause")
+            lockable = bool(lockable)
+
+            editable = block.get("editable")
+            if editable is None:
+                editable = block.get("user_can_edit") if block.get("user_can_edit") is not None else None
+            if editable is None:
+                editable = block.get("user_can_edit_text")
+            if editable is None:
+                editable = kind in ("llm", "variable")
+            editable = bool(editable)
+
+            block_permissions[block_id] = {"lockable": lockable, "editable": editable}
+
+        template_pref = self._get_template_preferences(user, template_id, meta)
+        pref_locked = template_pref.get("locked_blocks") if isinstance(template_pref, dict) else None
+        if not isinstance(pref_locked, list):
+            pref_locked = []
+        pref_overrides = template_pref.get("block_overrides") if isinstance(template_pref, dict) else None
+        if not isinstance(pref_overrides, dict):
+            pref_overrides = {}
+
+        overrides = variables.get("blocks") or variables.get("block_overrides") or {}
+        if not isinstance(overrides, dict):
+            overrides = {}
+
+        locked_blocks = variables.get("locked_blocks") or []
+        if not isinstance(locked_blocks, list):
+            locked_blocks = []
+
+        default_locked = meta.get("default_locked_blocks") or []
+        if not isinstance(default_locked, list):
+            default_locked = []
+
+        def is_lockable(block_id: str) -> bool:
+            return bool(block_permissions.get(block_id, {}).get("lockable"))
+
+        def is_editable(block_id: str) -> bool:
+            return bool(block_permissions.get(block_id, {}).get("editable"))
+
+        pref_locked = [block_id for block_id in pref_locked if is_lockable(block_id)]
+        locked_blocks = [block_id for block_id in locked_blocks if is_lockable(block_id)]
+        default_locked = [block_id for block_id in default_locked if is_lockable(block_id)]
+        pref_overrides = {key: value for key, value in pref_overrides.items() if is_editable(key)}
+        overrides = {key: value for key, value in overrides.items() if is_editable(key)}
+
+        merged_locked = list(dict.fromkeys(default_locked + pref_locked + locked_blocks))
+        merged_overrides: Dict[str, Any] = dict(pref_overrides)
+        merged_overrides.update(overrides)
+
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            block_id = str(block.get("id") or "").strip()
+            if not block_id:
+                continue
+
+            if not self._evaluate_block_condition(block.get("condition"), variables):
+                block_context[block_id] = ""
+                continue
+
+            kind = self._normalize_block_kind(block)
+            permissions = block_permissions.get(block_id) or {}
+            lockable = bool(permissions.get("lockable"))
+            editable = bool(permissions.get("editable"))
+
+            is_locked = block_id in merged_locked and lockable
+
+            if block_id in merged_overrides and editable:
+                block_context[block_id] = str(merged_overrides[block_id])
+                continue
+
+            clause_id = block.get("clause_id") or block.get("clause_ref") or block.get("clause")
+
+            if kind == "clause" or clause_id:
+                clause_text = await self._resolve_clause_text(str(clause_id), user, db)
+                if clause_text:
+                    block_context[block_id] = clause_text
+                    continue
+
+            if kind == "fixed":
+                fixed_text = block.get("text") or block.get("content") or ""
+                block_context[block_id] = str(fixed_text)
+                continue
+
+            if block_id in generated_blocks and not is_locked and kind in ("llm", "variable"):
+                block_context[block_id] = generated_blocks[block_id]
+                continue
+
+            content_template = block.get("content_template") or block.get("text") or ""
+            block_context[block_id] = str(content_template)
+
+        return block_context
+
     async def _apply_template(
         self,
         content: str,
@@ -878,6 +1542,7 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
         """Aplica template ao conteúdo"""
         
         template_content = None
+        template_meta = None
         
         # Buscar template do banco de dados se db for fornecido
         if db:
@@ -898,18 +1563,43 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
         
         # Se encontrou template, usa ele como base e insere o conteúdo gerado
         if template_content:
-            if "(minuta)" in template_content:
-                content = template_content.replace("(minuta)", content)
-                logger.info("Template aplicado usando marcador (minuta)")
-            elif "{{CONTENT}}" in template_content:
-                content = template_content.replace("{{CONTENT}}", content)
-                logger.info("Template aplicado usando marcador {{CONTENT}}")
-            elif "{{minuta}}" in template_content:
-                content = template_content.replace("{{minuta}}", content)
-                logger.info("Template aplicado usando marcador {{minuta}}")
+            template_meta, template_body = self._parse_template_frontmatter(template_content)
+            if not template_body:
+                template_body = template_content
+
+            generated_blocks = self._parse_block_output(content)
+            block_context = await self._build_block_context(
+                template_meta,
+                variables,
+                user,
+                db,
+                generated_blocks,
+                template_id
+            )
+
+            if self._template_body_has_blocks(template_body):
+                assembled = self._apply_block_placeholders(template_body, block_context)
+                if "{{CONTENT}}" in assembled or "(minuta)" in assembled or "{{minuta}}" in assembled:
+                    assembled = (
+                        assembled.replace("{{CONTENT}}", content)
+                        .replace("{{minuta}}", content)
+                        .replace("(minuta)", content)
+                    )
+                content = assembled
+                logger.info("Template aplicado via blocos {{BLOCK:id}}")
             else:
-                content = template_content + "\n\n" + content
-                logger.warning("Template sem marcador identificado, conteúdo anexado ao final")
+                if "(minuta)" in template_body:
+                    content = template_body.replace("(minuta)", content)
+                    logger.info("Template aplicado usando marcador (minuta)")
+                elif "{{CONTENT}}" in template_body:
+                    content = template_body.replace("{{CONTENT}}", content)
+                    logger.info("Template aplicado usando marcador {{CONTENT}}")
+                elif "{{minuta}}" in template_body:
+                    content = template_body.replace("{{minuta}}", content)
+                    logger.info("Template aplicado usando marcador {{minuta}}")
+                else:
+                    content = template_body + "\n\n" + content
+                    logger.warning("Template sem marcador identificado, conteúdo anexado ao final")
         
         # Processar variáveis (agora centralizado)
         return self._process_prompt_variables(content, variables, user)

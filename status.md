@@ -246,3 +246,22 @@ brew install plantuml graphviz
 ---
 
 **Observação**: Todas as funcionalidades anteriormente mockadas ou incompletas foram implementadas com integrações reais. Os serviços possuem fallbacks graciosos quando APIs externas não estão configuradas, permitindo que o sistema funcione em modo de demonstração enquanto as credenciais de produção são configuradas.
+
+---
+
+## ✅ Atualização (13/01/2026) — Correção de erro no Chat com Gemini (SSE / google-genai) ✅
+
+### Diagnóstico
+- ✅ O backend assumia `response.text` em respostas do SDK **`google-genai`**, mas o formato varia por versão/ambiente (em alguns casos o texto está em `candidates[0].content.parts[0].text`), causando erro ao enviar mensagem no chat quando o modelo era Gemini.
+- ✅ Foi identificado também um ponto de fricção na configuração: o `Settings` exigia `GOOGLE_API_KEY`, embora partes do código aceitem `GEMINI_API_KEY` como alias.
+- ✅ O `model_registry` usava `gemini-3-flash-preview` como `api_model` padrão, o que tende a falhar dependendo da disponibilidade do modelo no Vertex/local.
+
+### Correções aplicadas
+- ✅ Criado helper robusto de extração de texto: `apps/api/app/services/ai/genai_utils.py` (`extract_genai_text`)
+- ✅ Substituído acesso direto a `.text` por `extract_genai_text()` em:
+  - `apps/api/app/services/chat_service.py` (chat/stream do Gemini)
+  - `apps/api/app/services/ai/agent_clients.py` (calls síncrono/assíncrono do Gemini)
+  - `apps/api/app/services/ai/audit_service.py` (auditoria e verificação rápida)
+  - `apps/api/app/services/ai/engineering_pipeline.py` (Planner Gemini)
+- ✅ `apps/api/app/core/config.py`: aceito `GEMINI_API_KEY` como alias de `GOOGLE_API_KEY`
+- ✅ `apps/api/app/services/ai/model_registry.py`: `gemini-3-*` agora mapeia por padrão para modelos mais prováveis de existir (override por env vars `GEMINI_3_PRO_API_MODEL` e `GEMINI_3_FLASH_API_MODEL`)

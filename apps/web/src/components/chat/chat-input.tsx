@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, KeyboardEvent, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Button } from '@/components/ui/button';
-import { Send, Sparkles, ChevronDown, Paperclip, AtSign, Hash, Globe, Brain, Zap, HelpCircle } from 'lucide-react';
+import { Send, Sparkles, ChevronDown, Paperclip, AtSign, Hash, Globe, Brain, Zap, HelpCircle, BookOpen } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
   DropdownMenu,
@@ -15,6 +15,7 @@ import { AtCommandMenu } from './at-command-menu';
 import type { PredefinedPrompt } from '@/data/prompts';
 import type { CustomPrompt } from '@/components/dashboard/prompt-customization';
 import { useContextStore } from '@/stores/context-store';
+import { useCanvasStore } from '@/stores';
 import apiClient from '@/lib/api-client';
 import { useChatStore } from '@/stores/chat-store';
 import { toast } from 'sonner';
@@ -32,21 +33,25 @@ type AnyPrompt = PredefinedPrompt | CustomPrompt | SystemCommand;
 interface ChatInputProps {
   onSend: (content: string) => void;
   disabled?: boolean;
+  placeholder?: string;
 }
 
-export function ChatInput({ onSend, disabled }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   const [content, setContent] = useState('');
   const [style, setStyle] = useState('Formal');
   const [showSlashMenu, setShowSlashMenu] = useState(false);
   const [showAtMenu, setShowAtMenu] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const { setActiveTab, addItem } = useContextStore();
+  const { setActiveTab, addItem, items: contextItems } = useContextStore();
   const [advancedRagMode, setAdvancedRagMode] = useState(false);
   const {
     chatMode,
     selectedModels,
     webSearch, setWebSearch,
+    multiQuery, setMultiQuery,
+    breadthFirst, setBreadthFirst,
+    searchMode, setSearchMode,
     denseResearch, setDenseResearch,
     reasoningLevel, setReasoningLevel,
     setSelectedModels, setChatMode,
@@ -56,12 +61,17 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     hydeEnabled, setHydeEnabled,
     graphRagEnabled, setGraphRagEnabled,
     graphHops, setGraphHops,
-    useMultiAgent, setUseMultiAgent,
     attachmentMode, setAttachmentMode,
-    setPendingCanvasContext
+    setPendingCanvasContext,
+    thesis, setThesis
   } = useChatStore();
 
   const DEFAULT_COMPARE_MODELS = ['gpt-5.2', 'claude-4.5-sonnet', 'gemini-3-flash'];
+  const contextCount = contextItems.length;
+  const contextChipBase =
+    "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors";
+  const contextChipActive = "border-emerald-200 bg-emerald-500/10 text-emerald-600";
+  const contextChipInactive = "border-slate-200 text-slate-500 hover:bg-slate-100";
 
   const handleCompareToggle = (enabled: boolean) => {
     if (enabled) {
@@ -84,24 +94,28 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     toast.info('Comparar modelos desativado');
   };
 
-  // Context-aware chat from Canvas
-  const [canvasContext, setCanvasContext] = useState<{ text: string; action: 'improve' | 'shorten' | null } | null>(null);
+  const selectedText = useCanvasStore((state) => state.selectedText);
+  const pendingAction = useCanvasStore((state) => state.pendingAction);
+  const clearSelectedText = useCanvasStore((state) => state.clearSelectedText);
+  const setSelectedText = useCanvasStore((state) => state.setSelectedText);
+
+  const prefill = (text: string) => {
+    setContent(text);
+    setShowSlashMenu(false);
+    setShowAtMenu(false);
+    textareaRef.current?.focus();
+  };
 
   useEffect(() => {
-    // Subscribe to canvas store changes
-    const checkCanvasContext = () => {
-      import('@/stores/canvas-store').then(({ useCanvasStore }) => {
-        const { selectedText, pendingAction } = useCanvasStore.getState();
-        if (selectedText) {
-          setCanvasContext({ text: selectedText, action: pendingAction });
-        } else {
-          setCanvasContext(null);
-        }
-      });
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ text?: string }>).detail;
+      const text = String(detail?.text || '').trim();
+      if (!text) return;
+      prefill(text);
     };
-    checkCanvasContext();
-    const interval = setInterval(checkCanvasContext, 500);
-    return () => clearInterval(interval);
+    window.addEventListener('minuta:prefill-chat', handler as EventListener);
+    return () => window.removeEventListener('minuta:prefill-chat', handler as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -150,28 +164,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
     if (!content.trim() || disabled) return;
 
     // Include canvas context if available
-    let messageContent = content;
-    if (canvasContext?.text) {
-      if (chatMode === 'standard') {
-        setPendingCanvasContext(canvasContext);
-      } else {
-        setPendingCanvasContext(null);
-      }
-      const actionPrefix = canvasContext.action === 'improve'
-        ? 'Melhore este trecho: '
-        : canvasContext.action === 'shorten'
-          ? 'Resuma este trecho: '
-          : 'Sobre este trecho: ';
-      messageContent = `${actionPrefix}"${canvasContext.text}"\n\n${content}`;
-
-      // Clear canvas context after use
-      import('@/stores/canvas-store').then(({ useCanvasStore }) => {
-        useCanvasStore.getState().clearSelectedText();
-      });
-      setCanvasContext(null);
-    }
-
-    onSend(messageContent);
+    onSend(content);
     setContent('');
     setShowSlashMenu(false);
     setShowAtMenu(false);
@@ -214,6 +207,15 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
       } else if (action === 'set-mode:standard') {
         setChatMode('standard');
         toast.success("Modo Padrão ativado");
+      } else if (action.startsWith('insert-text:')) {
+        const insertText = action.replace('insert-text:', '');
+        const nextContent = content.endsWith('/')
+          ? content.slice(0, -1) + insertText
+          : insertText;
+        setContent(nextContent);
+        setShowSlashMenu(false);
+        textareaRef.current?.focus();
+        return;
       }
       setContent(''); // Clear the slash command
       setShowSlashMenu(false);
@@ -267,48 +269,154 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         />
       )}
 
-      <div className="group relative flex flex-col gap-2 rounded-xl border border-white/10 bg-white/5 p-2 shadow-sm focus-within:border-indigo-500/50 focus-within:ring-1 focus-within:ring-indigo-500/50 transition-all">
+      <div className="group relative flex flex-col gap-2 rounded-2xl border border-slate-200/80 bg-white p-2 shadow-sm focus-within:border-emerald-400/70 focus-within:ring-2 focus-within:ring-emerald-400/20 transition-all">
         {/* Context Banner - shows when text is selected from Canvas */}
-        {canvasContext?.text && (
-          <div className="flex items-center gap-2 px-2 py-1.5 bg-indigo-500/10 border border-indigo-500/20 rounded-lg text-xs">
-            <Sparkles className="h-3 w-3 text-indigo-500" />
-            <span className="text-indigo-600 font-medium">
-              {canvasContext.action === 'improve' ? 'Melhorando' : canvasContext.action === 'shorten' ? 'Resumindo' : 'Contexto'}:
+        {selectedText && (
+          <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/10 px-2 py-1.5 text-xs">
+            <div className="flex items-center gap-2">
+            <Sparkles className="h-3 w-3 text-emerald-600" />
+            <span className="text-emerald-700 font-medium">
+              {pendingAction === 'improve' ? 'Melhorando' : pendingAction === 'shorten' ? 'Resumindo' : 'Contexto'}:
             </span>
             <span className="text-muted-foreground truncate flex-1">
-              "{canvasContext.text.slice(0, 60)}{canvasContext.text.length > 60 ? '...' : ''}"
+              {"\""}
+              {selectedText.slice(0, 60)}
+              {selectedText.length > 60 ? '...' : ''}
+              {"\""}
             </span>
             <Button
               variant="ghost"
               size="sm"
               className="h-5 w-5 p-0 text-muted-foreground hover:text-destructive"
-              onClick={() => {
-                import('@/stores/canvas-store').then(({ useCanvasStore }) => {
-                  useCanvasStore.getState().clearSelectedText();
-                });
-                setCanvasContext(null);
-              }}
+              onClick={clearSelectedText}
             >
               ×
             </Button>
+            </div>
+
+            {/* Quick actions (MinutaIA-style affordance): prefill prompt for selected text */}
+            <div className="mt-2 flex flex-wrap gap-1">
+              {[
+                {
+                  id: 'rewrite',
+                  label: 'Reescrever',
+                  prompt: `Reescreva o trecho selecionado mantendo o sentido e melhorando clareza e coesão.`,
+                },
+                {
+                  id: 'shorten',
+                  label: 'Enxugar',
+                  prompt: `Enxugue o trecho selecionado, removendo redundâncias e mantendo o conteúdo essencial.`,
+                },
+                {
+                  id: 'formalize',
+                  label: 'Formalizar',
+                  prompt: `Formalize o trecho selecionado em linguagem jurídica adequada, mantendo a objetividade.`,
+                },
+                {
+                  id: 'ground',
+                  label: 'Fundamentar',
+                  prompt: `Inclua fundamentação jurídica no trecho selecionado (base legal e argumentos), sem inventar fatos. Se faltar contexto, pergunte antes.`,
+                },
+                {
+                  id: 'ementa',
+                  label: 'Ementa',
+                  prompt: `Crie uma ementa/assunto em 2–3 linhas a partir do trecho selecionado.`,
+                },
+                {
+                  id: 'verify',
+                  label: 'Checar citações',
+                  prompt: `Verifique e corrija eventuais citações jurídicas no trecho selecionado. Se alguma referência for incerta, marque como "verificar".`,
+                },
+              ].map((action) => (
+                <button
+                  key={action.id}
+                  type="button"
+                  onClick={() => {
+                    setSelectedText(selectedText, action.id as any, null, null);
+                    prefill(action.prompt);
+                  }}
+                  className="rounded-full border border-emerald-200 bg-white px-2 py-1 text-[10px] font-semibold text-emerald-700 hover:bg-emerald-50"
+                >
+                  {action.label}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  const text = `Edite o trecho selecionado conforme minha instrução a seguir:\n\n`;
+                  prefill(text);
+                }}
+                className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                Instrução livre
+              </button>
+            </div>
           </div>
         )}
+        <div className="flex flex-col gap-2 px-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setAttachmentMode('rag_local')}
+              className={cn(
+                contextChipBase,
+                attachmentMode === 'rag_local' ? contextChipActive : contextChipInactive
+              )}
+            >
+              <BookOpen className="h-3 w-3" />
+              RAG local
+              <span className="text-[9px] text-muted-foreground/70">({contextCount})</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setWebSearch(!webSearch)}
+              className={cn(
+                contextChipBase,
+                webSearch ? contextChipActive : contextChipInactive
+              )}
+            >
+              <Globe className="h-3 w-3" />
+              Web
+            </button>
+            <button
+              type="button"
+              onClick={() => setDenseResearch(!denseResearch)}
+              className={cn(
+                contextChipBase,
+                denseResearch ? contextChipActive : contextChipInactive
+              )}
+            >
+              <Brain className="h-3 w-3" />
+              Deep research
+            </button>
+          </div>
+          <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1">
+            <span className="text-[10px] font-semibold uppercase text-muted-foreground">Objetivo</span>
+            <input
+              value={thesis}
+              onChange={(e) => setThesis(e.target.value)}
+              placeholder="Defina a tese/objetivo"
+              className="flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none"
+            />
+          </div>
+        </div>
         <textarea
           ref={textareaRef}
           value={content}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="Descreva a minuta que você precisa... (Digite '/' para prompts, '@' para contexto)"
+          placeholder={placeholder || "Descreva a minuta que você precisa... (Digite '/' para prompts, '@' para contexto)"}
           className="min-h-[60px] w-full resize-none bg-transparent px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
           disabled={disabled}
           rows={1}
+          data-testid="chat-input"
         />
 
-        <div className="flex items-center justify-between px-2 pb-1">
-          <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-2 px-2 pb-1">
+          <div className="flex flex-wrap items-center gap-1 min-w-0">
 
             {/* Visible toggle (low-friction discovery) */}
-            <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-white/5 px-2 py-1">
+            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1">
               <Switch
                 checked={chatMode === 'multi-model'}
                 onCheckedChange={(v) => handleCompareToggle(!!v)}
@@ -325,11 +433,11 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
             <ModelSelector />
 
             {/* AI Controls */}
-            <div className="h-4 w-[1px] bg-white/10 mx-1" />
+            <div className="h-4 w-[1px] bg-slate-200 mx-1" />
 
             <Popover>
               <PopoverTrigger asChild>
-                <Button variant="ghost" size="sm" className={cn("h-7 gap-1 rounded-full px-2 text-[10px] font-medium transition-colors", (webSearch || denseResearch) ? "text-indigo-400 bg-indigo-500/10" : "text-muted-foreground hover:bg-white/10 hover:text-foreground")}>
+                <Button variant="ghost" size="sm" className={cn("h-7 gap-1 rounded-full px-2 text-[10px] font-medium transition-colors", (webSearch || denseResearch) ? "text-emerald-600 bg-emerald-500/10" : "text-slate-500 hover:bg-slate-100 hover:text-slate-700")}>
                   {denseResearch ? <Brain className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
                   {denseResearch ? "Deep Research" : (webSearch ? "Web Search" : "Offline")}
                   <ChevronDown className="h-3 w-3 opacity-50" />
@@ -345,22 +453,149 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                     <Switch checked={webSearch} onCheckedChange={setWebSearch} />
                   </div>
 
+                  <div className={cn("space-y-2", !webSearch && "opacity-50")}>
+                    <div className="flex items-center gap-2">
+                      <Label className="text-sm font-medium">Modo de busca</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="max-w-xs text-xs">
+                            Define como a busca web é executada no Modo Chat e no Modo Minuta.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                    <div className="flex flex-wrap gap-1">
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled={!webSearch}
+                              onClick={() => setSearchMode('shared')}
+                              className={cn(
+                                "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                                searchMode === 'shared'
+                                  ? "border-emerald-200 bg-emerald-500/15 text-emerald-700"
+                                  : "border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700",
+                                !webSearch && "pointer-events-none"
+                              )}
+                            >
+                              Compartilhada
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="max-w-xs text-xs">
+                            Uma única busca (pt‑BR + internacional) alimenta todos os modelos. Mais rápida e consistente.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled={!webSearch}
+                              onClick={() => setSearchMode('native')}
+                              className={cn(
+                                "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                                searchMode === 'native'
+                                  ? "border-emerald-200 bg-emerald-500/15 text-emerald-700"
+                                  : "border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700",
+                                !webSearch && "pointer-events-none"
+                              )}
+                            >
+                              Nativa por modelo
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="max-w-xs text-xs">
+                            Cada modelo usa a busca do próprio provedor. Maior cobertura, mais custo e latência.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button
+                              type="button"
+                              disabled={!webSearch}
+                              onClick={() => setSearchMode('hybrid')}
+                              className={cn(
+                                "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                                searchMode === 'hybrid'
+                                  ? "border-emerald-200 bg-emerald-500/15 text-emerald-700"
+                                  : "border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700",
+                                !webSearch && "pointer-events-none"
+                              )}
+                            >
+                              Híbrida
+                            </button>
+                          </TooltipTrigger>
+                          <TooltipContent side="right" className="max-w-xs text-xs">
+                            Usa busca compartilhada quando necessário; se todos suportarem nativo, usa nativa.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  </div>
+
+                  <div className={cn("flex items-center justify-between", !webSearch && "opacity-50")}>
+                    <div className="flex flex-col gap-0.5">
+                      <div className="flex items-center gap-2">
+                        <Label className="text-sm font-medium">Multi-query</Label>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-xs text-xs">
+                              Gera variações da pergunta para aumentar o recall da pesquisa. Pode trazer mais fontes.
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </div>
+                      <span className="text-xs text-muted-foreground">Busca várias reformulações automaticamente</span>
+                    </div>
+                    <Switch checked={multiQuery} onCheckedChange={setMultiQuery} disabled={!webSearch} />
+                  </div>
+
+                  <div className={cn("flex items-center justify-between", !webSearch && "opacity-50")}>
+                    <div className="flex flex-col gap-0.5">
+                      <div className="flex items-center gap-2">
+                        <Label className="text-sm font-medium">Breadth-first</Label>
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-xs text-xs">
+                              Ativa um fluxo com subagentes para perguntas amplas. Mais cobertura, mais lento.
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      </div>
+                      <span className="text-xs text-muted-foreground">Indicado para questões longas/complexas</span>
+                    </div>
+                    <Switch checked={breadthFirst} onCheckedChange={setBreadthFirst} disabled={!webSearch} />
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <div className="flex flex-col gap-0.5">
                       <div className="flex items-center gap-2">
                         <Label className="text-sm font-medium">Deep Research</Label>
-                        <span className="px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 text-[9px] font-bold">ALPHA</span>
+                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 text-[9px] font-bold">ALPHA</span>
                       </div>
                       <span className="text-xs text-muted-foreground">Agente Autônomo (Lento, +Custos)</span>
                     </div>
                     <Switch checked={denseResearch} onCheckedChange={setDenseResearch} />
                   </div>
 
-                  <div className="h-[1px] bg-white/10" />
+                  <div className="h-[1px] bg-slate-200" />
 
                   <div className="space-y-2">
                     <Label className="text-sm font-medium">Nível de Raciocínio (Thinking)</Label>
-                    <div className="flex gap-1 p-1 bg-white/5 rounded-lg">
+                    <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
                       {(['low', 'medium', 'high'] as const).map((level) => (
                         <button
                           key={level}
@@ -368,8 +603,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                           className={cn(
                             "flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all",
                             reasoningLevel === level
-                              ? "bg-indigo-600/20 text-indigo-400 shadow-sm"
-                              : "text-muted-foreground hover:bg-white/5 hover:text-foreground"
+                              ? "bg-emerald-600/15 text-emerald-700 shadow-sm"
+                              : "text-slate-500 hover:bg-slate-100 hover:text-slate-700"
                           )}
                         >
                           {level === 'low' ? 'Rápido' : level === 'medium' ? 'Médio' : 'Profundo'}
@@ -378,20 +613,23 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                     </div>
                   </div>
 
-                  <div className="h-[1px] bg-white/10" />
+                  <div className="h-[1px] bg-slate-200" />
 
                   <div className="flex items-center justify-between">
                     <div className="flex flex-col gap-0.5">
                       <div className="flex items-center gap-2">
-                        <Label className="text-sm font-medium">Comitê de Agentes</Label>
+                        <Label className="text-sm font-medium">Comparar modelos (Chat)</Label>
                         <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] font-bold">ON</span>
                       </div>
-                      <span className="text-xs text-muted-foreground">Debate multi-modelo (GPT + Claude + Gemini)</span>
+                      <span className="text-xs text-muted-foreground">Respostas paralelas; não é o Modo Minuta (Agentes)</span>
                     </div>
-                    <Switch checked={useMultiAgent} onCheckedChange={setUseMultiAgent} />
+                    <Switch
+                      checked={chatMode === 'multi-model'}
+                      onCheckedChange={(value) => handleCompareToggle(!!value)}
+                    />
                   </div>
 
-                  <div className="h-[1px] bg-white/10" />
+                  <div className="h-[1px] bg-slate-200" />
 
                   <div className="space-y-3">
                     <div className="flex items-center justify-between">
@@ -406,48 +644,96 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                     </div>
                     <p className="text-[10px] text-muted-foreground">
                       {advancedRagMode
-                        ? 'Configure técnicas avançadas de busca (Adaptive, HyDE, CRAG, GraphRAG).'
-                        : 'Modo simplificado. Ative "Avançado" para mais controle.'}
+                        ? 'Ajustes avançados para precisão e profundidade. Passe o mouse nos ícones para ver detalhes técnicos.'
+                        : 'RAG básico: busca trechos relevantes e responde com base neles. Rápido e indicado para a maioria dos casos.'}
                     </p>
 
                     {advancedRagMode && (
                       <>
                         <div className="flex items-center justify-between">
                           <div className="flex flex-col gap-0.5">
-                            <Label className="text-sm font-medium">Roteamento Inteligente</Label>
-                            <span className="text-xs text-muted-foreground">Escolhe estratégia por seção</span>
+                            <Label className="text-sm font-medium flex items-center gap-1">
+                              Estratégia automática
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right" className="max-w-xs text-xs">
+                                    <p>Nome técnico: Adaptive Routing. Escolhe automaticamente a melhor estratégia por seção.</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </Label>
+                            <span className="text-xs text-muted-foreground">Recomendado para a maioria dos casos</span>
                           </div>
                           <Switch checked={adaptiveRouting} onCheckedChange={setAdaptiveRouting} />
                         </div>
 
                         <div className="flex items-center justify-between">
                           <div className="flex flex-col gap-0.5">
-                            <Label className="text-sm font-medium">Busca por Texto Hipotético</Label>
-                            <span className="text-xs text-muted-foreground">HyDE - melhora busca semântica</span>
+                            <Label className="text-sm font-medium flex items-center gap-1">
+                              Rascunho inteligente
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right" className="max-w-xs text-xs">
+                                    <p>HyDE (Hypothetical Document Embeddings). Cria um rascunho para recuperar melhor quando a pergunta é vaga.</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </Label>
+                            <span className="text-xs text-muted-foreground">Ajuda quando a pergunta é vaga</span>
                           </div>
                           <Switch checked={hydeEnabled} onCheckedChange={setHydeEnabled} />
                         </div>
 
                         <div className="flex items-center justify-between">
                           <div className="flex flex-col gap-0.5">
-                            <Label className="text-sm font-medium">Filtro de Qualidade</Label>
-                            <span className="text-xs text-muted-foreground">CRAG - evita fontes fracas</span>
+                            <Label className="text-sm font-medium flex items-center gap-1">
+                              Verificação extra
+                              <TooltipProvider>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                                  </TooltipTrigger>
+                                  <TooltipContent side="right" className="max-w-xs text-xs">
+                                    <p>CRAG (Corrective RAG). Reavalia a qualidade das evidências antes de responder.</p>
+                                  </TooltipContent>
+                                </Tooltip>
+                              </TooltipProvider>
+                            </Label>
+                            <span className="text-xs text-muted-foreground">Checagem extra das fontes</span>
                           </div>
                           <Switch checked={cragGate} onCheckedChange={setCragGate} />
                         </div>
 
-                        <div className="space-y-2 pt-2 border-t border-white/5">
+                        <div className="space-y-2 pt-2 border-t border-slate-200/70">
                           <div className="flex items-center justify-between">
                             <div className="flex flex-col gap-0.5">
-                              <Label className="text-sm font-medium">Busca por Conexões</Label>
-                              <span className="text-xs text-muted-foreground">GraphRAG - relações entre leis</span>
+                              <Label className="text-sm font-medium flex items-center gap-1">
+                                Relações entre fatos
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
+                                    </TooltipTrigger>
+                                    <TooltipContent side="right" className="max-w-xs text-xs">
+                                      <p>GraphRAG. Conecta documentos e conceitos relacionados para ampliar o contexto. Profundidade define os saltos nas relações.</p>
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              </Label>
+                              <span className="text-xs text-muted-foreground">Conecta documentos e conceitos relacionados</span>
                             </div>
                             <Switch checked={graphRagEnabled} onCheckedChange={setGraphRagEnabled} />
                           </div>
                           {graphRagEnabled && (
                             <div className="space-y-2 px-1 pt-1 animate-in zoom-in-95">
                               <div className="flex justify-between items-center text-[10px]">
-                                <span className="text-indigo-400">Hops: {graphHops}</span>
+                                <span className="text-emerald-600">Profundidade: {graphHops}</span>
                               </div>
                               <Slider
                                 value={[graphHops]}
@@ -461,7 +747,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                     )}
                   </div>
 
-                  <div className="space-y-2 pt-3 border-t border-white/10">
+                  <div className="space-y-2 pt-3 border-t border-slate-200">
                     <div className="flex items-center gap-2">
                       <Label className="text-xs font-bold uppercase text-muted-foreground">Anexos no contexto</Label>
                       <TooltipProvider>
@@ -477,7 +763,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                     </div>
 
                     <div className="grid gap-2">
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
@@ -485,8 +771,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                             className={cn(
                               "h-6 px-2 rounded-md text-[10px] font-semibold transition-all",
                               attachmentMode === 'rag_local'
-                                ? "bg-indigo-600 text-white"
-                                : "bg-white/10 text-muted-foreground hover:bg-white/20"
+                                ? "bg-emerald-600 text-white"
+                                : "bg-slate-200 text-slate-600 hover:bg-slate-300"
                             )}
                           >
                             RAG Local
@@ -505,7 +791,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                         </TooltipProvider>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
@@ -513,8 +799,8 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
                             className={cn(
                               "h-6 px-2 rounded-md text-[10px] font-semibold transition-all",
                               attachmentMode === 'prompt_injection'
-                                ? "bg-indigo-600 text-white"
-                                : "bg-white/10 text-muted-foreground hover:bg-white/20"
+                                ? "bg-emerald-600 text-white"
+                                : "bg-slate-200 text-slate-600 hover:bg-slate-300"
                             )}
                           >
                             Injeção direta
@@ -538,38 +824,41 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
               </PopoverContent>
             </Popover>
 
-            <div className="h-4 w-[1px] bg-white/10 mx-1" />
+            <div className="h-4 w-[1px] bg-slate-200 mx-1" />
 
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7 rounded-full text-muted-foreground hover:bg-white/10 hover:text-foreground"
+              className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
               onClick={handleAttachClick}
               type="button"
             >
               <Paperclip className="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full text-muted-foreground hover:bg-white/10 hover:text-foreground">
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700">
               <AtSign className="h-3.5 w-3.5" />
             </Button>
-            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full text-muted-foreground hover:bg-white/10 hover:text-foreground">
+            <Button variant="ghost" size="icon" className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700">
               <Hash className="h-3.5 w-3.5" />
             </Button>
           </div>
 
-          <Button
-            onClick={handleSend}
-            disabled={!content.trim() || disabled}
-            size="icon"
-            className={cn(
-              "h-8 w-8 rounded-lg transition-all",
-              content.trim()
-                ? "bg-indigo-600 text-white hover:bg-indigo-500 shadow-lg shadow-indigo-500/20"
-                : "bg-white/5 text-muted-foreground hover:bg-white/10"
-            )}
-          >
-            <Send className="h-4 w-4" />
-          </Button>
+          <div className="ml-auto flex items-center">
+            <Button
+              onClick={handleSend}
+              disabled={!content.trim() || disabled}
+              size="icon"
+              className={cn(
+                "h-8 w-8 rounded-lg transition-all",
+                content.trim()
+                  ? "bg-emerald-600 text-white hover:bg-emerald-500 shadow-lg shadow-emerald-500/20"
+                  : "bg-slate-100 text-slate-400 hover:bg-slate-100"
+              )}
+              data-testid="chat-send"
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
       <input
@@ -580,7 +869,7 @@ export function ChatInput({ onSend, disabled }: ChatInputProps) {
         onChange={handleFileChange}
       />
       {/* Ambient Glow */}
-      <div className="pointer-events-none absolute -inset-px -z-10 rounded-2xl bg-gradient-to-r from-indigo-500/20 via-purple-500/20 to-indigo-500/20 opacity-0 blur-xl transition-opacity duration-500 group-focus-within:opacity-100" />
+      <div className="pointer-events-none absolute -inset-px -z-10 rounded-2xl bg-gradient-to-r from-emerald-400/20 via-emerald-200/20 to-emerald-500/20 opacity-0 blur-xl transition-opacity duration-500 group-focus-within:opacity-100" />
     </div>
   );
 }

@@ -16,6 +16,7 @@ import {
   Undo,
   Redo,
   Table,
+  GitBranch,
   Heading1,
   Heading2,
   Heading3,
@@ -184,7 +185,22 @@ export function EditorToolbar({ editor }: EditorToolbarProps) {
       >
         <Table className="h-4 w-4" />
       </Button>
+
+      <Button
+        variant="ghost"
+        size="icon"
+        onClick={() =>
+          editor
+            .chain()
+            .focus()
+            .setCodeBlock({ language: 'mermaid' })
+            .insertContent('graph TD\n  A[Início] --> B{Decisão}\n  B -->|Sim| C[Resultado]\n  B -->|Não| D[Fim]')
+            .run()
+        }
+        title="Inserir diagrama (Mermaid)"
+      >
+        <GitBranch className="h-4 w-4" />
+      </Button>
     </div>
   );
 }
-

@@ -3,6 +3,7 @@ Modelos de Chat e Mensagens
 """
 
 from datetime import datetime
+from app.core.time_utils import utcnow
 from typing import Optional
 from sqlalchemy import String, DateTime, JSON, Boolean, Text, Enum as SQLEnum, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
@@ -35,13 +36,13 @@ class Chat(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
-        onupdate=datetime.utcnow,
+        default=utcnow,
+        onupdate=utcnow,
         nullable=False
     )
     
@@ -64,10 +65,9 @@ class ChatMessage(Base):
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=utcnow,
         nullable=False
     )
     
     def __repr__(self) -> str:
         return f"<ChatMessage(id={self.id}, chat_id={self.chat_id}, role={self.role})>"
-

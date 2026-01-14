@@ -7,6 +7,7 @@ import { ContextSelector } from '@/components/chat/context-selector';
 import { ContextDashboard } from '@/components/chat/context-dashboard';
 import { useChatStore } from '@/stores';
 import { Button } from '@/components/ui/button';
+import { RichTooltip } from '@/components/ui/rich-tooltip';
 import {
     Maximize2,
     Minimize2,
@@ -43,7 +44,7 @@ export default function GeneratorPage() {
     }, [currentChat?.messages]);
 
     return (
-        <div className="flex h-[calc(100vh-4rem)] overflow-hidden bg-background">
+        <div className="flex h-full overflow-hidden bg-background">
             {/* Left Panel - AI Counsel */}
             <div
                 className={cn(
@@ -57,6 +58,12 @@ export default function GeneratorPage() {
                         <span className="font-display font-semibold text-foreground">AI Counsel</span>
                     </div>
                     <div className="flex items-center gap-2">
+                    <RichTooltip
+                        title="Modo Rigoroso"
+                        description="A IA seguirá estritamente os fatos e modelos fornecidos. Zero alucinação permitida. Ideal para uso final."
+                        badge="Uso final"
+                        icon={<Sparkles className="h-3.5 w-3.5" />}
+                    >
                         <div className="flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-1">
                             <span className="text-[10px] font-medium text-muted-foreground">Rigoroso</span>
                             <button
@@ -72,6 +79,7 @@ export default function GeneratorPage() {
                                 )} />
                             </button>
                         </div>
+                    </RichTooltip>
                         <Button
                             variant="ghost"
                             size="icon"
@@ -86,11 +94,17 @@ export default function GeneratorPage() {
                 <div className="flex flex-1 flex-col overflow-hidden bg-muted/30">
                     {/* Context Indicator & Selector */}
                     <div className="border-b border-white/5 bg-white/5 backdrop-blur-sm">
-                        <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-b border-white/5">
-                            <div className="flex h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
-                            <span className="font-medium text-emerald-400">Contexto Infinito Ativo</span>
-                            <span className="ml-auto opacity-70">1.2M tokens</span>
-                        </div>
+                        <RichTooltip
+                            title="Contexto ativo"
+                            description="Arquivos e processos carregados são usados como base para todas as respostas."
+                            badge="Memória habilitada"
+                        >
+                            <div className="flex items-center gap-2 px-4 py-2 text-xs text-muted-foreground border-b border-white/5">
+                                <div className="flex h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+                                <span className="font-medium text-emerald-400">Contexto Infinito Ativo</span>
+                                <span className="ml-auto opacity-70">1.2M tokens</span>
+                            </div>
+                        </RichTooltip>
                         <ContextSelector />
                     </div>
 

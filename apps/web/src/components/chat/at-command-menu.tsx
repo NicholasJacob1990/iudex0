@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, FileText, BookOpen, Scale, Link as LinkIcon, Mic, ArrowLeft, Loader2, Bot } from 'lucide-react';
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@/components/ui/command';
 import { apiClient } from '@/lib/api-client';
@@ -35,6 +35,10 @@ const AI_MODELS = [
     { id: 'claude-opus-4-5@20251101', name: 'Claude 4.5 Opus', description: 'Anthropic - Análise profunda' },
     { id: 'gemini-3-pro', name: 'Gemini 1.5 Pro', description: 'Google - Contexto longo' },
     { id: 'gemini-3-flash', name: 'Gemini 1.5 Flash', description: 'Google - Muito rápido' },
+    { id: 'grok-4', name: 'Grok 4', description: 'xAI - Raciocínio' },
+    { id: 'grok-4-fast', name: 'Grok 4 Fast', description: 'xAI - Baixa latência' },
+    { id: 'grok-4.1-fast', name: 'Grok 4.1 Fast', description: 'xAI - Baixa latência' },
+    { id: 'llama-4', name: 'Llama 4', description: 'Meta - OpenRouter' },
 ];
 
 export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProps) {
@@ -44,18 +48,7 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
     const [isLoading, setIsLoading] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
-    // Debounce search for submenus
-    useEffect(() => {
-        if (!activeCategory) return;
-
-        const timer = setTimeout(() => {
-            fetchItems(search);
-        }, 300);
-
-        return () => clearTimeout(timer);
-    }, [search, activeCategory]);
-
-    const fetchItems = async (query: string) => {
+    const fetchItems = useCallback(async (query: string) => {
         setIsLoading(true);
         try {
             if (activeCategory === 'models') {
@@ -77,7 +70,18 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
         } finally {
             setIsLoading(false);
         }
-    };
+    }, [activeCategory]);
+
+    // Debounce search for submenus
+    useEffect(() => {
+        if (!activeCategory) return;
+
+        const timer = setTimeout(() => {
+            fetchItems(search);
+        }, 300);
+
+        return () => clearTimeout(timer);
+    }, [search, activeCategory, fetchItems]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {

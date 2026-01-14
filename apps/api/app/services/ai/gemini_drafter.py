@@ -7,7 +7,7 @@ Adapts the interface expected by agent_clients.py
 import os
 import time
 import logging
-from typing import Optional
+from typing import Optional, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger("GeminiDrafter")
@@ -34,47 +34,61 @@ class GeminiDrafterWrapper:
             logger.error("❌ Erro ao importar init_vertex_client de agent_clients.")
             return None
             
-    def _generate_with_retry(self, prompt: str, max_retries: int = 3, model_name: Optional[str] = None) -> Optional[GenerationResponse]:
+    def _generate_with_retry(self, prompt: str, max_retries: int = 3, model_name: Optional[str] = None, cached_content: Optional[Any] = None) -> Optional[GenerationResponse]:
         """
-        Gera texto com retry e backoff exponencial usando Vertex AI.
+        Gera texto com retry e backoff exponencial usando agent_clients (Unified).
+        Supports Context Caching via cached_content.
         """
-        if not self.client_initialized:
-            logger.error("Client Vertex AI não inicializado.")
+        try:
+            from app.services.ai.agent_clients import call_vertex_gemini
+            from app.services.ai.agent_clients import get_gemini_client
+        except ImportError:
+            logger.error("❌ Erro ao importar agent_clients.")
             return None
             
-        # Vertex AI imports
-        try:
-            from vertexai.generative_models import GenerativeModel, GenerationConfig
-        except ImportError:
-            try:
-                from vertexai.preview.generative_models import GenerativeModel, GenerationConfig
-            except ImportError:
-                logger.error("❌ Vertex AI SDK não encontrado.")
-                return None
-        
+        client = get_gemini_client()
         target_model = model_name or self.model_name
         
         for attempt in range(max_retries):
             try:
-                # Instanciar modelo Vertex (stateless/global init)
-                model = GenerativeModel(target_model)
-                
-                # Configuração conservadora para o Juiz
-                response = model.generate_content(
-                    prompt,
-                    generation_config=GenerationConfig(
-                        temperature=0.1,
-                        max_output_tokens=8192
-                    )
+                # Use unified client call which supports caching
+                response_text = call_vertex_gemini(
+                    client=client,
+                    prompt=prompt,
+                    model=target_model,
+                    cached_content=cached_content,
+                    # For Judge/Drafter we want low temp
+                    temperature=0.1
                 )
                 
-                if response.text:
-                    return GenerationResponse(text=response.text)
+                if response_text:
+                    return GenerationResponse(text=response_text)
                     
             except Exception as e:
                 wait_time = 2 ** attempt
-                logger.warning(f"⚠️ Erro Vertex Gemini (Tentativa {attempt+1}/{max_retries}): {e}. Aguardando {wait_time}s...")
+                logger.warning(f"⚠️ Erro Gemini Drafter (Tentativa {attempt+1}/{max_retries}): {e}. Aguardando {wait_time}s...")
                 time.sleep(wait_time)
                 
-        logger.error("❌ Falha final na geração do Gemini (Vertex) após retries.")
-        return None
+        logger.error("❌ Falha final na geração do Gemini Drafter após retries.")
+    def generate_section(self, titulo: str, contexto_rag: str, tipo_peca: str, resumo_caso: str, tese_usuario: str, cached_content: Optional[Any] = None) -> str:
+        """
+        Gera uma seção individual com robustez (simula o LegalDrafter original).
+        Supports Context Caching.
+        """
+        # Se tiver cache, o prompt pode ser mais enxuto pois o contexto factual já está no cache
+        prompt = f"""
+## TAREFA: REDIGIR SEÇÃO "{titulo}"
+## TIPO: {tipo_peca}
+## TESE: {tese_usuario}
+
+{'## CONTEXTO (RAG): ' + contexto_rag[:3000] if not cached_content else '[CONTEXTO FACTUAL JÁ FORNECIDO NO CACHE]'}
+
+{'## RESUMO DO CASO: ' + resumo_caso[:2000] if not cached_content else ''}
+
+## INSTRUÇÕES:
+1. Escreva em parágrafos claros e jurídicos.
+2. Use citações [TIPO - Doc. X] se houver fatos.
+3. Não invente informações.
+"""
+        resp = self._generate_with_retry(prompt, model_name=self.model_name, cached_content=cached_content)
+        return resp.text if resp else ""

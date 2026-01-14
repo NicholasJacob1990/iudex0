@@ -7,7 +7,39 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { toast } from 'sonner';
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000/api';
+const DEFAULT_API_URL =
+  typeof window !== 'undefined'
+    ? `${window.location.origin}/api`
+    : 'http://localhost:8000/api';
+
+const normalizeApiUrl = (url: string): string => {
+  const trimmed = url.replace(/\/+$/, '');
+  if (!trimmed) return DEFAULT_API_URL;
+  if (trimmed.endsWith('/api')) return trimmed;
+  return `${trimmed}/api`;
+};
+
+// In the browser, prefer same-origin `/api` (via Next rewrites) to avoid CORS/credentials issues in dev.
+// If an env points to a different origin (e.g. http://localhost:8000/api), we still route through `/api`.
+const resolveApiUrl = (): string => {
+  const env = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+  if (typeof window === 'undefined') {
+    return normalizeApiUrl(env || DEFAULT_API_URL);
+  }
+  if (!env) return normalizeApiUrl(DEFAULT_API_URL);
+  try {
+    const u = new URL(env);
+    const sameOrigin = u.origin === window.location.origin;
+    if (!sameOrigin) {
+      return normalizeApiUrl(DEFAULT_API_URL);
+    }
+  } catch {
+    // allow relative URLs like "/api" or "https://example.com/api"
+  }
+  return normalizeApiUrl(env);
+};
+
+const API_URL = resolveApiUrl();
 
 interface AuthResponse {
   access_token: string;
@@ -99,6 +131,9 @@ interface GenerateDocumentRequest {
   reasoning_level?: 'low' | 'medium' | 'high';
 
   web_search?: boolean;
+  search_mode?: 'shared' | 'native' | 'hybrid';
+  multi_query?: boolean;
+  breadth_first?: boolean;
   dense_research?: boolean;
   thinking_level?: 'low' | 'medium' | 'high';
   min_pages?: number;
@@ -147,7 +182,24 @@ interface GenerateDocumentRequest {
   language?: string;
   tone?: string;
   template_id?: string;
+  template_document_id?: string;
   variables?: Record<string, any>;
+  hil_outline_enabled?: boolean;
+  hil_target_sections?: string[];
+  audit_mode?: 'sei_only' | 'research';
+  quality_profile?: 'rapido' | 'padrao' | 'rigoroso' | 'auditoria';
+  target_section_score?: number;
+  target_final_score?: number;
+  max_rounds?: number;
+  strict_document_gate?: boolean;
+  hil_section_policy?: 'none' | 'optional' | 'required';
+  hil_final_required?: boolean;
+  recursion_limit?: number;
+  document_checklist_hint?: Array<{
+    id?: string;
+    label: string;
+    critical: boolean;
+  }>;
 }
 
 interface GenerateDocumentResponse {
@@ -159,6 +211,20 @@ interface GenerateDocumentResponse {
   total_cost?: number;
   processing_time?: number;
   metadata?: any;
+}
+
+interface OutlineRequest {
+  prompt: string;
+  document_type?: string;
+  thesis?: string;
+  model?: string;
+  min_pages?: number;
+  max_pages?: number;
+}
+
+interface OutlineResponse {
+  outline: string[];
+  model?: string;
 }
 
 class ApiClient {
@@ -353,10 +419,20 @@ class ApiClient {
     return response.data;
   }
 
+  async getPreferences(): Promise<any> {
+    const response = await this.axios.get('/users/preferences');
+    return response.data;
+  }
+
+  async updatePreferences(preferences: Record<string, any>, replace = false): Promise<any> {
+    const response = await this.axios.put('/users/preferences', { preferences, replace });
+    return response.data;
+  }
+
   // ============= CHATS =============
 
   async getChats(skip = 0, limit = 20): Promise<{ chats: Chat[] }> {
-    const response = await this.axios.get<Chat[]>('/chats', {
+    const response = await this.axios.get<Chat[]>('/chats/', {
       params: { skip, limit },
     });
     return { chats: response.data };
@@ -368,10 +444,17 @@ class ApiClient {
   }
 
   async createChat(data: { title?: string; mode?: string; context?: any }): Promise<Chat> {
-    const response = await this.axios.post<Chat>('/chats', {
+    const response = await this.axios.post<Chat>('/chats/', {
       title: data.title || 'Nova Conversa',
       mode: data.mode || 'MINUTA',
       context: data.context || {},
+    });
+    return response.data;
+  }
+
+  async duplicateChat(chatId: string, title?: string): Promise<Chat> {
+    const response = await this.axios.post<Chat>(`/chats/${chatId}/duplicate`, {
+      title,
     });
     return response.data;
   }
@@ -389,6 +472,89 @@ class ApiClient {
   ): Promise<{ content: string }> {
     const response = await this.axios.post<{ content: string }>(`/multi-chat/threads/${threadId}/consolidate`, data);
     return response.data;
+  }
+
+  /**
+   * v5.4: Edit document via agent committee
+   * 
+   * Sends an edit command and document context to the committee.
+   * GPT and Claude propose edits, Gemini Judge consolidates.
+   * 
+   * @returns SSE stream with agent responses and final edited text
+   */
+  async editDocumentWithCommittee(
+    chatId: string, // Renamed from threadId to clarify it's a Chat ID
+    data: {
+      message: string;
+      document: string;
+      selection?: string;
+      selection_start?: number;
+      selection_end?: number;
+      selection_context_before?: string;
+      selection_context_after?: string;
+      models?: string[];
+      use_debate?: boolean;
+    },
+    onAgentResponse: (agent: string, text: string) => void,
+    onComplete: (original: string, edited: string, agents: string[]) => void,
+    onError: (error: string) => void
+  ): Promise<void> {
+    const token = this.getAccessToken();
+
+    try {
+      const response = await fetch(`${API_URL}/chats/${chatId}/edit`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) {
+        onError(`HTTP ${response.status}: ${response.statusText}`);
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        onError('Response body is not readable');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const event = JSON.parse(line.slice(5).trim());
+
+              if (event.type === 'agent_response') {
+                onAgentResponse(event.agent, event.text);
+              } else if (event.type === 'edit_complete') {
+                onComplete(event.original, event.edited, event.agents_used);
+              } else if (event.type === 'error') {
+                onError(event.error);
+              }
+            } catch (e) {
+              console.error('Failed to parse SSE event:', line);
+            }
+          }
+        }
+      }
+    } catch (error: any) {
+      onError(error.message || 'Unknown error');
+    }
   }
 
   /**
@@ -450,6 +616,17 @@ class ApiClient {
     return response.data;
   }
 
+  async generateOutline(
+    chatId: string,
+    request: OutlineRequest
+  ): Promise<OutlineResponse> {
+    const response = await this.axios.post<OutlineResponse>(
+      `/chats/${chatId}/outline`,
+      request
+    );
+    return response.data;
+  }
+
   // ============= DOCUMENTS =============
 
   async getDocuments(skip = 0, limit = 20, search?: string): Promise<{ documents: any[]; total: number }> {
@@ -499,6 +676,18 @@ class ApiClient {
     return response.data;
   }
 
+  async createDocumentFromUrl(data: { url: string; tags?: string; folder_id?: string }): Promise<any> {
+    const formData = new FormData();
+    formData.append('url', data.url);
+    if (data.tags) formData.append('tags', data.tags);
+    if (data.folder_id) formData.append('folder_id', data.folder_id);
+
+    const response = await this.axios.post('/documents/from-url', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    return response.data;
+  }
+
   async processDocument(documentId: string, options?: any): Promise<any> {
     const response = await this.axios.post(`/documents/${documentId}/process`, options);
     return response.data;
@@ -528,9 +717,15 @@ class ApiClient {
 
   // ============= LIBRARY =============
 
-  async getLibraryItems(skip = 0, limit = 20, search?: string): Promise<{ items: any[]; total: number }> {
+  async getLibraryItems(
+    skip = 0,
+    limit = 20,
+    search?: string,
+    item_type?: string
+  ): Promise<{ items: any[]; total: number }> {
     const params: any = { skip, limit };
     if (search) params.search = search;
+    if (item_type) params.item_type = item_type;
 
     const response = await this.axios.get('/library', {
       params,
@@ -623,6 +818,41 @@ class ApiClient {
 
   async deleteTemplate(templateId: string): Promise<void> {
     await this.axios.delete(`/templates/${templateId}`);
+  }
+
+  async getTemplate(templateId: string): Promise<any> {
+    const response = await this.axios.get(`/templates/${templateId}`);
+    return response.data;
+  }
+
+  async updateTemplate(templateId: string, data: any): Promise<any> {
+    const response = await this.axios.put(`/templates/${templateId}`, data);
+    return response.data;
+  }
+
+  async duplicateTemplate(templateId: string, name?: string): Promise<any> {
+    const response = await this.axios.post(`/templates/${templateId}/duplicate`, {
+      name,
+    });
+    return response.data;
+  }
+
+  // ============= CLAUSES =============
+
+  async getClauses(skip = 0, limit = 20): Promise<any> {
+    const response = await this.axios.get('/clauses', {
+      params: { skip, limit },
+    });
+    return response.data;
+  }
+
+  async createClause(data: any): Promise<any> {
+    const response = await this.axios.post('/clauses', data);
+    return response.data;
+  }
+
+  async deleteClause(clauseId: string): Promise<void> {
+    await this.axios.delete(`/clauses/${clauseId}`);
   }
 
   async indexRagModels(
@@ -927,6 +1157,130 @@ class ApiClient {
       { content, filename },
       { responseType: 'blob' }
     );
+    return response.data;
+  }
+
+  // ============= HEARING TRANSCRIPTION =============
+
+  /**
+   * SSE streaming hearing transcription with structured payload.
+   */
+  async transcribeHearingStream(
+    file: File,
+    options: {
+      case_id: string;
+      goal: string;
+      thinking_level: string;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      format_mode?: string;
+      custom_prompt?: string;
+      format_enabled?: boolean;
+    },
+    onProgress: (stage: string, progress: number, message: string) => void,
+    onComplete: (payload: any) => void,
+    onError: (error: string) => void
+  ): Promise<void> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('case_id', options.case_id);
+    formData.append('goal', options.goal);
+    formData.append('thinking_level', options.thinking_level);
+    if (options.model_selection) formData.append('model_selection', options.model_selection);
+    if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    if (options.format_mode) formData.append('format_mode', options.format_mode);
+    if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+    if (options.format_enabled === false) formData.append('format_enabled', 'false');
+
+    const token = this.getAccessToken();
+
+    try {
+      const response = await fetch(`${API_URL}/transcription/hearing/stream`, {
+        method: 'POST',
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          Accept: 'text/event-stream',
+        },
+        body: formData,
+      });
+
+      if (!response.ok) {
+        onError(`HTTP ${response.status}: ${response.statusText}`);
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        onError('Response body is not readable');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (line.startsWith('data:')) {
+            try {
+              const data = JSON.parse(line.slice(5).trim());
+              if (data.stage !== undefined) {
+                onProgress(data.stage, data.progress, data.message);
+              } else if (data.payload !== undefined) {
+                onComplete(data.payload);
+              } else if (data.error !== undefined) {
+                onError(data.error);
+              }
+            } catch (parseError) {
+              console.warn('Failed to parse SSE data:', line);
+            }
+          }
+        }
+      }
+
+      if (buffer.trim().startsWith('data:')) {
+        try {
+          const data = JSON.parse(buffer.trim().slice(5).trim());
+          if (data.payload !== undefined) {
+            onComplete(data.payload);
+          } else if (data.error !== undefined) {
+            onError(data.error);
+          }
+        } catch (parseError) {
+          console.warn('Failed to parse final SSE data:', buffer);
+        }
+      }
+    } catch (error: any) {
+      onError(error.message || 'Network error');
+    }
+  }
+
+  async updateHearingSpeakers(caseId: string, speakers: Array<{ speaker_id: string; name?: string; role?: string }>): Promise<any> {
+    const response = await this.axios.post('/transcription/hearing/speakers', {
+      case_id: caseId,
+      speakers,
+    });
+    return response.data;
+  }
+
+  async enrollHearingSpeaker(
+    file: File,
+    payload: { case_id: string; name: string; role: string }
+  ): Promise<any> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('case_id', payload.case_id);
+    formData.append('name', payload.name);
+    formData.append('role', payload.role);
+    const response = await this.axios.post('/transcription/hearing/enroll', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   }
 

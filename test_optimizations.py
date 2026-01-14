@@ -4,13 +4,18 @@ Script de teste rápido para validar otimizações Fase 1 + 2.2
 Uso: python test_optimizations.py <audio_ou_video>
 """
 
+import os
 import sys
 import time
 from pathlib import Path
+import pytest
 
 def test_quick():
     """Teste rápido das otimizações implementadas"""
-    
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        pytest.skip("Teste requer arquivo de áudio e dependências externas.")
+
     if len(sys.argv) < 2:
         print("❌ Uso: python test_optimizations.py <audio_ou_video>")
         print("\nExemplo:")
