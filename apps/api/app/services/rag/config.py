@@ -120,6 +120,17 @@ class RAGConfig:
     graph_max_nodes: int = 50
 
     # ==========================================================================
+    # Graph Backend (NetworkX or Neo4j)
+    # ==========================================================================
+    graph_backend: str = "networkx"  # "networkx" or "neo4j"
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "password"
+    neo4j_database: str = "iudex"
+    neo4j_max_connection_pool_size: int = 50
+    neo4j_connection_timeout: int = 30
+
+    # ==========================================================================
     # Storage - OpenSearch
     # ==========================================================================
     opensearch_url: str = "https://localhost:9200"
@@ -269,6 +280,15 @@ class RAGConfig:
             # Graph
             graph_hops=_env_int("RAG_GRAPH_HOPS", 2),
             graph_max_nodes=_env_int("RAG_GRAPH_MAX_NODES", 50),
+
+            # Graph Backend
+            graph_backend=os.getenv("RAG_GRAPH_BACKEND", "networkx"),
+            neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+            neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
+            neo4j_database=os.getenv("NEO4J_DATABASE", "iudex"),
+            neo4j_max_connection_pool_size=_env_int("NEO4J_MAX_POOL_SIZE", 50),
+            neo4j_connection_timeout=_env_int("NEO4J_CONNECTION_TIMEOUT", 30),
 
             # OpenSearch
             opensearch_url=os.getenv("OPENSEARCH_URL", "https://localhost:9200"),

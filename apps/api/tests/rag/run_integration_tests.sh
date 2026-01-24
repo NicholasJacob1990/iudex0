@@ -9,7 +9,9 @@
 #   ./tests/rag/run_integration_tests.sh          # Run all integration tests
 #   ./tests/rag/run_integration_tests.sh qdrant   # Run only Qdrant tests
 #   ./tests/rag/run_integration_tests.sh opensearch # Run only OpenSearch tests
+#   ./tests/rag/run_integration_tests.sh neo4j    # Run only Neo4j tests
 #   ./tests/rag/run_integration_tests.sh --start  # Only start containers
+#   ./tests/rag/run_integration_tests.sh --start-neo4j # Start Neo4j container
 #   ./tests/rag/run_integration_tests.sh --stop   # Only stop containers
 #   ./tests/rag/run_integration_tests.sh --status # Check container status
 #
@@ -19,6 +21,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.test.yml"
+COMPOSE_NEO4J="$SCRIPT_DIR/docker-compose.neo4j.yml"
 PROJECT_NAME="rag-test"
 
 # Colors
@@ -38,7 +41,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 # =============================================================================
 
 start_containers() {
-    log_info "Starting test containers..."
+    log_info "Starting test containers (Qdrant + OpenSearch)..."
     docker-compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d
 
     log_info "Waiting for services to be healthy..."
@@ -68,6 +71,31 @@ start_containers() {
     log_success "All services are ready!"
 }
 
+start_neo4j() {
+    log_info "Starting Neo4j container..."
+    docker-compose -f "$COMPOSE_NEO4J" -p "${PROJECT_NAME}-neo4j" up -d
+
+    log_info "Waiting for Neo4j to be healthy..."
+
+    echo -n "  Neo4j: "
+    for i in {1..60}; do
+        if curl -s http://localhost:7474 > /dev/null 2>&1; then
+            echo -e "${GREEN}ready${NC}"
+            break
+        fi
+        echo -n "."
+        sleep 2
+    done
+
+    log_success "Neo4j is ready!"
+}
+
+stop_neo4j() {
+    log_info "Stopping Neo4j container..."
+    docker-compose -f "$COMPOSE_NEO4J" -p "${PROJECT_NAME}-neo4j" down -v
+    log_success "Neo4j stopped and volumes removed."
+}
+
 stop_containers() {
     log_info "Stopping test containers..."
     docker-compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" down -v
@@ -89,6 +117,13 @@ check_status() {
     if curl -s http://localhost:9200/_cluster/health 2>/dev/null | grep -q '"status"'; then
         HEALTH=$(curl -s http://localhost:9200/_cluster/health | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
         echo -e "${GREEN}UP${NC} (status: $HEALTH)"
+    else
+        echo -e "${RED}DOWN${NC}"
+    fi
+
+    echo -n "Neo4j (localhost:7474): "
+    if curl -s http://localhost:7474 > /dev/null 2>&1; then
+        echo -e "${GREEN}UP${NC}"
     else
         echo -e "${RED}DOWN${NC}"
     fi
@@ -123,8 +158,17 @@ run_tests() {
             log_info "Running OpenSearch integration tests..."
             python -m pytest tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
             ;;
+        neo4j)
+            log_info "Running Neo4j integration tests..."
+            # Check if Neo4j is running
+            if ! curl -s http://localhost:7474 > /dev/null 2>&1; then
+                log_warn "Neo4j not running. Starting container..."
+                start_neo4j
+            fi
+            python -m pytest tests/rag/test_neo4j_integration.py -v --tb=short -o "addopts="
+            ;;
         *)
-            log_info "Running all integration tests..."
+            log_info "Running all integration tests (Qdrant + OpenSearch)..."
             python -m pytest tests/rag/test_qdrant_integration.py tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
             ;;
     esac
@@ -138,8 +182,15 @@ case "${1:-}" in
     --start)
         start_containers
         ;;
+    --start-neo4j)
+        start_neo4j
+        ;;
     --stop)
         stop_containers
+        stop_neo4j 2>/dev/null || true
+        ;;
+    --stop-neo4j)
+        stop_neo4j
         ;;
     --status)
         check_status
@@ -148,16 +199,20 @@ case "${1:-}" in
         echo "RAG Integration Tests Runner"
         echo ""
         echo "Usage:"
-        echo "  $0              Run all integration tests"
+        echo "  $0              Run Qdrant + OpenSearch tests"
         echo "  $0 qdrant       Run only Qdrant tests"
         echo "  $0 opensearch   Run only OpenSearch tests"
-        echo "  $0 --start      Only start containers"
-        echo "  $0 --stop       Only stop containers"
+        echo "  $0 neo4j        Run only Neo4j tests"
+        echo "  $0 --start      Start Qdrant + OpenSearch containers"
+        echo "  $0 --start-neo4j Start Neo4j container"
+        echo "  $0 --stop       Stop all containers"
+        echo "  $0 --stop-neo4j Stop Neo4j container"
         echo "  $0 --status     Check container status"
         echo ""
         echo "Requirements:"
         echo "  - Docker and docker-compose installed"
         echo "  - Python virtual environment with test dependencies"
+        echo "  - pip install neo4j (for Neo4j tests)"
         ;;
     *)
         run_tests "$1"

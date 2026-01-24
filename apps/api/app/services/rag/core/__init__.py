@@ -114,6 +114,24 @@ from .graph_rag import (
 )
 
 
+# Graph Factory imports (supports NetworkX and Neo4j backends)
+from .graph_factory import (
+    GraphBackend,
+    KnowledgeGraphProtocol,
+    NetworkXAdapter,
+    get_knowledge_graph,
+    reset_knowledge_graph,
+    close_all_graphs,
+    is_neo4j_available,
+)
+
+# Neo4j Adapter (optional - requires neo4j driver)
+try:
+    from .graph_factory import Neo4jAdapter
+    _neo4j_adapter_available = True
+except ImportError:
+    _neo4j_adapter_available = False
+
 # Neo4j MVP imports (optional - requires neo4j driver)
 try:
     from .neo4j_mvp import (
@@ -290,6 +308,14 @@ __all__ = [
     "ResearchStep",
     "OrchestrationResult",
     "AgenticOrchestrator",
+    # Graph Factory
+    "GraphBackend",
+    "KnowledgeGraphProtocol",
+    "NetworkXAdapter",
+    "get_knowledge_graph",
+    "reset_knowledge_graph",
+    "close_all_graphs",
+    "is_neo4j_available",
     # Resilience
     "CircuitState",
     "CircuitBreakerConfig",
@@ -309,6 +335,10 @@ __all__ = [
     "with_retry",
     "with_resilience",
 ]
+
+# Conditionally add Neo4j Adapter export
+if _neo4j_adapter_available:
+    __all__.append("Neo4jAdapter")
 
 # Conditionally add Neo4j MVP exports
 if _neo4j_available:
