@@ -721,6 +721,70 @@ class CrossEncoderReranker:
         """Get the device the model is running on."""
         return self._device
 
+    @classmethod
+    def preload(cls, config: Optional[RerankerConfig] = None) -> float:
+        """
+        Preload model and run warmup inference to eliminate cold start latency.
+
+        This method should be called during application startup to ensure
+        the model is ready for inference when the first request arrives.
+
+        Args:
+            config: Optional configuration for the reranker
+
+        Returns:
+            Load time in seconds
+        """
+        start = time.perf_counter()
+
+        instance = cls.get_instance(config)
+
+        # Force model loading
+        if not instance._ensure_model_loaded():
+            logger.warning("Failed to preload reranker model")
+            return time.perf_counter() - start
+
+        # Run warmup inference to compile/optimize model execution path
+        try:
+            warmup_query = "consulta jurídica sobre contrato administrativo"
+            warmup_doc = (
+                "Art. 37 da Constituição Federal estabelece os princípios "
+                "da administração pública: legalidade, impessoalidade, moralidade, "
+                "publicidade e eficiência."
+            )
+
+            # Warmup with single pair
+            instance._model.predict(
+                [(warmup_query, warmup_doc)],
+                batch_size=1,
+                show_progress_bar=False,
+            )
+
+            logger.info("Reranker warmup inference completed successfully")
+
+        except Exception as e:
+            logger.warning(f"Reranker warmup inference failed: {e}")
+
+        load_time = time.perf_counter() - start
+        logger.info(
+            f"Reranker preloaded: model={instance._active_model_name}, "
+            f"device={instance._device}, time={load_time:.2f}s"
+        )
+
+        return load_time
+
+    @classmethod
+    def is_preloaded(cls) -> bool:
+        """
+        Check if the reranker model is preloaded and ready.
+
+        Returns:
+            True if model is loaded and ready for inference
+        """
+        if cls._instance is None:
+            return False
+        return cls._instance._model_loaded
+
 
 def rerank(
     query: str,

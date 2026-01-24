@@ -7,7 +7,7 @@ from functools import lru_cache
 from typing import List, Optional, Dict, Any, Tuple
 
 from app.core.config import settings
-from app.services.rag_module import create_rag_manager, get_scoped_knowledge_graph
+from app.services.rag_module_old import create_rag_manager, get_scoped_knowledge_graph
 from app.services.rag_trace import trace_event
 from app.services.ai.rag_helpers import (
     rewrite_query_with_history,
@@ -16,6 +16,7 @@ from app.services.ai.rag_helpers import (
     evaluate_crag_gate,
     generate_multi_queries,
 )
+from app.services.rag.utils.env_helpers import env_bool as _env_bool, env_int as _env_int, env_float as _env_float
 
 logger = logging.getLogger("RAGContext")
 
@@ -26,32 +27,6 @@ _STOPWORDS = {
     "quando", "porque", "pois", "pela", "pelos", "pelas", "seja", "se", "em", "no",
     "na", "nos", "nas", "de", "do", "da", "e", "ou", "ao", "aos",
 }
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).lower() in ("1", "true", "yes", "on")
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
 
 
 def _extract_keywords(query: str) -> List[str]:

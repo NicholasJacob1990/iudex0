@@ -24,6 +24,13 @@ import google.generativeai as genai
 
 from app.services.rag.config import get_rag_config
 
+# Import BudgetTracker (optional - graceful degradation if not available)
+try:
+    from app.services.rag.core.budget_tracker import BudgetTracker, estimate_tokens
+except ImportError:
+    BudgetTracker = None  # type: ignore
+    estimate_tokens = None  # type: ignore
+
 logger = logging.getLogger("rag.query_expansion")
 
 
@@ -614,6 +621,8 @@ class QueryExpansionService:
         self,
         prompt: str,
         model: Optional[genai.GenerativeModel] = None,
+        budget_tracker: Optional[Any] = None,
+        operation: str = "unknown",
     ) -> str:
         """
         Call Gemini LLM asynchronously.
@@ -621,11 +630,20 @@ class QueryExpansionService:
         Args:
             prompt: The prompt to send
             model: Optional model instance (defaults to hyde_model)
+            budget_tracker: Optional BudgetTracker for cost control
+            operation: Operation name for tracking ("hyde", "multiquery", etc.)
 
         Returns:
             Generated text response
         """
         model = model or self.hyde_model
+        model_name = getattr(model, "_model_name", self._config.hyde_model)
+
+        # Check budget before making call
+        if budget_tracker is not None and BudgetTracker is not None:
+            if not budget_tracker.can_make_llm_call():
+                logger.warning(f"Skipping {operation}: LLM call budget exceeded")
+                return ""
 
         def _sync_call() -> str:
             try:
@@ -637,7 +655,20 @@ class QueryExpansionService:
                 logger.warning(f"Gemini call failed: {exc}")
                 return ""
 
-        return await asyncio.to_thread(_sync_call)
+        result = await asyncio.to_thread(_sync_call)
+
+        # Track usage after successful call
+        if budget_tracker is not None and estimate_tokens is not None and result:
+            input_tokens = estimate_tokens(prompt, model_name)
+            output_tokens = estimate_tokens(result, model_name)
+            budget_tracker.track_llm_call(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=model_name,
+                operation=operation,
+            )
+
+        return result
 
     # -----------------------------------------------------------------------
     # Pipeline Compatibility (RAGPipeline expects expand/expand_async)
@@ -650,12 +681,23 @@ class QueryExpansionService:
         use_hyde: bool = True,
         use_multiquery: bool = True,
         max_queries: int = 3,
+        budget_tracker: Optional[Any] = None,
     ) -> List[str]:
         """
         Return additional expanded queries for the pipeline.
 
         Note: The pipeline already includes the original query, so this returns
         only *extra* queries (multi-query variants and/or HyDE hypothetical doc).
+
+        Args:
+            query: Original query to expand
+            use_hyde: Enable HyDE document generation
+            use_multiquery: Enable multi-query expansion
+            max_queries: Maximum query variants to generate
+            budget_tracker: Optional BudgetTracker for cost control
+
+        Returns:
+            List of expanded queries (excluding original)
         """
         if not query or not query.strip():
             return []
@@ -664,15 +706,38 @@ class QueryExpansionService:
 
         extras: List[str] = []
 
+        # Check budget before multi-query expansion
         if use_multiquery and max_queries > 0:
-            variants = await self.generate_query_variants(query=query, count=max_queries + 1)
-            # Drop the original query (always first)
-            extras.extend([v for v in variants[1:] if v and v.strip()])
+            can_expand = True
+            if budget_tracker is not None and BudgetTracker is not None:
+                if not budget_tracker.can_make_llm_call():
+                    logger.info("Skipping multi-query: budget limit reached")
+                    can_expand = False
 
+            if can_expand:
+                variants = await self.generate_query_variants(
+                    query=query,
+                    count=max_queries + 1,
+                    budget_tracker=budget_tracker,
+                )
+                # Drop the original query (always first)
+                extras.extend([v for v in variants[1:] if v and v.strip()])
+
+        # Check budget before HyDE generation
         if use_hyde:
-            hypo = await self.generate_hypothetical_document(query=query)
-            if hypo and hypo.strip():
-                extras.append(hypo.strip())
+            can_hyde = True
+            if budget_tracker is not None and BudgetTracker is not None:
+                if not budget_tracker.can_make_llm_call():
+                    logger.info("Skipping HyDE: budget limit reached")
+                    can_hyde = False
+
+            if can_hyde:
+                hypo = await self.generate_hypothetical_document(
+                    query=query,
+                    budget_tracker=budget_tracker,
+                )
+                if hypo and hypo.strip():
+                    extras.append(hypo.strip())
 
         # Deduplicate while preserving order
         seen = set()
@@ -691,6 +756,7 @@ class QueryExpansionService:
         use_hyde: bool = True,
         use_multiquery: bool = True,
         max_queries: int = 3,
+        budget_tracker: Optional[Any] = None,
     ) -> List[str]:
         """Synchronous wrapper for expand_async (for legacy/sync callers)."""
         return asyncio.run(
@@ -699,6 +765,7 @@ class QueryExpansionService:
                 use_hyde=use_hyde,
                 use_multiquery=use_multiquery,
                 max_queries=max_queries,
+                budget_tracker=budget_tracker,
             )
         )
 
@@ -711,6 +778,7 @@ class QueryExpansionService:
         query: str,
         use_cache: bool = True,
         extended_prompt: bool = False,
+        budget_tracker: Optional[Any] = None,
     ) -> str:
         """
         Generate a hypothetical document that would answer the query.
@@ -723,6 +791,7 @@ class QueryExpansionService:
             query: User query to generate hypothetical answer for
             use_cache: Whether to use/update cache
             extended_prompt: Use longer, more detailed prompt
+            budget_tracker: Optional BudgetTracker for cost control
 
         Returns:
             Hypothetical document text
@@ -731,6 +800,12 @@ class QueryExpansionService:
             return ""
 
         query = query.strip()
+
+        # Check budget before making LLM call
+        if budget_tracker is not None and BudgetTracker is not None:
+            if not budget_tracker.can_make_llm_call():
+                logger.info(f"Skipping HyDE generation: budget limit reached")
+                return ""
 
         # Check cache first
         if use_cache:
@@ -744,7 +819,12 @@ class QueryExpansionService:
         prompt_template = HYDE_LEGAL_PROMPT_EXTENDED if extended_prompt else HYDE_LEGAL_PROMPT
         prompt = prompt_template.format(query=query)
 
-        hypothetical = await self._call_gemini(prompt, self.hyde_model)
+        hypothetical = await self._call_gemini(
+            prompt,
+            self.hyde_model,
+            budget_tracker=budget_tracker,
+            operation="hyde",
+        )
 
         if hypothetical and use_cache:
             self._cache.set("hyde", cache_key if use_cache else query, hypothetical)
@@ -839,6 +919,7 @@ class QueryExpansionService:
         query: str,
         count: Optional[int] = None,
         use_cache: bool = True,
+        budget_tracker: Optional[Any] = None,
     ) -> List[str]:
         """
         Generate multiple query variants for multi-query RAG.
@@ -849,6 +930,7 @@ class QueryExpansionService:
             query: Original user query
             count: Total number of variants (including original)
             use_cache: Whether to use/update cache
+            budget_tracker: Optional BudgetTracker for cost control
 
         Returns:
             List of query variants with original query first
@@ -865,6 +947,15 @@ class QueryExpansionService:
         if count <= 1:
             return variants
 
+        # Check budget before making LLM call
+        if budget_tracker is not None and BudgetTracker is not None:
+            if not budget_tracker.can_make_llm_call():
+                logger.info(f"Skipping multi-query generation: budget limit reached")
+                # Return original + heuristic variants only
+                heuristic = self._generate_heuristic_variants(query, count - 1)
+                variants.extend(heuristic)
+                return variants[:count]
+
         # Check cache
         cache_key = f"{query}:{count}"
         if use_cache:
@@ -875,7 +966,12 @@ class QueryExpansionService:
 
         # Generate variants with LLM
         prompt = MULTI_QUERY_LEGAL_PROMPT.format(query=query, count=count - 1)
-        response = await self._call_gemini(prompt, self.multiquery_model)
+        response = await self._call_gemini(
+            prompt,
+            self.multiquery_model,
+            budget_tracker=budget_tracker,
+            operation="multiquery",
+        )
 
         # Parse response
         if response:
@@ -1040,6 +1136,7 @@ class QueryExpansionService:
         self,
         query: str,
         use_cache: bool = True,
+        budget_tracker: Optional[Any] = None,
     ) -> str:
         """
         Rewrite query for optimal retrieval.
@@ -1049,6 +1146,7 @@ class QueryExpansionService:
         Args:
             query: Original query
             use_cache: Whether to cache results
+            budget_tracker: Optional BudgetTracker for cost control
 
         Returns:
             Optimized query string
@@ -1058,13 +1156,24 @@ class QueryExpansionService:
 
         query = query.strip()
 
+        # Check budget before making LLM call
+        if budget_tracker is not None and BudgetTracker is not None:
+            if not budget_tracker.can_make_llm_call():
+                logger.info(f"Skipping query rewrite: budget limit reached")
+                return query
+
         if use_cache:
             cached = self._cache.get("rewrite", query)
             if cached:
                 return cached
 
         prompt = QUERY_REWRITE_LEGAL_PROMPT.format(query=query)
-        rewritten = await self._call_gemini(prompt, self.multiquery_model)
+        rewritten = await self._call_gemini(
+            prompt,
+            self.multiquery_model,
+            budget_tracker=budget_tracker,
+            operation="rewrite",
+        )
 
         result = rewritten.strip() if rewritten else query
 

@@ -33,6 +33,8 @@ import os
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from app.services.rag.utils.env_helpers import env_bool as _env_bool, env_int as _env_int, env_float as _env_float
+
 logger = logging.getLogger("RAGPipelineAdapter")
 
 # Feature flag to control which pipeline to use
@@ -110,9 +112,11 @@ async def _call_new_pipeline(
     user_id: Optional[str],
     scope_groups: Optional[List[str]],
     allow_global_scope: bool,
+    allow_group_scope: bool,
     graph_rag_enabled: bool,
     graph_hops: int,
     filters: Optional[Dict[str, Any]],
+    result_max_chars: Optional[int] = None,
     argument_graph_enabled: Optional[bool] = None,
     hyde_enabled: Optional[bool] = None,
     multi_query: Optional[bool] = None,
@@ -146,6 +150,7 @@ async def _call_new_pipeline(
             tenant_id=tenant_id,
             scope_groups=scope_groups,
             allow_global_scope=allow_global_scope,
+            allow_group_scope=allow_group_scope,
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
@@ -179,6 +184,7 @@ async def _call_new_pipeline(
             "juris": config.opensearch_index_juris,
             "pecas_modelo": config.opensearch_index_pecas,
             "pecas": config.opensearch_index_pecas,
+            "doutrina": config.opensearch_index_doutrina,
             "sei": config.opensearch_index_sei,
             "local": config.opensearch_index_local,
         }
@@ -187,6 +193,7 @@ async def _call_new_pipeline(
             "juris": config.qdrant_collection_juris,
             "pecas_modelo": config.qdrant_collection_pecas,
             "pecas": config.qdrant_collection_pecas,
+            "doutrina": config.qdrant_collection_doutrina,
             "sei": config.qdrant_collection_sei,
             "local": config.qdrant_collection_local,
         }
@@ -205,7 +212,7 @@ async def _call_new_pipeline(
     if tenant_id:
         effective_filters.setdefault("tenant_id", tenant_id)
     effective_filters.setdefault("include_global", bool(allow_global_scope))
-    if scope_groups:
+    if allow_group_scope and scope_groups:
         effective_filters.setdefault("group_ids", list(scope_groups))
     if user_id:
         effective_filters.setdefault("user_id", user_id)
@@ -256,6 +263,7 @@ async def _call_new_pipeline(
             tenant_id=tenant_id,
             scope_groups=scope_groups,
             allow_global_scope=allow_global_scope,
+            allow_group_scope=allow_group_scope,
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
@@ -275,7 +283,7 @@ async def _call_new_pipeline(
         )
 
     # Convert to legacy format
-    rag_context_str = _format_results_for_prompt(result.results)
+    rag_context_str = _format_results_for_prompt(result.results, max_chars=int(result_max_chars or 12000))
 
     graph_context_str = ""
     if result.graph_context:
@@ -291,6 +299,7 @@ async def _call_legacy_pipeline(
     tenant_id: str,
     scope_groups: Optional[List[str]],
     allow_global_scope: bool,
+    allow_group_scope: bool,
     graph_rag_enabled: bool,
     graph_hops: int,
     filters: Optional[Dict[str, Any]],
@@ -308,6 +317,7 @@ async def _call_legacy_pipeline(
         tenant_id=tenant_id,
         scope_groups=scope_groups,
         allow_global_scope=allow_global_scope,
+        allow_group_scope=allow_group_scope,
         graph_rag_enabled=graph_rag_enabled,
         graph_hops=graph_hops,
         filters=filters,
@@ -375,6 +385,12 @@ async def build_rag_context_unified(
     # Dense research (legacy behavior: increase top_k)
     if dense_research:
         rag_top_k = max(int(rag_top_k or 0), 12)
+
+    # Defaults for scope visibility (match legacy behavior)
+    if allow_global_scope is None:
+        allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+    if allow_group_scope is None:
+        allow_group_scope = True if scope_groups else False
 
     # History loading + optional history-based query rewrite
     effective_query = query
@@ -463,6 +479,68 @@ async def build_rag_context_unified(
     history = effective_history
     filters = effective_filters
 
+    # Defaults for optional features (match legacy env + behavior where possible).
+    # Callers that explicitly pass these values should always win.
+    try:
+        from app.core.config import settings as _settings
+
+        is_prod = bool(getattr(_settings, "is_production", False))
+    except Exception:
+        is_prod = os.getenv("ENVIRONMENT", "development").lower() == "production"
+
+    unlock_all = _env_bool("RAG_UNLOCK_ALL", not is_prod)
+
+    # Multi-query: prefer new-pipeline env vars if present, else legacy ones.
+    if multi_query is None:
+        if os.getenv("RAG_ENABLE_MULTIQUERY") is None:
+            multi_query = _env_bool("RAG_MULTI_QUERY_ENABLED", True if is_prod else False)
+    if multi_query_max is None:
+        if os.getenv("RAG_MULTIQUERY_MAX") is None:
+            multi_query_max = _env_int("RAG_MULTI_QUERY_MAX", 3 if is_prod else 2)
+
+    # Compression: prefer new-pipeline env vars if present, else legacy ones.
+    if compression_enabled is None:
+        if os.getenv("RAG_ENABLE_COMPRESSION") is None:
+            compression_enabled = _env_bool("RAG_CONTEXT_COMPRESSION_ENABLED", True if is_prod or unlock_all else False)
+    if compression_max_chars is None:
+        if os.getenv("RAG_COMPRESSION_MAX_CHARS") is None:
+            compression_max_chars = _env_int("RAG_CONTEXT_COMPRESSION_MAX_CHARS", 900 if is_prod else 1000)
+
+    # Parent-child chunk expansion: prefer new-pipeline env vars if present, else legacy ones.
+    if parent_child_enabled is None:
+        if os.getenv("RAG_ENABLE_CHUNK_EXPANSION") is None:
+            parent_child_enabled = _env_bool("RAG_PARENT_CHILD_ENABLED", True if is_prod or unlock_all else False)
+    if parent_child_window is None:
+        if os.getenv("RAG_CHUNK_EXPANSION_WINDOW") is None:
+            parent_child_window = _env_int("RAG_PARENT_CHILD_WINDOW", 1)
+    if parent_child_max_extra is None:
+        if os.getenv("RAG_CHUNK_EXPANSION_MAX_EXTRA") is None:
+            parent_child_max_extra = _env_int("RAG_PARENT_CHILD_MAX_EXTRA", 12 if is_prod else 8)
+
+    # Corrective RAG: legacy env vars (no new-pipeline equivalents yet).
+    if corrective_rag is None:
+        corrective_rag = _env_bool("RAG_CORRECTIVE_ENABLED", True if is_prod or unlock_all else False)
+    if corrective_use_hyde is None:
+        corrective_use_hyde = _env_bool("RAG_CORRECTIVE_USE_HYDE", True)
+    if corrective_min_best_score is None:
+        default_best = max(float(crag_min_best_score or 0.0), 0.5 if is_prod else 0.35)
+        corrective_min_best_score = _env_float("RAG_CORRECTIVE_MIN_BEST_SCORE", default_best)
+    if corrective_min_avg_score is None:
+        default_avg = max(float(crag_min_avg_score or 0.0), 0.4 if is_prod else 0.25)
+        corrective_min_avg_score = _env_float("RAG_CORRECTIVE_MIN_AVG_SCORE", default_avg)
+
+    # Attachment-mode context budget (match legacy behavior)
+    try:
+        from app.core.config import settings
+
+        result_max_chars = (
+            settings.RAG_CONTEXT_MAX_CHARS_PROMPT_INJECTION
+            if attachment_mode == "prompt_injection"
+            else settings.RAG_CONTEXT_MAX_CHARS
+        )
+    except Exception:
+        result_max_chars = 12000
+
     # Decide which pipeline to use
     use_new = _USE_NEW_PIPELINE
 
@@ -487,10 +565,12 @@ async def build_rag_context_unified(
             tenant_id=tenant_id,
             user_id=user_id,
             scope_groups=scope_groups,
-            allow_global_scope=allow_global_scope or False,
+            allow_global_scope=bool(allow_global_scope),
+            allow_group_scope=bool(allow_group_scope),
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
+            result_max_chars=result_max_chars,
             argument_graph_enabled=argument_graph_enabled,
             # Pass remaining kwargs for potential future use
             crag_gate=crag_gate,
@@ -539,8 +619,8 @@ async def build_rag_context_unified(
             tenant_id=tenant_id,
             user_id=user_id,
             scope_groups=scope_groups,
-            allow_global_scope=allow_global_scope,
-            allow_group_scope=allow_group_scope,
+            allow_global_scope=bool(allow_global_scope),
+            allow_group_scope=bool(allow_group_scope),
             history=history,
             summary_text=summary_text,
             conversation_id=conversation_id,

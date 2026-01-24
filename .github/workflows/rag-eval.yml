@@ -1,0 +1,251 @@
+name: RAG Evaluation
+
+on:
+  push:
+    paths:
+      - 'apps/api/app/services/rag/**'
+      - 'apps/api/app/services/rag_module.py'
+      - 'apps/api/app/services/rag_graph.py'
+      - 'eval_rag.py'
+      - 'evals/**'
+  pull_request:
+    paths:
+      - 'apps/api/app/services/rag/**'
+      - 'apps/api/app/services/rag_module.py'
+      - 'apps/api/app/services/rag_graph.py'
+      - 'eval_rag.py'
+      - 'evals/**'
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly Monday 6am UTC
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: 'Dataset file to evaluate'
+        required: false
+        default: 'evals/benchmarks/v1.0_legal_domain.jsonl'
+      top_k:
+        description: 'Number of documents to retrieve'
+        required: false
+        default: '8'
+      with_llm:
+        description: 'Run LLM-based metrics (faithfulness, answer_relevancy)'
+        required: false
+        default: 'false'
+        type: boolean
+
+env:
+  PYTHON_VERSION: '3.11'
+  # Thresholds for CI pass/fail
+  MIN_CONTEXT_PRECISION: '0.70'
+  MIN_CONTEXT_RECALL: '0.65'
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: production
+      DEBUG: 'false'
+      DATABASE_URL: sqlite+aiosqlite:///./iudex_eval.db
+      SECRET_KEY: ${{ secrets.SECRET_KEY || 'eval-secret-key' }}
+      JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY || 'eval-jwt-secret' }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || '' }}
+      RAG_MULTI_QUERY_ENABLED: 'true'
+      RAG_CONTEXT_COMPRESSION_ENABLED: 'true'
+      RAG_PARENT_CHILD_ENABLED: 'true'
+      RAG_CORRECTIVE_ENABLED: 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements-minimal.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+          pip install ragas datasets
+
+      - name: Determine dataset
+        id: dataset
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "path=${{ github.event.inputs.dataset }}" >> $GITHUB_OUTPUT
+            echo "top_k=${{ github.event.inputs.top_k }}" >> $GITHUB_OUTPUT
+            echo "with_llm=${{ github.event.inputs.with_llm }}" >> $GITHUB_OUTPUT
+          else
+            echo "path=evals/benchmarks/v1.0_legal_domain.jsonl" >> $GITHUB_OUTPUT
+            echo "top_k=8" >> $GITHUB_OUTPUT
+            echo "with_llm=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run RAG evaluation
+        id: eval
+        run: |
+          cd apps/api
+          LLM_FLAG=""
+          if [ "${{ steps.dataset.outputs.with_llm }}" = "true" ]; then
+            LLM_FLAG="--with-llm"
+          fi
+
+          python ../../eval_rag.py \
+            --dataset ../../${{ steps.dataset.outputs.path }} \
+            --top-k ${{ steps.dataset.outputs.top_k }} \
+            --out ../../evals/results/eval_results.json \
+            --min-context-precision ${{ env.MIN_CONTEXT_PRECISION }} \
+            --min-context-recall ${{ env.MIN_CONTEXT_RECALL }} \
+            $LLM_FLAG
+
+          echo "exit_code=$?" >> $GITHUB_OUTPUT
+
+      - name: Check thresholds
+        run: |
+          python -c "
+          import json
+          import sys
+
+          with open('evals/results/eval_results.json') as f:
+              results = json.load(f)
+
+          summary = results.get('summary', {})
+          failed = []
+
+          thresholds = {
+              'context_precision': float('${{ env.MIN_CONTEXT_PRECISION }}'),
+              'context_recall': float('${{ env.MIN_CONTEXT_RECALL }}'),
+          }
+
+          for metric, min_val in thresholds.items():
+              actual = summary.get(metric)
+              if actual is not None and actual < min_val:
+                  failed.append(f'{metric}: {actual:.4f} < {min_val:.4f}')
+
+          if failed:
+              print('FAILED THRESHOLDS:')
+              for f in failed:
+                  print(f'  - {f}')
+              sys.exit(1)
+
+          print('All thresholds passed!')
+          print(f'  context_precision: {summary.get(\"context_precision\", \"N/A\")}')
+          print(f'  context_recall: {summary.get(\"context_recall\", \"N/A\")}')
+          "
+
+      - name: Generate evaluation report
+        if: always()
+        run: |
+          if [ -f "eval_report.py" ]; then
+            python eval_report.py \
+              --input evals/results/eval_results.json \
+              --md evals/results/eval_report.md \
+              --html evals/results/eval_report.html
+          fi
+
+      - name: Upload evaluation results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-results-${{ github.run_number }}
+          path: |
+            evals/results/eval_results.json
+            evals/results/eval_report.md
+            evals/results/eval_report.html
+          retention-days: 30
+
+      - name: Comment PR with results
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let results;
+            try {
+              results = JSON.parse(fs.readFileSync('evals/results/eval_results.json', 'utf8'));
+            } catch (e) {
+              console.log('No results file found');
+              return;
+            }
+
+            const summary = results.summary || {};
+            const precision = summary.context_precision?.toFixed(4) || 'N/A';
+            const recall = summary.context_recall?.toFixed(4) || 'N/A';
+            const faithfulness = summary.faithfulness?.toFixed(4) || 'N/A';
+            const relevancy = summary.answer_relevancy?.toFixed(4) || 'N/A';
+
+            const body = `## RAG Evaluation Results
+
+            | Metric | Value | Threshold |
+            |--------|-------|-----------|
+            | Context Precision | ${precision} | >= 0.70 |
+            | Context Recall | ${recall} | >= 0.65 |
+            | Faithfulness | ${faithfulness} | - |
+            | Answer Relevancy | ${relevancy} | - |
+
+            **Dataset:** \`${{ steps.dataset.outputs.path }}\`
+            **Top-K:** ${{ steps.dataset.outputs.top_k }}
+            **Timestamp:** ${results.ts}
+            `;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+
+  # Weekly comprehensive evaluation with LLM metrics
+  weekly-full-eval:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+      DATABASE_URL: sqlite+aiosqlite:///./iudex_eval.db
+      SECRET_KEY: ${{ secrets.SECRET_KEY || 'eval-secret-key' }}
+      JWT_SECRET_KEY: ${{ secrets.JWT_SECRET_KEY || 'eval-jwt-secret' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: apps/api/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+          pip install ragas datasets
+
+      - name: Run full RAG evaluation with LLM metrics
+        run: |
+          cd apps/api
+          python ../../eval_rag.py \
+            --dataset ../../evals/benchmarks/v1.0_legal_domain.jsonl \
+            --top-k 8 \
+            --with-llm \
+            --persist-db \
+            --out ../../evals/results/weekly_eval_results.json \
+            --min-context-precision 0.70 \
+            --min-context-recall 0.65 \
+            --min-faithfulness 0.60 \
+            --min-answer-relevancy 0.60
+
+      - name: Upload weekly results
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-weekly-eval-${{ github.run_number }}
+          path: evals/results/weekly_eval_results.json
+          retention-days: 90

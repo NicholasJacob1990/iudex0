@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.services.ai.orchestrator import MultiAgentOrchestrator
-from app.services.rag_module import RAGManager
+from app.services.rag_module_old import RAGManager
 from app.models.user import User
 from app.models.document import Document, DocumentType
 from app.models.library import LibraryItem, LibraryItemType
@@ -35,6 +35,7 @@ from app.services.legal_templates import legal_template_library
 from app.services.model_registry import get_model_config as get_budget_model_config
 from app.services.token_budget_service import TokenBudgetService
 from app.services.api_call_tracker import job_context
+from app.services.job_manager import job_manager
 from app.services.billing_service import (
     resolve_plan_key,
     resolve_deep_research_billing,
@@ -119,7 +120,7 @@ class DocumentGenerator:
     def __init__(self):
         # RAG Manager compartilhado
         try:
-            from app.services.rag_module import create_rag_manager
+            from app.services.rag_module_old import create_rag_manager
             self.rag_manager = create_rag_manager()
         except Exception as e:
             logger.warning(f"⚠️ RAGManager não pôde ser inicializado: {e}")
@@ -1013,6 +1014,25 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "reviewer_models": getattr(request, "reviewer_models", []) or [],
                     "auto_approve_hil": True
                 }
+                # Billing / Budget (soft caps): propagated from endpoint quote when available.
+                budget_approved_points = None
+                budget_estimate_points = None
+                for source in (context_data, request_context):
+                    if isinstance(source, dict):
+                        if budget_approved_points is None:
+                            budget_approved_points = source.get("budget_approved_points")
+                        if budget_estimate_points is None:
+                            budget_estimate_points = source.get("budget_estimate_points")
+                try:
+                    if budget_approved_points is not None:
+                        initial_state["budget_approved_points"] = int(budget_approved_points)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    if budget_estimate_points is not None:
+                        initial_state["budget_estimate_points"] = int(budget_estimate_points)
+                except (TypeError, ValueError):
+                    pass
 
                 config = {
                     "configurable": {"thread_id": document_id},
@@ -1033,6 +1053,7 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                 citations_log = (audit_data or {}).get("citations", [])
 
                 agents_used = self._infer_agents_from_langgraph(state_values, request)
+                api_counters = job_manager.get_api_counters(document_id) if document_id else {}
                 decision_payload = {
                     "final_decision": state_values.get("final_decision"),
                     "final_decision_reasons": state_values.get("final_decision_reasons", []),
@@ -1050,6 +1071,8 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
                     "min_pages": min_pages,
                     "max_pages": max_pages,
                     "engine": "langgraph",
+                    "api_calls": api_counters,
+                    "points_total": int(api_counters.get("points_total") or 0) if isinstance(api_counters, dict) else 0,
                     **decision_payload
                 }
 

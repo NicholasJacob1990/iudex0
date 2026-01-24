@@ -306,7 +306,7 @@ async def audit_with_rag(request: AuditWithRAGRequest):
         if request.use_rag and request.include_citation_analysis:
             try:
                 try:
-                    from app.services.rag_module import RAGManager
+                    from app.services.rag_module_old import RAGManager
                 except ImportError:
                     from rag_module import RAGManager
                 rag_manager = RAGManager()

@@ -12,10 +12,22 @@ Contains the core processing components for the RAG pipeline:
 - Knowledge graph embedding training
 - Hybrid router (rules + optional LLM fallback)
 - Agentic orchestrator (deep research, comparison, open-ended)
+- Resilience patterns (circuit breaker, retry with backoff)
 """
 
 # Import from existing modules
 from .reranker import CrossEncoderReranker, RerankerConfig, RerankerResult
+
+# Budget tracker imports
+from .budget_tracker import (
+    BudgetTracker,
+    BudgetExceededError,
+    LLMCallRecord,
+    EmbeddingRecord,
+    estimate_tokens,
+    TOKEN_ESTIMATES,
+)
+
 from .context_compressor import (
     ContextCompressor,
     CompressionConfig,
@@ -158,8 +170,36 @@ from .agentic_orchestrator import (
     AgenticOrchestrator,
 )
 
+# Resilience imports
+from .resilience import (
+    CircuitState,
+    CircuitBreakerConfig,
+    CircuitBreakerStats,
+    CircuitBreaker,
+    CircuitBreakerOpenError,
+    RetryConfig,
+    calculate_backoff_delay,
+    retry_with_backoff,
+    retry_with_backoff_async,
+    ResilientService,
+    get_circuit_breaker,
+    get_all_circuit_breakers,
+    get_circuit_breaker_status,
+    reset_all_circuit_breakers,
+    with_circuit_breaker,
+    with_retry,
+    with_resilience,
+)
+
 
 __all__ = [
+    # Budget Tracker
+    "BudgetTracker",
+    "BudgetExceededError",
+    "LLMCallRecord",
+    "EmbeddingRecord",
+    "estimate_tokens",
+    "TOKEN_ESTIMATES",
     # CRAG Gate
     "CRAGConfig",
     "CRAGGate",
@@ -250,6 +290,24 @@ __all__ = [
     "ResearchStep",
     "OrchestrationResult",
     "AgenticOrchestrator",
+    # Resilience
+    "CircuitState",
+    "CircuitBreakerConfig",
+    "CircuitBreakerStats",
+    "CircuitBreaker",
+    "CircuitBreakerOpenError",
+    "RetryConfig",
+    "calculate_backoff_delay",
+    "retry_with_backoff",
+    "retry_with_backoff_async",
+    "ResilientService",
+    "get_circuit_breaker",
+    "get_all_circuit_breakers",
+    "get_circuit_breaker_status",
+    "reset_all_circuit_breakers",
+    "with_circuit_breaker",
+    "with_retry",
+    "with_resilience",
 ]
 
 # Conditionally add Neo4j MVP exports

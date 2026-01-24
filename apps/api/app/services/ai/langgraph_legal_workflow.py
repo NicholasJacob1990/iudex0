@@ -2,9 +2,14 @@
 LangGraph Legal Workflow - Phase 4 (Audit Feedback Loop + HIL)
 
 Fluxo:
-  outline → [research] → debate → divergence_hil → audit → 
-  → [if issues] → propose_corrections → correction_hil →
-  → finalize_hil → END
+  outline → [research] → fact_check → citer_verifier → debate →
+  → divergence_hil → audit → [if issues] → propose_corrections →
+  → correction_hil → finalize_hil → END
+
+Nodes:
+  - citer_verifier (B2): Gate pré-debate que verifica rastreabilidade
+    de afirmações às fontes. Marca claims sem fonte como [VERIFICAR].
+    Se coverage < 0.3, bloqueia debate e vai direto para HIL.
 
 Feature Flag:
   USE_GRANULAR_DEBATE=true  → Uses 8-node sub-graph (R1-R4)
@@ -27,6 +32,12 @@ except ImportError:
     def interrupt(value: dict):
         """Compatibility shim: raises Interrupt to pause the graph for HIL."""
         raise Interrupt(value)
+else:
+    # Ensure Interrupt is available for observability wrappers.
+    try:
+        from langgraph.types import Interrupt  # type: ignore
+    except Exception:  # pragma: no cover
+        Interrupt = None  # type: ignore
 from loguru import logger
 import asyncio
 import sqlite3
@@ -62,6 +73,9 @@ from app.services.ai.structural_fix import structural_fix_node
 from app.services.ai.targeted_patch import targeted_patch_node
 from app.services.ai.quality_report import quality_report_node
 
+# B2 Citer/Verifier (Pre-Debate Gate)
+from app.services.ai.citer_verifier import citer_verifier_node
+
 # Audit service instance
 audit_service = AuditService()
 
@@ -70,7 +84,7 @@ USE_GRANULAR_DEBATE = os.getenv("USE_GRANULAR_DEBATE", "false").lower() == "true
 logger.info("🔀 Mixed Debate Mode ENABLED (granular per section, default_granular=%s)", USE_GRANULAR_DEBATE)
 
 # Graph RAG Integration (v5.1)
-from app.services.rag_module import create_rag_manager, get_scoped_knowledge_graph
+from app.services.rag_module_old import create_rag_manager, get_scoped_knowledge_graph
 
 # =============================================================================
 # RAG ROUTING STRATEGIES (ported from CLI)
@@ -306,6 +320,48 @@ def append_sources_section(markdown_text: str, citations_map: Any, *, max_source
             lines.append(f"[{key}] {format_reference_abnt(title=title, url='')}".strip())
 
     return text + "\n" + "\n".join(lines).rstrip() + "\n"
+
+def prepend_need_evidence_notice(state: "DocumentState", markdown_text: str) -> str:
+    """
+    Prepend a user-visible notice when we generated a draft but the workflow
+    flagged missing/insufficient evidence. This is meant for HIL-off mode:
+    keep the workflow running, but make the risk explicit in the document.
+    """
+    text = (markdown_text or "").lstrip()
+    if not text:
+        return markdown_text
+
+    # Avoid duplicates if the banner is already present.
+    if re.search(r"(?im)pendênci(as)?\s+de\s+evidênci(a|as)", text):
+        return markdown_text
+    if re.search(r"(?im)minuta\s+gerada\s+com\s+pendênci", text):
+        return markdown_text
+
+    citer = state.get("citer_verifier_result") or {}
+    coverage = citer.get("coverage")
+    try:
+        coverage_pct = f"{float(coverage) * 100:.1f}%"
+    except Exception:
+        coverage_pct = None
+
+    gaps = []
+    if isinstance(citer, dict):
+        gaps = citer.get("critical_gaps") or []
+    gaps = [str(g).strip() for g in (gaps or []) if str(g).strip()]
+    gaps = gaps[:5]
+
+    lines = [
+        "> ⚠️ **Minuta gerada com pendências de evidência** — revise antes de protocolar.",
+    ]
+    if coverage_pct:
+        lines.append(f"> **Rastreabilidade (Citer/Verifier):** {coverage_pct}.")
+    if gaps:
+        lines.append("> **Lacunas principais:**")
+        for gap in gaps:
+            lines.append(f"> - {gap[:240]}")
+    lines.append("")
+
+    return "\n".join(lines) + "\n" + text
 
 
 def _clean_outline_line(line: str) -> str:
@@ -1572,6 +1628,13 @@ class DocumentState(TypedDict):
     hil_iterations_cap: Optional[int]
     hil_iterations_count: int
     hil_iterations_by_checkpoint: Dict[str, int]
+
+    # Budget (approved at quote time; soft caps only, never hard-stop)
+    budget_approved_points: Optional[int]
+    budget_estimate_points: Optional[int]
+    budget_stage: Optional[str]
+    budget_spent_points: Optional[int]
+    budget_remaining_points: Optional[int]
     
     # v4.1: CRAG Gate & Adaptive Routing (unified with CLI)
     crag_gate_enabled: bool
@@ -1662,6 +1725,16 @@ class DocumentState(TypedDict):
     citation_missing_keys: List[str]
     citation_orphan_keys: List[str]
 
+    # Citer/Verifier (B2 - Pre-Debate Gate)
+    citer_verifier_result: Optional[Dict[str, Any]]
+    verified_context: Optional[str]
+    citer_verifier_force_hil: bool
+    citer_verifier_coverage: Optional[float]
+    citer_verifier_critical_gaps: List[str]
+    citer_min_coverage: float  # Config: minimum coverage to pass (default 0.6)
+    citer_block_debate_coverage: float  # Config: coverage threshold to block debate (default 0.3)
+    citer_block_debate_min_unverified: int  # Config: min unverified claims to block (default 1)
+
     # Style Check (editorial gate)
     style_report: Optional[Dict[str, Any]]
     style_score: Optional[float]
@@ -1706,6 +1779,9 @@ class DocumentState(TypedDict):
     divergence_hil_instructions: Optional[str]
     document_overridden_by_human: bool
     json_parse_failures: List[Dict[str, Any]]
+
+    # HIL History (v5.6) - Audit trail of all human interactions
+    hil_history: List[Dict[str, Any]]
     
     # Committee Review (v5.2)
     committee_review_report: Optional[Dict[str, Any]]
@@ -1754,6 +1830,13 @@ def _collect_final_decision_reasons(state: DocumentState) -> Dict[str, Any]:
 
     if state.get("quality_gate_force_hil"):
         reasons.append("quality_gate_force_hil")
+
+    citer_result = state.get("citer_verifier_result") or {}
+    if isinstance(citer_result, dict):
+        if citer_result.get("force_hil"):
+            reasons.append("citer_verifier_force_hil")
+        if citer_result.get("block_debate"):
+            reasons.append("citer_verifier_block_debate")
 
     report = state.get("committee_review_report") or {}
     score = report.get("score")
@@ -2324,6 +2407,169 @@ def _emit_event(
     )
 
 
+LANGGRAPH_AUDIT_NODE_EVENTS = os.getenv("LANGGRAPH_AUDIT_NODE_EVENTS", "true").lower() == "true"
+
+
+def _audit_channel_for_node(node_name: str) -> str:
+    name = (node_name or "").strip()
+    if name in ("gen_outline", "outline_hil", "planner"):
+        return "outline"
+    if name in ("deep_research", "web_search", "research_notes_step", "research_verify"):
+        return "research"
+    if name in ("fact_check",):
+        return "fact_check"
+    if name in ("debate",):
+        return "debate"
+    if name in ("audit",):
+        return "audit"
+    if name in ("quality_gate", "structural_fix", "targeted_patch", "gen_quality_report", "style_check", "style_refine", "refine_document"):
+        return "quality"
+    if name in ("document_gate",):
+        return "document_gate"
+    if name in ("evaluate_hil",):
+        return "hil_decision"
+    if name in ("divergence_hil", "section_hil", "correction_hil", "finalize_hil", "proposal_debate", "final_committee_review"):
+        return "review"
+    return "message"
+
+
+def _summarize_value(value: Any, *, max_chars: int = 480) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rsplit(" ", 1)[0].strip() or text[:max_chars]
+    if isinstance(value, list):
+        size = len(value)
+        if not value:
+            return {"type": "list", "len": 0}
+        head = value[:5]
+        if all(isinstance(x, (str, int, float, bool)) for x in head):
+            return {"type": "list", "len": size, "head": head}
+        return {"type": "list", "len": size}
+    if isinstance(value, dict):
+        keys = list(value.keys())
+        sample = {}
+        for k in keys[:12]:
+            try:
+                sample[str(k)] = _summarize_value(value.get(k), max_chars=160)
+            except Exception:
+                continue
+        return {"type": "dict", "keys": keys[:25], "sample": sample}
+    try:
+        return str(value)[:max_chars]
+    except Exception:
+        return None
+
+
+def _audit_state_summary(state: Mapping[str, Any]) -> Dict[str, Any]:
+    input_text = state.get("input_text") or ""
+    research_context = state.get("research_context") or ""
+    processed = state.get("processed_sections") or []
+    outline = state.get("outline") or []
+    routing = state.get("section_routing_reasons") or {}
+    routing_sample: Dict[str, Any] = {}
+    if isinstance(routing, dict):
+        for title in list(routing.keys())[:3]:
+            try:
+                item = routing.get(title) or {}
+                if not isinstance(item, dict):
+                    continue
+                routing_sample[str(title)] = {
+                    "strategy": item.get("strategy"),
+                    "reason": _summarize_value(item.get("reason"), max_chars=180),
+                    "sources": item.get("sources"),
+                }
+            except Exception:
+                continue
+
+    return {
+        "job_id": state.get("job_id"),
+        "request_id": state.get("request_id"),
+        "mode": state.get("mode"),
+        "audit_mode": state.get("audit_mode"),
+        "web_search_enabled": state.get("web_search_enabled"),
+        "deep_research_enabled": state.get("deep_research_enabled"),
+        "thinking_level": state.get("thinking_level"),
+        "input_text_chars": len(str(input_text)),
+        "research_context_chars": len(str(research_context)),
+        "full_document_ref": state.get("full_document_ref"),
+        "full_document_chars": state.get("full_document_chars"),
+        "outline_count": len(outline) if isinstance(outline, list) else None,
+        "processed_sections_count": len(processed) if isinstance(processed, list) else None,
+        "has_any_divergence": state.get("has_any_divergence"),
+        "divergence_summary": _summarize_value(state.get("divergence_summary"), max_chars=220),
+        "section_routing_reasons_count": len(routing) if isinstance(routing, dict) else None,
+        "section_routing_reasons_sample": routing_sample,
+        "final_decision": state.get("final_decision"),
+        "final_decision_reasons": _summarize_value(state.get("final_decision_reasons"), max_chars=220),
+    }
+
+
+def _audit_updates_summary(updates: Any) -> Dict[str, Any]:
+    if not isinstance(updates, dict):
+        return {"type": type(updates).__name__}
+    summary: Dict[str, Any] = {"keys": list(updates.keys())[:60]}
+    previews: Dict[str, Any] = {}
+    for k in list(updates.keys())[:25]:
+        try:
+            previews[str(k)] = _summarize_value(updates.get(k))
+        except Exception:
+            continue
+    summary["previews"] = previews
+    return summary
+
+
+def _wrap_node(node_name: str, fn):
+    async def wrapped(state: DocumentState):
+        if LANGGRAPH_AUDIT_NODE_EVENTS:
+            _emit_event(
+                state,
+                "node_start",
+                {"node": node_name, "input": _audit_state_summary(state)},
+                phase=_audit_channel_for_node(node_name),
+                node=node_name,
+            )
+        started = time.time()
+        try:
+            result = await fn(state)
+        except Exception as exc:
+            duration_ms = round((time.time() - started) * 1000, 2)
+            is_interrupt = bool(Interrupt) and isinstance(exc, Interrupt)  # type: ignore[arg-type]
+            if LANGGRAPH_AUDIT_NODE_EVENTS:
+                _emit_event(
+                    state,
+                    "node_interrupt" if is_interrupt else "node_error",
+                    {
+                        "node": node_name,
+                        "duration_ms": duration_ms,
+                        "error": _summarize_value(str(exc), max_chars=600),
+                    },
+                    phase=_audit_channel_for_node(node_name),
+                    node=node_name,
+                )
+            raise
+        duration_ms = round((time.time() - started) * 1000, 2)
+        if LANGGRAPH_AUDIT_NODE_EVENTS:
+            _emit_event(
+                state,
+                "node_end",
+                {
+                    "node": node_name,
+                    "duration_ms": duration_ms,
+                    "updates": _audit_updates_summary(result),
+                },
+                phase=_audit_channel_for_node(node_name),
+                node=node_name,
+            )
+        return result
+    return wrapped
+
+
 def _iter_text_chunks(text: str, chunk_size: int):
     if not text:
         return
@@ -2398,6 +2644,92 @@ def _increment_hil_counters(state: DocumentState, checkpoint: str) -> DocumentSt
         "hil_iterations_by_checkpoint": per_checkpoint,
     }
 
+def _apply_budget_soft_caps(state: "DocumentState", *, node: str) -> "DocumentState":
+    """
+    Soft budget supervisor.
+
+    Goal: do NOT abort the workflow mid-run if the user has credits and approved a budget.
+    Instead, progressively reduce optional/expensive loops/tools as we approach the approved budget.
+    """
+    job_id = state.get("job_id")
+    if not job_id:
+        return state
+
+    approved_raw = state.get("budget_approved_points")
+    if approved_raw is None:
+        return state
+    try:
+        approved = int(approved_raw)
+    except (TypeError, ValueError):
+        return state
+    if approved <= 0:
+        return state
+
+    counters = job_manager.get_api_counters(str(job_id))
+    try:
+        spent = int((counters or {}).get("points_total") or 0)
+    except Exception:
+        spent = 0
+    remaining = approved - spent
+
+    low_threshold = max(10, int(approved * 0.10))
+    stage = "ok"
+    if remaining <= 0:
+        stage = "exhausted"
+    elif remaining <= low_threshold:
+        stage = "low"
+
+    prev_stage = str(state.get("budget_stage") or "").strip() or None
+    updated: Dict[str, Any] = {
+        "budget_stage": stage,
+        "budget_spent_points": spent,
+        "budget_remaining_points": remaining,
+    }
+
+    if stage in ("low", "exhausted"):
+        for key, cap_value in (
+            ("max_web_search_requests", 1),
+            ("max_final_review_loops", 1),
+            ("style_refine_max_rounds", 1),
+            ("max_granular_passes", 1),
+        ):
+            try:
+                current = int(state.get(key) or 0)
+            except Exception:
+                current = 0
+            if current > 0:
+                updated[key] = min(current, cap_value)
+
+        for key in ("max_research_verifier_attempts", "max_rag_retries"):
+            try:
+                current = int(state.get(key) or 0)
+            except Exception:
+                current = 0
+            if current > 0:
+                updated[key] = 0
+
+    if stage == "exhausted":
+        updated["deep_research_enabled"] = False
+        updated["web_search_enabled"] = False
+
+    if not prev_stage or prev_stage != stage:
+        _emit_event(
+            state,
+            "billing_budget_stage",
+            {
+                "node": node,
+                "stage": stage,
+                "approved_points": approved,
+                "spent_points": spent,
+                "remaining_points": remaining,
+                "low_threshold": low_threshold,
+            },
+            phase="billing",
+            node=node,
+        )
+
+    return {**state, **updated}
+
 
 def _try_hil_interrupt(
     state: DocumentState,
@@ -2423,6 +2755,7 @@ def _try_hil_interrupt(
 
 async def deep_research_node(state: DocumentState) -> DocumentState:
     """Deep Research based on outline"""
+    state = _apply_budget_soft_caps(state, node="deep_research")
     if not state.get("deep_research_enabled"):
         return state
         
@@ -2584,6 +2917,7 @@ SEÇÕES: {sections_summary}
 
 async def web_search_node(state: DocumentState) -> DocumentState:
     """Simple web search"""
+    state = _apply_budget_soft_caps(state, node="web_search")
     if not state.get("web_search_enabled"):
         return state
 
@@ -3598,6 +3932,7 @@ async def planner_node(state: DocumentState) -> DocumentState:
     - Completeness of the outline
     - User intent
     """
+    state = _apply_budget_soft_caps(state, node="planner")
     logger.info("🧠 [Phase2] Planner: Analyzing research strategy...")
     parse_failures = list(state.get("json_parse_failures") or [])
     
@@ -3813,6 +4148,7 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
     - Real-time event emission via job_manager
     - Comprehensive error handling and fallback
     """
+    state = _apply_budget_soft_caps(state, node="debate")
     logger.info("⚔️ [6-Star Hybrid] Multi-Agent Committee Starting...")
     
     # Lazy imports to avoid circular dependencies
@@ -5400,6 +5736,7 @@ async def final_committee_review_node(state: DocumentState) -> DocumentState:
     
     The Judge synthesizes all reviews and produces final report.
     """
+    state = _apply_budget_soft_caps(state, node="final_committee_review")
     logger.info("🤝 [Final Committee Review] Starting holistic document review...")
     parse_failures = list(state.get("json_parse_failures") or [])
     
@@ -5889,6 +6226,7 @@ async def style_check_node(state: DocumentState) -> DocumentState:
     """
     🎨 Style Check: avalia tom e consistência editorial antes do gate documental.
     """
+    state = _apply_budget_soft_caps(state, node="style_check")
     logger.info("🎨 [Style Check] Avaliando estilo editorial...")
     parse_failures = list(state.get("json_parse_failures") or [])
     full_document = resolve_full_document(state)
@@ -6040,6 +6378,7 @@ async def style_refine_node(state: DocumentState) -> DocumentState:
     """
     ✍️ Ajusta o tom/estilo do documento conforme instruções de Style Check.
     """
+    state = _apply_budget_soft_caps(state, node="style_refine")
     instruction = (state.get("style_instruction") or "").strip()
     full_document = resolve_full_document(state)
     if not full_document or not instruction:
@@ -6499,12 +6838,20 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
             force_final_hil,
             force_hil,
         )
-        final_md = append_sources_section(full_document, citations_map)
-        return _with_final_decision({
-            **state,
-            "human_approved_final": True,
-            "final_markdown": final_md
-        }, "APPROVED", extra_reasons=["auto_approve_hil"])
+        decision = "NEED_EVIDENCE" if force_hil else "APPROVED"
+        final_doc = full_document
+        if decision == "NEED_EVIDENCE":
+            final_doc = prepend_need_evidence_notice(state, final_doc)
+        final_md = append_sources_section(final_doc, citations_map)
+        return _with_final_decision(
+            {
+                **state,
+                "human_approved_final": True,
+                "final_markdown": final_md,
+            },
+            decision,
+            extra_reasons=["auto_approve_hil"],
+        )
     
     decision, state, skipped = _try_hil_interrupt(
         state,
@@ -6559,38 +6906,42 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
 workflow = StateGraph(DocumentState)
 
 # Nodes (renamed to avoid conflict with state keys)
-workflow.add_node("gen_outline", outline_node)
-workflow.add_node("outline_hil", outline_hil_node)
-workflow.add_node("planner", planner_node)
-workflow.add_node("deep_research", deep_research_node)
-workflow.add_node("web_search", web_search_node)
-workflow.add_node("research_notes_step", research_notes_node)
-workflow.add_node("research_verify", research_verify_node)
-workflow.add_node("fact_check", fact_check_sei_node)
+workflow.add_node("gen_outline", _wrap_node("gen_outline", outline_node))
+workflow.add_node("outline_hil", _wrap_node("outline_hil", outline_hil_node))
+workflow.add_node("planner", _wrap_node("planner", planner_node))
+workflow.add_node("deep_research", _wrap_node("deep_research", deep_research_node))
+workflow.add_node("web_search", _wrap_node("web_search", web_search_node))
+workflow.add_node("research_notes_step", _wrap_node("research_notes_step", research_notes_node))
+workflow.add_node("research_verify", _wrap_node("research_verify", research_verify_node))
+workflow.add_node("fact_check", _wrap_node("fact_check", fact_check_sei_node))
+
+# B2 Citer/Verifier (Pre-Debate Gate)
+workflow.add_node("citer_verifier", _wrap_node("citer_verifier", citer_verifier_node))
+logger.info("🔍 Graph: Citer/Verifier node registered (pre-debate gate)")
 
 # Register debate node (mixed granular per section)
-workflow.add_node("debate", debate_all_sections_node)
+workflow.add_node("debate", _wrap_node("debate", debate_all_sections_node))
 logger.info("📊 Graph: Using MIXED debate node (granular per section)")
 
-workflow.add_node("divergence_hil", divergence_hil_node)
-workflow.add_node("section_hil", section_hil_node)
+workflow.add_node("divergence_hil", _wrap_node("divergence_hil", divergence_hil_node))
+workflow.add_node("section_hil", _wrap_node("section_hil", section_hil_node))
 
 # Quality Pipeline nodes (v2.25)
-workflow.add_node("quality_gate", quality_gate_node)
-workflow.add_node("structural_fix", structural_fix_node)
-workflow.add_node("targeted_patch", targeted_patch_node)
-workflow.add_node("gen_quality_report", quality_report_node)
+workflow.add_node("quality_gate", _wrap_node("quality_gate", quality_gate_node))
+workflow.add_node("structural_fix", _wrap_node("structural_fix", structural_fix_node))
+workflow.add_node("targeted_patch", _wrap_node("targeted_patch", targeted_patch_node))
+workflow.add_node("gen_quality_report", _wrap_node("gen_quality_report", quality_report_node))
 
-workflow.add_node("audit", audit_node)
-workflow.add_node("evaluate_hil", evaluate_hil_node)  # Universal HIL Decision
-workflow.add_node("propose_corrections", propose_corrections_node)
-workflow.add_node("correction_hil", correction_hil_node)
-workflow.add_node("final_committee_review", final_committee_review_node)  # v5.2: Holistic review
-workflow.add_node("refine_document", refine_document_node)
-workflow.add_node("style_check", style_check_node)
-workflow.add_node("style_refine", style_refine_node)
-workflow.add_node("document_gate", document_gate_node)
-workflow.add_node("finalize_hil", finalize_hil_node)
+workflow.add_node("audit", _wrap_node("audit", audit_node))
+workflow.add_node("evaluate_hil", _wrap_node("evaluate_hil", evaluate_hil_node))  # Universal HIL Decision
+workflow.add_node("propose_corrections", _wrap_node("propose_corrections", propose_corrections_node))
+workflow.add_node("correction_hil", _wrap_node("correction_hil", correction_hil_node))
+workflow.add_node("final_committee_review", _wrap_node("final_committee_review", final_committee_review_node))  # v5.2: Holistic review
+workflow.add_node("refine_document", _wrap_node("refine_document", refine_document_node))
+workflow.add_node("style_check", _wrap_node("style_check", style_check_node))
+workflow.add_node("style_refine", _wrap_node("style_refine", style_refine_node))
+workflow.add_node("document_gate", _wrap_node("document_gate", document_gate_node))
+workflow.add_node("finalize_hil", _wrap_node("finalize_hil", finalize_hil_node))
 
 # Entry
 workflow.set_entry_point("gen_outline")
@@ -6630,7 +6981,29 @@ workflow.add_conditional_edges("planner", research_router)
 workflow.add_edge("deep_research", "research_notes_step")
 workflow.add_edge("web_search", "research_notes_step")
 workflow.add_edge("research_notes_step", "fact_check")
-workflow.add_edge("fact_check", "debate")
+
+# B2 Citer/Verifier: fact_check → citer_verifier → debate
+workflow.add_edge("fact_check", "citer_verifier")
+
+
+def citer_verifier_router(state: DocumentState) -> Literal["debate", "__end__"]:
+    """
+    Route based on citer_verifier result.
+    If block_debate=True:
+    - auto_approve_hil=True: proceed (no pauses) but keep NEED_EVIDENCE flags in state.
+    - otherwise: end early with a diagnostic report (avoid spending on low-signal draft).
+    """
+    result = state.get("citer_verifier_result") or {}
+    if result.get("block_debate") and not state.get("auto_approve_hil", False):
+        logger.warning("⚠️ Citer/Verifier: Bloqueando debate (rastreabilidade insuficiente)")
+        return "__end__"
+    return "debate"
+
+
+workflow.add_conditional_edges("citer_verifier", citer_verifier_router, {
+    "debate": "debate",
+    "__end__": END,
+})
 
 # Main flow with Quality Pipeline (v2.25)
 # debate → quality_gate → structural_fix → divergence_hil → section_hil → audit → targeted_patch → quality_report → evaluate_hil
@@ -6742,7 +7115,7 @@ workflow.add_conditional_edges("document_gate", document_gate_router, {
 })
 
 # v5.4: Human Proposal Debate node and routing
-workflow.add_node("proposal_debate", human_proposal_debate_node)
+workflow.add_node("proposal_debate", _wrap_node("proposal_debate", human_proposal_debate_node))
 
 def finalize_hil_router(state: DocumentState) -> Literal["proposal_debate", "__end__"]:
     """Route based on whether user provided a proposal."""

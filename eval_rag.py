@@ -123,7 +123,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default="evals/sample_eval.jsonl")
     parser.add_argument("--top-k", type=int, default=8)
-    parser.add_argument("--out", default="evals/eval_results.json")
+    parser.add_argument("--out", "--output", default="evals/eval_results.json", dest="out")
     parser.add_argument("--with-llm", action="store_true")
     parser.add_argument("--persist-db", action="store_true")
     parser.add_argument("--min-context-precision", type=float, default=None)

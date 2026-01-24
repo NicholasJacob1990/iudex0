@@ -501,3 +501,95 @@ def reset_embeddings_service() -> None:
     with _service_lock:
         _service = None
         logger.info("EmbeddingsService singleton reset")
+
+
+# Common legal queries for preloading embeddings cache
+COMMON_LEGAL_QUERIES = [
+    # Constitutional law
+    "princípios constitucionais da administração pública",
+    "direitos fundamentais Constituição Federal",
+    "competência do Supremo Tribunal Federal",
+    "controle de constitucionalidade",
+    # Civil law
+    "responsabilidade civil por danos morais",
+    "prazo prescricional código civil",
+    "contrato de compra e venda requisitos",
+    "obrigações contratuais inadimplemento",
+    # Administrative law
+    "licitação modalidades Lei 14.133",
+    "ato administrativo anulação revogação",
+    "servidor público estabilidade demissão",
+    "contrato administrativo cláusulas exorbitantes",
+    # Labor law
+    "verbas rescisórias trabalhistas",
+    "justa causa demissão CLT",
+    "horas extras cálculo adicional noturno",
+    "estabilidade gestante acidente trabalho",
+    # Procedural law
+    "recurso especial prequestionamento STJ",
+    "tutela antecipada requisitos CPC",
+    "prescrição intercorrente processo execução",
+    "competência foro eleição consumidor",
+    # Tax law
+    "lançamento tributário decadência",
+    "imunidade tributária templos religiosos",
+    "ICMS substituição tributária",
+    "contribuições previdenciárias patronais",
+    # Criminal law
+    "prisão preventiva requisitos CPP",
+    "prescrição penal retroativa",
+    "excludentes ilicitude legítima defesa",
+    "dosimetria pena circunstâncias judiciais",
+    # Consumer law
+    "vício do produto responsabilidade fornecedor",
+    "inversão do ônus da prova CDC",
+    "dano moral contrato consumo",
+]
+
+
+def preload_embeddings_cache(queries: Optional[List[str]] = None) -> Tuple[float, int]:
+    """
+    Preload common legal query embeddings into cache.
+
+    This function should be called during application startup to warm up
+    the embeddings cache with frequently used legal queries.
+
+    Args:
+        queries: Optional list of queries to preload. If not provided,
+                uses the default COMMON_LEGAL_QUERIES list.
+
+    Returns:
+        Tuple of (load_time_seconds, queries_cached)
+    """
+    start = time.time()
+    queries_to_cache = queries or COMMON_LEGAL_QUERIES
+
+    service = get_embeddings_service()
+    cached_count = 0
+
+    for query in queries_to_cache:
+        try:
+            # This will cache the embedding
+            service.embed_query(query, use_cache=True)
+            cached_count += 1
+        except Exception as e:
+            logger.warning(f"Failed to preload embedding for query '{query[:50]}...': {e}")
+            continue
+
+    load_time = time.time() - start
+    logger.info(
+        f"Embeddings cache preloaded: {cached_count}/{len(queries_to_cache)} queries "
+        f"in {load_time:.2f}s"
+    )
+
+    return load_time, cached_count
+
+
+def is_embeddings_service_ready() -> bool:
+    """
+    Check if the embeddings service is initialized and ready.
+
+    Returns:
+        True if the service singleton exists
+    """
+    return _service is not None

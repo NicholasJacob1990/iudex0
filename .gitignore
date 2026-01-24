@@ -158,6 +158,12 @@ audit_*.md
 # Claude Code
 .claude/settings.json
 
+# RAG Evaluation Results (keep .gitkeep)
+evals/results/*.json
+evals/results/*.md
+evals/results/*.html
+!evals/results/.gitkeep
+
 # Virtual environments
 .venv*/
 *.venv/

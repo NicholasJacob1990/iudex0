@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -131,6 +131,7 @@ class RAGConfig:
     opensearch_index_lei: str = "rag-lei"
     opensearch_index_juris: str = "rag-juris"
     opensearch_index_pecas: str = "rag-pecas_modelo"
+    opensearch_index_doutrina: str = "rag-doutrina"
     opensearch_index_sei: str = "rag-sei"
     opensearch_index_local: str = "rag-local"
 
@@ -144,6 +145,7 @@ class RAGConfig:
     qdrant_collection_lei: str = "lei"
     qdrant_collection_juris: str = "juris"
     qdrant_collection_pecas: str = "pecas_modelo"
+    qdrant_collection_doutrina: str = "doutrina"
     qdrant_collection_sei: str = "sei"
     qdrant_collection_local: str = "local_chunks"
 
@@ -175,6 +177,13 @@ class RAGConfig:
     rrf_k: int = 60
     lexical_weight: float = 0.5
     vector_weight: float = 0.5
+
+    # ==========================================================================
+    # Budget Caps (Cost Control)
+    # ==========================================================================
+    max_tokens_per_request: int = 50000  # Total token budget per RAG request
+    max_llm_calls_per_request: int = 5   # Limit HyDE + multi-query calls
+    warn_at_budget_percent: float = 0.8  # Warn when 80% of budget used
 
     # ==========================================================================
     # Search Defaults
@@ -269,6 +278,7 @@ class RAGConfig:
             opensearch_index_lei=os.getenv("OPENSEARCH_INDEX_LEI", "rag-lei"),
             opensearch_index_juris=os.getenv("OPENSEARCH_INDEX_JURIS", "rag-juris"),
             opensearch_index_pecas=os.getenv("OPENSEARCH_INDEX_PECAS", "rag-pecas_modelo"),
+            opensearch_index_doutrina=os.getenv("OPENSEARCH_INDEX_DOUTRINA", "rag-doutrina"),
             opensearch_index_sei=os.getenv("OPENSEARCH_INDEX_SEI", "rag-sei"),
             opensearch_index_local=os.getenv("OPENSEARCH_INDEX_LOCAL", "rag-local"),
 
@@ -278,6 +288,7 @@ class RAGConfig:
             qdrant_collection_lei=os.getenv("QDRANT_COLLECTION_LEI", "lei"),
             qdrant_collection_juris=os.getenv("QDRANT_COLLECTION_JURIS", "juris"),
             qdrant_collection_pecas=os.getenv("QDRANT_COLLECTION_PECAS", "pecas_modelo"),
+            qdrant_collection_doutrina=os.getenv("QDRANT_COLLECTION_DOUTRINA", "doutrina"),
             qdrant_collection_sei=os.getenv("QDRANT_COLLECTION_SEI", "sei"),
             qdrant_collection_local=os.getenv("QDRANT_COLLECTION_LOCAL", "local_chunks"),
 
@@ -306,6 +317,11 @@ class RAGConfig:
             default_fetch_k=_env_int("RAG_DEFAULT_FETCH_K", 50),
             default_top_k=_env_int("RAG_DEFAULT_TOP_K", 10),
 
+            # Budget caps
+            max_tokens_per_request=_env_int("RAG_MAX_TOKENS_PER_REQUEST", 50000),
+            max_llm_calls_per_request=_env_int("RAG_MAX_LLM_CALLS_PER_REQUEST", 5),
+            warn_at_budget_percent=_env_float("RAG_WARN_AT_BUDGET_PERCENT", 0.8),
+
             # Lexical-first
             lexical_strong_threshold=_env_float("RAG_LEXICAL_STRONG_THRESHOLD", 0.7),
 
@@ -329,6 +345,7 @@ class RAGConfig:
             self.opensearch_index_lei,
             self.opensearch_index_juris,
             self.opensearch_index_pecas,
+            self.opensearch_index_doutrina,
             self.opensearch_index_sei,
             self.opensearch_index_local,
         ]
@@ -339,6 +356,7 @@ class RAGConfig:
             self.qdrant_collection_lei,
             self.qdrant_collection_juris,
             self.qdrant_collection_pecas,
+            self.qdrant_collection_doutrina,
             self.qdrant_collection_sei,
             self.qdrant_collection_local,
         ]
@@ -349,6 +367,7 @@ class RAGConfig:
             self.opensearch_index_lei,
             self.opensearch_index_juris,
             self.opensearch_index_pecas,
+            self.opensearch_index_doutrina,
             self.opensearch_index_sei,
         ]
 
@@ -358,6 +377,7 @@ class RAGConfig:
             self.qdrant_collection_lei,
             self.qdrant_collection_juris,
             self.qdrant_collection_pecas,
+            self.qdrant_collection_doutrina,
             self.qdrant_collection_sei,
         ]
 

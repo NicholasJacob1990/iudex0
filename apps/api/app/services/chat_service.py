@@ -35,7 +35,7 @@ from app.services.ai.agent_clients import (
 from app.services.ai.gemini_drafter import GeminiDrafterWrapper
 from app.services.ai.debate_subgraph import run_debate_for_section
 from app.services.web_search_service import web_search_service, build_web_context, is_breadth_first
-from app.services.rag_context import build_rag_context
+from app.services.rag.pipeline_adapter import build_rag_context_unified as build_rag_context
 from app.services.rag_trace import trace_event
 from app.services.ai.internal_rag_agent import (
     build_internal_rag_system_instruction,

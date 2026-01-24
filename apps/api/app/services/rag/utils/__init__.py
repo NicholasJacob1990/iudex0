@@ -63,6 +63,12 @@ from .audit import (
     audit_query_rewrite,
 )
 
+from .env_helpers import (
+    env_bool,
+    env_int,
+    env_float,
+)
+
 __all__ = [
     # Core tracing
     "trace_event",
@@ -119,4 +125,8 @@ __all__ = [
     "audit_search_request",
     "audit_search_response",
     "audit_query_rewrite",
+    # Environment helpers
+    "env_bool",
+    "env_int",
+    "env_float",
 ]

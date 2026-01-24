@@ -84,7 +84,7 @@ from app.services.ai.nodes.catalogo_documentos import (
 )
 from app.services.chat_service import ChatService
 from app.services.web_search_service import web_search_service, build_web_context, is_breadth_first
-from app.services.rag_context import build_rag_context
+from app.services.rag.pipeline_adapter import build_rag_context_unified as build_rag_context
 from app.services.api_call_tracker import (
     usage_context,
     record_api_call,

@@ -4,9 +4,12 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health
 
 api_router = APIRouter()
+
+# Health check routes (no prefix, accessible at /api/health/*)
+api_router.include_router(health.router, tags=["health"])
 
 # Incluir rotas
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])

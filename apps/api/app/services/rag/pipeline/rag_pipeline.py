@@ -104,28 +104,19 @@ except ImportError:
     EmbeddingsService = None  # type: ignore
     get_embeddings_service = None  # type: ignore
 
+try:
+    from app.services.rag.core.budget_tracker import BudgetTracker, BudgetExceededError
+except ImportError:
+    BudgetTracker = None  # type: ignore
+    BudgetExceededError = None  # type: ignore
+
 trace_event = None  # legacy hook removed; use PipelineResult.trace instead
 TraceEventType = None  # type: ignore
 
 
 logger = logging.getLogger("RAGPipeline")
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return str(raw).lower() in ("1", "true", "yes", "on")
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+from app.services.rag.utils.env_helpers import env_bool as _env_bool, env_int as _env_int
 
 
 def _truncate_block(text: str, max_chars: int, *, suffix: str = "\n\n...[conteúdo truncado]...") -> str:
@@ -373,6 +364,9 @@ class PipelineTrace:
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
+    # Budget tracking
+    budget_usage: Optional[Dict[str, Any]] = None
+
     def start_stage(self, stage: PipelineStage, input_count: int = 0) -> StageTrace:
         """Start tracking a new stage."""
         trace = StageTrace(
@@ -419,6 +413,7 @@ class PipelineTrace:
             "stages": [s.to_dict() for s in self.stages],
             "errors": self.errors,
             "warnings": self.warnings,
+            "budget_usage": self.budget_usage,
         }
 
 
@@ -909,6 +904,7 @@ class RAGPipeline:
         enable_hyde: bool,
         enable_multiquery: bool,
         multiquery_max: int,
+        budget_tracker: Optional[Any] = None,
     ) -> List[str]:
         """
         Stage 1: Query Enhancement (HyDE / Multi-query).
@@ -919,6 +915,10 @@ class RAGPipeline:
         Args:
             query: Original query
             trace: Pipeline trace
+            enable_hyde: Whether to use HyDE expansion
+            enable_multiquery: Whether to use multi-query expansion
+            multiquery_max: Maximum query variants
+            budget_tracker: Optional BudgetTracker for cost control
 
         Returns:
             List of queries (original + expanded)
@@ -942,6 +942,12 @@ class RAGPipeline:
                 stage.skip("Query is citation-heavy, skipping expansion")
                 return queries
 
+            # Check budget before expansion
+            if budget_tracker is not None and BudgetTracker is not None:
+                if not budget_tracker.can_make_llm_call():
+                    stage.skip("Budget limit reached, skipping query expansion")
+                    return queries
+
             # Perform expansion
             if hasattr(self._query_expander, "expand_async"):
                 expanded = await self._query_expander.expand_async(
@@ -949,6 +955,7 @@ class RAGPipeline:
                     use_hyde=enable_hyde,
                     use_multiquery=enable_multiquery,
                     max_queries=multiquery_max,
+                    budget_tracker=budget_tracker,
                 )
             elif hasattr(self._query_expander, "expand"):
                 expanded = self._query_expander.expand(
@@ -956,6 +963,7 @@ class RAGPipeline:
                     use_hyde=enable_hyde,
                     use_multiquery=enable_multiquery,
                     max_queries=multiquery_max,
+                    budget_tracker=budget_tracker,
                 )
             else:
                 stage.skip("Query expander has no expand method")
@@ -1927,7 +1935,7 @@ class RAGPipeline:
             # Preferred: reuse the same persisted GraphRAG store used by legacy `build_rag_context`.
             # This keeps GraphRAG + ArgumentRAG behavior consistent when running the new pipeline.
             try:
-                from app.services.rag_module import get_scoped_knowledge_graph as get_scoped_graph
+                from app.services.rag_module_old import get_scoped_knowledge_graph as get_scoped_graph
             except Exception:
                 get_scoped_graph = None  # type: ignore
 
@@ -2315,6 +2323,15 @@ class RAGPipeline:
         trace = PipelineTrace(original_query=query)
         result = PipelineResult(trace=trace)
 
+        # Initialize budget tracker for cost control
+        budget_tracker: Optional[Any] = None
+        if BudgetTracker is not None:
+            budget_tracker = BudgetTracker.from_config()
+            logger.debug(
+                f"Budget tracker initialized: max_tokens={budget_tracker.max_tokens}, "
+                f"max_llm_calls={budget_tracker.max_llm_calls}"
+            )
+
         try:
             # Ensure components are initialized
             self._ensure_components()
@@ -2337,7 +2354,7 @@ class RAGPipeline:
             # Detect query characteristics
             is_citation_query = self.is_lexical_heavy(query)
 
-            # Stage 1: Query Enhancement
+            # Stage 1: Query Enhancement (with budget tracking)
             effective_enable_hyde = self._base_config.enable_hyde if hyde_enabled is None else bool(hyde_enabled)
             effective_enable_multi = self._base_config.enable_multiquery if multi_query is None else bool(multi_query)
             effective_multi_max = self._base_config.multiquery_max if multi_query_max is None else int(multi_query_max)
@@ -2347,6 +2364,7 @@ class RAGPipeline:
                 enable_hyde=effective_enable_hyde,
                 enable_multiquery=effective_enable_multi,
                 multiquery_max=effective_multi_max,
+                budget_tracker=budget_tracker,
             )
 
             # Stage 2: Lexical Search
@@ -2469,6 +2487,20 @@ class RAGPipeline:
             # Stage 10: Trace
             await self._stage_trace(trace, result)
 
+            # Add budget usage to trace
+            if budget_tracker is not None:
+                trace.budget_usage = budget_tracker.get_usage_report()
+                if budget_tracker.is_budget_exceeded():
+                    trace.add_warning(
+                        f"Budget exceeded: tokens={budget_tracker.tokens_used}/{budget_tracker.max_tokens}, "
+                        f"llm_calls={budget_tracker.llm_calls_made}/{budget_tracker.max_llm_calls}"
+                    )
+                logger.info(
+                    f"RAG request budget: tokens={budget_tracker.tokens_used}/{budget_tracker.max_tokens} "
+                    f"({budget_tracker.get_token_usage_percent()*100:.1f}%), "
+                    f"llm_calls={budget_tracker.llm_calls_made}/{budget_tracker.max_llm_calls}"
+                )
+
             # Add metadata
             result.metadata = {
                 "query": query,
@@ -2485,6 +2517,11 @@ class RAGPipeline:
             logger.error(error_msg, exc_info=True)
             trace.add_error(error_msg)
             trace.complete(results_count=0)
+
+            # Still capture budget usage on failure
+            if budget_tracker is not None:
+                trace.budget_usage = budget_tracker.get_usage_report()
+
             result.trace = trace
 
             if not self.config.fail_open:

@@ -76,7 +76,7 @@ class MultiAgentOrchestrator:
             
         # RAG Manager para checagem de alucinação
         try:
-            from app.services.rag_module import create_rag_manager
+            from app.services.rag_module_old import create_rag_manager
             # Usar diretório padrão definido no script
             self.rag_manager = create_rag_manager()
         except ImportError:

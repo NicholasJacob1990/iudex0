@@ -21,7 +21,7 @@ from app.models.user import User, UserRole
 from app.models.rag_policy import RAGAccessPolicy
 from app.models.rag_ingestion import RAGIngestionEvent
 from app.services.rag_policy import upsert_rag_policy
-from app.services.rag_module import create_rag_manager
+from app.services.rag_module_old import create_rag_manager
 
 
 router = APIRouter()
