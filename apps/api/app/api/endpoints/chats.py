@@ -4835,6 +4835,8 @@ async def send_message_stream(
                 argument_graph_enabled=effective_argument_graph_enabled,
             ):
                 with points_counter_context():
+                    last_billing_emit = time.monotonic()
+                    last_points_total = 0
                     async for event in stream_response():
                         if first_token_t is None and preprocess_done_t is not None:
                             payload = _extract_payload(event)
@@ -4854,6 +4856,25 @@ async def send_message_stream(
                                     payload.get("type"),
                                 )
                         yield event
+                        now = time.monotonic()
+                        if now - last_billing_emit >= 1.0:
+                            current_points = get_points_total()
+                            if current_points != last_points_total:
+                                last_points_total = int(current_points)
+                                yield sse_event(
+                                    {
+                                        "type": "billing_update",
+                                        "billing": {
+                                            "actual_points": int(current_points),
+                                            "estimated_points": int(getattr(quote, "estimated_points", 0) or 0),
+                                            "approved_points": int(message_budget or 0),
+                                            "usd_per_point": float(usd_per_point),
+                                        },
+                                        "turn_id": turn_id,
+                                    },
+                                    event="billing",
+                                )
+                            last_billing_emit = now
 
     return StreamingResponse(
         event_generator(),
@@ -5088,6 +5109,9 @@ async def generate_document(
                 status_code = 409
             raise HTTPException(status_code=status_code, detail=asdict(quote))
 
+        approved_budget_points = int(message_budget)
+        estimated_budget_points = int(quote.estimated_points)
+
         rag_config = request.rag_config or {}
         use_templates = request.use_templates or bool(rag_config.get("use_templates"))
         context_use_templates = chat.context.get("use_templates")
@@ -5282,11 +5306,15 @@ async def generate_document(
             context_data.update(request.context)
         context_data["rag_mode"] = rag_mode
         context_data["argument_graph_enabled"] = effective_argument_graph_enabled
+        context_data["budget_approved_points"] = approved_budget_points
+        context_data["budget_estimate_points"] = estimated_budget_points
 
         with usage_context("chat", chat_id, user_id=current_user.id, turn_id=turn_id):
             with billing_context(
                 graph_rag_enabled=bool(effective_graph_rag_enabled),
                 argument_graph_enabled=effective_argument_graph_enabled,
+                budget_approved_points=approved_budget_points,
+                budget_estimate_points=estimated_budget_points,
             ):
                 result = await get_document_generator().generate_document(
                     request=doc_request,

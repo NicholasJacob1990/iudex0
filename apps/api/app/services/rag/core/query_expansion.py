@@ -640,6 +640,69 @@ class QueryExpansionService:
         return await asyncio.to_thread(_sync_call)
 
     # -----------------------------------------------------------------------
+    # Pipeline Compatibility (RAGPipeline expects expand/expand_async)
+    # -----------------------------------------------------------------------
+
+    async def expand_async(
+        self,
+        query: str,
+        *,
+        use_hyde: bool = True,
+        use_multiquery: bool = True,
+        max_queries: int = 3,
+    ) -> List[str]:
+        """
+        Return additional expanded queries for the pipeline.
+
+        Note: The pipeline already includes the original query, so this returns
+        only *extra* queries (multi-query variants and/or HyDE hypothetical doc).
+        """
+        if not query or not query.strip():
+            return []
+
+        query = query.strip()
+
+        extras: List[str] = []
+
+        if use_multiquery and max_queries > 0:
+            variants = await self.generate_query_variants(query=query, count=max_queries + 1)
+            # Drop the original query (always first)
+            extras.extend([v for v in variants[1:] if v and v.strip()])
+
+        if use_hyde:
+            hypo = await self.generate_hypothetical_document(query=query)
+            if hypo and hypo.strip():
+                extras.append(hypo.strip())
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique: List[str] = []
+        for q in extras:
+            key = q.lower().strip()
+            if key and key not in seen:
+                seen.add(key)
+                unique.append(q.strip())
+        return unique
+
+    def expand(
+        self,
+        query: str,
+        *,
+        use_hyde: bool = True,
+        use_multiquery: bool = True,
+        max_queries: int = 3,
+    ) -> List[str]:
+        """Synchronous wrapper for expand_async (for legacy/sync callers)."""
+        return asyncio.run(
+            self.expand_async(
+                query,
+                use_hyde=use_hyde,
+                use_multiquery=use_multiquery,
+                max_queries=max_queries,
+            )
+        )
+
+    # -----------------------------------------------------------------------
     # HyDE Implementation
     # -----------------------------------------------------------------------
 

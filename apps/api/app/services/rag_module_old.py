@@ -467,6 +467,51 @@ class RAGManager:
         Se structure_aware=True, tenta respeitar estrutura (artigos, parágrafos).
         """
         if structure_aware:
+            # v6.0: semantic chunking (prefer) with safe fallback to legacy heuristics.
+            # Enabled by default, but can be disabled via env for quick rollback.
+            try:
+                import os
+
+                use_semantic = os.getenv("RAG_SEMANTIC_CHUNKING_ENABLED", "true").lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+            except Exception:
+                use_semantic = True
+
+            if use_semantic:
+                try:
+                    from app.services.rag.utils.semantic_chunker import (
+                        ChunkingConfig,
+                        chunk_legal_document,
+                    )
+
+                    semantic_cfg = ChunkingConfig(
+                        max_chunk_chars=int(chunk_size),
+                        min_chunk_chars=50,
+                        overlap_chars=int(overlap),
+                        preserve_articles=True,
+                        merge_small_chunks=True,
+                        include_hierarchy=True,
+                        sentence_aware_fallback=True,
+                    )
+                    semantic_chunks = chunk_legal_document(
+                        text=text,
+                        doc_type="auto",
+                        config=semantic_cfg,
+                    )
+                    if semantic_chunks and len(semantic_chunks) > 1:
+                        out = [c.text.strip() for c in semantic_chunks if (c.text or "").strip()]
+                        out = [c for c in out if len(c) > 50]
+                        if out:
+                            return out
+                except Exception:
+                    # Keep legacy behavior if semantic chunker isn't available or fails.
+                    pass
+
+        if structure_aware:
             # Tentar dividir por estrutura jurídica
             import re
             # Padrões comuns em textos jurídicos

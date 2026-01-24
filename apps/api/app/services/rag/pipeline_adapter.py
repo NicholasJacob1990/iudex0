@@ -107,11 +107,28 @@ async def _call_new_pipeline(
     rag_sources: Optional[List[str]],
     rag_top_k: Optional[int],
     tenant_id: str,
+    user_id: Optional[str],
     scope_groups: Optional[List[str]],
     allow_global_scope: bool,
     graph_rag_enabled: bool,
     graph_hops: int,
     filters: Optional[Dict[str, Any]],
+    argument_graph_enabled: Optional[bool] = None,
+    hyde_enabled: Optional[bool] = None,
+    multi_query: Optional[bool] = None,
+    multi_query_max: Optional[int] = None,
+    compression_enabled: Optional[bool] = None,
+    compression_max_chars: Optional[int] = None,
+    parent_child_enabled: Optional[bool] = None,
+    parent_child_window: Optional[int] = None,
+    parent_child_max_extra: Optional[int] = None,
+    crag_gate: Optional[bool] = None,
+    crag_min_best_score: Optional[float] = None,
+    crag_min_avg_score: Optional[float] = None,
+    corrective_rag: Optional[bool] = None,
+    corrective_use_hyde: Optional[bool] = None,
+    corrective_min_best_score: Optional[float] = None,
+    corrective_min_avg_score: Optional[float] = None,
     **kwargs,
 ) -> Tuple[str, str, List[Dict[str, Any]]]:
     """
@@ -132,47 +149,102 @@ async def _call_new_pipeline(
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
+            crag_gate=bool(crag_gate) if crag_gate is not None else False,
+            crag_min_best_score=crag_min_best_score,
+            crag_min_avg_score=crag_min_avg_score,
+            hyde_enabled=bool(hyde_enabled) if hyde_enabled is not None else False,
+            multi_query=multi_query,
+            multi_query_max=multi_query_max,
+            compression_enabled=compression_enabled,
+            compression_max_chars=compression_max_chars,
+            parent_child_enabled=parent_child_enabled,
+            parent_child_window=parent_child_window,
+            parent_child_max_extra=parent_child_max_extra,
+            argument_graph_enabled=argument_graph_enabled,
             **kwargs,
         )
 
     config = get_rag_config()
 
-    # Determine scope
-    if allow_global_scope:
-        scope = "global"
-    elif scope_groups:
-        scope = "group"
-    else:
-        scope = "private"
+    # Do not force a single scope for the new pipeline; use security filters
+    # (include_global + group_ids + user_id + case_id) to model visibility.
+    scope = ""
 
-    # Map sources to indices/collections
-    # This mapping may need adjustment based on your index naming
-    indices = None
-    collections = None
+    # Map sources to indices/collections (new pipeline expects concrete index/collection names)
+    indices: Optional[List[str]] = None
+    collections: Optional[List[str]] = None
     if rag_sources:
         source_to_index = {
-            "lei": config.opensearch_index_global,
-            "juris": config.opensearch_index_global,
-            "pecas_modelo": config.opensearch_index_global,
+            "lei": config.opensearch_index_lei,
+            "juris": config.opensearch_index_juris,
+            "pecas_modelo": config.opensearch_index_pecas,
+            "pecas": config.opensearch_index_pecas,
+            "sei": config.opensearch_index_sei,
             "local": config.opensearch_index_local,
         }
-        indices = [source_to_index.get(s, config.opensearch_index_global) for s in rag_sources]
-        indices = list(set(indices))  # Deduplicate
+        source_to_collection = {
+            "lei": config.qdrant_collection_lei,
+            "juris": config.qdrant_collection_juris,
+            "pecas_modelo": config.qdrant_collection_pecas,
+            "pecas": config.qdrant_collection_pecas,
+            "sei": config.qdrant_collection_sei,
+            "local": config.qdrant_collection_local,
+        }
+
+        indices = []
+        collections = []
+        for s in rag_sources:
+            if s in source_to_index:
+                indices.append(source_to_index[s])
+            if s in source_to_collection:
+                collections.append(source_to_collection[s])
+        indices = list(dict.fromkeys(indices)) or None
+        collections = list(dict.fromkeys(collections)) or None
+
+    effective_filters: Dict[str, Any] = dict(filters or {})
+    if tenant_id:
+        effective_filters.setdefault("tenant_id", tenant_id)
+    effective_filters.setdefault("include_global", bool(allow_global_scope))
+    if scope_groups:
+        effective_filters.setdefault("group_ids", list(scope_groups))
+    if user_id:
+        effective_filters.setdefault("user_id", user_id)
+    if "case_id" in effective_filters:
+        pass
 
     # Create pipeline instance
     pipeline = RAGPipeline()
 
     # Execute search
     try:
+        include_graph = bool(graph_rag_enabled) or bool(argument_graph_enabled)
         result = await pipeline.search(
             query=query,
             indices=indices,
             collections=collections,
             top_k=rag_top_k,
-            include_graph=graph_rag_enabled,
-            tenant_id=tenant_id,
+            include_graph=include_graph,
+            argument_graph_enabled=bool(argument_graph_enabled),
+            hyde_enabled=hyde_enabled,
+            multi_query=multi_query,
+            multi_query_max=multi_query_max,
+            compression_enabled=compression_enabled,
+            compression_max_chars=compression_max_chars,
+            parent_child_enabled=parent_child_enabled,
+            parent_child_window=parent_child_window,
+            parent_child_max_extra=parent_child_max_extra,
+            graph_hops=graph_hops,
+            crag_gate=crag_gate,
+            crag_min_best_score=crag_min_best_score,
+            crag_min_avg_score=crag_min_avg_score,
+            corrective_rag=corrective_rag,
+            corrective_use_hyde=corrective_use_hyde,
+            corrective_min_best_score=corrective_min_best_score,
+            corrective_min_avg_score=corrective_min_avg_score,
+            tenant_id=tenant_id or effective_filters.get("tenant_id"),
             scope=scope,
-            filters=filters,
+            filters=effective_filters,
+            case_id=effective_filters.get("case_id"),
         )
     except Exception as e:
         logger.error(f"RAGPipeline.search failed: {e}")
@@ -187,6 +259,18 @@ async def _call_new_pipeline(
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
+            crag_gate=bool(crag_gate) if crag_gate is not None else False,
+            crag_min_best_score=crag_min_best_score,
+            crag_min_avg_score=crag_min_avg_score,
+            hyde_enabled=bool(hyde_enabled) if hyde_enabled is not None else False,
+            multi_query=multi_query,
+            multi_query_max=multi_query_max,
+            compression_enabled=compression_enabled,
+            compression_max_chars=compression_max_chars,
+            parent_child_enabled=parent_child_enabled,
+            parent_child_window=parent_child_window,
+            parent_child_max_extra=parent_child_max_extra,
+            argument_graph_enabled=argument_graph_enabled,
             **kwargs,
         )
 
@@ -215,7 +299,7 @@ async def _call_legacy_pipeline(
     """
     Call the legacy build_rag_context function.
     """
-    from app.services.rag_context import build_rag_context
+    from app.services.rag_context_legacy import build_rag_context
 
     return await build_rag_context(
         query=query,
@@ -283,23 +367,113 @@ async def build_rag_context_unified(
     """
     started_at = time.perf_counter()
 
+    # Normalize filters early (used by both pipelines)
+    effective_filters: Dict[str, Any] = dict(filters or {})
+    if tipo_peca_filter:
+        effective_filters.setdefault("tipo_peca", str(tipo_peca_filter).strip())
+
+    # Dense research (legacy behavior: increase top_k)
+    if dense_research:
+        rag_top_k = max(int(rag_top_k or 0), 12)
+
+    # History loading + optional history-based query rewrite
+    effective_query = query
+    effective_history = history
+    if not effective_history and conversation_id:
+        try:
+            from app.services.ai.rag_memory_store import RAGMemoryStore
+
+            effective_history = await RAGMemoryStore().get_history(conversation_id)
+        except Exception as exc:
+            logger.warning(f"RAG memory load failed: {exc}")
+
+    applied_history_rewrite = False
+    if rewrite_query and effective_history:
+        try:
+            from app.services.ai.rag_helpers import rewrite_query_with_history
+
+            rewritten = await rewrite_query_with_history(
+                query=effective_query,
+                history=effective_history,
+                summary_text=summary_text,
+            )
+            rewritten = (rewritten or "").strip()
+            if rewritten and rewritten != effective_query:
+                effective_query = rewritten
+                applied_history_rewrite = True
+        except Exception as exc:
+            logger.warning(f"History rewrite failed: {exc}")
+
+    # Optional agentic routing (dataset/source selection + optional query rewrite)
+    effective_sources: List[str] = [str(s).strip().lower() for s in (rag_sources or []) if str(s).strip()]
+    effective_sources = list(dict.fromkeys(effective_sources))
+    had_explicit_sources = bool(effective_sources)
+    if adaptive_routing and not effective_sources:
+        # Conservative default: allow routing across the main knowledge bases.
+        effective_sources = ["lei", "juris", "pecas_modelo"]
+
+    if adaptive_routing:
+        allowed_sources = set(effective_sources)
+        try:
+            from app.services.ai.agentic_rag import AgenticRAGRouter, DatasetRegistry
+
+            router = AgenticRAGRouter(DatasetRegistry())
+            routed = await router.route(
+                query=effective_query,
+                history=effective_history,
+                summary_text=summary_text,
+            )
+            if isinstance(routed, dict):
+                routed_query = routed.get("query")
+                if routed_query:
+                    effective_query = str(routed_query).strip() or effective_query
+
+                datasets = routed.get("datasets")
+                if isinstance(datasets, list):
+                    resolved = router.registry.get_sources(
+                        [str(d).strip() for d in datasets if str(d).strip()]
+                    )
+                    if resolved:
+                        if had_explicit_sources:
+                            resolved = [s for s in resolved if s in allowed_sources]
+                        effective_sources = resolved or effective_sources
+        except Exception as exc:
+            logger.warning(f"AgenticRAG routing failed: {exc}")
+
+        if effective_sources:
+            try:
+                from app.services.ai.rag_helpers import route_rag_sources
+
+                routed_sources = await route_rag_sources(
+                    query=effective_query,
+                    available_sources=effective_sources,
+                    history=effective_history,
+                    summary_text=summary_text,
+                )
+                if routed_sources:
+                    routed_sources = [str(s).strip().lower() for s in routed_sources if str(s).strip()]
+                    routed_sources = list(dict.fromkeys(routed_sources))
+                    if had_explicit_sources:
+                        routed_sources = [s for s in routed_sources if s in allowed_sources]
+                    effective_sources = routed_sources or effective_sources
+            except Exception as exc:
+                logger.warning(f"AgenticRAG source routing failed: {exc}")
+
+    # Use the effective history (may have been loaded from conversation_id) downstream.
+    history = effective_history
+    filters = effective_filters
+
     # Decide which pipeline to use
     use_new = _USE_NEW_PIPELINE
 
     # Features that require legacy pipeline (not yet in new pipeline)
-    requires_legacy = any([
-        history and rewrite_query,  # Query rewriting with history
-        adaptive_routing,            # LLM-based source routing
-        argument_graph_enabled,      # Argument graph integration
-        dense_research,              # Dense research mode
-    ])
+    requires_legacy = any([])
 
     if requires_legacy and use_new:
         logger.info(
             f"Falling back to legacy pipeline: "
             f"history_rewrite={bool(history and rewrite_query)}, "
             f"adaptive_routing={adaptive_routing}, "
-            f"argument_graph={argument_graph_enabled}, "
             f"dense_research={dense_research}"
         )
         use_new = False
@@ -307,30 +481,42 @@ async def build_rag_context_unified(
     if use_new:
         logger.debug("Using new RAGPipeline")
         result = await _call_new_pipeline(
-            query=query,
-            rag_sources=rag_sources,
+            query=effective_query,
+            rag_sources=effective_sources or rag_sources,
             rag_top_k=rag_top_k,
             tenant_id=tenant_id,
+            user_id=user_id,
             scope_groups=scope_groups,
             allow_global_scope=allow_global_scope or False,
             graph_rag_enabled=graph_rag_enabled,
             graph_hops=graph_hops,
             filters=filters,
+            argument_graph_enabled=argument_graph_enabled,
             # Pass remaining kwargs for potential future use
             crag_gate=crag_gate,
+            crag_min_best_score=crag_min_best_score,
+            crag_min_avg_score=crag_min_avg_score,
             hyde_enabled=hyde_enabled,
             multi_query=multi_query,
+            multi_query_max=multi_query_max,
             compression_enabled=compression_enabled,
+            compression_max_chars=compression_max_chars,
             parent_child_enabled=parent_child_enabled,
+            parent_child_window=parent_child_window,
+            parent_child_max_extra=parent_child_max_extra,
+            corrective_rag=corrective_rag,
+            corrective_use_hyde=corrective_use_hyde,
+            corrective_min_best_score=corrective_min_best_score,
+            corrective_min_avg_score=corrective_min_avg_score,
         )
     else:
         logger.debug("Using legacy build_rag_context")
         result = await _call_legacy_pipeline(
-            query=query,
-            rag_sources=rag_sources,
+            query=effective_query,
+            rag_sources=effective_sources or rag_sources,
             rag_top_k=rag_top_k,
             attachment_mode=attachment_mode,
-            adaptive_routing=adaptive_routing,
+            adaptive_routing=False,  # already applied above to avoid double-routing
             crag_gate=crag_gate,
             crag_min_best_score=crag_min_best_score,
             crag_min_avg_score=crag_min_avg_score,
@@ -359,7 +545,7 @@ async def build_rag_context_unified(
             summary_text=summary_text,
             conversation_id=conversation_id,
             request_id=request_id,
-            rewrite_query=rewrite_query,
+            rewrite_query=(False if applied_history_rewrite else rewrite_query),
             filters=filters,
             tipo_peca_filter=tipo_peca_filter,
         )
