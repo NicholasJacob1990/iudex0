@@ -81,31 +81,51 @@ def find_cross_file_duplicates(index: dict) -> list:
 # ==============================================================================
 
 def normalize_law_number(raw_num: str) -> str:
-    """Normalize law numbers to standard format (e.g., 866693 -> 8666/93, 14133 -> 14133)."""
-    raw_num = raw_num.replace('.', '').replace('/', '').strip()
+    """Normalize law numbers to a stable comparison key.
+
+    We intentionally normalize to the *base law number* (no year), because the
+    goal of the content-audit is to detect omissions between RAW and formatted
+    outputs (not year-format differences).
+
+    Examples:
+    - 866693 -> 8666
+    - 14.133/2021 -> 14133
+    - 8.666/93 -> 8666
+    - 14133 -> 14133
+    """
+    raw_num = (raw_num or "").strip()
+
+    # If an explicit year suffix exists (e.g., 14.133/2021, 8.666/93), keep only the base number.
+    if "/" in raw_num:
+        base = raw_num.split("/", 1)[0]
+        base_digits = re.sub(r"\D", "", base)
+        return base_digits or raw_num
+
+    raw_digits = re.sub(r"\D", "", raw_num)
     
-    if not raw_num.isdigit():
+    if not raw_digits.isdigit():
         return raw_num
     
-    n = int(raw_num)
+    n = int(raw_digits)
     
-    # If already has year suffix (e.g., 1413321 = 14133/21 = Lei 14.133/2021)
-    # Heuristic: Brazilian laws typically have 4-5 digit numbers + 2-4 digit year
-    if len(raw_num) >= 6:
-        # Try to split: last 2 digits as year if plausible
-        potential_year = int(raw_num[-2:])
-        potential_law = raw_num[:-2]
-        
-        # Years 90-99 (1990s) or 00-25 (2000s-2020s) are most common
-        if (90 <= potential_year <= 99) or (0 <= potential_year <= 30):
-            year_full = 1900 + potential_year if potential_year >= 90 else 2000 + potential_year
-            return f"{potential_law}/{potential_year:02d}"
+    # Heuristic: sometimes transcriptions omit the slash: 866693 (8.666/93), 141332021 (14.133/2021)
+    if len(raw_digits) >= 8:
+        # Try last 4 digits as full year.
+        potential_year4 = int(raw_digits[-4:])
+        if 1900 <= potential_year4 <= 2035:
+            return raw_digits[:-4]
+
+    if len(raw_digits) >= 6:
+        # Try last 2 digits as year (common in transcriptions).
+        potential_year2 = int(raw_digits[-2:])
+        if (90 <= potential_year2 <= 99) or (0 <= potential_year2 <= 30):
+            return raw_digits[:-2]
     
     # If the number is reasonable as-is (4-5 digits = law number without year)
     if 1000 <= n <= 99999:
-        return raw_num
+        return raw_digits
     
-    return raw_num
+    return raw_digits
 
 
 def is_valid_law_ref(law_num: str) -> bool:
@@ -127,6 +147,97 @@ def is_valid_law_ref(law_num: str) -> bool:
     return True
 
 
+# Known common transcription errors and their correct versions (Brazilian law numbers)
+KNOWN_LAW_CORRECTIONS = {
+    "11455": "11445",   # Lei de Saneamento Básico (spoken typo)
+    "13467": "13465",   # Lei da REURB (confusion with Reforma Trabalhista)
+    "3874": "13874",    # Lei de Liberdade Econômica (missing prefix)
+    "9637": "9637",     # Lei das OS (sometimes misheard)
+    "8112": "8112",     # Estatuto dos Servidores
+}
+
+
+def _edit_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return _edit_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def find_similar_law_in_set(raw_num: str, fmt_refs: set, max_edit_distance: int = 1) -> str | None:
+    """Check if a similar law number exists in formatted refs (typo correction detection).
+    
+    Handles common transcription errors:
+    - Single digit typos: 11455 vs 11445 (edit distance 1)
+    - Missing prefix: 3874 vs 13874 (prefix check)
+    - Transposed digits: 13467 vs 13465 (edit distance 1)
+    
+    Args:
+        raw_num: The normalized law number from RAW transcription
+        fmt_refs: Set of normalized law numbers from formatted output
+        max_edit_distance: Maximum allowed edit distance for fuzzy match (default 1)
+    
+    Returns:
+        The matching law number from fmt_refs if found, otherwise None
+    """
+    if not raw_num or not fmt_refs:
+        return None
+    
+    raw_digits = re.sub(r'\D', '', raw_num)
+    if not raw_digits:
+        return None
+    
+    # 1. Check known corrections first (fastest path)
+    if raw_digits in KNOWN_LAW_CORRECTIONS:
+        corrected = KNOWN_LAW_CORRECTIONS[raw_digits]
+        for fmt_ref in fmt_refs:
+            fmt_digits = re.sub(r'\D', '', fmt_ref)
+            if fmt_digits == corrected:
+                return fmt_ref
+    
+    # 2. Check for prefix variations (e.g., 3874 -> 13874)
+    # Only match if raw is exactly a suffix (prevents 12345 matching 13465)
+    for fmt_ref in fmt_refs:
+        fmt_digits = re.sub(r'\D', '', fmt_ref)
+        # Check if raw is a suffix of formatted (missing prefix)
+        if len(fmt_digits) > len(raw_digits) >= 4:  # Require at least 4 digits to avoid spurious matches
+            if fmt_digits.endswith(raw_digits):
+                return fmt_ref
+    
+    # 3. Fuzzy match using edit distance (handles typos)
+    # STRICTER: Only for similar-length numbers (within 1 character) and edit distance = 1
+    best_match = None
+    best_distance = max_edit_distance + 1
+    
+    for fmt_ref in fmt_refs:
+        fmt_digits = re.sub(r'\D', '', fmt_ref)
+        
+        # Only compare if lengths are very similar (within 1 character)
+        # This prevents matching completely different numbers like 12345 vs 13465
+        if abs(len(raw_digits) - len(fmt_digits)) > 1:
+            continue
+        
+        distance = _edit_distance(raw_digits, fmt_digits)
+        if distance <= max_edit_distance and distance < best_distance:
+            best_distance = distance
+            best_match = fmt_ref
+    
+    return best_match
+
+
 def extract_legal_references(text: str) -> dict:
     """Extract all legal references (laws, sumulas, articles) from text.
     
@@ -140,9 +251,15 @@ def extract_legal_references(text: str) -> dict:
         'julgados': set()
     }
     
-    # Laws: Lei 14.133, Lei nº 8.666, Lei 866693 (malformed), etc.
-    # More permissive pattern to catch malformed transcriptions
-    lei_pattern = r'[Ll]ei\s*(?:n[º°]?\s*)?(\d{3,8}(?:\.\d{3})?(?:/\d{2,4})?)'
+    # Laws: Lei 14.133/2021, Lei nº 8.666/93, Lei 9637, Lei Municipal nº 5.026/2009, etc.
+    # Accept common qualifiers between "Lei" and the number (Municipal/Federal/Complementar/etc.).
+    # Accept 1-6 digits before separators to support "8.666" and "14.133".
+    lei_pattern = (
+        r"[Ll]ei"
+        r"(?:\s+(?:Complementar|Municipal|Federal|Estadual|Org[âa]nica|Delegada|Nacional))?"
+        r"\s*(?:n[º°]?\s*)?"
+        r"(\d{1,6}(?:\.\d{3})*(?:/\d{2,4})?)"
+    )
     for match in re.finditer(lei_pattern, text):
         raw = match.group(1)
         normalized = normalize_law_number(raw)
@@ -161,8 +278,8 @@ def extract_legal_references(text: str) -> dict:
     for match in re.finditer(artigo_pattern, text):
         references['artigos'].add(f"Art. {match.group(1)}")
     
-    # Decrees: Decreto 51.078, Decreto Rio
-    decreto_pattern = r'[Dd]ecreto\s*(?:Rio\s*)?(?:n[º°]?\s*)?(\d{3,6}(?:\.\d{3})?(?:/\d{2,4})?)'
+    # Decrees: Decreto 30.780/2009, Decreto 51.078, etc.
+    decreto_pattern = r'[Dd]ecreto\s*(?:Rio\s*)?(?:n[º°]?\s*)?(\d{1,6}(?:\.\d{3})*(?:/\d{2,4})?)'
     for match in re.finditer(decreto_pattern, text):
         raw = match.group(1)
         normalized = normalize_law_number(raw)
@@ -172,24 +289,24 @@ def extract_legal_references(text: str) -> dict:
     # === EXPANDED LEGAL NER (v4.2) ===
     # Court decisions: STF, STJ, TST, TRF, TJ patterns
     julgado_patterns = [
-        # Recursos: REsp, RE, RMS, AgRg, etc.
-        r'(?:REsp|RE|RMS|Ag(?:Rg)?|RCL|EDcl|AI|AC)\s*(?:n[º°]?\s*)?[\d\./-]+',
-        # Habeas Corpus e Mandados
-        r'(?:HC|MS|MI|HD)\s*(?:n[º°]?\s*)?[\d\./-]+',
-        # Ações de Controle Concentrado
-        r'(?:ADI|ADPF|ADC|ADO)\s*(?:n[º°]?\s*)?\d+',
+        # Recursos: REsp, RE, RMS, AgRg, etc. (word boundary prevents matching inside "relicitação", etc.)
+        r'\b(?:REsp|RE|RMS|Ag(?:Rg)?|RCL|EDcl|AI|AC)\b\s*(?:n[º°]?\s*)?[\d\./-]+',
+        # Habeas Corpus e Mandados (avoid false positives like "SMS 02/2025" -> "MS 02")
+        r'\b(?:HC|MS|MI|HD)\b\s*(?:n[º°]?\s*)?[\d\./-]+',
+        # Ações de Controle Concentrado (avoid matching substrings like "enunciado" -> "ado")
+        r'\b(?:ADI|ADPF|ADC|ADO)\b\s*(?:n[º°]?\s*)?\d+',
         # Acórdãos TCU/TCE
-        r'Acórdão\s*(?:TCU|TCE[/-]?\w*)?\s*(?:n[º°]?\s*)?[\d\./-]+',
-        # Pareceres AGU/PGE
-        r'Parecer\s*(?:AGU|PGE|PGM|PGFN)?\s*(?:n[º°]?\s*)?[\d\./-]+',
+        r'\bAcórdão\b\s*(?:TCU|TCE[/-]?\w*)?\s*(?:n[º°]?\s*)?[\d\./-]+',
+        # Pareceres (require at least one digit to avoid matching "parecer.")
+        r'\bParecer\b(?:\s+[A-Z]{2,15})*\s*(?:n[º°]?\s*)?\d[\d\./-]*',
         # Temas de Repercussão Geral
-        r'(?:Tema|RG)\s*(?:n[º°]?\s*)?\d+\s*(?:STF|STJ)?',
+        r'\b(?:Tema|RG)\b\s*(?:n[º°]?\s*)?\d+\s*(?:STF|STJ)?',
         # Teses STF/STJ
-        r'Tese\s*(?:STF|STJ)\s*(?:n[º°]?\s*)?\d+',
+        r'\bTese\b\s*(?:STF|STJ)\s*(?:n[º°]?\s*)?\d+',
         # Informativos
-        r'Informativo\s*(?:STF|STJ)?\s*(?:n[º°]?\s*)?\d+',
+        r'\bInformativo\b\s*(?:STF|STJ)?\s*(?:n[º°]?\s*)?\d+',
         # Súmulas de Tribunais Estaduais
-        r'Súmula\s*(?:TJ[A-Z]{2}|TRF\d?)\s*(?:n[º°]?\s*)?\d+',
+        r'\bSúmula\b\s*(?:TJ[A-Z]{2}|TRF\d?)\s*(?:n[º°]?\s*)?\d+',
     ]
     
     for pattern in julgado_patterns:
@@ -197,6 +314,8 @@ def extract_legal_references(text: str) -> dict:
             julgado = match.group(0).strip()
             # Normalize spacing
             julgado = re.sub(r'\s+', ' ', julgado)
+            # Normalize for case-insensitive comparison (reduces false positives like "Tema 32" vs "tema 32")
+            julgado = julgado.lower()
             if len(julgado) > 3:  # Avoid noise
                 references['julgados'].add(julgado)
     
@@ -258,12 +377,28 @@ def analyze_content_issues(formatted_path: str, raw_path: str = None) -> dict:
         elif issues['compression_ratio'] < 0.85:
             issues['compression_warning'] = f"WARNING: Compression {issues['compression_ratio']:.0%} - review for omissions"
     
-    # 2. Legal Reference Comparison
+    # 2. Legal Reference Comparison with Fuzzy Matching (v4.3)
     raw_refs = extract_legal_references(raw_text)
     fmt_refs = extract_legal_references(formatted_text)
     
-    # Find missing references
-    issues['missing_laws'] = list(raw_refs['leis'] - fmt_refs['leis'])
+    # Find missing references using fuzzy matching to avoid false positives
+    # from proactive corrections (e.g., 11.455 -> 11.445, 3874 -> 13.874)
+    missing_laws = []
+    for raw_law in raw_refs['leis']:
+        if raw_law in fmt_refs['leis']:
+            continue  # Exact match found
+        
+        # Check if a similar law number exists (likely a correction)
+        similar = find_similar_law_in_set(raw_law, fmt_refs['leis'])
+        if similar:
+            # Law was likely corrected, not omitted - don't flag as missing
+            print(f"  ℹ️  Law {raw_law} appears corrected to {similar} (not flagged as missing)")
+            continue
+        
+        # No exact or fuzzy match - truly missing
+        missing_laws.append(raw_law)
+    
+    issues['missing_laws'] = missing_laws
     issues['missing_sumulas'] = list(raw_refs['sumulas'] - fmt_refs['sumulas'])
     issues['missing_decretos'] = list(raw_refs['decretos'] - fmt_refs['decretos'])
     issues['missing_julgados'] = list(raw_refs['julgados'] - fmt_refs['julgados'])
@@ -441,12 +576,13 @@ def apply_structural_fixes_to_file(filepath: str, suggestions: dict) -> dict:
     
     # Remove duplicate paragraphs by approved fingerprint
     approved_fps = {dup.get('fingerprint') for dup in suggestions.get('duplicate_paragraphs', []) if dup.get('fingerprint')}
+    
     if approved_fps:
         paragraphs = content.split('\n\n')
         new_paragraphs = []
         seen_fps = set()
 
-        for para in paragraphs:
+        for i, para in enumerate(paragraphs):
             current_fp = compute_paragraph_fingerprint(para) if len(para.strip()) >= 50 else None
             if current_fp in approved_fps:
                 if current_fp in seen_fps:
@@ -454,7 +590,7 @@ def apply_structural_fixes_to_file(filepath: str, suggestions: dict) -> dict:
                     continue
                 seen_fps.add(current_fp)
             new_paragraphs.append(para)
-
+        
         content = '\n\n'.join(new_paragraphs)
 
     # Renumber H2 headings to restore order/consistency
@@ -484,22 +620,33 @@ def apply_structural_fixes_to_file(filepath: str, suggestions: dict) -> dict:
     if dup_section_titles:
         section_pattern = r'^(## .+?)(?=^## |\Z)'
         sections = re.findall(section_pattern, content, re.MULTILINE | re.DOTALL)
-        prefix_match = re.split(r'^## .+?$', content, maxsplit=1, flags=re.MULTILINE)
-        prefix = prefix_match[0] if prefix_match else ""
+        
+        # Only proceed if we found sections to process
+        if sections:
+            prefix_match = re.split(r'^## .+?$', content, maxsplit=1, flags=re.MULTILINE)
+            prefix = prefix_match[0] if prefix_match else ""
 
-        seen = set()
-        kept_sections = []
-        for section in sections:
-            lines = section.strip().split('\n')
-            title = lines[0] if lines else ""
-            normalized = re.sub(r'^##\s*(\d+\.\s*)?', '', title).strip().lower()
-            if normalized in dup_section_titles and normalized in seen:
-                applied.append(f"Removed duplicate section: {title}")
-                continue
-            seen.add(normalized)
-            kept_sections.append(section.strip())
+            seen = set()
+            kept_sections = []
+            removed_count = 0
+            for section in sections:
+                lines = section.strip().split('\n')
+                title = lines[0] if lines else ""
+                normalized = re.sub(r'^##\s*(\d+\.\s*)?', '', title).strip().lower()
+                if normalized in dup_section_titles and normalized in seen:
+                    applied.append(f"Removed duplicate section: {title}")
+                    removed_count += 1
+                    continue
+                seen.add(normalized)
+                kept_sections.append(section.strip())
 
-        content = prefix.rstrip() + ("\n\n" if prefix.strip() else "") + "\n\n".join(kept_sections)
+            # Only reconstruct content if we actually removed something
+            if removed_count > 0 and kept_sections:
+                content = prefix.rstrip() + ("\n\n" if prefix.strip() else "") + "\n\n".join(kept_sections)
+            # If we removed everything (shouldn't happen), keep original
+            elif removed_count > 0 and not kept_sections:
+                # Revert - don't remove all content
+                pass
     
     # Backup and save
     if applied:

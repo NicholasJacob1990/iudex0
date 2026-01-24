@@ -106,6 +106,31 @@ REDIS_URL=redis://localhost:6379/0
 JWT_SECRET_KEY=sua-chave-secreta
 ```
 
+### RAG avançado (defaults por ambiente)
+
+Em produção, o sistema habilita Multi‑Query, compressão, parent‑child e corrective por padrão.
+Em desenvolvimento/local, o backend também habilita por padrão (para “destravar” o RAG). Para voltar ao comportamento antigo (desligado por default), use `RAG_UNLOCK_ALL=false` no `.env`.
+
+```env
+# RAG_UNLOCK_ALL=true
+# RAG_MULTI_QUERY_ENABLED=true
+# RAG_MULTI_QUERY_MAX=3
+# RAG_CONTEXT_COMPRESSION_ENABLED=true
+# RAG_CONTEXT_COMPRESSION_MAX_CHARS=900
+# RAG_PARENT_CHILD_ENABLED=true
+# RAG_PARENT_CHILD_WINDOW=1
+# RAG_PARENT_CHILD_MAX_EXTRA=12
+# RAG_CORRECTIVE_ENABLED=true
+# RAG_CORRECTIVE_USE_HYDE=true
+# RAG_CORRECTIVE_MIN_BEST_SCORE=0.5
+# RAG_CORRECTIVE_MIN_AVG_SCORE=0.4
+```
+
+### GraphRAG
+
+O GraphRAG requer `networkx`. Ele já está incluído em `apps/api/requirements.txt`.
+Se estiver usando o `requirements-minimal.txt`, inclua `networkx` também.
+
 ## 🧪 Uso da API
 
 ### Autenticação
@@ -225,7 +250,7 @@ Logs são salvos em:
 
 ### Limites
 
-- Upload: 500MB por arquivo
+- Upload: até 4GB por arquivo (limite local; limites efetivos variam por provedor)
 - Contexto: 3M tokens (divisão automática)
 - Rate limiting: 100 req/min por usuário
 
@@ -278,4 +303,3 @@ MIT License - veja LICENSE para detalhes.
 ---
 
 **Desenvolvido com ❤️ e Python 🐍**
-

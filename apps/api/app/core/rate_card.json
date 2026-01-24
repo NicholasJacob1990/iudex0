@@ -1,0 +1,60 @@
+{
+  "usd_per_point": 0.00003,
+  "size_profiles": {
+    "S": { "input_tokens": 800, "output_tokens": 300 },
+    "M": { "input_tokens": 2500, "output_tokens": 1200 },
+    "L": { "input_tokens": 4000, "output_tokens": 1500 }
+  },
+  "llm_points_per_call": {
+    "gpt-5.2": { "S": 224, "M": 847, "L": 1120 },
+    "gpt-5-mini": { "S": 40, "M": 150, "L": 200 },
+    "claude-4.5-sonnet": { "S": 300, "M": 1120, "L": 1500 },
+    "claude-4.5-opus": { "S": 520, "M": 1950, "L": 2600 },
+    "gemini-3-pro": { "S": 220, "M": 820, "L": 1100 },
+    "gemini-3-flash": { "S": 60, "M": 220, "L": 300 },
+    "grok-4": { "S": 300, "M": 1120, "L": 1500 },
+    "llama-4": { "S": 19, "M": 68, "L": 95 }
+  },
+  "tool_points": {
+    "web_search_request": 200,
+    "deep_research_effort": {
+      "low": 16400,
+      "medium": 47600,
+      "high": 52800
+    }
+  },
+  "perplexity": {
+    "search_api": {
+      "points_per_request": 200
+    },
+    "grounded_llm": {
+      "defaults": {
+        "search_context_size": "low",
+        "sonar_pro_search_type": "fast",
+        "auto_search_type_estimate": "pro"
+      },
+      "token_points_per_call": {
+        "sonar": { "S": 44, "M": 148, "L": 220 },
+        "sonar-pro": { "S": 276, "M": 1020, "L": 1380 },
+        "sonar-reasoning-pro": { "S": 160, "M": 584, "L": 800 }
+      },
+      "request_fee_points_per_call": {
+        "sonar": {
+          "low": 200,
+          "medium": 320,
+          "high": 480
+        },
+        "sonar-pro": {
+          "fast": { "low": 240, "medium": 400, "high": 560 },
+          "pro": { "low": 560, "medium": 720, "high": 880 },
+          "auto": { "estimate": "pro" }
+        },
+        "sonar-reasoning-pro": {
+          "low": 240,
+          "medium": 400,
+          "high": 560
+        }
+      }
+    }
+  }
+}

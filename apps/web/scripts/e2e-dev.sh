@@ -12,7 +12,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if curl -sf "http://localhost:8000/health" >/dev/null 2>&1; then
+if curl -sf "http://127.0.0.1:8000/health" >/dev/null 2>&1; then
   API_PID=""
 else
   if command -v lsof >/dev/null 2>&1; then
@@ -31,11 +31,11 @@ else
   (cd "$API_DIR" && DATABASE_URL="sqlite+aiosqlite:///$E2E_DB_PATH" "$API_DIR/venv/bin/uvicorn" app.main:app --host 0.0.0.0 --port 8000) &
   API_PID=$!
 
-  until curl -sf "http://localhost:8000/health" >/dev/null 2>&1; do
+  until curl -sf "http://127.0.0.1:8000/health" >/dev/null 2>&1; do
     sleep 0.5
   done
 fi
 
 cd "$WEB_DIR"
-export NEXT_PUBLIC_API_URL="http://localhost:8000"
+export NEXT_PUBLIC_API_URL="http://127.0.0.1:8000"
 npm run dev -- --port 3001

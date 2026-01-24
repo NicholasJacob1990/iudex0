@@ -1,0 +1,45 @@
+name: RAG Advanced Smoke
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  rag-advanced-smoke:
+    runs-on: ubuntu-latest
+    env:
+      ENVIRONMENT: production
+      DEBUG: "false"
+      DATABASE_URL: sqlite+aiosqlite:///./iudex.db
+      SECRET_KEY: test-secret
+      JWT_SECRET_KEY: test-jwt-secret
+      GOOGLE_API_KEY: test-google-key
+      RAG_MULTI_QUERY_ENABLED: "true"
+      RAG_MULTI_QUERY_MAX: "3"
+      RAG_CONTEXT_COMPRESSION_ENABLED: "true"
+      RAG_PARENT_CHILD_ENABLED: "true"
+      RAG_CORRECTIVE_ENABLED: "true"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            apps/api/requirements.txt
+            apps/api/requirements-minimal.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r apps/api/requirements.txt
+
+      - name: Run RAG advanced smoke tests
+        run: |
+          pytest -q tests/test_rag_multi_query_corrective.py tests/test_rag_compress_parent_child.py

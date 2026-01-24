@@ -4,15 +4,47 @@ Configurações da aplicação usando Pydantic Settings
 
 from typing import List, Optional
 import os
+from pathlib import Path
+from dotenv import load_dotenv
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+def _resolve_env_file() -> Path:
+    """
+    Resolve which .env file to load.
+
+    Prefer an explicit IUDEX_ENV_FILE, otherwise try common monorepo locations:
+    - apps/api/app/.env (legacy)
+    - apps/api/.env
+    - repo root .env
+    """
+    override_path = os.getenv("IUDEX_ENV_FILE")
+    if override_path:
+        candidate = Path(override_path).expanduser()
+        if candidate.exists():
+            return candidate
+
+    candidates = [
+        Path(__file__).resolve().parents[2] / ".env",
+        Path(__file__).resolve().parents[3] / ".env",
+        Path(__file__).resolve().parents[5] / ".env",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+ENV_FILE = _resolve_env_file()
+if ENV_FILE.exists():
+    load_dotenv(ENV_FILE, override=False)
 
 
 class Settings(BaseSettings):
     """Configurações da aplicação"""
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -66,14 +98,14 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
-    # OpenAI
-    OPENAI_API_KEY: str
+    # OpenAI (opcional - usado como fallback)
+    OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     OPENAI_TEMPERATURE: float = 0.7
     OPENAI_MAX_TOKENS: int = 4000
     
-    # Anthropic (Claude)
-    ANTHROPIC_API_KEY: str
+    # Anthropic (Claude) - opcional
+    ANTHROPIC_API_KEY: Optional[str] = None
     # Use canonical id; provider name is resolved via model_registry.get_api_model_name()
     ANTHROPIC_MODEL: str = "claude-4.5-sonnet"
     ANTHROPIC_TEMPERATURE: float = 0.7
@@ -120,7 +152,7 @@ class Settings(BaseSettings):
     
     # Processamento de Áudio
     WHISPER_MODEL: str = "base"
-    AUDIO_MAX_SIZE_MB: int = 500
+    AUDIO_MAX_SIZE_MB: int = 4096
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
@@ -139,7 +171,20 @@ class Settings(BaseSettings):
     SENTRY_DSN: Optional[str] = None
     
     # Limites
-    MAX_UPLOAD_SIZE_MB: int = 500
+    MAX_UPLOAD_SIZE_MB: int = 4096
+
+    # Attachment context limits (chars ≈ tokens * 4)
+    ATTACHMENT_INJECTION_MAX_CHARS: int = 120000
+    ATTACHMENT_INJECTION_MAX_CHARS_PER_DOC: int = 40000
+    ATTACHMENT_INJECTION_MAX_FILES: int = 20
+    ATTACHMENT_RAG_LOCAL_MAX_FILES: int = 200
+    ATTACHMENT_RAG_LOCAL_TOP_K: int = 25
+    RAG_CONTEXT_MAX_CHARS: int = 20000
+    RAG_CONTEXT_MAX_CHARS_PROMPT_INJECTION: int = 40000
+    UPLOAD_CACHE_MIN_BYTES: int = 2 * 1024 * 1024
+    UPLOAD_CACHE_MIN_FILES: int = 4
+    MENTION_MAX_ITEMS: int = 10
+    MENTION_MAX_CONTENT_CHARS: int = 40000
     MAX_DOCUMENTS_PER_USER: int = 1000
     MAX_CONTEXT_TOKENS: int = 3000000
     
@@ -197,3 +242,21 @@ class Settings(BaseSettings):
 
 # Instância global de configurações
 settings = Settings()
+
+def _promote_settings_env() -> None:
+    """Ensure critical provider keys are available via os.getenv for legacy clients."""
+    key_map = {
+        "OPENAI_API_KEY": settings.OPENAI_API_KEY,
+        "ANTHROPIC_API_KEY": settings.ANTHROPIC_API_KEY,
+        "GOOGLE_API_KEY": settings.GOOGLE_API_KEY,
+        "GEMINI_API_KEY": settings.GEMINI_API_KEY,
+        "GOOGLE_CLOUD_PROJECT": settings.GOOGLE_CLOUD_PROJECT,
+        "VERTEX_AI_LOCATION": settings.VERTEX_AI_LOCATION,
+        "OPENROUTER_API_KEY": getattr(settings, "OPENROUTER_API_KEY", None),
+        "XAI_API_KEY": getattr(settings, "XAI_API_KEY", None),
+    }
+    for key, value in key_map.items():
+        if value and not os.getenv(key):
+            os.environ[key] = str(value)
+
+_promote_settings_env()

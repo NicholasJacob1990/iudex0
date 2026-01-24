@@ -35,6 +35,7 @@ class ModelConfig:
     api_model: str = ""  # Actual API model name if different from id
     supports_streaming: bool = True
     thinking_category: ThinkingCategory = "xml"  # NEW: How to implement thinking
+    max_output_tokens: int = 8192  # NEW: Max output tokens capability
 
 # =============================================================================
 # REGISTRY
@@ -55,15 +56,34 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="openai.svg",
-        api_model="gpt-5.2-chat-latest",
+        # Allow overriding the concrete provider model id via env.
+        # Default uses a widely available model to avoid "offline fallback" in local setups.
+        api_model=os.getenv("GPT_5_2_API_MODEL", "gpt-4o"),
         thinking_category="xml",  # Uses XML parsing
+        max_output_tokens=16384,
+    ),
+    "gpt-5.2-instant": ModelConfig(
+        id="gpt-5.2-instant",
+        provider="openai",
+        family="gpt-5",
+        label="GPT‑5.2 Instant",
+        context_window=400_000,
+        latency_tier="low",
+        cost_tier="medium",
+        capabilities=["chat", "tools", "high_volume"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="openai.svg",
+        api_model=os.getenv("GPT_5_2_INSTANT_API_MODEL", "gpt-4o-mini"),
+        thinking_category="agent",
     ),
     "gpt-5": ModelConfig(
         id="gpt-5",
         provider="openai",
         family="gpt-5",
         label="GPT‑5",
-        context_window=200_000,
+        context_window=400_000,
         latency_tier="medium",
         cost_tier="medium_high",
         capabilities=["chat", "code", "analysis"],
@@ -71,7 +91,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=True,
         icon="openai.svg",
-        api_model="gpt-5",
+        # Allow overriding the concrete provider model id via env.
+        api_model=os.getenv("GPT_5_API_MODEL", "gpt-4o"),
     ),
     "gpt-5-mini": ModelConfig(
         id="gpt-5-mini",
@@ -86,7 +107,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="openai.svg",
-        api_model="gpt-5-mini",
+        # Allow overriding the concrete provider model id via env.
+        api_model=os.getenv("GPT_5_MINI_API_MODEL", "gpt-4o-mini"),
         thinking_category="agent",  # Light model: use agent-based
     ),
     "gpt-4o": ModelConfig(
@@ -103,6 +125,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="openai.svg",
         api_model="gpt-4o",
+        max_output_tokens=16384,
     ),
 
     # ---------- XAI ----------
@@ -149,7 +172,22 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="xai.svg",
-        api_model=os.getenv("GROK_4_1_FAST_API_MODEL", "grok-4.1-fast"),
+        api_model=os.getenv("GROK_4_1_FAST_API_MODEL", "x-ai/grok-4.1-fast"),
+    ),
+    "grok-4.1": ModelConfig(
+        id="grok-4.1",
+        provider="xai",
+        family="grok-4",
+        label="Grok 4.1",
+        context_window=2_000_000,
+        latency_tier="medium",
+        cost_tier="medium",
+        capabilities=["chat", "analysis", "agents"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="xai.svg",
+        api_model=os.getenv("GROK_4_1_API_MODEL", "x-ai/grok-4.1"),
     ),
 
     # ---------- ANTHROPIC ----------
@@ -166,8 +204,10 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="anthropic.svg",
-        api_model="claude-opus-4-5@20250929",
+        # Allow overriding the concrete provider model id via env.
+        api_model=os.getenv("CLAUDE_4_5_OPUS_API_MODEL", "claude-opus-4-5"),
         thinking_category="xml",  # Opus uses XML parsing
+        max_output_tokens=8192,
     ),
     "claude-4.5-sonnet": ModelConfig(
         id="claude-4.5-sonnet",
@@ -182,8 +222,10 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=True,
         icon="anthropic.svg",
-        api_model="claude-sonnet-4-5@20250929",
+        # Allow overriding the concrete provider model id via env.
+        api_model=os.getenv("CLAUDE_4_5_SONNET_API_MODEL", "claude-sonnet-4-5"),
         thinking_category="native",  # Extended Thinking via API
+        max_output_tokens=8192,
     ),
     "claude-4.5-haiku": ModelConfig(
         id="claude-4.5-haiku",
@@ -198,7 +240,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="anthropic.svg",
-        api_model="claude-haiku-4-5@20250929",
+        # Allow overriding the concrete provider model id via env.
+        api_model=os.getenv("CLAUDE_4_5_HAIKU_API_MODEL", "claude-haiku-4-5"),
         thinking_category="agent",  # Light model: use agent-based
     ),
 
@@ -216,8 +259,9 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=True,
         icon="gemini.svg",
-        api_model=os.getenv("GEMINI_3_PRO_API_MODEL", "gemini-2.5-pro-preview-05-06"),
+        api_model=os.getenv("GEMINI_3_PRO_API_MODEL", "gemini-3-pro-preview"),
         thinking_category="native",  # Native include_thoughts API
+        max_output_tokens=8192,
     ),
     "gemini-3-flash": ModelConfig(
         id="gemini-3-flash",
@@ -232,8 +276,9 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="gemini.svg",
-        api_model=os.getenv("GEMINI_3_FLASH_API_MODEL", "gemini-2.0-flash"),
+        api_model=os.getenv("GEMINI_3_FLASH_API_MODEL", "gemini-3-flash-preview"),
         thinking_category="native",  # Native include_thoughts API (Gemini 2.0+ supports it)
+        max_output_tokens=8192,
     ),
     "gemini-2.5-pro": ModelConfig(
         id="gemini-2.5-pro",
@@ -248,7 +293,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="gemini.svg",
-        api_model="gemini-2.5-pro-preview-05-06",
+        api_model=os.getenv("GEMINI_2_5_PRO_API_MODEL", "gemini-2.5-pro"),
     ),
     "gemini-2.5-flash": ModelConfig(
         id="gemini-2.5-flash",
@@ -263,7 +308,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="gemini.svg",
-        api_model="gemini-2.5-flash-preview-05-20",
+        api_model=os.getenv("GEMINI_2_5_FLASH_API_MODEL", "gemini-2.5-flash"),
     ),
 
     # ---------- OPENROUTER / META ----------
@@ -282,6 +327,87 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         icon="meta.svg",
         api_model=os.getenv("LLAMA_4_API_MODEL", "meta-llama/llama-4-maverick"),
     ),
+    "llama-4-maverick-t": ModelConfig(
+        id="llama-4-maverick-t",
+        provider="openrouter",
+        family="llama-4",
+        label="Llama 4 Maverick T",
+        context_window=500_000,
+        latency_tier="medium",
+        cost_tier="medium",
+        capabilities=["chat", "analysis"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="meta.svg",
+        api_model=os.getenv("LLAMA_4_MAVERICK_T_API_MODEL", "meta-llama/llama-4-maverick-17b-128e-instruct-fp8"),
+    ),
+
+    # ---------- PERPLEXITY (SONAR) ----------
+    "sonar": ModelConfig(
+        id="sonar",
+        provider="perplexity",
+        family="sonar",
+        label="Sonar",
+        context_window=128_000,
+        latency_tier="medium",
+        cost_tier="medium",
+        capabilities=["chat", "web_grounded"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="perplexity.svg",
+        api_model="sonar",
+        thinking_category="none",
+    ),
+    "sonar-pro": ModelConfig(
+        id="sonar-pro",
+        provider="perplexity",
+        family="sonar",
+        label="Sonar Pro",
+        context_window=128_000,
+        latency_tier="medium",
+        cost_tier="high",
+        capabilities=["chat", "web_grounded"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="perplexity.svg",
+        api_model="sonar-pro",
+        thinking_category="none",
+    ),
+    "sonar-deep-research": ModelConfig(
+        id="sonar-deep-research",
+        provider="perplexity",
+        family="sonar",
+        label="Sonar Deep Research",
+        context_window=128_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "web_grounded", "deep_research"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="perplexity.svg",
+        api_model="sonar-deep-research",
+        thinking_category="none",
+    ),
+    "sonar-reasoning-pro": ModelConfig(
+        id="sonar-reasoning-pro",
+        provider="perplexity",
+        family="sonar",
+        label="Sonar Reasoning Pro",
+        context_window=128_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "web_grounded", "analysis"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="perplexity.svg",
+        api_model="sonar-reasoning-pro",
+        thinking_category="none",
+    ),
 
     # ---------- INTERNAL ----------
     "internal-rag": ModelConfig(
@@ -297,8 +423,9 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="iudex.svg",
-        api_model="gemini-2.5-flash-preview-05-20",
-        supports_streaming=False,
+        # Internamente roda como um agente RAG usando Gemini Flash no Vertex.
+        api_model=os.getenv("GEMINI_3_FLASH_API_MODEL", "gemini-3-flash-preview"),
+        supports_streaming=True,
     ),
 
     # ---------- OPEN-WEIGHT (opcional) ----------
@@ -457,5 +584,5 @@ def pick_model_for_job(purpose: str = "juridico", fast: bool = False, cheap: boo
 
 # Default models for different use cases
 DEFAULT_CHAT_MODEL = "gemini-3-flash"
-DEFAULT_JUDGE_MODEL = "gemini-3-pro"
-DEFAULT_DEBATE_MODELS = ["gpt-5.2", "claude-4.5-sonnet", "gemini-3-pro"]
+DEFAULT_JUDGE_MODEL = "gemini-3-flash"
+DEFAULT_DEBATE_MODELS = ["gpt-5.2", "claude-4.5-sonnet", "gemini-3-flash"]

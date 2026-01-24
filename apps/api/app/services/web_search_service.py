@@ -15,6 +15,9 @@ import httpx
 from bs4 import BeautifulSoup
 import re
 
+from app.services.api_call_tracker import record_api_call
+from app.services.ai.perplexity_config import normalize_perplexity_search_mode, normalize_float
+
 
 class WebSearchService:
     """Serviço de busca web com cache inteligente"""
@@ -46,15 +49,51 @@ class WebSearchService:
         query: str,
         num_results: int = 10,
         max_results: Optional[int] = None,
-        use_cache: bool = True
+        use_cache: bool = True,
+        # Perplexity-specific filters
+        country: Optional[str] = None,
+        search_region: Optional[str] = None,
+        search_city: Optional[str] = None,
+        search_latitude: Optional[object] = None,
+        search_longitude: Optional[object] = None,
+        domain_filter: Optional[List[str]] = None,
+        language_filter: Optional[List[str]] = None,
+        recency_filter: Optional[str] = None,
+        search_mode: Optional[str] = None,
+        # Date range filters (format: "m/d/yyyy")
+        search_after_date: Optional[str] = None,
+        search_before_date: Optional[str] = None,
+        # Last updated filters (format: "m/d/yyyy")
+        last_updated_after: Optional[str] = None,
+        last_updated_before: Optional[str] = None,
+        # Token controls
+        max_tokens: Optional[int] = None,
+        max_tokens_per_page: Optional[int] = None,
+        # Content options
+        return_images: bool = False,
+        return_videos: bool = False,
+        return_snippets: bool = True,
     ) -> Dict[str, Any]:
         """
-        Busca web com cache inteligente
+        Busca web com cache inteligente e suporte completo à Perplexity Search API.
         
         Args:
             query: Termo de busca
-            num_results: Número de resultados
+            num_results: Número de resultados (1-20)
             use_cache: Usar cache se disponível
+            country: Código ISO 3166-1 alpha-2 (ex: "BR", "US")
+            domain_filter: Lista de domínios (allowlist ou denylist com "-")
+            language_filter: Códigos ISO 639-1 (ex: ["pt", "en"])
+            recency_filter: "day", "week", "month", "year"
+            search_after_date: Data mínima de publicação (formato: "m/d/yyyy")
+            search_before_date: Data máxima de publicação (formato: "m/d/yyyy")
+            last_updated_after: Atualizado após (formato: "m/d/yyyy")
+            last_updated_before: Atualizado antes (formato: "m/d/yyyy")
+            max_tokens: Total de tokens de conteúdo (default: 25000, max: 1000000)
+            max_tokens_per_page: Tokens por página (default: 2048)
+            return_images: Incluir imagens nos resultados
+            return_videos: Incluir videos nos resultados
+            return_snippets: Incluir snippets de texto
             
         Returns:
             Dicionário com resultados
@@ -62,9 +101,24 @@ class WebSearchService:
         if max_results is not None:
             num_results = max_results
         logger.info(f"Buscando na web: '{query}'")
-        
-        # Verificar cache primeiro
-        if use_cache:
+
+        normalized_search_mode = normalize_perplexity_search_mode(search_mode)
+        normalized_latitude = normalize_float(search_latitude)
+        normalized_longitude = normalize_float(search_longitude)
+        normalized_region = (search_region or "").strip() or None
+        normalized_city = (search_city or "").strip() or None
+        # Verificar cache primeiro (apenas se não houver filtros avançados)
+        has_filters = any([
+            country, normalized_region, normalized_city,
+            normalized_latitude is not None, normalized_longitude is not None,
+            domain_filter, language_filter, recency_filter,
+            normalized_search_mode and normalized_search_mode != "web",
+            search_after_date, search_before_date,
+            last_updated_after, last_updated_before,
+            max_tokens, max_tokens_per_page, return_images, return_videos,
+            not return_snippets,
+        ])
+        if use_cache and not has_filters:
             cached_result = self._get_from_cache(query)
             if cached_result:
                 logger.info(f"Resultado encontrado no cache para '{query}'")
@@ -72,10 +126,30 @@ class WebSearchService:
         
         # Realizar busca real
         try:
-            results = await self._perform_search(query, num_results)
+            results = await self._perform_search(
+                query, num_results,
+                country=country,
+                search_region=normalized_region,
+                search_city=normalized_city,
+                search_latitude=normalized_latitude,
+                search_longitude=normalized_longitude,
+                domain_filter=domain_filter,
+                language_filter=language_filter,
+                recency_filter=recency_filter,
+                search_mode=normalized_search_mode,
+                search_after_date=search_after_date,
+                search_before_date=search_before_date,
+                last_updated_after=last_updated_after,
+                last_updated_before=last_updated_before,
+                max_tokens=max_tokens,
+                max_tokens_per_page=max_tokens_per_page,
+                return_images=return_images,
+                return_videos=return_videos,
+                return_snippets=return_snippets,
+            )
             
-            # Salvar no cache
-            if use_cache:
+            # Salvar no cache (apenas se não houver filtros)
+            if use_cache and not has_filters:
                 self._save_to_cache(query, results)
             
             return results
@@ -89,21 +163,59 @@ class WebSearchService:
                 "error": str(e)
             }
 
+    async def search_legal(
+        self,
+        query: str,
+        num_results: int = 10,
+        recency_filter: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Busca especializada para fontes jurídicas brasileiras.
+        
+        Usa filtro de domínio pré-configurado para tribunais e portais jurídicos.
+        """
+        legal_domains = [
+            "stf.jus.br",
+            "stj.jus.br",
+            "planalto.gov.br",
+            "trf1.jus.br",
+            "trf2.jus.br",
+            "trf3.jus.br",
+            "trf4.jus.br",
+            "trf5.jus.br",
+            "trf6.jus.br",
+            "cnj.jus.br",
+            "jusbrasil.com.br",
+            "conjur.com.br",
+        ]
+        
+        return await self.search(
+            query=query,
+            num_results=num_results,
+            use_cache=use_cache,
+            country="BR",
+            domain_filter=legal_domains,
+            language_filter=["pt"],
+            recency_filter=recency_filter,
+        )
+
     async def search_multi(
         self,
         query: str,
         num_results: int = 10,
         max_queries: int = 4,
-        use_cache: bool = True
+        use_cache: bool = True,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """Busca web com múltiplas variações de query (multi-query RAG)."""
         queries = plan_queries(query, max_queries=max_queries)
         if not queries:
-            return await self.search(query, num_results=num_results, use_cache=use_cache)
+            return await self.search(query, num_results=num_results, use_cache=use_cache, **kwargs)
 
         per_query = max(3, int(num_results / max(1, len(queries))))
         tasks = [
-            self.search(q, num_results=per_query, use_cache=use_cache)
+            self.search(q, num_results=per_query, use_cache=use_cache, **kwargs)
             for q in queries
         ]
 
@@ -120,8 +232,15 @@ class WebSearchService:
                 results.append({**item, "query": payload.get("query")})
 
         deduped = _dedupe_results(results)
-        source_candidates = {item.get("source") for item in deduped if item.get("source")}
-        source = "serper-multi" if "serper" in source_candidates else "duckduckgo-multi"
+        source_candidates = {str(item.get("source")) for item in deduped if item.get("source")}
+        if "perplexity" in source_candidates:
+            source = "perplexity-multi"
+        elif "serper" in source_candidates:
+            source = "serper-multi"
+        elif "duckduckgo" in source_candidates:
+            source = "duckduckgo-multi"
+        else:
+            source = "web-multi"
         return {
             "success": True,
             "query": query,
@@ -135,9 +254,60 @@ class WebSearchService:
     async def _perform_search(
         self,
         query: str,
-        num_results: int
+        num_results: int,
+        country: Optional[str] = None,
+        search_region: Optional[str] = None,
+        search_city: Optional[str] = None,
+        search_latitude: Optional[float] = None,
+        search_longitude: Optional[float] = None,
+        domain_filter: Optional[List[str]] = None,
+        language_filter: Optional[List[str]] = None,
+        recency_filter: Optional[str] = None,
+        search_mode: Optional[str] = None,
+        search_after_date: Optional[str] = None,
+        search_before_date: Optional[str] = None,
+        last_updated_after: Optional[str] = None,
+        last_updated_before: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        max_tokens_per_page: Optional[int] = None,
+        return_images: bool = False,
+        return_videos: bool = False,
+        return_snippets: bool = True,
     ) -> Dict[str, Any]:
-        """Realiza busca usando Serper (se configurado) com fallback no DuckDuckGo."""
+        """
+        Realiza busca usando Perplexity (principal) com fallback no Serper e DuckDuckGo.
+        
+        Chain: Perplexity (com retry) → Serper → DuckDuckGo → Fallback simulado
+        """
+        # 1. Tentar Perplexity primeiro (se configurado) com retry
+        perplexity_key = os.getenv("PERPLEXITY_API_KEY")
+        if perplexity_key:
+            try:
+                return await self._perform_perplexity_search_with_retry(
+                    query, num_results, perplexity_key,
+                    country=country,
+                    search_region=search_region,
+                    search_city=search_city,
+                    search_latitude=search_latitude,
+                    search_longitude=search_longitude,
+                    domain_filter=domain_filter,
+                    language_filter=language_filter,
+                    recency_filter=recency_filter,
+                    search_mode=search_mode,
+                    search_after_date=search_after_date,
+                    search_before_date=search_before_date,
+                    last_updated_after=last_updated_after,
+                    last_updated_before=last_updated_before,
+                    max_tokens=max_tokens,
+                    max_tokens_per_page=max_tokens_per_page,
+                    return_images=return_images,
+                    return_videos=return_videos,
+                    return_snippets=return_snippets,
+                )
+            except Exception as e:
+                logger.warning(f"Erro Perplexity após retries: {e}. Tentando Serper...")
+
+        # 2. Fallback para Serper
         serper_key = os.getenv("SERPER_API_KEY")
         if serper_key:
             try:
@@ -145,12 +315,259 @@ class WebSearchService:
             except Exception as e:
                 logger.error(f"Erro ao buscar no Serper: {e}. Fazendo fallback no DuckDuckGo.")
 
+        # 3. Fallback para DuckDuckGo
         try:
             return await self._perform_duckduckgo_search(query, num_results)
         except Exception as e:
             logger.error(f"Erro ao buscar no DuckDuckGo: {e}")
-            # Fallback para resultados simulados
+            # 4. Fallback para resultados simulados
             return self._generate_fallback_results(query, num_results)
+
+    async def _perform_perplexity_search_with_retry(
+        self,
+        query: str,
+        num_results: int,
+        api_key: str,
+        max_retries: int = 3,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Wrapper com retry e exponential backoff para Perplexity Search.
+        """
+        import random
+        
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return await self._perform_perplexity_search(
+                    query, num_results, api_key, **kwargs
+                )
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                
+                # Verificar se é rate limit
+                is_rate_limit = "rate" in error_str or "429" in error_str or "limit" in error_str
+                
+                if attempt < max_retries - 1:
+                    # Exponential backoff com jitter
+                    delay = (2 ** attempt) + random.uniform(0, 1)
+                    if is_rate_limit:
+                        delay *= 2  # Dobrar delay para rate limits
+                        logger.warning(f"Rate limit Perplexity. Retry {attempt + 1}/{max_retries} em {delay:.1f}s")
+                    else:
+                        logger.warning(f"Erro Perplexity: {e}. Retry {attempt + 1}/{max_retries} em {delay:.1f}s")
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error(f"Perplexity falhou após {max_retries} tentativas: {e}")
+        
+        raise last_error or Exception("Perplexity search failed")
+
+    async def _perform_perplexity_search(
+        self,
+        query: str,
+        num_results: int,
+        api_key: str,
+        country: Optional[str] = None,
+        search_region: Optional[str] = None,
+        search_city: Optional[str] = None,
+        search_latitude: Optional[float] = None,
+        search_longitude: Optional[float] = None,
+        domain_filter: Optional[List[str]] = None,
+        language_filter: Optional[List[str]] = None,
+        recency_filter: Optional[str] = None,
+        search_mode: Optional[str] = None,
+        search_after_date: Optional[str] = None,
+        search_before_date: Optional[str] = None,
+        last_updated_after: Optional[str] = None,
+        last_updated_before: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        max_tokens_per_page: Optional[int] = None,
+        return_images: bool = False,
+        return_videos: bool = False,
+        return_snippets: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Realiza busca usando Perplexity Search API com suporte completo a todos os filtros.
+        
+        Args:
+            query: Termo de busca
+            num_results: Número máximo de resultados (1-20)
+            api_key: Chave da API Perplexity
+            country: Código ISO 3166-1 alpha-2 (ex: "BR", "US")
+            search_region: Região/estado para geolocalização (ex: "SP")
+            search_city: Cidade para geolocalização (ex: "São Paulo")
+            search_latitude: Latitude para geolocalização
+            search_longitude: Longitude para geolocalização
+            domain_filter: Lista de domínios (ex: ["stf.jus.br"] ou ["-pinterest.com"])
+            language_filter: Códigos ISO 639-1 (ex: ["pt", "en"])
+            recency_filter: "day", "week", "month", "year"
+            search_mode: "web", "academic" ou "sec"
+            search_after_date: Data mínima de publicação (formato: "m/d/yyyy")
+            search_before_date: Data máxima de publicação (formato: "m/d/yyyy")
+            last_updated_after: Atualizado após (formato: "m/d/yyyy")
+            last_updated_before: Atualizado antes (formato: "m/d/yyyy")
+            max_tokens: Total de tokens (default: 25000, max: 1000000)
+            max_tokens_per_page: Tokens por página (default: 2048)
+            return_images: Incluir imagens nos resultados
+            return_videos: Incluir videos nos resultados
+            return_snippets: Incluir snippets de texto
+        """
+        try:
+            from perplexity import AsyncPerplexity
+        except ImportError:
+            logger.error("Pacote perplexityai não instalado. Execute: pip install perplexityai")
+            raise
+
+        client = AsyncPerplexity(api_key=api_key)
+        
+        normalized_search_mode = normalize_perplexity_search_mode(search_mode)
+
+        # Preparar parâmetros base
+        params = {
+            "query": query,
+            "max_results": min(num_results, 20),  # API limita a 20
+        }
+        extra_body: Dict[str, Any] = {}
+
+        if normalized_search_mode:
+            params["search_mode"] = normalized_search_mode
+        
+        # Filtros geográficos e de domínio
+        if country:
+            params["country"] = country.upper()
+
+        if search_region:
+            extra_body["search_region"] = search_region
+
+        if search_city:
+            extra_body["search_city"] = search_city
+
+        if search_latitude is not None and search_longitude is not None:
+            extra_body["search_latitude"] = float(search_latitude)
+            extra_body["search_longitude"] = float(search_longitude)
+        
+        if domain_filter:
+            params["search_domain_filter"] = domain_filter[:20]  # Max 20 domínios
+        
+        if language_filter:
+            params["search_language_filter"] = language_filter[:10]  # Max 10 idiomas
+        
+        # Filtros de recência (mutuamente exclusivo com datas específicas)
+        if (search_after_date or search_before_date) and recency_filter:
+            recency_filter = None
+        if recency_filter and recency_filter in ("day", "week", "month", "year"):
+            params["search_recency_filter"] = recency_filter
+        
+        # Filtros de data de publicação (formato: "m/d/yyyy")
+        if search_after_date:
+            extra_body["search_after_date"] = search_after_date
+            extra_body["search_after_date_filter"] = search_after_date
+        
+        if search_before_date:
+            extra_body["search_before_date"] = search_before_date
+            extra_body["search_before_date_filter"] = search_before_date
+        
+        # Filtros de última atualização
+        if last_updated_after:
+            params["last_updated_after_filter"] = last_updated_after
+        
+        if last_updated_before:
+            params["last_updated_before_filter"] = last_updated_before
+        
+        # Controles de token
+        if max_tokens is not None:
+            params["max_tokens"] = min(max(1, max_tokens), 1000000)
+        
+        if max_tokens_per_page is not None:
+            params["max_tokens_per_page"] = max(1, max_tokens_per_page)
+        
+        # Opções de conteúdo
+        if return_images:
+            extra_body["return_images"] = True
+
+        if return_videos:
+            extra_body["return_videos"] = True
+        
+        if return_snippets is not None:
+            extra_body["return_snippets"] = bool(return_snippets)
+
+        log_payload = dict(params)
+        if extra_body:
+            log_payload["extra_body"] = extra_body
+        logger.info(f"Perplexity search: {query} (params: {log_payload})")
+
+        try:
+            create_kwargs = dict(params)
+            if extra_body:
+                create_kwargs["extra_body"] = extra_body
+            search = await client.search.create(**create_kwargs)
+            record_api_call(
+                kind="web_search",
+                provider="perplexity",
+                success=True,
+            )
+        except Exception:
+            record_api_call(
+                kind="web_search",
+                provider="perplexity",
+                success=False,
+            )
+            raise
+        
+        # Converter para formato padrão - capturar todos os campos disponíveis
+        results = []
+        for idx, item in enumerate(search.results or []):
+            # Campos básicos documentados pela API
+            result_item = {
+                "title": getattr(item, "title", "") or "",
+                "url": getattr(item, "url", "") or "",
+                "snippet": getattr(item, "snippet", "") or "",
+                "date": getattr(item, "date", None),
+                "last_updated": getattr(item, "last_updated", None),
+                "source": "perplexity",
+            }
+            
+            # Score/relevância (se disponível no SDK)
+            score = getattr(item, "score", None) or getattr(item, "relevance", None)
+            if score is not None:
+                result_item["score"] = score
+            else:
+                # Usar posição como proxy para relevância (primeiro = mais relevante)
+                result_item["score"] = 1.0 - (idx * 0.05)  # 1.0, 0.95, 0.90...
+            
+            # Conteúdo extraído (se disponível - controlado por max_tokens_per_page)
+            content = (
+                getattr(item, "content", None) 
+                or getattr(item, "extracted_text", None)
+                or getattr(item, "page_content", None)
+                or getattr(item, "text", None)
+            )
+            if content:
+                result_item["content"] = content
+            
+            # Imagens se disponíveis
+            images = getattr(item, "images", None)
+            if images:
+                result_item["images"] = images
+            
+            # Metadados adicionais que possam existir
+            for extra_field in ["author", "domain", "language", "word_count"]:
+                value = getattr(item, extra_field, None)
+                if value is not None:
+                    result_item[extra_field] = value
+            
+            results.append(result_item)
+        
+        return {
+            "success": True,
+            "query": query,
+            "total": len(results),
+            "results": results[:num_results],
+            "source": "perplexity",
+            "cached": False,
+            "search_id": getattr(search, "id", None),
+        }
 
     def _merge_locale_results(
         self,
@@ -204,20 +621,38 @@ class WebSearchService:
         serper_url = "https://google.serper.dev/search"
         payload = {"q": query, "num": num_results, "gl": gl, "hl": hl}
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                serper_url,
-                json=payload,
-                headers={
-                    "X-API-KEY": api_key,
-                    "Content-Type": "application/json",
-                },
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    serper_url,
+                    json=payload,
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception:
+            record_api_call(
+                kind="web_search",
+                provider="serper",
+                success=False,
             )
+            raise
 
         if response.status_code != 200:
+            record_api_call(
+                kind="web_search",
+                provider="serper",
+                success=False,
+            )
             raise Exception(f"Serper retornou status {response.status_code}")
 
         data = response.json()
+        record_api_call(
+            kind="web_search",
+            provider="serper",
+            success=True,
+        )
         results = []
         for item in data.get("organic", []) or []:
             results.append({
@@ -277,18 +712,36 @@ class WebSearchService:
     ) -> List[Dict[str, Any]]:
         ddg_url = "https://html.duckduckgo.com/html/"
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                ddg_url,
-                data={"q": query, "kl": kl},
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                }
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.post(
+                    ddg_url,
+                    data={"q": query, "kl": kl},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    }
+                )
+        except Exception:
+            record_api_call(
+                kind="web_search",
+                provider="duckduckgo",
+                success=False,
             )
+            raise
 
         if response.status_code != 200:
+            record_api_call(
+                kind="web_search",
+                provider="duckduckgo",
+                success=False,
+            )
             raise Exception(f"DuckDuckGo retornou status {response.status_code}")
 
+        record_api_call(
+            kind="web_search",
+            provider="duckduckgo",
+            success=True,
+        )
         return self._parse_duckduckgo_html(response.text, num_results)
 
     async def _perform_duckduckgo_search(

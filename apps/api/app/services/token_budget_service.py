@@ -22,8 +22,33 @@ class TokenBudgetService:
         self._client = None
         if GENAI_AVAILABLE:
             try:
-                self._client = genai.Client()
-                logger.info("✅ TokenBudgetService: Gemini client initialized for precise token counting")
+                # Vertex AI Config
+                project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+                location = os.getenv("VERTEX_AI_LOCATION", "global")
+                auth_mode = (os.getenv("IUDEX_GEMINI_AUTH") or "auto").strip().lower()
+                
+                use_vertex = False
+                if auth_mode in ("vertex", "vertexai", "gcp"):
+                    use_vertex = True
+                elif auth_mode in ("apikey", "api_key"):
+                    use_vertex = False
+                else: 
+                     # Auto: prefer Vertex if project is set
+                     use_vertex = bool(project_id)
+
+                if use_vertex and project_id:
+                     self._client = genai.Client(
+                        vertexai=True,
+                        project=project_id,
+                        location=location
+                     )
+                     logger.info(f"✅ TokenBudgetService: Connected via Vertex AI ({location})")
+                else:
+                     # Fallback to API Key (default)
+                     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+                     self._client = genai.Client(api_key=api_key)
+                     logger.info("✅ TokenBudgetService: Connected via Google AI Studio (API Key)")
+
             except Exception as e:
                 logger.warning(f"Could not initialize Gemini client: {e}")
 

@@ -40,6 +40,8 @@ from app.services.ai.model_registry import (
     get_model_config,
     get_api_model_name,
 )
+from app.services.api_call_tracker import billing_context
+from app.services.job_manager import job_manager
 
 
 # =============================================================================
@@ -60,6 +62,7 @@ class DebateSectionState(TypedDict):
     # Optional formatting/meta
     formatting_options: Optional[Dict[str, Any]]
     template_structure: Optional[str]
+    job_id: Optional[str]
     
     # API Clients (injected)
     gpt_client: Any
@@ -68,6 +71,7 @@ class DebateSectionState(TypedDict):
     gpt_model: str
     claude_model: str
     judge_model: str
+    temperature: float
     
     # Reflection Control
     retries: int 
@@ -107,7 +111,16 @@ class DebateSectionState(TypedDict):
 # HELPER FUNCTIONS
 # =============================================================================
 
-async def call_gpt_async(client, prompt: str, model: str, system: str = None) -> str:
+async def call_gpt_async(
+    client,
+    prompt: str,
+    model: str,
+    system: str = None,
+    temperature: float = 0.3,
+    *,
+    billing_node: Optional[str] = None,
+    billing_size: Optional[str] = None,
+) -> str:
     """Call GPT with timeout and error handling"""
     from app.services.ai.agent_clients import call_openai_async
     
@@ -115,14 +128,24 @@ async def call_gpt_async(client, prompt: str, model: str, system: str = None) ->
         prompt = f"{system}\n\n{prompt}"
     
     try:
-        result = await call_openai_async(client, prompt, model=model, timeout=90)
-        return result or ""
+        with billing_context(node=billing_node, size=billing_size):
+            result = await call_openai_async(client, prompt, model=model, temperature=temperature, timeout=90)
+            return result or ""
     except Exception as e:
         logger.error(f"GPT call failed: {e}")
         return f"[GPT Error: {e}]"
 
 
-async def call_claude_async(client, prompt: str, model: str, system: str = None) -> str:
+async def call_claude_async(
+    client,
+    prompt: str,
+    model: str,
+    system: str = None,
+    temperature: float = 0.3,
+    *,
+    billing_node: Optional[str] = None,
+    billing_size: Optional[str] = None,
+) -> str:
     """Call Claude with timeout and error handling"""
     from app.services.ai.agent_clients import call_anthropic_async
     
@@ -130,8 +153,9 @@ async def call_claude_async(client, prompt: str, model: str, system: str = None)
         prompt = f"{system}\n\n{prompt}"
     
     try:
-        result = await call_anthropic_async(client, prompt, model=model, timeout=90)
-        return result or ""
+        with billing_context(node=billing_node, size=billing_size):
+            result = await call_anthropic_async(client, prompt, model=model, temperature=temperature, timeout=90)
+            return result or ""
     except Exception as e:
         logger.error(f"Claude call failed: {e}")
         return f"[Claude Error: {e}]"
@@ -143,7 +167,9 @@ async def _call_model_any_async(
     *,
     system_instruction: Optional[str] = None,
     temperature: float = 0.2,
-    max_tokens: int = 2000
+    max_tokens: int = 2000,
+    billing_node: Optional[str] = None,
+    billing_size: Optional[str] = None,
 ) -> str:
     if not model_id:
         return ""
@@ -169,63 +195,76 @@ async def _call_model_any_async(
         client = init_openai_client()
         if not client:
             return ""
-        return await call_openai_async(
-            client,
-            prompt,
-            model=api_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_instruction=system_instruction
-        ) or ""
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_openai_async(
+                client,
+                prompt,
+                model=api_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction
+            ) or ""
     if cfg.provider == "anthropic":
         client = init_anthropic_client()
         if not client:
             return ""
-        return await call_anthropic_async(
-            client,
-            prompt,
-            model=api_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_instruction=system_instruction
-        ) or ""
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_anthropic_async(
+                client,
+                prompt,
+                model=api_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction
+            ) or ""
     if cfg.provider == "google":
         client = get_gemini_client()
         if not client:
             return ""
-        return await call_vertex_gemini_async(
-            client,
-            prompt,
-            model=model_id,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_instruction=system_instruction
-        ) or ""
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_vertex_gemini_async(
+                client,
+                prompt,
+                model=model_id,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction
+            ) or ""
     if cfg.provider == "xai":
         client = init_xai_client()
         if not client:
             return ""
-        return await call_openai_async(
-            client,
-            prompt,
-            model=api_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_instruction=system_instruction
-        ) or ""
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_openai_async(
+                client,
+                prompt,
+                model=api_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction
+            ) or ""
     if cfg.provider == "openrouter":
         client = init_openrouter_client()
         if not client:
             return ""
-        return await call_openai_async(
-            client,
-            prompt,
-            model=api_model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system_instruction=system_instruction
-        ) or ""
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_openai_async(
+                client,
+                prompt,
+                model=api_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system_instruction=system_instruction
+            ) or ""
     return ""
+
+def _resolve_temperatures(state: DebateSectionState) -> Tuple[float, float]:
+    try:
+        base = float(state.get("temperature", 0.3))
+    except (TypeError, ValueError):
+        base = 0.3
+    base = max(0.0, min(1.0, base))
+    return base, min(base, 0.3)
 
 
 # =============================================================================
@@ -235,7 +274,17 @@ async def _call_model_any_async(
 async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     """R1: GPT generates initial draft (Critic perspective)"""
     logger.info(f"🤖 [R1-GPT] Drafting: {state['section_title']} (Retry: {state['retries']})")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "draft"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="gpt",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     # Get document type specific instructions
     instrucoes = get_document_instructions(state['mode'])
@@ -254,7 +303,10 @@ async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
         state['gpt_client'], 
         prompt, 
         state.get('gpt_model', 'gpt-4o'),
-        system=system
+        system=system,
+        temperature=draft_temperature,
+        billing_node="section_draft",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -270,7 +322,17 @@ async def gpt_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
 async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
     """R1: Claude generates initial draft (Defense perspective)"""
     logger.info(f"🤖 [R1-Claude] Drafting: {state['section_title']} (Retry: {state['retries']})")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "draft"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="claude",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     t_sys = Template(PROMPT_CLAUDE_SYSTEM)
@@ -286,7 +348,10 @@ async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
         state['claude_client'], 
         prompt, 
         state.get('claude_model', 'claude-4.5-sonnet'),
-        system=system
+        system=system,
+        temperature=draft_temperature,
+        billing_node="section_draft",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -302,7 +367,17 @@ async def claude_draft_v1_node(state: DebateSectionState) -> DebateSectionState:
 async def gemini_blind_node(state: DebateSectionState) -> DebateSectionState:
     """R1: Judge generates independent draft (Blind Judge - doesn't see others)"""
     logger.info(f"🤖 [R1-Judge] Blind Draft: {state['section_title']}")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "draft"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="judge",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     # Judge (Blind) usually runs once; we re-run with feedback to align with retries.
     
@@ -319,8 +394,10 @@ async def gemini_blind_node(state: DebateSectionState) -> DebateSectionState:
         judge_model,
         prompt_content,
         system_instruction=system,
-        temperature=0.3,
-        max_tokens=2000
+        temperature=draft_temperature,
+        max_tokens=2000,
+        billing_node="section_draft",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -340,7 +417,17 @@ async def gemini_blind_node(state: DebateSectionState) -> DebateSectionState:
 async def gpt_critique_node(state: DebateSectionState) -> DebateSectionState:
     """R2: GPT critiques Claude's draft"""
     logger.info(f"💬 [R2-GPT] Critiquing Claude's draft")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "critique"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="gpt",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     t = Template(PROMPT_CRITICA)
@@ -355,7 +442,10 @@ async def gpt_critique_node(state: DebateSectionState) -> DebateSectionState:
     critique = await call_gpt_async(
         state['gpt_client'], 
         prompt, 
-        state.get('gpt_model', 'gpt-4o')
+        state.get('gpt_model', 'gpt-4o'),
+        temperature=review_temperature,
+        billing_node="section_critique",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -371,7 +461,17 @@ async def gpt_critique_node(state: DebateSectionState) -> DebateSectionState:
 async def claude_critique_node(state: DebateSectionState) -> DebateSectionState:
     """R2: Claude critiques GPT's draft"""
     logger.info(f"💬 [R2-Claude] Critiquing GPT's draft")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "critique"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="claude",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     t = Template(PROMPT_CRITICA)
@@ -386,7 +486,10 @@ async def claude_critique_node(state: DebateSectionState) -> DebateSectionState:
     critique = await call_claude_async(
         state['claude_client'], 
         prompt, 
-        state.get('claude_model', 'claude-4.5-sonnet')
+        state.get('claude_model', 'claude-4.5-sonnet'),
+        temperature=review_temperature,
+        billing_node="section_critique",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -406,7 +509,17 @@ async def claude_critique_node(state: DebateSectionState) -> DebateSectionState:
 async def gpt_revise_node(state: DebateSectionState) -> DebateSectionState:
     """R3: GPT revises its draft based on Claude's critique"""
     logger.info(f"✏️ [R3-GPT] Revising based on Claude's critique")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "revise"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="gpt",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     t = Template(PROMPT_REVISAO)
@@ -422,7 +535,10 @@ async def gpt_revise_node(state: DebateSectionState) -> DebateSectionState:
     revised = await call_gpt_async(
         state['gpt_client'], 
         prompt, 
-        state.get('gpt_model', 'gpt-4o')
+        state.get('gpt_model', 'gpt-4o'),
+        temperature=draft_temperature,
+        billing_node="section_revision",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -438,7 +554,17 @@ async def gpt_revise_node(state: DebateSectionState) -> DebateSectionState:
 async def claude_revise_node(state: DebateSectionState) -> DebateSectionState:
     """R3: Claude revises its draft based on GPT's critique"""
     logger.info(f"✏️ [R3-Claude] Revising based on GPT's critique")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "revise"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="claude",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     t = Template(PROMPT_REVISAO)
@@ -454,7 +580,10 @@ async def claude_revise_node(state: DebateSectionState) -> DebateSectionState:
     revised = await call_claude_async(
         state['claude_client'], 
         prompt, 
-        state.get('claude_model', 'claude-4.5-sonnet')
+        state.get('claude_model', 'claude-4.5-sonnet'),
+        temperature=draft_temperature,
+        billing_node="section_revision",
+        billing_size="M",
     )
     
     latency = int((time.time() - start) * 1000)
@@ -475,7 +604,17 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
     """R4: Judge model consolidates all versions"""
     judge_model = state.get("judge_model", "claude-4.5-opus")
     logger.info(f"⚖️ [R4-Judge] Consolidating: {state['section_title']} using {judge_model}")
+    if state.get("job_id"):
+        job_manager.emit_event(
+            state.get("job_id"),
+            "section_stage",
+            {"stage": "merge"},
+            phase="debate",
+            section=state.get("section_title"),
+            agent="judge",
+        )
     start = time.time()
+    draft_temperature, review_temperature = _resolve_temperatures(state)
     
     instrucoes = get_document_instructions(state['mode'])
     
@@ -524,8 +663,10 @@ async def judge_merge_node(state: DebateSectionState) -> DebateSectionState:
         judge_model,
         prompt,
         system_instruction=system,
-        temperature=0.2,
-        max_tokens=2000
+        temperature=review_temperature,
+        max_tokens=2000,
+        billing_node="section_judge",
+        billing_size="S",
     )
     
     # Parse JSON
@@ -773,15 +914,25 @@ async def run_debate_for_section(
     gpt_model: str = "gpt-4o",
     claude_model: str = "claude-4.5-sonnet", # Updated default
     judge_model: str = "claude-4.5-opus",    # Updated default
+    temperature: float = 0.3,
     previous_sections: List[str] = None,  
     previous_sections_excerpts: Optional[str] = None,
     formatting_options: Optional[Dict[str, Any]] = None,
-    template_structure: Optional[str] = None
+    template_structure: Optional[str] = None,
+    max_retries: Optional[int] = None,
+    job_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Convenience function to run the full debate for one section.
     Returns the final state with merged_content, divergencias, and drafts.
     """
+
+    max_retries_value = 2
+    if max_retries is not None:
+        try:
+            max_retries_value = max(0, int(max_retries))
+        except (TypeError, ValueError):
+            max_retries_value = 2
     
     initial_state = DebateSectionState(
         section_title=section_title,
@@ -794,14 +945,16 @@ async def run_debate_for_section(
         previous_sections_excerpts=previous_sections_excerpts,
         formatting_options=formatting_options,
         template_structure=template_structure,
+        job_id=job_id,
         gpt_client=gpt_client,
         claude_client=claude_client,
         drafter=drafter,
         gpt_model=gpt_model,
         claude_model=claude_model,
         judge_model=judge_model,
+        temperature=temperature,
         retries=0,
-        max_retries=2, # Allow 2 retries (total 3 attempts)
+        max_retries=max_retries_value, # Allow N retries (total N+1 attempts)
         judge_feedback=None,
         retry_reason=None,
         draft_gpt_v1=None,

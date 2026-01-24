@@ -1,0 +1,34 @@
+{
+  "success": true,
+  "query": "oi resumo",
+  "total": 4,
+  "results": [
+    {
+      "title": "Resumo da última conta - Oi",
+      "url": "https://www.oi.com.br/minha-oi/resumo-ultima-conta/",
+      "snippet": "Consulte oresumoda sua última conta daOi",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "De fracasso em fracasso: a inevitável agonia da Oi, por Marcos Dantas",
+      "url": "https://jornalggn.com.br/artigos/de-fracasso-em-fracasso-a-inevitavel-agonia-da-oi-por-marcos-dantas/",
+      "snippet": "Resumoda notícia Em 1998, artigo já previa inviabilidade econômica da Tele Centro-Sul e Norte-Leste, hojeOi, diante da privatização da Telebrás. Fusão Telemar/Brasil Telecom em 2008 não resolveu problemas estruturais;Oientrou em crise e passou por recuperação judicial.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Resume.io",
+      "url": "https://resume.io/",
+      "snippet": "We would like to show you a description here but the site won't allow us.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Oi (empresa) - Wikipédia, a enciclopédia livre",
+      "url": "https://pt.wikipedia.org/wiki/Oi_(empresa)",
+      "snippet": "Oi, anteriormente conhecida como Telemar, [3] é uma empresa que atua no segmento de telecomunicações no Brasil. [4] É a terceira maior operadora de telefonia fixa e até então uma das maiores empresas do setor de telecomunicações na América do Sul. [5][6][7][8] Atuava no país inteiro além de possuir um instituto de inovação e criatividade para impacto social, o InstitutoOiFuturo ...",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-01-17T01:11:56.141105"
+}

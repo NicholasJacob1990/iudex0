@@ -6,7 +6,9 @@ export const runtime = 'nodejs';
 // This avoids cross-origin redirects and ensures Authorization headers are preserved.
 function getTargetBase(): string {
   // Points to backend root (without /api). Keep in sync with next.config.js default.
-  return process.env.API_PROXY_TARGET || 'http://localhost:8000';
+  // Use 127.0.0.1 by default to avoid localhost -> IPv6 (::1) resolution issues
+  // when the backend is bound only on IPv4 (e.g. 0.0.0.0).
+  return process.env.API_PROXY_TARGET || 'http://127.0.0.1:8000';
 }
 
 function filterRequestHeaders(headers: Headers): Headers {
@@ -16,6 +18,8 @@ function filterRequestHeaders(headers: Headers): Headers {
   out.delete('connection');
   out.delete('content-length');
   out.delete('accept-encoding');
+  // Force identity to avoid compressed bodies (proxy passes through raw bytes).
+  out.set('accept-encoding', 'identity');
   return out;
 }
 
@@ -29,54 +33,100 @@ function filterResponseHeaders(headers: Headers): Headers {
 }
 
 async function proxy(request: NextRequest, pathParts: string[]) {
-  const targetBase = getTargetBase().replace(/\/+$/, '');
-  const targetPath = pathParts.map(encodeURIComponent).join('/');
-  const url = new URL(`${targetBase}/api/${targetPath}`);
-  // Preserve querystring
-  request.nextUrl.searchParams.forEach((value, key) => {
-    url.searchParams.append(key, value);
-  });
+  try {
+    const targetBase = getTargetBase().replace(/\/+$/, '');
+    const normalizedParts = Array.isArray(pathParts) ? pathParts : String(pathParts || '').split('/').filter(Boolean);
+    const targetPath = normalizedParts.map(encodeURIComponent).join('/');
+    const url = new URL(`${targetBase}/api/${targetPath}`);
+    // Preserve querystring
+    request.nextUrl.searchParams.forEach((value, key) => {
+      url.searchParams.append(key, value);
+    });
 
-  const method = request.method.toUpperCase();
-  const headers = filterRequestHeaders(request.headers);
+    const method = request.method.toUpperCase();
+    const headers = filterRequestHeaders(request.headers);
 
-  const init: RequestInit = {
-    method,
-    headers,
-    // @ts-expect-error duplex is required by Node for streaming request bodies in some runtimes
-    duplex: 'half',
-    // Avoid automatic redirect retries that can fail for buffered bodies.
-    redirect: 'manual',
-  };
+    const hasBody = method !== 'GET' && method !== 'HEAD';
+    const contentLength = request.headers.get('content-length');
+    const transferEncoding = request.headers.get('transfer-encoding');
+    const hasData = hasBody && ((contentLength && parseInt(contentLength) > 0) || transferEncoding === 'chunked');
 
-  const bodyBuf = (method !== 'GET' && method !== 'HEAD') ? await request.arrayBuffer() : null;
-  if (method !== 'GET' && method !== 'HEAD') {
-    init.body = bodyBuf as ArrayBuffer;
-  }
+    console.log(`[Proxy] ${method} ${url.toString()} - Start`);
+    console.log(`[Proxy] Reading body? ${hasData} (CL: ${contentLength}, TE: ${transferEncoding})`);
 
-  let res = await fetch(url.toString(), init);
-  // Follow a single redirect manually (common in FastAPI when trailing slashes differ).
-  if ([301, 302, 303, 307, 308].includes(res.status)) {
-    const loc = res.headers.get('location');
-    if (loc) {
-      const redirected = new URL(loc, url);
-      const redirectedInit: RequestInit = {
-        ...init,
-        // Per RFC, 303 should switch to GET
-        method: res.status === 303 ? 'GET' : init.method,
-        body: res.status === 303 ? undefined : (bodyBuf as ArrayBuffer | null),
-      };
-      res = await fetch(redirected.toString(), redirectedInit);
+    // Buffer once (keeps request retry-safe for redirects).
+    let bodyBytes = null;
+    if (hasData) {
+      try {
+        console.log('[Proxy] Awaiting arrayBuffer...');
+        bodyBytes = new Uint8Array(await request.arrayBuffer());
+        console.log(`[Proxy] Body read: ${bodyBytes.length} bytes`);
+      } catch (e) {
+        console.error('[Proxy] Error reading body:', e);
+      }
     }
-  }
-  const resHeaders = filterResponseHeaders(res.headers);
 
-  // Stream through (works for SSE too).
-  return new Response(res.body, {
-    status: res.status,
-    statusText: res.statusText,
-    headers: resHeaders,
-  });
+    const makeInit = (overrideMethod?: string): RequestInit => {
+      const m = (overrideMethod || method).toUpperCase();
+      const includeBody = m !== 'GET' && m !== 'HEAD';
+      return {
+        method: m,
+        headers,
+        // Avoid automatic redirect retries that can fail for buffered bodies.
+        redirect: 'manual',
+        // Note: do not set `duplex` here; Next's patched fetch can throw if an unsupported option is present.
+        body: includeBody && bodyBytes ? Buffer.from(bodyBytes) : undefined,
+        cache: 'no-store',
+      };
+    };
+
+    console.log(`[Proxy] ${method} ${url.toString()} - Start`);
+    const init = makeInit();
+    console.log(`[Proxy] Init:`, JSON.stringify({ ...init, body: init.body ? '[Body]' : null }));
+
+    // Add timeout to prevent indefinite hanging
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 30000); // 30s timeout
+    init.signal = controller.signal;
+
+    let res;
+    try {
+      res = await fetch(url.toString(), init);
+    } finally {
+      clearTimeout(id);
+    }
+    console.log(`[Proxy] Response: ${res.status} ${res.statusText}`);
+    // Follow a single redirect manually (common in FastAPI when trailing slashes differ).
+    if ([301, 302, 303, 307, 308].includes(res.status)) {
+      const loc = res.headers.get('location');
+      if (loc) {
+        const redirected = new URL(loc, url);
+        // Per RFC, 303 should switch to GET
+        const redirectedMethod = res.status === 303 ? 'GET' : method;
+        res = await fetch(redirected.toString(), makeInit(redirectedMethod));
+      }
+    }
+    const resHeaders = filterResponseHeaders(res.headers);
+    // For SSE: disable buffering in common reverse proxies.
+    if (resHeaders.get('content-type')?.includes('text/event-stream')) {
+      resHeaders.set('cache-control', 'no-cache, no-transform');
+      resHeaders.set('x-accel-buffering', 'no');
+      resHeaders.set('connection', 'keep-alive');
+    }
+
+    // Stream through (works for SSE too).
+    return new Response(res.body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: resHeaders,
+    });
+  } catch (err) {
+    console.error('API proxy error', err);
+    return new Response(JSON.stringify({ error: 'API proxy error', detail: String((err as any)?.message || err) }), {
+      status: 502,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
 }
 
 export async function GET(request: NextRequest, { params }: { params: { path: string[] } }) {
@@ -97,4 +147,3 @@ export async function DELETE(request: NextRequest, { params }: { params: { path:
 export async function OPTIONS(request: NextRequest, { params }: { params: { path: string[] } }) {
   return proxy(request, params.path || []);
 }
-

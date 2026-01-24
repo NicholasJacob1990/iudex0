@@ -3,6 +3,7 @@ Aplicação FastAPI principal
 """
 
 from contextlib import asynccontextmanager
+import asyncio
 from typing import AsyncGenerator
 
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from app.api.routes import api_router
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging import setup_logging
+from app.services.api_call_tracker import set_background_loop
 
 
 @asynccontextmanager
@@ -32,6 +34,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Inicializar banco de dados
     await init_db()
     logger.info("✅ Banco de dados inicializado")
+
+    # Registrar loop principal para persistência de uso de API
+    set_background_loop(asyncio.get_running_loop())
     
     # Inicializar Redis
     # await init_redis()

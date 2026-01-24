@@ -11,6 +11,7 @@ from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from app.services.docs_utils import save_as_word_juridico
 from app.services.ai.genai_utils import extract_genai_text
+from app.services.api_call_tracker import record_api_call
 
 # Logger precisa existir antes de qualquer try/except que o use
 logger = logging.getLogger("AuditService")
@@ -27,6 +28,11 @@ try:
 except ImportError:
     logger.warning("⚠️ Não foi possível importar audit_juridico da raiz. Usando lógica de fallback.")
     audit_document_text = None
+try:
+    from audit_module import auditar_consistencia_legal
+except ImportError:
+    logger.warning("⚠️ Não foi possível importar audit_module da raiz. Auditoria CLI indisponível.")
+    auditar_consistencia_legal = None
 
 PROMPT_AUDITORIA_JURIDICA = """
 ATUE COMO UM AUDITOR JURÍDICO SÊNIOR (DESEMBARGADOR APOSENTADO).
@@ -108,7 +114,7 @@ class AuditService:
         """Returns the model name for external use."""
         return self.model_name
 
-    def audit_document(self, text: str, model_name: Optional[str] = None, rag_manager=None) -> Dict:
+    def audit_document(self, text: str, model_name: Optional[str] = None, rag_manager=None, raw_transcript: str = None) -> Dict:
         """
         Public method used by Orchestrator.
         Uses audit_juridico.py logic if available.
@@ -118,7 +124,8 @@ class AuditService:
                 client=self.client,
                 model_name=model_name or self.model_name,
                 text=text,
-                rag_manager=rag_manager
+                rag_manager=rag_manager,
+                raw_transcript=raw_transcript
             )
         
         # Fallback to internal logic if import failed
@@ -172,6 +179,12 @@ Trecho: "{text[:500]}"
                         max_output_tokens=500
                     )
                 )
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-gemini",
+                    model=self.model_name,
+                    success=True,
+                )
                 
                 text = extract_genai_text(response)
                 if text:
@@ -192,6 +205,12 @@ Trecho: "{text[:500]}"
                         "citations": []
                     }
             except Exception as e:
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-gemini",
+                    model=self.model_name,
+                    success=False,
+                )
                 logger.error(f"Erro na verificação rápida: {e}")
                 return {"status": "error", "message": str(e), "citations": []}
         
@@ -211,67 +230,107 @@ Trecho: "{text[:500]}"
         texto_completo: str, 
         output_folder: str, 
         filename_base: str,
+        raw_transcript: str | None = None,
         rag_manager=None
     ) -> Dict[str, str]:
         """
         Executa auditoria e salva relatórios (.md e .docx)
         Returns: Dict com paths dos arquivos gerados
         """
-        logger.info("⚖️ Iniciando Auditoria Jurídica (API Service)...")
+        logger.info("⚖️ Iniciando Auditoria Jurídica (CLI parity)...")
         data_atual = datetime.now().strftime("%d/%m/%Y")
-        
-        # 1. Check Hallucinations (if RAG available)
-        rag_report = ""
-        # TODO: Implement RAG integration from shared module if available
-        
-        # 2. Generate Audit Report
+
+        if auditar_consistencia_legal:
+            try:
+                from google import genai
+                project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gen-lang-client-0727883752")
+                client = genai.Client(vertexai=True, project=project_id, location="global")
+                md_filename = f"{filename_base}_AUDITORIA.md"
+                md_path = os.path.join(output_folder, md_filename)
+                report_text = auditar_consistencia_legal(
+                    client,
+                    texto_completo,
+                    md_path,
+                    raw_transcript=raw_transcript,
+                )
+                if not report_text:
+                    return {"error": "Auditoria juridica retornou texto vazio"}
+                try:
+                    full_content = Path(md_path).read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    full_content = f"<!-- Auditoria realizada em: {md_path} -->\n\n{report_text}"
+
+                docx_filename = f"{filename_base}_AUDITORIA.docx"
+                docx_path = save_as_word_juridico(full_content, docx_filename, output_folder, modo="AUDITORIA")
+                return {
+                    "markdown_path": md_path,
+                    "docx_path": docx_path,
+                    "content": full_content
+                }
+            except Exception as e:
+                logger.error(f"❌ Erro na auditoria CLI: {e}")
+                return {"error": str(e)}
+
         if not self.client:
             return {"error": "Client Gemini not configured"}
-            
+
+        if raw_transcript:
+             # PROMPT_AUDITORIA_CONTRA_RAW might not be available here directly if import failed
+             # But we are inside the class fallback.
+             # Since we are modifying to support RAW, we should try to use the raw prompt if defined in module level or define it.
+             # For now, let's assume we are in the fallback block where audit_juridico failed to import.
+             # We can't easily support RAW mode in fallback without copying the prompt.
+             logger.warning("⚠️ Usando fallback de auditoria. RAW ignorado (funcionalidade limitada).")
+             pass
+
         prompt = PROMPT_AUDITORIA_JURIDICA.format(texto=texto_completo, data_atual=data_atual)
-        
+
         from google.genai import types
         try:
-             # Sync call in thread or assum async wrapper availability?
-             # For simplicity, using simple sync call here, but in prod should be async wrapper.
-             # Assuming orchestrator runs in threadpool or fast enough.
-             
-             response = self.client.models.generate_content(
+            response = self.client.models.generate_content(
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     temperature=0.1,
                     max_output_tokens=8192
                 )
-             )
-             
-             relatorio = extract_genai_text(response)
-             if not relatorio:
-                 return {"error": "Empty response from Audit Model"}
-                 
-             full_content = f"<!-- Auditoria: {data_atual} -->\n\n{relatorio}"
-             if rag_report:
-                 full_content += rag_report
-                 
-             # 3. Save Markdown
-             md_filename = f"{filename_base}_AUDIT.md"
-             md_path = os.path.join(output_folder, md_filename)
-             with open(md_path, 'w', encoding='utf-8') as f:
-                 f.write(full_content)
-                 
-             # 4. Save DOCX
-             docx_filename = f"{filename_base}_AUDIT.docx"
-             docx_path = save_as_word_juridico(full_content, docx_filename, output_folder, modo="AUDITORIA")
-             
-             return {
-                 "markdown_path": md_path,
-                 "docx_path": docx_path,
-                 "content": full_content
-             }
-             
+            )
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=self.model_name,
+                success=True,
+            )
+
+            relatorio = extract_genai_text(response)
+            if not relatorio:
+                return {"error": "Empty response from Audit Model"}
+
+            full_content = f"<!-- Auditoria: {data_atual} -->\n\n{relatorio}"
+
+            md_filename = f"{filename_base}_AUDIT.md"
+            md_path = os.path.join(output_folder, md_filename)
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(full_content)
+
+            docx_filename = f"{filename_base}_AUDIT.docx"
+            docx_path = save_as_word_juridico(full_content, docx_filename, output_folder, modo="AUDITORIA")
+
+            return {
+                "markdown_path": md_path,
+                "docx_path": docx_path,
+                "content": full_content
+            }
+
         except Exception as e:
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=self.model_name,
+                success=False,
+            )
             logger.error(f"❌ Erro na auditoria: {e}")
-            raise e
+            return {"error": str(e)}
 
     async def verify_citation(self, citation: str, provider: str = "gemini") -> Dict:
         """

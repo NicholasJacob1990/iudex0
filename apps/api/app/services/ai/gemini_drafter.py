@@ -34,7 +34,14 @@ class GeminiDrafterWrapper:
             logger.error("❌ Erro ao importar init_vertex_client de agent_clients.")
             return None
             
-    def _generate_with_retry(self, prompt: str, max_retries: int = 3, model_name: Optional[str] = None, cached_content: Optional[Any] = None) -> Optional[GenerationResponse]:
+    def _generate_with_retry(
+        self,
+        prompt: str,
+        max_retries: int = 3,
+        model_name: Optional[str] = None,
+        cached_content: Optional[Any] = None,
+        temperature: float = 0.1
+    ) -> Optional[GenerationResponse]:
         """
         Gera texto com retry e backoff exponencial usando agent_clients (Unified).
         Supports Context Caching via cached_content.
@@ -48,6 +55,11 @@ class GeminiDrafterWrapper:
             
         client = get_gemini_client()
         target_model = model_name or self.model_name
+        try:
+            temperature = float(temperature)
+        except (TypeError, ValueError):
+            temperature = 0.1
+        temperature = max(0.0, min(1.0, temperature))
         
         for attempt in range(max_retries):
             try:
@@ -57,8 +69,8 @@ class GeminiDrafterWrapper:
                     prompt=prompt,
                     model=target_model,
                     cached_content=cached_content,
-                    # For Judge/Drafter we want low temp
-                    temperature=0.1
+                    # Allow caller to override temperature for creativity control.
+                    temperature=temperature
                 )
                 
                 if response_text:
@@ -70,7 +82,16 @@ class GeminiDrafterWrapper:
                 time.sleep(wait_time)
                 
         logger.error("❌ Falha final na geração do Gemini Drafter após retries.")
-    def generate_section(self, titulo: str, contexto_rag: str, tipo_peca: str, resumo_caso: str, tese_usuario: str, cached_content: Optional[Any] = None) -> str:
+    def generate_section(
+        self,
+        titulo: str,
+        contexto_rag: str,
+        tipo_peca: str,
+        resumo_caso: str,
+        tese_usuario: str,
+        cached_content: Optional[Any] = None,
+        temperature: float = 0.1
+    ) -> str:
         """
         Gera uma seção individual com robustez (simula o LegalDrafter original).
         Supports Context Caching.
@@ -90,5 +111,10 @@ class GeminiDrafterWrapper:
 2. Use citações [TIPO - Doc. X] se houver fatos.
 3. Não invente informações.
 """
-        resp = self._generate_with_retry(prompt, model_name=self.model_name, cached_content=cached_content)
+        resp = self._generate_with_retry(
+            prompt,
+            model_name=self.model_name,
+            cached_content=cached_content,
+            temperature=temperature
+        )
         return resp.text if resp else ""

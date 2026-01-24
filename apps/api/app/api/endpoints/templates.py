@@ -15,8 +15,14 @@ import os
 import uuid
 from pathlib import Path
 from app.core.config import settings
-from app.schemas.smart_template import SmartTemplate, TemplateRenderInput
+from app.schemas.smart_template import SmartTemplate, TemplateRenderInput, UserTemplateV1
 from app.services.legal_templates import legal_template_library
+from app.services.ai.nodes.catalogo_documentos import (
+    list_doc_kinds,
+    get_template,
+    template_spec_to_dict,
+)
+from app.services.ai.template_generator import generate_user_template_from_description
 import json
 
 router = APIRouter()
@@ -44,6 +50,17 @@ class TemplateDuplicate(BaseModel):
 
 class LegalTemplateImport(BaseModel):
     name: Optional[str] = None
+
+
+class CatalogValidateRequest(BaseModel):
+    template: Dict[str, Any]
+
+
+class CatalogParseRequest(BaseModel):
+    description: str
+    doc_kind: Optional[str] = None
+    doc_subtype: Optional[str] = None
+    model_id: Optional[str] = None
 
 
 def _extract_doc_type(tags: List[str]) -> Optional[str]:
@@ -409,6 +426,47 @@ async def get_template_schema(
         raise HTTPException(status_code=500, detail=f"Erro de formato no template: {str(e)}")
 
 
+@router.get("/catalog/types", response_model=dict)
+async def list_catalog_types():
+    """Lista doc_kind e doc_subtype disponiveis no catalogo base."""
+    types = list_doc_kinds()
+    return {"types": types, "total": sum(len(v) for v in types.values())}
+
+
+@router.get("/catalog/defaults/{doc_kind}/{doc_subtype}", response_model=dict)
+async def get_catalog_defaults(doc_kind: str, doc_subtype: str):
+    """Retorna o template base do catalogo para doc_kind/doc_subtype."""
+    spec = get_template(doc_kind, doc_subtype)
+    if not spec:
+        raise HTTPException(status_code=404, detail="Template base nao encontrado")
+    return {"template": template_spec_to_dict(spec)}
+
+
+@router.post("/catalog/validate", response_model=dict)
+async def validate_catalog_template(payload: CatalogValidateRequest):
+    """Valida JSON do UserTemplateV1."""
+    try:
+        parsed = UserTemplateV1.model_validate(payload.template)
+        return {"valid": True, "template": parsed.model_dump()}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Template invalido: {e}")
+
+
+@router.post("/catalog/parse", response_model=dict)
+async def parse_catalog_template(payload: CatalogParseRequest):
+    """Gera UserTemplateV1 a partir de descricao em linguagem simples."""
+    try:
+        parsed = await generate_user_template_from_description(
+            description=payload.description,
+            doc_kind=payload.doc_kind,
+            doc_subtype=payload.doc_subtype,
+            model_id=payload.model_id,
+        )
+        return {"template": parsed}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/preview", response_model=dict)
 async def preview_smart_template(
     payload: TemplateRenderInput,
@@ -682,4 +740,3 @@ async def import_legal_template(
         "success": True,
         "message": f"Template '{template.name}' importado com sucesso!",
     }
-

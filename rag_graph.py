@@ -12,8 +12,8 @@ import json
 import logging
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field, asdict
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
+from dataclasses import dataclass, field
 from enum import Enum
 
 try:
@@ -22,6 +22,12 @@ except ImportError:
     raise ImportError("NetworkX required: pip install networkx")
 
 logger = logging.getLogger(__name__)
+
+try:
+    from legal_pack import LegalPack as ExternalLegalPack, LEGAL_PACK as EXTERNAL_LEGAL_PACK
+except Exception:
+    ExternalLegalPack = None
+    EXTERNAL_LEGAL_PACK = None
 
 
 # =============================================================================
@@ -51,13 +57,67 @@ class RelationType(str, Enum):
 
 
 # =============================================================================
+# GENERIC SCHEMA & PACKS
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class GraphSchema:
+    name: str
+    node_types: Tuple[str, ...]
+    relation_types: Tuple[str, ...]
+
+
+class BaseGraphPack(Protocol):
+    name: str
+    schema: GraphSchema
+
+    def extract_candidates(self, text: str) -> List[Tuple[Union[str, Enum], str, str, Dict[str, Any]]]:
+        ...
+
+    def extract_relations(
+        self,
+        text: str,
+        source_node_id: str,
+        candidate_node_ids: Iterable[str],
+    ) -> List[Tuple[str, str, Union[str, Enum], Dict[str, Any]]]:
+        ...
+
+    def seed_from_metadata(self, meta: Dict[str, Any]) -> List[Union[str, Tuple[Union[str, Enum], str, str, Dict[str, Any]]]]:
+        ...
+
+
+def _normalize_graph_type(value: Union[str, Enum]) -> str:
+    return value.value if isinstance(value, Enum) else str(value)
+
+
+class GenericPack:
+    name = "generic"
+    schema = GraphSchema(name="generic", node_types=tuple(), relation_types=tuple())
+
+    def extract_candidates(self, text: str) -> List[Tuple[str, str, str, Dict[str, Any]]]:
+        return []
+
+    def extract_relations(
+        self,
+        text: str,
+        source_node_id: str,
+        candidate_node_ids: Iterable[str],
+    ) -> List[Tuple[str, str, str, Dict[str, Any]]]:
+        return []
+
+    def seed_from_metadata(self, meta: Dict[str, Any]) -> List[Union[str, Tuple[str, str, str, Dict[str, Any]]]]:
+        return []
+
+
+# =============================================================================
 # DATA CLASSES
 # =============================================================================
 
 @dataclass
-class LegalEntity:
-    """Base class for legal entities (graph nodes)."""
-    entity_type: EntityType
+class Entity:
+    """Base class for graph entities (nodes)."""
+    entity_type: str
     entity_id: str  # Unique ID within type (e.g., "lei_8666_1993")
     name: str       # Display name (e.g., "Lei 8.666/93")
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -65,15 +125,15 @@ class LegalEntity:
     @property
     def node_id(self) -> str:
         """Global unique ID for graph."""
-        return f"{self.entity_type.value}:{self.entity_id}"
+        return f"{self.entity_type}:{self.entity_id}"
 
 
 @dataclass  
-class LegalRelation:
-    """Relationship between legal entities (graph edges)."""
+class Relation:
+    """Relationship between graph entities (edges)."""
     source_id: str      # Entity node_id
     target_id: str      # Entity node_id
-    relation_type: RelationType
+    relation_type: str
     weight: float = 1.0
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -82,27 +142,28 @@ class LegalRelation:
 # KNOWLEDGE GRAPH
 # =============================================================================
 
-class LegalKnowledgeGraph:
+class LegalEntity(Entity):
+    """Legacy alias for backward compatibility."""
+
+
+class LegalRelation(Relation):
+    """Legacy alias for backward compatibility."""
+
+
+class KnowledgeGraph:
     """
-    Knowledge Graph for Legal Documents.
+    Knowledge Graph core (domain-agnostic).
     
-    Enables GraphRAG queries like:
-    - "Which laws are cited by decisions that apply Súmula X?"
-    - "What articles are related to thesis Y?"
-    
-    Usage:
-        graph = LegalKnowledgeGraph()
-        graph.add_entity(EntityType.LEI, "8666_1993", "Lei 8.666/93", {"ano": 1993})
-        graph.add_entity(EntityType.ARTIGO, "art_1_8666", "Art. 1º", {"lei": "8666"})
-        graph.add_relationship("lei:8666_1993", "artigo:art_1_8666", RelationType.POSSUI)
-        
-        # Query
-        related = graph.query_related("lei:8666_1993", hops=2)
+    Enables GraphRAG queries across domains when paired with a pack.
     """
-    
-    DEFAULT_PERSIST_PATH = "./graph_db/legal_knowledge_graph.json"
-    
-    def __init__(self, persist_path: str = None):
+
+    DEFAULT_PERSIST_PATH = os.path.join(
+        os.path.dirname(__file__),
+        "graph_db",
+        "knowledge_graph.json"
+    )
+
+    def __init__(self, persist_path: str = None, pack: Optional[BaseGraphPack] = None):
         """
         Initialize the knowledge graph.
         
@@ -110,8 +171,9 @@ class LegalKnowledgeGraph:
             persist_path: Path to JSON file for persistence
         """
         self.persist_path = persist_path or self.DEFAULT_PERSIST_PATH
+        self.pack = pack or GenericPack()
         self.graph = nx.DiGraph()
-        self._entity_index: Dict[str, LegalEntity] = {}
+        self._entity_index: Dict[str, Entity] = {}
         
         # Try to load existing graph
         if os.path.exists(self.persist_path):
@@ -126,7 +188,7 @@ class LegalKnowledgeGraph:
     
     def add_entity(
         self, 
-        entity_type: EntityType, 
+        entity_type: Union[str, Enum],
         entity_id: str, 
         name: str, 
         metadata: Dict[str, Any] = None
@@ -143,8 +205,9 @@ class LegalKnowledgeGraph:
         Returns:
             The node_id of the created entity
         """
-        entity = LegalEntity(
-            entity_type=entity_type,
+        entity_type_value = _normalize_graph_type(entity_type)
+        entity = Entity(
+            entity_type=entity_type_value,
             entity_id=entity_id,
             name=name,
             metadata=metadata or {}
@@ -155,7 +218,7 @@ class LegalKnowledgeGraph:
         # Add to NetworkX graph
         self.graph.add_node(
             node_id,
-            entity_type=entity_type.value,
+            entity_type=entity_type_value,
             name=name,
             **entity.metadata
         )
@@ -173,7 +236,7 @@ class LegalKnowledgeGraph:
     
     def find_entities(
         self, 
-        entity_type: EntityType = None, 
+        entity_type: Union[str, Enum] = None,
         name_contains: str = None,
         **metadata_filters
     ) -> List[str]:
@@ -192,7 +255,7 @@ class LegalKnowledgeGraph:
         
         for node_id, data in self.graph.nodes(data=True):
             # Type filter
-            if entity_type and data.get("entity_type") != entity_type.value:
+            if entity_type and data.get("entity_type") != _normalize_graph_type(entity_type):
                 continue
             
             # Name filter
@@ -221,7 +284,7 @@ class LegalKnowledgeGraph:
         self,
         source_id: str,
         target_id: str,
-        relation_type: RelationType,
+        relation_type: Union[str, Enum],
         weight: float = 1.0,
         metadata: Dict[str, Any] = None
     ) -> bool:
@@ -242,10 +305,11 @@ class LegalKnowledgeGraph:
             logger.warning(f"GraphRAG: Cannot add edge - node(s) not found: {source_id}, {target_id}")
             return False
         
+        relation_value = _normalize_graph_type(relation_type)
         self.graph.add_edge(
             source_id,
             target_id,
-            relation=relation_type.value,
+            relation=relation_value,
             weight=weight,
             **(metadata or {})
         )
@@ -297,7 +361,7 @@ class LegalKnowledgeGraph:
         self,
         node_id: str,
         hops: int = 2,
-        relation_filter: List[RelationType] = None
+        relation_filter: List[Union[str, Enum]] = None
     ) -> Dict[str, Any]:
         """
         Find all entities connected to a node within N hops.
@@ -321,14 +385,15 @@ class LegalKnowledgeGraph:
         frontier: Set[str] = {node_id}
         all_edges: List[Dict] = []
         
+        allowed = {_normalize_graph_type(r) for r in relation_filter} if relation_filter else None
         for _ in range(hops):
             next_frontier: Set[str] = set()
             
             for current in frontier:
                 # Outgoing edges
                 for _, target, data in self.graph.out_edges(current, data=True):
-                    if relation_filter:
-                        if data.get("relation") not in [r.value for r in relation_filter]:
+                    if allowed is not None:
+                        if data.get("relation") not in allowed:
                             continue
                     
                     if target not in visited:
@@ -343,8 +408,8 @@ class LegalKnowledgeGraph:
                 
                 # Incoming edges
                 for source, _, data in self.graph.in_edges(current, data=True):
-                    if relation_filter:
-                        if data.get("relation") not in [r.value for r in relation_filter]:
+                    if allowed is not None:
+                        if data.get("relation") not in allowed:
                             continue
                     
                     if source not in visited:
@@ -409,6 +474,74 @@ class LegalKnowledgeGraph:
         except nx.NodeNotFound:
             return None
     
+    def _build_context_for_entities(
+        self,
+        entity_ids: Set[str],
+        hops: int
+    ) -> str:
+        if not entity_ids:
+            return ""
+
+        context_parts = ["### 📊 CONTEXTO DO GRAFO DE CONHECIMENTO:\n"]
+
+        for entity_id in entity_ids:
+            subgraph = self.query_related(entity_id, hops=hops)
+            entity_data = self.get_entity(entity_id)
+
+            if entity_data:
+                context_parts.append(f"**{entity_data.get('name', entity_id)}**:")
+
+                relations_by_type: Dict[str, List[str]] = {}
+                for edge in subgraph["edges"]:
+                    rel_type = edge["relation"]
+                    if rel_type not in relations_by_type:
+                        relations_by_type[rel_type] = []
+
+                    other_id = edge["target"] if edge["source"] == entity_id else edge["source"]
+                    other_data = self.get_entity(other_id)
+                    if other_data:
+                        relations_by_type[rel_type].append(other_data.get("name", other_id))
+
+                for rel_type, targets in relations_by_type.items():
+                    context_parts.append(f"  - {rel_type.upper()}: {', '.join(targets[:5])}")
+
+                context_parts.append("")
+
+        return "\n".join(context_parts)
+
+    def _seed_to_node_id(
+        self,
+        seed: Union[str, Tuple[Union[str, Enum], str, str, Dict[str, Any]]]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        if isinstance(seed, str):
+            return seed, None
+        entity_type, entity_id, name, _ = seed
+        node_id = f"{_normalize_graph_type(entity_type)}:{entity_id}"
+        return node_id, name
+
+    def resolve_query_entities(self, text: str) -> List[str]:
+        matches: Set[str] = set()
+        seeds = self.pack.extract_candidates(text) if self.pack else []
+        for seed in seeds:
+            node_id, name = self._seed_to_node_id(seed)
+            if node_id and node_id in self.graph.nodes:
+                matches.add(node_id)
+                continue
+            if name:
+                for candidate in self.find_entities(name_contains=name):
+                    matches.add(candidate)
+        return list(matches)
+
+    def query_context_from_text(
+        self,
+        text: str,
+        hops: int = 2
+    ) -> Tuple[str, List[str]]:
+        entity_ids = set(self.resolve_query_entities(text))
+        if not entity_ids:
+            return "", []
+        return self._build_context_for_entities(entity_ids, hops), list(entity_ids)
+
     def enrich_context(
         self,
         chunks: List[Dict[str, Any]],
@@ -416,76 +549,27 @@ class LegalKnowledgeGraph:
     ) -> str:
         """
         Enrich RAG chunks with knowledge graph context.
-        
-        Extracts entities from chunk metadata and adds related entities.
-        This is the integration point with standard RAG.
-        
-        Args:
-            chunks: RAG search results with metadata
-            hops: Relationship depth to explore
-            
-        Returns:
-            Formatted string with graph context for LLM prompt
         """
         extracted_entities: Set[str] = set()
-        
-        # Extract entities from chunk metadata
+
         for chunk in chunks:
-            meta = chunk.get("metadata", {})
-            
-            # Lei extraction
-            if "tipo" in meta and meta["tipo"] in ["lei", "decreto", "portaria"]:
-                lei_id = f"{meta['tipo']}_{meta.get('numero', 'unknown')}_{meta.get('ano', '')}"
-                node_id = f"lei:{lei_id}"
-                if node_id in self.graph.nodes:
+            meta = chunk.get("metadata", {}) or {}
+            seeds = self.pack.seed_from_metadata(meta) if self.pack else []
+            if not seeds:
+                chunk_text = chunk.get("text", "")
+                if chunk_text and self.pack:
+                    seeds = self.pack.extract_candidates(chunk_text)
+
+            for seed in seeds:
+                node_id, name = self._seed_to_node_id(seed)
+                if node_id and node_id in self.graph.nodes:
                     extracted_entities.add(node_id)
-            
-            # Súmula extraction
-            if "tipo_decisao" in meta and "súmula" in meta.get("tipo_decisao", "").lower():
-                sumula_id = f"{meta.get('tribunal', 'unknown')}_{meta.get('numero', '')}"
-                node_id = f"sumula:{sumula_id}"
-                if node_id in self.graph.nodes:
-                    extracted_entities.add(node_id)
-            
-            # Jurisprudência extraction
-            if "tribunal" in meta and "numero" in meta:
-                juris_id = f"{meta['tribunal']}_{meta['numero']}"
-                node_id = f"jurisprudencia:{juris_id}"
-                if node_id in self.graph.nodes:
-                    extracted_entities.add(node_id)
-        
-        if not extracted_entities:
-            return ""
-        
-        # Build context from graph relationships
-        context_parts = ["### 📊 CONTEXTO DO GRAFO DE CONHECIMENTO:\n"]
-        
-        for entity_id in extracted_entities:
-            subgraph = self.query_related(entity_id, hops=hops)
-            entity_data = self.get_entity(entity_id)
-            
-            if entity_data:
-                context_parts.append(f"**{entity_data.get('name', entity_id)}**:")
-                
-                # Group by relationship type
-                relations_by_type: Dict[str, List[str]] = {}
-                for edge in subgraph["edges"]:
-                    rel_type = edge["relation"]
-                    if rel_type not in relations_by_type:
-                        relations_by_type[rel_type] = []
-                    
-                    # Get the "other" node
-                    other_id = edge["target"] if edge["source"] == entity_id else edge["source"]
-                    other_data = self.get_entity(other_id)
-                    if other_data:
-                        relations_by_type[rel_type].append(other_data.get("name", other_id))
-                
-                for rel_type, targets in relations_by_type.items():
-                    context_parts.append(f"  - {rel_type.upper()}: {', '.join(targets[:5])}")
-                
-                context_parts.append("")
-        
-        return "\n".join(context_parts)
+                    continue
+                if name:
+                    for candidate in self.find_entities(name_contains=name):
+                        extracted_entities.add(candidate)
+
+        return self._build_context_for_entities(extracted_entities, hops)
     
     # -------------------------------------------------------------------------
     # Persistence
@@ -600,8 +684,46 @@ class LegalEntityExtractor:
         )
     }
     
-    def __init__(self, graph: LegalKnowledgeGraph):
+    def __init__(self, graph: KnowledgeGraph):
         self.graph = graph
+
+    @classmethod
+    def extract_candidates(
+        cls,
+        text: str
+    ) -> List[Tuple[Union[str, Enum], str, str, Dict[str, Any]]]:
+        candidates: List[Tuple[Union[str, Enum], str, str, Dict[str, Any]]] = []
+
+        for match in cls.PATTERNS["lei"].finditer(text):
+            numero = match.group(1).replace(".", "")
+            ano = match.group(2)
+            entity_id = f"{numero}_{ano}"
+            name = f"Lei {numero}/{ano}"
+            candidates.append((EntityType.LEI, entity_id, name, {"numero": numero, "ano": int(ano)}))
+
+        for match in cls.PATTERNS["sumula"].finditer(text):
+            numero = match.group(1)
+            tribunal = match.group(2) or "STJ"
+            entity_id = f"{tribunal}_{numero}"
+            name = f"Súmula {numero} {tribunal}"
+            candidates.append((EntityType.SUMULA, entity_id, name, {"numero": numero, "tribunal": tribunal}))
+
+        for match in cls.PATTERNS["jurisprudencia"].finditer(text):
+            tipo = match.group(1).upper()
+            numero = match.group(2).replace(".", "")
+            uf = match.group(3) or ""
+            entity_id = f"{tipo}_{numero}_{uf}" if uf else f"{tipo}_{numero}"
+            name = f"{tipo} {numero}" + (f"/{uf}" if uf else "")
+            candidates.append((EntityType.JURISPRUDENCIA, entity_id, name, {"tipo": tipo, "numero": numero, "uf": uf}))
+
+        for match in cls.PATTERNS["artigo"].finditer(text):
+            artigo = match.group(1)
+            paragrafo = match.group(2) or ""
+            entity_id = f"art_{artigo}" + (f"_p{paragrafo}" if paragrafo else "")
+            name = f"Art. {artigo}" + (f", § {paragrafo}" if paragrafo else "")
+            candidates.append((EntityType.ARTIGO, entity_id, name, {"artigo": artigo, "paragrafo": paragrafo}))
+
+        return candidates
     
     def extract_from_text(self, text: str) -> List[str]:
         """
@@ -698,11 +820,89 @@ class LegalEntityExtractor:
 
 
 # =============================================================================
+# LEGAL PACK (DOMAIN)
+# =============================================================================
+
+class LegalPack:
+    name = "legal"
+    schema = GraphSchema(
+        name="legal",
+        node_types=tuple(t.value for t in EntityType),
+        relation_types=tuple(r.value for r in RelationType),
+    )
+
+    def extract_candidates(self, text: str) -> List[Tuple[Union[str, Enum], str, str, Dict[str, Any]]]:
+        return LegalEntityExtractor.extract_candidates(text)
+
+    def extract_relations(
+        self,
+        text: str,
+        source_node_id: str,
+        candidate_node_ids: Iterable[str],
+    ) -> List[Tuple[str, str, Union[str, Enum], Dict[str, Any]]]:
+        return [
+            (source_node_id, target_id, RelationType.CITA, {})
+            for target_id in candidate_node_ids
+            if target_id != source_node_id
+        ]
+
+    def seed_from_metadata(
+        self,
+        meta: Dict[str, Any]
+    ) -> List[Union[str, Tuple[Union[str, Enum], str, str, Dict[str, Any]]]]:
+        seeds: List[Union[str, Tuple[Union[str, Enum], str, str, Dict[str, Any]]]] = []
+        meta = meta or {}
+
+        tipo = str(meta.get("tipo") or meta.get("source_type") or "").lower().strip()
+        numero = str(meta.get("numero") or "").replace(".", "")
+        ano = str(meta.get("ano") or "").strip()
+
+        if tipo in {"lei", "decreto", "portaria"} and numero and ano:
+            seeds.append((EntityType.LEI, f"{numero}_{ano}", f"Lei {numero}/{ano}", {"numero": numero, "ano": ano}))
+
+        tipo_decisao = str(meta.get("tipo_decisao") or "").lower()
+        tribunal = str(meta.get("tribunal") or "").strip().upper()
+        if "sumula" in tipo_decisao and numero:
+            seeds.append((EntityType.SUMULA, f"{tribunal or 'STJ'}_{numero}", f"Súmula {numero} {tribunal or 'STJ'}", {"numero": numero, "tribunal": tribunal or "STJ"}))
+
+        if tribunal and numero:
+            seeds.append((EntityType.JURISPRUDENCIA, f"{tribunal}_{numero}", f"{tribunal} {numero}", {"tribunal": tribunal, "numero": numero}))
+
+        classe = str(meta.get("classe") or meta.get("tipo_juris") or "").strip().upper()
+        uf = str(meta.get("uf") or "").strip().upper()
+        if classe and numero:
+            entity_id = f"{classe}_{numero}_{uf}" if uf else f"{classe}_{numero}"
+            name = f"{classe} {numero}" + (f"/{uf}" if uf else "")
+            seeds.append((EntityType.JURISPRUDENCIA, entity_id, name, {"classe": classe, "numero": numero, "uf": uf}))
+
+        return seeds
+
+
+class LegalKnowledgeGraph(KnowledgeGraph):
+    DEFAULT_PERSIST_PATH = os.path.join(
+        os.path.dirname(__file__),
+        "graph_db",
+        "legal_knowledge_graph.json"
+    )
+
+    def __init__(self, persist_path: str = None, pack: Optional[BaseGraphPack] = None):
+        default_pack = pack
+        if default_pack is None:
+            default_pack = EXTERNAL_LEGAL_PACK or LegalPack()
+        super().__init__(persist_path=persist_path, pack=default_pack)
+
+
+# =============================================================================
 # FACTORY
 # =============================================================================
 
-def create_knowledge_graph(persist_path: str = None) -> LegalKnowledgeGraph:
+def create_knowledge_graph(
+    persist_path: str = None,
+    pack: Optional[BaseGraphPack] = None
+) -> KnowledgeGraph:
     """Factory function to create knowledge graph instance."""
+    if pack is not None:
+        return KnowledgeGraph(persist_path=persist_path, pack=pack)
     return LegalKnowledgeGraph(persist_path)
 
 

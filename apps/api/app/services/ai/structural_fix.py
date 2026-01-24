@@ -15,6 +15,8 @@ from typing import Dict, Any, List, Set, Tuple
 from dataclasses import dataclass, field, asdict
 from loguru import logger
 
+from app.services.ai.document_store import resolve_full_document, store_full_document_state
+
 
 @dataclass
 class StructuralFixResult:
@@ -310,7 +312,7 @@ async def structural_fix_node(state: dict) -> dict:
     
     Deve rodar ANTES do audit_node para garantir documento limpo.
     """
-    full_document = state.get("full_document", "")
+    full_document = resolve_full_document(state)
     
     if not full_document:
         logger.warning("Structural Fix: documento vazio, pulando")
@@ -327,9 +329,8 @@ async def structural_fix_node(state: dict) -> dict:
         f"{result.artifacts_cleaned} artefatos"
     )
     
-    return {
+    updated_state = {
         **state,
-        "full_document": fixed_document,
         "structural_fix_result": result.to_dict()
     }
-
+    return store_full_document_state(updated_state, fixed_document)

@@ -16,11 +16,13 @@ import TableCell from '@tiptap/extension-table-cell';
 import TableHeader from '@tiptap/extension-table-header';
 import { EditorToolbar } from './editor-toolbar';
 import { CitationMark } from './extensions/citation-mark';
+import { FootnoteRefMark } from './extensions/footnote-ref-mark';
 import { SuggestionHighlight } from './extensions/suggestion-highlight';
 import { MermaidCodeBlock } from './extensions/mermaid-code-block';
 import { Sparkles, Scissors, MessageSquare, Wand2, Scale } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import { apiBaseUrl } from '@/lib/api-client';
 import { useCanvasStore } from '@/stores/canvas-store';
 
 interface DocumentEditorProps {
@@ -46,6 +48,7 @@ export function DocumentEditor({
 }: DocumentEditorProps) {
   const ignoreNextUpdateRef = useRef(false);
   const editor = useEditor({
+    immediatelyRender: false,
     extensions: [
       StarterKit.configure({
         codeBlock: false,
@@ -73,6 +76,7 @@ export function DocumentEditor({
       TableHeader,
       // Canvas UX extensions
       CitationMark,
+      FootnoteRefMark,
       SuggestionHighlight,
     ],
     content,
@@ -233,10 +237,9 @@ export function DocumentEditor({
     // Call backend API for inline verification
     const toastId = toast.loading('Verificando citações...');
     try {
-      const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
       const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
 
-      const response = await fetch(`${API_URL}/audit/verify-snippet`, {
+      const response = await fetch(`${apiBaseUrl}/audit/verify-snippet`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

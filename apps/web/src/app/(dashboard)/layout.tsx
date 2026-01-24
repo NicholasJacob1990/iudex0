@@ -2,9 +2,10 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { useAuthStore } from '@/stores';
+import { useAuthStore, useChatStore } from '@/stores';
 import { TopNav, SidebarPro } from '@/components/layout';
 import { useUIStore } from '@/stores';
+import { HumanReviewModal } from '@/components/chat/human-review-modal';
 
 export default function DashboardLayout({
   children,
@@ -15,6 +16,7 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const { isAuthenticated, fetchProfile, isLoading } = useAuthStore();
   const { sidebarState, setSidebarState } = useUIStore();
+  const { reviewData, submitReview } = useChatStore();
   const [isHydrated, setIsHydrated] = useState(false);
 
   // Aguardar hidratação do Zustand persist
@@ -26,11 +28,37 @@ export default function DashboardLayout({
     if (!isHydrated || isLoading) return;
 
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    console.log('[DashboardLayout] Auth check:', { isAuthenticated, hasToken: !!token, tokenPreview: token?.substring(0, 20) });
 
     if (!isAuthenticated && !token) {
+      console.log('[DashboardLayout] Sem auth e sem token, redirecionando para login');
       router.push('/login');
-    } else {
-      fetchProfile();
+    } else if (token) {
+      // Verify token is still valid by fetching profile
+      console.log('[DashboardLayout] Token encontrado, verificando com fetchProfile...');
+      fetchProfile()
+        .then(() => {
+          console.log('[DashboardLayout] fetchProfile OK!');
+        })
+        .catch((err) => {
+          // If fetchProfile fails (403/401), the token is invalid
+          // Clear any stale auth state and redirect to login
+          console.error('[DashboardLayout] fetchProfile FALHOU:', err?.response?.status, err?.response?.data || err?.message);
+          if (typeof window !== 'undefined') {
+            localStorage.removeItem('access_token');
+            localStorage.removeItem('refresh_token');
+            localStorage.removeItem('auth-storage');
+          }
+          router.push('/login');
+        });
+    } else if (isAuthenticated && !token) {
+      // isAuthenticated is true in zustand store but no token exists
+      // This is a stale state, clear it and redirect
+      console.warn('[DashboardLayout] Estado de auth inconsistente, redirecionando para login');
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('auth-storage');
+      }
+      router.push('/login');
     }
   }, [isAuthenticated, isHydrated, isLoading, router, fetchProfile]);
 
@@ -66,6 +94,11 @@ export default function DashboardLayout({
           <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>{children}</main>
         </div>
       </div>
+      <HumanReviewModal
+        isOpen={!!reviewData}
+        data={reviewData}
+        onSubmit={submitReview}
+      />
     </div>
   );
 }

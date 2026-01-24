@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026",
+  "total": 5,
+  "results": [
+    {
+      "title": "Resultado 1 para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'",
+      "url": "https://exemplo.com/resultado-1",
+      "snippet": "Resultado de demonstração para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'.",
+      "source": "fallback"
+    },
+    {
+      "title": "Resultado 2 para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'",
+      "url": "https://exemplo.com/resultado-2",
+      "snippet": "Resultado de demonstração para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'.",
+      "source": "fallback"
+    },
+    {
+      "title": "Resultado 3 para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'",
+      "url": "https://exemplo.com/resultado-3",
+      "snippet": "Resultado de demonstração para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'.",
+      "source": "fallback"
+    },
+    {
+      "title": "Resultado 4 para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'",
+      "url": "https://exemplo.com/resultado-4",
+      "snippet": "Resultado de demonstração para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'.",
+      "source": "fallback"
+    },
+    {
+      "title": "Resultado 5 para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'",
+      "url": "https://exemplo.com/resultado-5",
+      "snippet": "Resultado de demonstração para 'Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil 2026'.",
+      "source": "fallback"
+    }
+  ],
+  "source": "fallback",
+  "cached": false,
+  "cached_at": "2026-01-20T21:33:47.405608"
+}

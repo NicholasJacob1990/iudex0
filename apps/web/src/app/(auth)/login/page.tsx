@@ -36,18 +36,19 @@ export default function LoginPage() {
     try {
       console.log('[Login Page] Iniciando login de teste...');
       await loginTest();
-      console.log('[Login Page] Login de teste bem-sucedido!');
-      toast.success('Login de teste realizado!');
-      // Pequeno delay para garantir que o estado seja atualizado
+      console.log('[Login Page] Login de teste concluído com sucesso.');
+      toast.success('Login de teste realizado! Redirecionando...');
+
+      // Delay pequeno para garantir que o Zustand persistiu o estado no localStorage
+      // e que o DashboardLayout vai ler o estado correto.
       setTimeout(() => {
         router.push('/dashboard');
-      }, 100);
+      }, 500);
     } catch (error: any) {
       console.error('[Login Page] Erro no login de teste:', error);
       const errorMessage = error.response?.data?.detail || error.message || 'Erro desconhecido';
-      // Tentar mostrar URL base se possível para debug
       const apiInfo = error.config?.baseURL || 'URL desconhecida';
-      toast.error(`Erro: ${errorMessage}. (API: ${apiInfo})`);
+      toast.error(`Falha ao entrar como visitante: ${errorMessage}`);
     }
   };
 

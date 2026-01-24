@@ -193,7 +193,7 @@ class AudioTranscriber:
             try:
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=HF_TOKEN_ENV
+                    token=HF_TOKEN_ENV
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))

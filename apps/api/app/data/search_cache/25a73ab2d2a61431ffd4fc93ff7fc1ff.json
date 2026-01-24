@@ -1,0 +1,28 @@
+{
+  "success": true,
+  "query": "edite no canvas",
+  "total": 3,
+  "results": [
+    {
+      "title": "Editor de fotos online gratuito - Canva",
+      "url": "https://www.canva.com/pt_br/editor-fotos/",
+      "snippet": "Acesse a galeria e faça uploads direto da página inicial doCanvapara fazer edições instantâneas em qualquer foto. Seja usando um computador ou dispositivo móvel, bastam alguns toques para fazer upload, ajustar e publicar suas fotos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Free Online Photo Editor: Free & easy image editing - Canva",
+      "url": "https://www.canva.com/photo-editor/",
+      "snippet": "UseCanva'sFree Photo Editor to edit, crop, enhance, or add effects & filters to pictures.Nowatermarks. Mobile app available.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Crie documentos, apps e muito mais com o Canvas",
+      "url": "https://support.google.com/gemini/answer/16047321?hl=pt&co=GENIE.Platform%3DDesktop",
+      "snippet": "Exemplos O que pode fazer com as appsnoCanvasEditeapps e código Pode usar a caixa de texto de comandos para pedir ao Gemini para fazer atualizações à sua app ou editar diretamente o código. As alteraçõesnoCanvassão guardadas automaticamente.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-01-15T11:28:06.510900"
+}

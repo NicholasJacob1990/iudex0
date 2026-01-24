@@ -182,54 +182,112 @@ async def login_test(
     """
     Login especial para testes/demonstração (Cria usuário se não existir)
     """
+    print("[Login Test] Iniciando endpoint login-test")
     test_email = "teste@iudex.ai"
     
-    # Verificar se usuário teste existe
-    result = await db.execute(select(User).where(User.email == test_email))
-    user = result.scalars().first()
-    
-    if not user:
-        # Criar usuário de teste
-        user = User(
-            id=str(uuid.uuid4()),
-            email=test_email,
-            hashed_password=get_password_hash("teste123"),
-            name="Usuário de Teste",
-            role=UserRole.PREMIUM,
-            plan=UserPlan.PROFESSIONAL,
-            account_type=AccountType.INDIVIDUAL,
-            is_active=True,
-            is_verified=True,
-            oab="999999",
-            oab_state="SP",
-            preferences={
-                "theme": "system",
-                "language": "pt-BR",
-                "notifications_enabled": True
-            }
+    try:
+        # Verificar se usuário teste existe
+        print(f"[Login Test] Buscando usuário {test_email}")
+        result = await db.execute(select(User).where(User.email == test_email))
+        user = result.scalars().first()
+        
+        if not user:
+            print("[Login Test] Usuário não encontrado. Criando novo usuário...")
+            # Criar usuário de teste
+            user = User(
+                id=str(uuid.uuid4()),
+                email=test_email,
+                hashed_password=get_password_hash("teste123"),
+                name="Usuário de Teste",
+                role=UserRole.PREMIUM,
+                plan=UserPlan.PROFESSIONAL,
+                account_type=AccountType.INDIVIDUAL,
+                is_active=True,
+                is_verified=True,
+                oab="999999",
+                oab_state="SP",
+                preferences={
+                    "theme": "system",
+                    "language": "pt-BR",
+                    "notifications_enabled": True
+                }
+            )
+            db.add(user)
+            print("[Login Test] Usuário adicionado à sessão. Commitando...")
+            await db.commit()
+            print("[Login Test] Commit realizado. Refreshing...")
+            await db.refresh(user)
+            print(f"[Login Test] Usuário criado: {user.id}")
+        else:
+            print(f"[Login Test] Usuário encontrado: {user.id}. Verificando self-healing...")
+            # Self-healing: Garantir que o usuário de teste esteja ativo e correto
+            params_changed = False
+            
+            if not user.is_active:
+                user.is_active = True
+                params_changed = True
+                
+            if not user.is_verified:
+                user.is_verified = True
+                params_changed = True
+                
+            # Garantir roles corretas para teste
+            if user.role != UserRole.PREMIUM:
+                user.role = UserRole.PREMIUM
+                params_changed = True
+                
+            if user.plan != UserPlan.PROFESSIONAL:
+                user.plan = UserPlan.PROFESSIONAL
+                params_changed = True
+                
+            if params_changed:
+                print("[Login Test] Aplicando correções (self-healing)...")
+                db.add(user)
+                await db.commit()
+                await db.refresh(user)
+                print("[Login Test] Correções aplicadas com sucesso.")
+        
+        # Gerar tokens (mesma lógica do login)
+        print("[Login Test] Gerando tokens...")
+        access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value},
+            expires_delta=access_token_expires
         )
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    
-    # Gerar tokens (mesma lógica do login)
-    access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value},
-        expires_delta=access_token_expires
-    )
-    
-    refresh_token = create_refresh_token(
-        data={"sub": user.id, "type": "refresh"}
-    )
-    
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        "user": user
-    }
+        
+        refresh_token = create_refresh_token(
+            data={"sub": user.id, "type": "refresh"}
+        )
+        
+        # Verificar se o usuário realmente existe no banco antes de retornar
+        verify_result = await db.execute(select(User).where(User.id == user.id))
+        verify_user = verify_result.scalars().first()
+        if not verify_user:
+            print(f"[Login Test] ERRO: Usuário {user.id} não encontrado após commit!")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Erro ao persistir usuário de teste"
+            )
+
+        print(f"[Login Test] Tokens gerados. User ID: {user.id}, Email: {user.email}")
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            "user": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[Login Test] ERRO CRÍTICO: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao realizar login de teste: {str(e)}"
+        )
 
 
 @router.post("/logout")

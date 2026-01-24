@@ -6,15 +6,23 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { apiClient } from '@/lib/api-client';
+import { useUploadLimits } from '@/lib/use-upload-limits';
 
 export default function AuditPage() {
     const [file, setFile] = useState<File | null>(null);
     const [isUploading, setIsUploading] = useState(false);
     const [resultBlob, setResultBlob] = useState<Blob | null>(null);
+    const { maxUploadLabel, maxUploadBytes } = useUploadLimits();
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files && e.target.files[0]) {
-            setFile(e.target.files[0]);
+            const nextFile = e.target.files[0];
+            if (nextFile.size > maxUploadBytes) {
+                toast.error(`Arquivo excede o limite de ${maxUploadLabel}.`);
+                e.target.value = '';
+                return;
+            }
+            setFile(nextFile);
             setResultBlob(null); // Reset previous result
         }
     };
@@ -26,7 +34,12 @@ export default function AuditPage() {
     const handleDrop = (e: React.DragEvent) => {
         e.preventDefault();
         if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-            setFile(e.dataTransfer.files[0]);
+            const nextFile = e.dataTransfer.files[0];
+            if (nextFile.size > maxUploadBytes) {
+                toast.error(`Arquivo excede o limite de ${maxUploadLabel}.`);
+                return;
+            }
+            setFile(nextFile);
             setResultBlob(null);
         }
     };
@@ -105,7 +118,7 @@ export default function AuditPage() {
                     ) : (
                         <div className="text-center space-y-1">
                             <p className="font-medium text-lg text-foreground">Clique para enviar ou arraste aqui</p>
-                            <p className="text-sm text-muted-foreground">PDF, DOCX ou TXT (Max 50MB)</p>
+                            <p className="text-sm text-muted-foreground">PDF, DOCX ou TXT (até {maxUploadLabel})</p>
                         </div>
                     )}
                 </div>

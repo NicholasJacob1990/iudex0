@@ -138,6 +138,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
     const [hilTargets, setHilTargets] = useState<string[]>([]);
     const [activeTab, setActiveTab] = useState<string | null>(null);
     const [proposal, setProposal] = useState('');  // v5.4: User proposal for committee
+    const [showCommitteeDetails, setShowCommitteeDetails] = useState(false);
 
     // Reset state when data changes
     useEffect(() => {
@@ -161,6 +162,7 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
             setInstructions('');
             setShowOriginal(true);
             setActiveTab(null);
+            setShowCommitteeDetails(false);
         }
     }, [data]);
 
@@ -432,10 +434,11 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                 <div>
                                     <h4 className="font-semibold text-sm flex items-center gap-2">
                                         <Users className="h-4 w-4 text-indigo-600" />
-                                        Relatório do Modo Minuta (Agentes)
+                                        Relatório do Comitê
                                     </h4>
                                     <p className="text-xs text-muted-foreground mt-1">
-                                        Revisão realizada por: {data.committee_review_report.agents_participated.join(", ")}
+                                        Comitê com {data.committee_review_report.agents_participated?.length || 0} agentes.
+                                        {showCommitteeDetails ? ' Detalhes exibidos.' : ' Detalhes ocultos.'}
                                     </p>
                                     {data.committee_review_report.score_disagreement && (
                                         <p className="text-xs text-amber-700 mt-1">
@@ -443,17 +446,33 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                         </p>
                                     )}
                                 </div>
-                                <div className="text-right">
-                                    <div className={cn(
-                                        "text-2xl font-bold",
-                                        data.committee_review_report.score >= 7 ? "text-green-600" : "text-amber-600"
-                                    )}>
-                                        {data.committee_review_report.score.toFixed(1)}
-                                        <span className="text-sm font-normal text-muted-foreground">/10</span>
+                                <div className="text-right flex flex-col items-end gap-2">
+                                    <div>
+                                        <div className={cn(
+                                            "text-2xl font-bold",
+                                            data.committee_review_report.score >= 7 ? "text-green-600" : "text-amber-600"
+                                        )}>
+                                            {data.committee_review_report.score.toFixed(1)}
+                                            <span className="text-sm font-normal text-muted-foreground">/10</span>
+                                        </div>
+                                        <p className="text-[10px] text-muted-foreground">Nota Média</p>
                                     </div>
-                                    <p className="text-[10px] text-muted-foreground">Nota Média</p>
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        className="h-7 px-2 text-[10px]"
+                                        onClick={() => setShowCommitteeDetails((prev) => !prev)}
+                                    >
+                                        {showCommitteeDetails ? 'Ocultar detalhes' : 'Ver detalhes'}
+                                    </Button>
                                 </div>
                             </div>
+
+                            {showCommitteeDetails && (
+                                <p className="text-xs text-muted-foreground">
+                                    Revisão realizada por: {data.committee_review_report.agents_participated.join(", ")}
+                                </p>
+                            )}
 
                             {/* Critical Problems */}
                             {data.committee_review_report.critical_problems.length > 0 && (
@@ -481,33 +500,34 @@ export function HumanReviewModal({ isOpen, data, onSubmit }: HumanReviewModalPro
                                 </Alert>
                             )}
 
-                            {/* Individual Reviews Accordion */}
-                            <div className="space-y-2">
-                                <h5 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pareceres Individuais</h5>
-                                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                                    {Object.entries(data.committee_review_report.individual_reviews).map(([agent, review]) => (
-                                        <div key={agent} className="border rounded-md overflow-hidden flex flex-col">
-                                            <div className="bg-muted/50 px-3 py-2 border-b flex items-center justify-between">
-                                                <span className="text-xs font-semibold">{agent}</span>
-                                                {/* Parsing score from review text roughly for badge */}
-                                                {(review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1] && (
-                                                    <span className={cn(
-                                                        "text-[10px] px-1.5 py-0.5 rounded-full font-medium",
-                                                        parseFloat((review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1]!.replace(',', '.')) >= 7
-                                                            ? "bg-green-100 text-green-700"
-                                                            : "bg-amber-100 text-amber-700"
-                                                    )}>
-                                                        {(review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1]}
-                                                    </span>
-                                                )}
+                            {showCommitteeDetails && (
+                                <div className="space-y-2">
+                                    <h5 className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Pareceres Individuais</h5>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                        {Object.entries(data.committee_review_report.individual_reviews).map(([agent, review]) => (
+                                            <div key={agent} className="border rounded-md overflow-hidden flex flex-col">
+                                                <div className="bg-muted/50 px-3 py-2 border-b flex items-center justify-between">
+                                                    <span className="text-xs font-semibold">{agent}</span>
+                                                    {/* Parsing score from review text roughly for badge */}
+                                                    {(review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1] && (
+                                                        <span className={cn(
+                                                            "text-[10px] px-1.5 py-0.5 rounded-full font-medium",
+                                                            parseFloat((review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1]!.replace(',', '.')) >= 7
+                                                                ? "bg-green-100 text-green-700"
+                                                                : "bg-amber-100 text-amber-700"
+                                                        )}>
+                                                            {(review.match(/nota.*?(\d+(?:[.,]\d+)?)/i) || [])[1]}
+                                                        </span>
+                                                    )}
+                                                </div>
+                                                <div className="p-3 text-[10px] text-muted-foreground h-[150px] overflow-y-auto whitespace-pre-wrap bg-white">
+                                                    {review}
+                                                </div>
                                             </div>
-                                            <div className="p-3 text-[10px] text-muted-foreground h-[150px] overflow-y-auto whitespace-pre-wrap bg-white">
-                                                {review}
-                                            </div>
-                                        </div>
-                                    ))}
+                                        ))}
+                                    </div>
                                 </div>
-                            </div>
+                            )}
                         </div>
                     )}
 

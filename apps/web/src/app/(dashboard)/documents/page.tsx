@@ -3,18 +3,24 @@
 import { useEffect, useState } from 'react';
 import { useDocumentStore } from '@/stores';
 import { DocumentsDropzone, DocumentViewerDialog, DocumentActionsMenu } from '@/components/dashboard';
-import { FileText, Eye, Trash2, Sparkles, BookmarkPlus, FileCheck, Mic, Podcast, Network } from 'lucide-react';
+import { FileText, Eye, Trash2, Sparkles, BookmarkPlus, Mic, Podcast, Network } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatDate, formatFileSize } from '@/lib/utils';
 import { toast } from 'sonner';
+import apiClient from '@/lib/api-client';
 
 export default function DocumentsPage() {
   const { documents, fetchDocuments, deleteDocument } = useDocumentStore();
   const [selectedDoc, setSelectedDoc] = useState<any>(null);
   const [viewerOpen, setViewerOpen] = useState(false);
   const [autoClean, setAutoClean] = useState(true);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryDocName, setSummaryDocName] = useState('');
+  const [summaryContent, setSummaryContent] = useState('');
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   useEffect(() => {
     fetchDocuments();
@@ -32,23 +38,66 @@ export default function DocumentsPage() {
   };
 
   const handleExpand = (doc: any) => {
-    setSelectedDoc({ ...doc, pages: 10, content: 'Conteúdo do documento...' });
-    setViewerOpen(true);
+    setSelectedDoc(null);
+    apiClient
+      .getDocument(doc.id)
+      .then((fullDoc) => {
+        setSelectedDoc(fullDoc);
+        setViewerOpen(true);
+      })
+      .catch(() => {
+        toast.error('Não foi possível carregar o documento.');
+      });
   };
 
   const handleSummarize = (doc: any) => {
-    toast.info(`Gerando resumo de "${doc.name}"...`);
-    setTimeout(() => toast.success('Resumo gerado com sucesso!'), 1500);
+    setSummaryDocName(doc.name);
+    setSummaryContent('');
+    setSummaryLoading(true);
+    setSummaryOpen(true);
+    apiClient
+      .getDocumentSummary(doc.id)
+      .then((result) => {
+        const summary = String(result?.summary || '').trim();
+        setSummaryContent(summary || 'Resumo indisponível para este documento.');
+      })
+      .catch(() => {
+        setSummaryOpen(false);
+        toast.error('Não foi possível gerar o resumo.');
+      })
+      .finally(() => {
+        setSummaryLoading(false);
+      });
   };
 
   const handleSaveToLibrary = (doc: any) => {
     toast.info(`Salvando "${doc.name}" na biblioteca...`);
-    setTimeout(() => toast.success('Documento salvo na biblioteca!'), 1000);
+    apiClient
+      .getDocument(doc.id)
+      .then((fullDoc) => {
+        const text = String(fullDoc?.extracted_text || fullDoc?.content || '').trim();
+        const tokenCount = text ? Math.ceil(text.length / 4) : 0;
+        const description = text ? text.slice(0, 800) : undefined;
+        return apiClient.createLibraryItem({
+          type: 'DOCUMENT',
+          name: fullDoc?.name || doc.name,
+          description,
+          tags: Array.isArray(fullDoc?.tags) ? fullDoc.tags : [],
+          folder_id: fullDoc?.folder_id,
+          resource_id: doc.id,
+          token_count: tokenCount,
+        });
+      })
+      .then(() => {
+        toast.success('Documento salvo na biblioteca!');
+      })
+      .catch(() => {
+        toast.error('Não foi possível salvar na biblioteca.');
+      });
   };
 
   const handleBulkAction = (action: string) => {
-    toast.info(`Executando: ${action}`);
-    setTimeout(() => toast.success(`${action} concluído!`), 1500);
+    toast.info(`Selecione um documento e use "${action}" na lista abaixo.`);
   };
 
   return (
@@ -61,10 +110,10 @@ export default function DocumentsPage() {
         </p>
       </div>
 
-      <DocumentsDropzone />
+      <DocumentsDropzone onOpenDocument={handleExpand} />
 
       {documents.length > 0 && (
-        <div className="rounded-3xl border border-white/70 bg-white/95 p-5 shadow-soft space-y-4">
+        <div id="documents-list" className="rounded-3xl border border-white/70 bg-white/95 p-5 shadow-soft space-y-4">
           {/* Menu Controls */}
           <div className="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-outline/20">
             <div className="flex items-center gap-4">
@@ -204,7 +253,17 @@ export default function DocumentsPage() {
           document={selectedDoc}
         />
       )}
+
+      <Dialog open={summaryOpen} onOpenChange={setSummaryOpen}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Resumo de {summaryDocName}</DialogTitle>
+          </DialogHeader>
+          <div className="max-h-[60vh] overflow-y-auto whitespace-pre-wrap text-sm text-foreground">
+            {summaryLoading ? 'Gerando resumo...' : summaryContent}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
-

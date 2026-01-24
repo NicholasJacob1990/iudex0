@@ -11,11 +11,13 @@ import { Label } from '@/components/ui/label';
 import { ArrowLeft, Save, Upload, Sparkles, Folder, MessageSquare } from 'lucide-react';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
-import { ContextSelector } from '@/components/dashboard/context-selector';
 import { GeneratorWizard } from '@/components/dashboard/generator-wizard';
-import { ChatInterface } from '@/components/dashboard/chat-interface';
+import { ChatInterface } from '@/components/chat/chat-interface';
 import { useChatStore } from '@/stores/chat-store';
 import { useContextStore } from '@/stores/context-store';
+import { MessageBudgetModal } from '@/components/billing/message-budget-modal';
+import { useCanvasStore } from '@/stores/canvas-store';
+import { CanvasContainer } from '@/components/dashboard';
 
 export default function CaseDetailPage() {
     const params = useParams();
@@ -24,10 +26,25 @@ export default function CaseDetailPage() {
 
     const [caseData, setCaseData] = useState<any>(null);
     const [loading, setLoading] = useState(true);
+    const [caseDocuments, setCaseDocuments] = useState<any[]>([]);
+    const [docsLoading, setDocsLoading] = useState(false);
+    const [caseChatId, setCaseChatId] = useState<string | null>(null);
+    const [caseGeneratorChatId, setCaseGeneratorChatId] = useState<string | null>(null);
+    const [didInitCaseContext, setDidInitCaseContext] = useState(false);
+    const canvasState = useCanvasStore((s) => s.state);
 
     // Stores
-    const { setThesis, contextFiles } = useChatStore();
-    // const { clearItems } = useContextStore(); // Might use later
+    const {
+        setThesis,
+        setContext,
+        billingModal,
+        closeBillingModal,
+        retryWithBudgetOverride,
+        createChat,
+    } = useChatStore();
+    const legacyCaseChatStorageKey = `iudex:case_chat:${id}`;
+    const caseChatStorageKey = `iudex:case_chat:${id}:chat`;
+    const caseGeneratorChatStorageKey = `iudex:case_chat:${id}:generator`;
 
     useEffect(() => {
         const loadCase = async () => {
@@ -55,6 +72,160 @@ export default function CaseDetailPage() {
         if (id) loadCase();
     }, [id, setThesis, router]);
 
+    useEffect(() => {
+        const ensureCaseChats = async () => {
+            if (!id) return;
+            if (!caseData?.title) return;
+
+            const loadValidChatId = async (storageKey: string) => {
+                let storedId: string | null = null;
+                try {
+                    storedId = typeof window !== 'undefined' ? localStorage.getItem(storageKey) : null;
+                } catch {
+                    storedId = null;
+                }
+
+                if (!storedId) return null;
+                try {
+                    await apiClient.getChat(storedId);
+                    return storedId;
+                } catch {
+                    try {
+                        localStorage.removeItem(storageKey);
+                    } catch {
+                        // noop
+                    }
+                    return null;
+                }
+            };
+
+            let chatId = await loadValidChatId(caseChatStorageKey);
+            let generatorChatId = await loadValidChatId(caseGeneratorChatStorageKey);
+
+            // Migration: legacy key used to store a single chat for both experiences.
+            // Prefer keeping the legacy chat as the "Gerar peça" chat, and create a fresh chat for "Chat Jurídico".
+            if (!generatorChatId) {
+                let legacyId: string | null = null;
+                try {
+                    legacyId = typeof window !== 'undefined' ? localStorage.getItem(legacyCaseChatStorageKey) : null;
+                } catch {
+                    legacyId = null;
+                }
+                if (legacyId) {
+                    try {
+                        await apiClient.getChat(legacyId);
+                        generatorChatId = legacyId;
+                        try {
+                            localStorage.setItem(caseGeneratorChatStorageKey, legacyId);
+                            localStorage.removeItem(legacyCaseChatStorageKey);
+                        } catch {
+                            // noop
+                        }
+                    } catch {
+                        try {
+                            localStorage.removeItem(legacyCaseChatStorageKey);
+                        } catch {
+                            // noop
+                        }
+                    }
+                }
+            }
+
+            if (!chatId) {
+                const chat = await createChat(`Caso: ${caseData.title} (Chat)`);
+                chatId = chat.id;
+                try {
+                    localStorage.setItem(caseChatStorageKey, chat.id);
+                } catch {
+                    // noop
+                }
+            }
+
+            if (!generatorChatId) {
+                const chat = await createChat(`Caso: ${caseData.title} (Gerar peça)`);
+                generatorChatId = chat.id;
+                try {
+                    localStorage.setItem(caseGeneratorChatStorageKey, chat.id);
+                } catch {
+                    // noop
+                }
+            }
+
+            setCaseChatId(chatId);
+            setCaseGeneratorChatId(generatorChatId);
+        };
+
+        ensureCaseChats().catch((error) => {
+            console.error(error);
+            toast.error("Erro ao preparar o chat do caso");
+        });
+    }, [
+        id,
+        caseData?.title,
+        legacyCaseChatStorageKey,
+        caseChatStorageKey,
+        caseGeneratorChatStorageKey,
+        createChat,
+    ]);
+
+    useEffect(() => {
+        const loadCaseDocuments = async () => {
+            try {
+                setDocsLoading(true);
+                const data = await apiClient.getDocuments(0, 200);
+                const docs = Array.isArray(data?.documents) ? data.documents : [];
+                const tagKey = `case:${id}`.toLowerCase();
+                const filtered = docs.filter((doc: any) =>
+                    Array.isArray(doc?.tags) && doc.tags.some((tag: string) => String(tag).toLowerCase() === tagKey)
+                );
+                setCaseDocuments(filtered);
+            } catch (error) {
+                console.error(error);
+            } finally {
+                setDocsLoading(false);
+            }
+        };
+
+        if (id) loadCaseDocuments();
+    }, [id]);
+
+    useEffect(() => {
+        if (!id) return;
+        // Avoid leaking context across cases.
+        setDidInitCaseContext(false);
+        useContextStore.getState().clearItems();
+        setContext([]);
+    }, [id, setContext]);
+
+    useEffect(() => {
+        if (!id) return;
+        if (!caseDocuments || caseDocuments.length === 0) return;
+
+        const caseItems = caseDocuments
+            .filter((doc: any) => doc && typeof doc.id === 'string')
+            .map((doc: any) => ({
+                id: String(doc.id),
+                type: 'file' as const,
+                name: String(doc.name || doc.title || doc.filename || 'Documento'),
+                meta: 'Caso',
+            }));
+        if (caseItems.length === 0) return;
+
+        // Merge (do not overwrite) to preserve any manual additions the user may have made.
+        const currentItems = useContextStore.getState().items || [];
+        const byId = new Map<string, any>();
+        for (const item of currentItems) {
+            if (item && typeof item.id === 'string') byId.set(item.id, item);
+        }
+        for (const item of caseItems) byId.set(item.id, item);
+
+        const mergedItems = Array.from(byId.values());
+        useContextStore.getState().setItems(mergedItems);
+        setContext(mergedItems);
+
+        if (!didInitCaseContext) setDidInitCaseContext(true);
+    }, [id, caseDocuments, didInitCaseContext, setContext]);
+
     const handleSaveMetadata = async () => {
         try {
             await apiClient.updateCase(id, {
@@ -75,7 +246,7 @@ export default function CaseDetailPage() {
     if (!caseData) return <div className="p-8">Caso não encontrado</div>;
 
     return (
-        <div className="container py-6 space-y-6 max-w-7xl mx-auto">
+        <div className="w-full py-4 space-y-4">
             {/* Header */}
             <div className="flex items-center gap-4 border-b border-border/40 pb-4">
                 <Button variant="ghost" size="icon" onClick={() => router.push('/cases')}>
@@ -95,7 +266,7 @@ export default function CaseDetailPage() {
                 </Button>
             </div>
 
-            <Tabs defaultValue="generation" className="space-y-4">
+            <Tabs defaultValue="generation" className="space-y-3">
                 <TabsList>
                     <TabsTrigger value="overview">Visão Geral & Fatos</TabsTrigger>
                     <TabsTrigger value="generation" className="gap-2">
@@ -164,7 +335,7 @@ export default function CaseDetailPage() {
                 {/* TAB: Generation */}
                 <TabsContent value="generation">
                     <div className="max-w-5xl mx-auto">
-                        <GeneratorWizard caseId={id} caseThesis={caseData.thesis} />
+                        <GeneratorWizard caseId={id} caseThesis={caseData.thesis} chatId={caseGeneratorChatId ?? undefined} />
                     </div>
                 </TabsContent>
 
@@ -175,6 +346,29 @@ export default function CaseDetailPage() {
                             <CardTitle>Arquivos do Caso (RAG Local)</CardTitle>
                         </CardHeader>
                         <CardContent>
+                            {docsLoading ? (
+                                <div className="text-sm text-muted-foreground">Carregando documentos do caso...</div>
+                            ) : caseDocuments.length > 0 ? (
+                                <div className="space-y-2 mb-6">
+                                    {caseDocuments.map((doc) => (
+                                        <div key={doc.id} className="flex items-center justify-between gap-2 text-sm border rounded-md px-3 py-2">
+                                            <div className="min-w-0">
+                                                <div className="font-medium truncate">{doc.name}</div>
+                                                <div className="text-xs text-muted-foreground">
+                                                    {doc.created_at ? new Date(doc.created_at).toLocaleString() : '—'}
+                                                </div>
+                                            </div>
+                                            <Button size="sm" variant="outline" onClick={() => router.push('/documents')}>
+                                                Ver em Documentos
+                                            </Button>
+                                        </div>
+                                    ))}
+                                </div>
+                            ) : (
+                                <div className="text-sm text-muted-foreground mb-6">
+                                    Nenhum documento associado a este caso ainda.
+                                </div>
+                            )}
                             <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-xl border-muted bg-muted/10">
                                 <Upload className="h-8 w-8 text-muted-foreground mb-4" />
                                 <p className="text-sm text-muted-foreground mb-4">
@@ -188,11 +382,41 @@ export default function CaseDetailPage() {
 
                 {/* TAB: Chat with Documents */}
                 <TabsContent value="chat">
-                    <div className="max-w-5xl mx-auto">
-                        <ChatInterface caseId={id} caseContextFiles={contextFiles} />
+                    <div className="w-full">
+                        <div className="flex h-[calc(100vh-140px)] min-h-[820px] gap-2">
+                            {canvasState === 'expanded' ? (
+                                <div className="flex-1 min-h-0 overflow-hidden rounded-xl border border-slate-200/60 bg-white shadow-sm">
+                                    <CanvasContainer mode="chat" />
+                                </div>
+                            ) : (
+                                <>
+                                    <div className={`flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-slate-200/60 bg-white shadow-sm ${canvasState !== 'hidden' ? 'flex-[2.4]' : 'flex-1'}`}>
+                                        {caseChatId ? (
+                                            <ChatInterface chatId={caseChatId} renderBudgetModal={false} showCanvasButton />
+                                        ) : (
+                                            <div className="text-sm text-muted-foreground py-8 px-4">
+                                                Preparando chat...
+                                            </div>
+                                        )}
+                                    </div>
+                                    {canvasState !== 'hidden' && (
+                                        <div className="flex-1 min-h-0 overflow-hidden rounded-xl border border-slate-200/60 bg-white shadow-sm">
+                                            <CanvasContainer mode="chat" />
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
                     </div>
                 </TabsContent>
             </Tabs>
+
+            <MessageBudgetModal
+                open={billingModal.open}
+                quote={billingModal.quote}
+                onClose={closeBillingModal}
+                onSelectBudget={retryWithBudgetOverride}
+            />
         </div>
     );
 }

@@ -153,6 +153,22 @@ async def dry_run_analysis(request: DryRunAnalysisRequest):
         logger.error(f"Dry-run analysis error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+class CrossFileDuplicatesRequest(BaseModel):
+    files: List[str]
+
+@router.post("/cross-file-duplicates")
+async def cross_file_duplicates(request: CrossFileDuplicatesRequest):
+    """
+    Finds duplicate paragraphs across multiple files using fingerprinting.
+    Wraps quality_service.find_cross_file_duplicates.
+    """
+    try:
+        result = await quality_service.find_cross_file_duplicates(request.files)
+        return result
+    except Exception as e:
+        logger.error(f"Cross-file duplicates error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/apply-structural-fixes")
 async def apply_structural_fixes(request: ApplyFixesRequest):
     """
@@ -343,7 +359,7 @@ async def align_diarization(request: DiarizeRequest):
                  
             pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
-                use_auth_token=hf_token
+                token=hf_token
             )
             device = "mps" if torch.backends.mps.is_available() else "cpu"
             pipeline.to(torch.device(device))

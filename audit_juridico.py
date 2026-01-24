@@ -7,6 +7,12 @@ from typing import List, Optional, Dict, Any
 from google import genai
 from google.genai import types
 
+try:
+    from app.services.api_call_tracker import record_api_call
+except Exception:
+    def record_api_call(*args, **kwargs):
+        return None
+
 # Configuração de Logger
 logger = logging.getLogger("AuditJuridico")
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
@@ -65,6 +71,69 @@ Gere um RELATÓRIO DE AUDITORIA FORMAL em Markdown:
 <peca_analisada>
 {texto}
 </peca_analisada>
+"""
+
+PROMPT_AUDITORIA_CONTRA_RAW = """
+ATUE COMO UM AUDITOR DE FIDELIDADE PARA APOSTILAS JURÍDICAS.
+
+## FONTE DA VERDADE (REGRA ABSOLUTA)
+A TRANSCRIÇÃO BRUTA (RAW) é a fonte da verdade desta auditoria.
+- NÃO use conhecimento jurídico externo para dizer que a aula está “errada”.
+- Sua função é detectar problemas introduzidos pela formatação (adições, distorções, omissões, troca de números).
+
+## SEU OBJETIVO
+Compare o RAW com a APOSTILA FORMATADA e identifique:
+
+1) 🔴 ADIÇÕES / ALUCINAÇÕES (a apostila traz algo que não existe no RAW)
+   - Conceitos, regras, exceções, exemplos, macetes, “pegadinhas”.
+   - NÚMEROS: leis, artigos, súmulas, temas, REsp/RE/ADI, prazos, percentuais, valores.
+
+2) 🔴 DISTORÇÕES DE SENTIDO (RAW diz X, apostila diz Y)
+   - Ex.: “facultativo” ↔ “obrigatório”, regra ↔ exceção, troca de sujeito, troca de prazo, generalização indevida.
+
+3) 🔴 ALTERAÇÃO DE REFERÊNCIAS (mudou/omitiu número ou identificação)
+   - Ex.: Lei 11.101/2005 virou “Lei de Falências” sem número; Súmula 7 virou Súmula 17; perdeu artigo/inciso.
+
+4) 🔴 OMISSÕES CRÍTICAS (algo relevante do RAW sumiu na apostila)
+   - Especialmente dispositivos/números, passos de procedimento, dicas de prova e pontos enfatizados pelo professor.
+
+5) 🟠 INTEGRIDADE / REDAÇÃO (problema editorial que compromete entendimento)
+   - Frases truncadas, colagens estranhas, repetição integral de parágrafos, trechos sem nexo.
+
+## COMO REPORTAR (CRÍTICO)
+- Priorize itens de maior impacto (números/regras/prazos).
+- Para cada item crítico, inclua:
+  - Trecho curto do RAW que comprova o correto (ou “não encontrado no RAW” se for adição).
+  - Trecho curto da APOSTILA onde aparece o problema.
+  - Sugestão objetiva: “remover”, “corrigir para X”, “reinserir trecho Y”.
+- Limite a lista a no máximo 25 itens (os mais relevantes). Se houver mais, cite “há mais ocorrências”.
+
+---
+SAÍDA ESPERADA (Markdown):
+
+# 🕵️ Relatório de Auditoria (RAW x Apostila)
+
+## 1. Resumo Geral
+- Nota de fidelidade (0–10): X/10
+- Síntese (2 linhas)
+
+## 2. Pontos de Atenção (Críticos)
+(Liste itens. Se não houver, escreva "Nenhum problema crítico detectado.")
+
+## 3. Omissões Relevantes
+(Liste. Se não houver, escreva "Nenhuma omissão relevante detectada.")
+
+## 4. Checklist de Referências Numéricas
+(Liste leis/súmulas/artigos/julgados mencionados na apostila para conferência rápida.)
+
+---
+<transcricao_bruta>
+{raw}
+</transcricao_bruta>
+
+<apostila_formatada>
+{formatted}
+</apostila_formatada>
 """
 
 def normalize_law_number(raw_num: str) -> str:
@@ -188,9 +257,21 @@ def verify_semantic_interpretation(client, model_name, citation: str, context: s
                 temperature=0.1
             )
         )
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=True,
+        )
         if response.text:
             return json.loads(response.text)
-    except:
+    except Exception:
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=False,
+        )
         pass
     return {}
 
@@ -374,6 +455,12 @@ def verify_online_grounding(client, model_name, citation: str) -> Dict:
                 temperature=0.0
             )
         )
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=True,
+        )
         
         # === EXTRAIR GROUNDING METADATA (v2.0) ===
         if hasattr(response, 'candidates') and response.candidates:
@@ -434,6 +521,12 @@ def verify_online_grounding(client, model_name, citation: str) -> Dict:
                         pass
                         
     except Exception as e:
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=False,
+        )
         logger.warning(f"⚠️ Erro no Web Search Fallback: {e}")
         result["summary"] = f"Erro: {str(e)}"
     
@@ -481,6 +574,12 @@ def _verify_via_openai(citation: str, model_name: str = "gpt-5.2-chat-latest") -
             tools=[{"type": "web_search_preview"}],
             tool_choice={"type": "web_search_preview"},
             input=prompt
+        )
+        record_api_call(
+            kind="llm",
+            provider="openai",
+            model=model_name,
+            success=True,
         )
         
         result = {
@@ -532,6 +631,12 @@ def _verify_via_openai(citation: str, model_name: str = "gpt-5.2-chat-latest") -
         logger.warning("⚠️ OpenAI SDK não instalado. Use: pip install openai")
         return {"existe": False, "summary": "OpenAI SDK não disponível", "urls": [], "provider": "openai"}
     except Exception as e:
+        record_api_call(
+            kind="llm",
+            provider="openai",
+            model=model_name,
+            success=False,
+        )
         logger.warning(f"⚠️ Erro no Web Search (OpenAI): {e}")
         return {"existe": False, "summary": f"Erro: {str(e)}", "urls": [], "provider": "openai"}
 
@@ -572,6 +677,12 @@ def _verify_via_claude(citation: str, model_name: str = "claude-sonnet-4-5") -> 
                 "max_uses": 3,
                 "allowed_domains": ["gov.br", "stf.jus.br", "stj.jus.br", "jusbrasil.com.br", "planalto.gov.br"]
             }]
+        )
+        record_api_call(
+            kind="llm",
+            provider="anthropic",
+            model=model_name,
+            success=True,
         )
         
         result = {
@@ -621,6 +732,12 @@ def _verify_via_claude(citation: str, model_name: str = "claude-sonnet-4-5") -> 
         logger.warning("⚠️ Anthropic SDK não instalado. Use: pip install anthropic")
         return {"existe": False, "summary": "Anthropic SDK não disponível", "urls": [], "provider": "claude"}
     except Exception as e:
+        record_api_call(
+            kind="llm",
+            provider="anthropic",
+            model=model_name,
+            success=False,
+        )
         logger.warning(f"⚠️ Erro no Web Search (Claude): {e}")
         return {"existe": False, "summary": f"Erro: {str(e)}", "urls": [], "provider": "claude"}
 
@@ -687,10 +804,11 @@ def check_hallucinations(text: str, rag_manager, client=None, model_name=None) -
             
     return report
 
-def auditar_peca(client, model_name, texto_completo, output_path, rag_manager=None):
+def auditar_peca(client, model_name, texto_completo, output_path, rag_manager=None, raw_transcript=None):
     """
     Executa a auditoria jurídica.
     Se 'rag_manager' for fornecido, executa checagem de alucinação.
+    Se 'raw_transcript' for fornecido, usa modo de confronto.
     """
     logger.info("⚖️ Iniciando Auditoria Jurídica...")
     
@@ -702,12 +820,23 @@ def auditar_peca(client, model_name, texto_completo, output_path, rag_manager=No
         logger.info("🕵️‍♂️ Executando verificação de alucinação (RAG + Reranking)...")
         rag_report = check_hallucinations(texto_completo, rag_manager, client=client, model_name=model_name)
     
-    prompt = PROMPT_AUDITORIA_JURIDICA.format(texto=texto_completo, data_atual=data_atual)
+    if raw_transcript:
+        logger.info("🧾 Modo de confronto ativado (RAW fornecido)")
+        prompt = PROMPT_AUDITORIA_CONTRA_RAW.format(raw=raw_transcript, formatted=texto_completo)
+    else:
+        logger.warning("⚠️ Auditoria sem RAW. Apenas validação jurídica intrínseca.")
+        prompt = PROMPT_AUDITORIA_JURIDICA.format(texto=texto_completo, data_atual=data_atual)
     
     try:
         # Adaptando para a API do google-genai v1/v2
         if isinstance(client, genai.GenerativeModel):
              response = client.generate_content(prompt)
+             record_api_call(
+                 kind="llm",
+                 provider="vertex-gemini",
+                 model=model_name,
+                 success=True,
+             )
         else:
              # v3.0: Usando ThinkingConfig HIGH para auditoria (raciocínio profundo)
              response = client.models.generate_content(
@@ -728,6 +857,12 @@ def auditar_peca(client, model_name, texto_completo, output_path, rag_manager=No
                     ]
                 )
              )
+             record_api_call(
+                 kind="llm",
+                 provider="vertex-gemini",
+                 model=model_name,
+                 success=True,
+             )
 
         if response.text:
             relatorio = response.text
@@ -747,19 +882,34 @@ def auditar_peca(client, model_name, texto_completo, output_path, rag_manager=No
             return False
 
     except Exception as e:
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=False,
+        )
         logger.error(f"❌ Erro na auditoria: {e}")
         return False
 
-def audit_document_text(client, model_name: str, text: str, rag_manager=None) -> Dict[str, Any]:
+def audit_document_text(client, model_name: str, text: str, rag_manager=None, raw_transcript: str = None) -> Dict[str, Any]:
     """
     Gera metadados de auditoria completos (Relatório + Citações) sem efeitos colaterais (IO).
     Ideal para uso via API/Orchestrator.
+    
+    Se raw_transcript for fornecido, usa auditoria de confronto (Fidelidade).
+    Caso contrário, usa auditoria solo (Jurídica/Processual).
     """
     from datetime import datetime
     data_atual = datetime.now().strftime("%d/%m/%Y")
     
     # 1. Gerar Relatório de Auditoria (LLM)
-    prompt = PROMPT_AUDITORIA_JURIDICA.format(texto=text, data_atual=data_atual)
+    if raw_transcript:
+        logger.info("🧾 Modo: auditoria com confronto RAW (Fidelidade)")
+        prompt = PROMPT_AUDITORIA_CONTRA_RAW.format(raw=raw_transcript, formatted=text)
+    else:
+        logger.warning("⚠️ Modo: auditoria solo (Sem RAW). Fidelidade não garantida.")
+        prompt = PROMPT_AUDITORIA_JURIDICA.format(texto=text, data_atual=data_atual)
+    
     audit_report = ""
     
     try:
@@ -780,12 +930,30 @@ def audit_document_text(client, model_name: str, text: str, rag_manager=None) ->
                     ]
                 )
             )
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=model_name,
+                success=True,
+            )
         else: # Legacy
             response = client.generate_content(prompt)
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=model_name,
+                success=True,
+            )
             
         audit_report = response.text if response and response.text else "Auditoria não gerou texto."
         
     except Exception as e:
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_name,
+            success=False,
+        )
         logger.error(f"Erro na geração do relatório de auditoria: {e}")
         audit_report = f"Erro técnico na auditoria: {str(e)}"
 

@@ -1,0 +1,434 @@
+{
+  "points_anchor": {
+    "usd_per_1m_points": 30,
+    "usd_per_point": 0.00003
+  },
+  "size_profiles": {
+    "S": { "input_tokens": 800, "output_tokens": 300 },
+    "M": { "input_tokens": 2500, "output_tokens": 1200 },
+    "L": { "input_tokens": 4000, "output_tokens": 1500 }
+  },
+  "context_multiplier_policy": [
+    { "max_context_tokens": 16000, "multiplier": 1.0 },
+    { "max_context_tokens": 64000, "multiplier": 1.5 },
+    { "max_context_tokens": 200000, "multiplier": 2.5 },
+    { "max_context_tokens": 1000000000, "multiplier": 4.0 }
+  ],
+  "defaults": {
+    "llm_size": "M",
+    "deep_research_effort": "medium"
+  },
+  "llm_points_per_call": {
+    "gpt-5.2": { "S": 224, "M": 847, "L": 1120 },
+    "gpt-5.2-instant": { "S": 224, "M": 847, "L": 1120 },
+    "gpt-5": { "S": 224, "M": 847, "L": 1120 },
+    "gpt-5-mini": { "S": 40, "M": 150, "L": 200 },
+    "gpt-4o": { "S": 224, "M": 847, "L": 1120 },
+    "claude-4.5-sonnet": { "S": 300, "M": 1120, "L": 1500 },
+    "claude-4.5-opus": { "S": 520, "M": 1950, "L": 2600 },
+    "claude-4.5-haiku": { "S": 120, "M": 450, "L": 600 },
+    "gemini-3-pro": { "S": 220, "M": 820, "L": 1100 },
+    "gemini-3-flash": { "S": 60, "M": 220, "L": 300 },
+    "gemini-2.5-pro": { "S": 220, "M": 820, "L": 1100 },
+    "gemini-2.5-flash": { "S": 60, "M": 220, "L": 300 },
+    "internal-rag": { "S": 60, "M": 220, "L": 300 },
+    "grok-4": { "S": 300, "M": 1120, "L": 1500 },
+    "grok-4-fast": { "S": 300, "M": 1120, "L": 1500 },
+    "grok-4.1": { "S": 11, "M": 38, "L": 54 },
+    "grok-4.1-fast": { "S": 11, "M": 38, "L": 54 },
+    "llama-4": { "S": 19, "M": 68, "L": 95 },
+    "llama-4-maverick-t": { "S": 55, "M": 55, "L": 55 }
+  },
+  "llm_rate_cards": {
+    "gpt-5": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 38,
+        "output": 300,
+        "cached_input_multiplier": 0.1
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00112, "points": 38, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.009, "points": 300, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "gpt-5.2": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 53,
+        "output": 420,
+        "cached_input_multiplier": 0.1
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00158, "points": 53, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.0126, "points": 420, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "gpt-5.2-instant": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 53,
+        "output": 420,
+        "cached_input_multiplier": 0.1
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00158, "points": 53, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.0126, "points": 420, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "gpt-5-mini": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 9,
+        "output": 67,
+        "cached_input_multiplier": 0.1
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00025, "points": 9, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.002, "points": 67, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "claude-4.5-opus": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 142,
+        "output": 709,
+        "cached_input_multiplier": 0.1
+      },
+      "cache_write_input_multiplier": 1.25,
+      "cache_write_ttl_seconds": 300,
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada.",
+        "Quando novo conteudo e gravado no cache, custa 25% mais pontos que a entrada original e expira em 5 minutos."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00425, "points": 142, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.02125, "points": 709, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "claude-4.5-sonnet": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 85,
+        "output": 425,
+        "cached_input_multiplier": 0.1
+      },
+      "cache_write_input_multiplier": 1.25,
+      "cache_write_ttl_seconds": 300,
+      "over_context_threshold": 200000,
+      "over_context_input_multiplier": 2.0,
+      "over_context_output_multiplier": 1.5,
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo.",
+        "As pesquisas na Web adicionarao tokens de entrada.",
+        "Quando o contexto e superior a 200k tokens: taxa de entrada 2.0x e taxa de saida 1.5x.",
+        "Quando novo conteudo e gravado no cache, custa 25% mais pontos que a entrada original e expira em 5 minutos."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.00255, "points": 85, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.01275, "points": 425, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "gemini-3-pro": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 54,
+        "output": 320,
+        "cached_input_multiplier": 0.1
+      },
+      "media_points_per_second": {
+        "audio": 2,
+        "video": 4
+      },
+      "over_context_threshold": 200000,
+      "over_context_input_multiplier": 2.0,
+      "over_context_output_multiplier": 1.5,
+      "notes": [
+        "O custo por mensagem é variável: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts está ativo.",
+        "O cache de prompts está atualmente limitado a sessões com a busca na web desativada.",
+        "As pesquisas na Web adicionarão tokens de entrada.",
+        "Quando o contexto é superior a 200k tokens: taxa de entrada 2.0x e taxa de saída 1.5x."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.0016, "points": 54, "unit": "por 1.000 tokens" },
+        { "key": "input_image", "label": "Entrada (imagem)", "usd": 0.0016, "points": 54, "unit": "por 1.000 tokens" },
+        { "key": "input_video", "label": "Entrada (vídeo)", "usd": 0.00011, "points": 4, "unit": "por segundo" },
+        { "key": "input_audio", "label": "Entrada (áudio)", "usd": 0.000051, "points": 2, "unit": "por segundo" },
+        { "key": "output_text", "label": "Saída (texto)", "usd": 0.0096, "points": 320, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "gemini-3-flash": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 17,
+        "output": 100,
+        "cached_input_multiplier": 0.1
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 90% no input quando o cache de prompts esta ativo."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.0005, "points": 17, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.003, "points": 100, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "grok-4.1": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 7,
+        "output": 17,
+        "cached_input_multiplier": 0.25
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 75% no input quando o cache de prompts esta ativo."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.0002, "points": 7, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.0005, "points": 17, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "grok-4.1-fast": {
+      "pricing_model": "variable",
+      "apply_context_multiplier": false,
+      "token_points_per_1k": {
+        "input": 7,
+        "output": 17,
+        "cached_input_multiplier": 0.25
+      },
+      "notes": [
+        "O custo por mensagem e variavel: mensagens mais longas custam mais.",
+        "Desconto de cache: 75% no input quando o cache de prompts esta ativo."
+      ],
+      "rate_table": [
+        { "key": "input_text", "label": "Entrada (texto)", "usd": 0.0002, "points": 7, "unit": "por 1.000 tokens" },
+        { "key": "output_text", "label": "Saida (texto)", "usd": 0.0005, "points": 17, "unit": "por 1.000 tokens" }
+      ]
+    },
+    "llama-4-maverick-t": {
+      "pricing_model": "fixed",
+      "rate_table": [
+        { "key": "message", "label": "Custo total", "usd": 0.0016, "points": 55, "unit": "por mensagem" }
+      ],
+      "notes": [
+        "Custo fixo por mensagem."
+      ]
+    }
+  },
+  "tool_points": {
+    "web_search_request": 200,
+    "deep_research": {
+      "effort_points": {
+        "low": 1640,
+        "medium": 4760,
+        "high": 5280
+      },
+      "default_effort": "medium"
+    }
+  },
+  "perplexity": {
+    "search_api": {
+      "points_per_request": 200
+    },
+    "grounded_llm": {
+      "defaults": {
+        "search_context_size": "low",
+        "sonar_pro_search_type": "fast",
+        "auto_search_type_estimate": "pro"
+      },
+      "notes": [
+        "Este bot usa um modelo de precificacao variavel.",
+        "O historico da conversa e tokens de imagem contam como input.",
+        "As taxas de autorizacao podem ser maiores do que a estimativa exibida."
+      ],
+      "token_points_per_1k": {
+        "sonar": { "input": 80, "output": 80 },
+        "sonar-pro": { "input": 240, "output": 1200 }
+      },
+      "base_fee_points": {
+        "sonar": { "low": 400, "medium": 640, "high": 960 },
+        "sonar-pro": { "low": 480, "medium": 800, "high": 1120 }
+      },
+      "token_points_per_call": {
+        "sonar": { "S": 44, "M": 148, "L": 220 },
+        "sonar-pro": { "S": 276, "M": 1020, "L": 1380 },
+        "sonar-reasoning-pro": { "S": 160, "M": 584, "L": 800 }
+      },
+      "request_fee_points_per_call": {
+        "sonar": {
+          "low": 400,
+          "medium": 640,
+          "high": 960
+        },
+        "sonar-pro": {
+          "fast": { "low": 480, "medium": 800, "high": 1120 },
+          "pro": { "low": 480, "medium": 800, "high": 1120 },
+          "auto": { "estimate": "pro" }
+        },
+        "sonar-reasoning-pro": {
+          "low": 240,
+          "medium": 400,
+          "high": 560
+        }
+      }
+    },
+    "deep_research_pricing": {
+      "token_points_per_1k": {
+        "input": 160,
+        "output": 640,
+        "citation": 160,
+        "reasoning": 240
+      },
+      "search_query_points": 400,
+      "notes": [
+        "Este bot usa um modelo de precificacao variavel.",
+        "O historico da conversa conta como tokens de entrada.",
+        "As taxas de autorizacao podem ser maiores do que a estimativa exibida."
+      ]
+    },
+    "deep_research": {
+      "effort_points": {
+        "low": 1640,
+        "medium": 4760,
+        "high": 5280
+      },
+      "default_effort": "medium"
+    }
+  },
+  "workflow_node_defaults": {
+    "outline_node": { "type": "llm", "size": "S", "default_model": "gpt-5.2" },
+    "planner_node": { "type": "llm", "size": "S", "default_model": "gpt-5.2" },
+    "hyde_query": { "type": "llm", "size": "S", "default_model": "gpt-5-mini" },
+    "section_draft": { "type": "llm", "size": "M" },
+    "section_critique": { "type": "llm", "size": "M" },
+    "section_revision": { "type": "llm", "size": "M" },
+    "section_judge": { "type": "llm", "size": "S", "default_model": "gpt-5.2" },
+    "final_committee_review_parallel": { "type": "llm", "size": "M", "default_model": "claude-4.5-sonnet" },
+    "final_committee_consolidation": { "type": "llm", "size": "S", "default_model": "gpt-5.2" },
+    "style_check_node": { "type": "llm", "size": "L", "default_model": "claude-4.5-opus" },
+    "style_refine_node": { "type": "llm", "size": "M", "default_model": "claude-4.5-sonnet" },
+    "fact_check_sei_node": { "type": "llm", "size": "M", "default_model": "gpt-5.2", "fallback_model": "gemini-3-pro", "max_calls": 2 },
+    "web_search_node": { "type": "tool", "tool_name": "web_search_request", "max_requests": 5 },
+    "deep_research_node": { "type": "tool", "tool_name": "deep_research", "max_calls": 2 }
+  },
+  "plans": {
+    "free": { "price_usd": 0, "quota_points": 3000, "period": "daily" },
+    "starter": { "price_usd": 9, "quota_points": 300000, "period": "monthly" },
+    "standard": { "price_usd": 30, "quota_points": 1000000, "period": "monthly" },
+    "pro": { "price_usd": 75, "quota_points": 2500000, "period": "monthly" },
+    "advanced": { "price_usd": 150, "quota_points": 5000000, "period": "monthly" },
+    "ultra": { "price_usd": 375, "quota_points": 12500000, "period": "monthly" },
+    "topup_100k": { "price_usd": 3, "quota_points": 100000, "period": "one_off" },
+    "topup_1m": { "price_usd": 30, "quota_points": 1000000, "period": "one_off" }
+  },
+  "plan_order": ["free", "starter", "standard", "pro", "advanced", "ultra"],
+  "plan_aliases": {
+    "FREE": "free",
+    "STARTER": "starter",
+    "STANDARD": "standard",
+    "PRO": "pro",
+    "ADVANCED": "advanced",
+    "ULTRA": "ultra",
+    "ENTERPRISE": "ultra",
+    "INDIVIDUAL": "starter",
+    "PROFESSIONAL": "pro",
+    "ENTERPRISE_PLAN": "ultra",
+    "DAILY_BASIC": "starter"
+  },
+  "feature_gates": {
+    "deep_research": {
+      "min_plan": "starter",
+      "else_multiplier": 2.0
+    }
+  },
+  "caps_by_plan": {
+    "free": {
+      "max_granular_passes": 1,
+      "max_final_review_loops": 1,
+      "max_style_loops": 1,
+      "max_hil_iterations": 0,
+      "max_web_search_requests": 1,
+      "deep_research_effort_max": "none",
+      "max_deep_research_per_month": 0
+    },
+    "starter": {
+      "max_granular_passes": 1,
+      "max_final_review_loops": 1,
+      "max_style_loops": 1,
+      "max_hil_iterations": 1,
+      "max_web_search_requests": 3,
+      "deep_research_effort_max": "low",
+      "max_deep_research_per_month": 1
+    },
+    "standard": {
+      "max_granular_passes": 2,
+      "max_final_review_loops": 2,
+      "max_style_loops": 2,
+      "max_hil_iterations": 1,
+      "max_web_search_requests": 5,
+      "deep_research_effort_max": "low",
+      "max_deep_research_per_month": 5
+    },
+    "pro": {
+      "max_granular_passes": 3,
+      "max_final_review_loops": 3,
+      "max_style_loops": 3,
+      "max_hil_iterations": 2,
+      "max_web_search_requests": 5,
+      "deep_research_effort_max": "medium",
+      "max_deep_research_per_month": 20
+    },
+    "advanced": {
+      "max_granular_passes": 3,
+      "max_final_review_loops": 3,
+      "max_style_loops": 3,
+      "max_hil_iterations": 3,
+      "max_web_search_requests": 5,
+      "deep_research_effort_max": "high",
+      "max_deep_research_per_month": 60
+    },
+    "ultra": {
+      "max_granular_passes": 3,
+      "max_final_review_loops": 3,
+      "max_style_loops": 3,
+      "max_hil_iterations": 5,
+      "max_web_search_requests": 5,
+      "deep_research_effort_max": "high",
+      "max_deep_research_per_month": 200
+    }
+  }
+}

@@ -3,12 +3,14 @@ import { Button } from '@/components/ui/button';
 import { Upload, FileText, CheckCircle2, AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
+import { useUploadLimits } from '@/lib/use-upload-limits';
 
 export function StyleLearner() {
     const [isDragging, setIsDragging] = useState(false);
     const [file, setFile] = useState<File | null>(null);
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [analysisComplete, setAnalysisComplete] = useState(false);
+    const { maxUploadLabel, maxUploadBytes } = useUploadLimits();
 
     const handleDragOver = (e: React.DragEvent) => {
         e.preventDefault();
@@ -24,6 +26,10 @@ export function StyleLearner() {
         setIsDragging(false);
         const droppedFile = e.dataTransfer.files[0];
         if (droppedFile && (droppedFile.type === 'application/pdf' || droppedFile.name.endsWith('.docx'))) {
+            if (droppedFile.size > maxUploadBytes) {
+                toast.error(`Arquivo excede o limite de ${maxUploadLabel}.`);
+                return;
+            }
             setFile(droppedFile);
         } else {
             toast.error('Por favor, envie apenas arquivos PDF ou DOCX.');
@@ -84,7 +90,7 @@ export function StyleLearner() {
                             <div className="flex flex-col items-center gap-2 text-center">
                                 <Upload className="h-10 w-10 text-muted-foreground" />
                                 <p className="font-medium text-foreground">Arraste suas petições aqui</p>
-                                <p className="text-xs text-muted-foreground">PDF ou DOCX até 10MB</p>
+                                <p className="text-xs text-muted-foreground">PDF ou DOCX até {maxUploadLabel}</p>
                                 <Button variant="outline" size="sm" className="mt-2">
                                     Selecionar Arquivo
                                 </Button>

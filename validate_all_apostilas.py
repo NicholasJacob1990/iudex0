@@ -41,11 +41,12 @@ for raw_file in raw_files:
             
         # Run validation
         # validate_completeness_full(self, raw_transcript, formatted_text, video_name, global_structure=None)
-        validation_result = vomo.validate_completeness_full(
-            raw_text, 
-            formatted_text, 
+        validation_result = vomo.validate_fidelity_primary(
+            raw_text,
+            formatted_text,
             stem,
-            global_structure=None # Optional, we can skip for validation only
+            modo="APOSTILA",
+            include_sources=False,
         )
         
         # Parse result (it's likely a JSON string or dict, depending on implementation)

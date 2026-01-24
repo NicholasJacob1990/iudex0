@@ -15,9 +15,11 @@ import asyncio
 import html as html_lib
 import re
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Literal, Generator, AsyncGenerator
+from functools import lru_cache
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -33,20 +35,49 @@ from app.services.ai.agent_clients import (
 from app.services.ai.gemini_drafter import GeminiDrafterWrapper
 from app.services.ai.debate_subgraph import run_debate_for_section
 from app.services.web_search_service import web_search_service, build_web_context, is_breadth_first
+from app.services.rag_context import build_rag_context
+from app.services.rag_trace import trace_event
+from app.services.ai.internal_rag_agent import (
+    build_internal_rag_system_instruction,
+    build_internal_rag_prompt,
+)
 from app.services.ai.agent_clients import (
     call_openai_async,
     call_anthropic_async,
     call_vertex_gemini_async,
+    stream_vertex_gemini_async,
 )
-from app.services.ai.citations import to_perplexity
-from app.services.ai.citations.base import render_perplexity, stable_numbering
+from app.services.ai.citations import extract_perplexity
+from app.services.ai.perplexity_config import (
+    build_perplexity_chat_kwargs,
+    normalize_perplexity_search_mode,
+    normalize_perplexity_recency,
+    normalize_perplexity_date,
+    parse_csv_list,
+    normalize_float,
+)
+from app.services.ai.citations.base import render_perplexity, stable_numbering, sources_to_citations
+from app.services.ai.research_policy import decide_research_flags
+from app.services.ai.deep_research_service import deep_research_service
+from app.services.web_rag_service import web_rag_service
 from app.services.ai.agent_clients import _is_anthropic_vertex_client
 from app.services.ai.genai_utils import extract_genai_text
+from app.services.ai.prompt_flags import apply_verbosity_instruction, clamp_thinking_budget
 from app.services.model_registry import get_model_config as get_budget_model_config
+from app.services.token_budget_service import TokenBudgetService
+from app.services.api_call_tracker import record_api_call, billing_context
 
 logger = logging.getLogger("ChatService")
 
 from app.services.ai.engineering_pipeline import run_engineering_pipeline
+
+token_budget_service = TokenBudgetService()
+
+
+@lru_cache(maxsize=1)
+def get_document_generator():
+    from app.services.document_generator import DocumentGenerator
+    return DocumentGenerator()
 
 
 def _normalize_text(value: Optional[str]) -> str:
@@ -107,6 +138,70 @@ def _get_min_context_window(model_ids: List[str]) -> tuple[int, int]:
     return context_window or 0, max_output or HISTORY_DEFAULT_MAX_OUTPUT
 
 
+def _pick_smallest_context_model(model_ids: List[str]) -> str:
+    selected = model_ids[0]
+    min_ctx = get_budget_model_config(selected).get("context_window", 0)
+    for model_id in model_ids[1:]:
+        ctx = get_budget_model_config(model_id).get("context_window", 0)
+        if min_ctx <= 0 or (ctx > 0 and ctx < min_ctx):
+            selected = model_id
+            min_ctx = ctx
+    return selected
+
+
+def _should_use_precise_budget(model_id: str) -> bool:
+    provider = (get_budget_model_config(model_id) or {}).get("provider") or ""
+    return provider in ("vertex", "google")
+
+
+def _join_context_parts(*parts: Optional[str]) -> str:
+    filtered = [part for part in parts if part]
+    return "\n\n".join(filtered).strip()
+
+
+def _redact_prompt(text: str, max_len: int = 2000) -> str:
+    if not text:
+        return ""
+    redacted = re.sub(r"(?i)(api[_-]?key|secret|token)\s*[:=]\s*\S+", r"\1=[REDACTED]", text)
+    return redacted if len(redacted) <= max_len else redacted[: max_len - 3] + "..."
+
+
+def _estimate_attachment_stats(docs: List[Any]) -> tuple[int, int]:
+    total_tokens = 0
+    total_chars = 0
+    for doc in docs:
+        text = (getattr(doc, "extracted_text", "") or "").strip()
+        if not text:
+            continue
+        total_chars += len(text)
+        total_tokens += token_budget_service.estimate_tokens(text)
+    return total_tokens, total_chars
+
+
+def _estimate_available_tokens(model_id: str, prompt: str, base_context: str) -> int:
+    config = get_budget_model_config(model_id) or {}
+    limit = config.get("context_window", 0)
+    max_output = config.get("max_output", HISTORY_DEFAULT_MAX_OUTPUT)
+    if limit <= 0:
+        return 0
+    buffer = 1000
+    base_tokens = token_budget_service.estimate_tokens(base_context)
+    prompt_tokens = token_budget_service.estimate_tokens(prompt)
+    return limit - base_tokens - prompt_tokens - max_output - buffer
+
+
+def _format_history_block(history: List[Dict[str, str]]) -> str:
+    lines: List[str] = []
+    for item in history[-12:]:
+        role = str(item.get("role") or "").strip().lower() or "user"
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        label = "Usuário" if role == "user" else "Assistente"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines).strip()
+
+
 def _trim_history_to_budget(history: List[Dict[str, str]], max_tokens: int) -> List[Dict[str, str]]:
     if max_tokens <= 0 or not history:
         return []
@@ -162,7 +257,7 @@ def _should_use_fast_judge(user_message: str, candidates: List[Dict[str, Any]]) 
 
 
 def _judge_model_priority(user_message: str, candidates: List[Dict[str, Any]]) -> List[str]:
-    preferred = os.getenv("JUDGE_MODEL_ID", "gemini-3-pro").strip() or "gemini-3-pro"
+    preferred = os.getenv("JUDGE_MODEL_ID", "gemini-3-flash").strip() or "gemini-3-flash"
     fast = os.getenv("JUDGE_FAST_MODEL_ID", "gemini-3-flash").strip() or "gemini-3-flash"
     primary = fast if _should_use_fast_judge(user_message, candidates) else preferred
 
@@ -418,6 +513,7 @@ class ChatOrchestrator:
                     client = get_gpt_client()
                     if not client:
                         continue
+                    provider_name = "vertex-openai" if hasattr(getattr(client, "models", None), "generate_content") else "openai"
                     api_model = get_api_model_name(model_id) or model_id
                     resp = client.chat.completions.create(
                         model=api_model,
@@ -428,13 +524,26 @@ class ChatOrchestrator:
                         ],
                     )
                     merged_text = (resp.choices[0].message.content or "").strip()
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name,
+                        model=api_model,
+                        success=True,
+                    )
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-openai" if "provider_name" in locals() and provider_name == "vertex-openai" else "openai",
+                        model=get_api_model_name(model_id) or model_id,
+                        success=False,
+                    )
                     logger.error(f"Consolidate via {model_id} failed: {e}")
             elif provider == "anthropic":
                 try:
                     client = get_claude_client()
                     if not client:
                         continue
+                    provider_name = "vertex-anthropic" if _is_anthropic_vertex_client(client) else "anthropic"
                     api_model = get_api_model_name(model_id) or model_id
                     resp = client.messages.create(
                         model=api_model,
@@ -444,7 +553,19 @@ class ChatOrchestrator:
                     )
                     if hasattr(resp, "content") and resp.content:
                         merged_text = "".join([getattr(b, "text", "") for b in resp.content]).strip()
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name,
+                        model=api_model,
+                        success=True,
+                    )
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name if "provider_name" in locals() else "anthropic",
+                        model=get_api_model_name(model_id) or model_id,
+                        success=False,
+                    )
                     logger.error(f"Consolidate via {model_id} failed: {e}")
             elif provider == "google":
                 try:
@@ -457,7 +578,19 @@ class ChatOrchestrator:
                         contents=f"{system}\n\n{judge_user}",
                     )
                     merged_text = extract_genai_text(resp)
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-gemini",
+                        model=api_model,
+                        success=True,
+                    )
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-gemini",
+                        model=get_api_model_name(model_id) or model_id,
+                        success=False,
+                    )
                     logger.error(f"Consolidate via {model_id} failed: {e}")
 
             if merged_text:
@@ -642,7 +775,8 @@ class ChatOrchestrator:
                     mode="edicao_especifica",  # Custom mode
                     gpt_client=gpt_client,
                     claude_client=claude_client,
-                    drafter=drafter
+                    drafter=drafter,
+                    temperature=0.3
                 )
 
                 final_text = result.get("merged_content") or target_text
@@ -686,55 +820,132 @@ class ChatOrchestrator:
                     client = get_gpt_client()
                     if client:
                         api_model = get_api_model_name(model_id)
-                        resp = client.chat.completions.create(
-                            model=api_model,
-                            messages=[{"role": "user", "content": edit_prompt}],
-                            max_tokens=4096
-                        )
-                        final_text = resp.choices[0].message.content
+                        provider_name = "vertex-openai" if hasattr(getattr(client, "models", None), "generate_content") else "openai"
+                        try:
+                            resp = client.chat.completions.create(
+                                model=api_model,
+                                messages=[{"role": "user", "content": edit_prompt}],
+                                max_tokens=4096
+                            )
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=True,
+                            )
+                            final_text = resp.choices[0].message.content
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=False,
+                            )
+                            raise
 
                 elif provider == "anthropic" or "claude" in model_id.lower():
                     client = get_claude_client()
                     if client:
                         api_model = get_api_model_name(model_id)
-                        resp = client.messages.create(
-                            model=api_model,
-                            max_tokens=4096,
-                            messages=[{"role": "user", "content": edit_prompt}]
-                        )
-                        final_text = "".join([getattr(b, "text", "") for b in resp.content]).strip()
+                        provider_name = "vertex-anthropic" if _is_anthropic_vertex_client(client) else "anthropic"
+                        try:
+                            resp = client.messages.create(
+                                model=api_model,
+                                max_tokens=4096,
+                                messages=[{"role": "user", "content": edit_prompt}]
+                            )
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=True,
+                            )
+                            final_text = "".join([getattr(b, "text", "") for b in resp.content]).strip()
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=False,
+                            )
+                            raise
 
                 elif provider == "google" or "gemini" in model_id.lower():
                     client = get_gemini_client()
                     if client:
                         api_model = get_api_model_name(model_id)
-                        resp = client.models.generate_content(
-                            model=api_model,
-                            contents=edit_prompt
-                        )
-                        final_text = extract_genai_text(resp)
+                        try:
+                            resp = client.models.generate_content(
+                                model=api_model,
+                                contents=edit_prompt
+                            )
+                            record_api_call(
+                                kind="llm",
+                                provider="vertex-gemini",
+                                model=api_model,
+                                success=True,
+                            )
+                            final_text = extract_genai_text(resp)
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider="vertex-gemini",
+                                model=api_model,
+                                success=False,
+                            )
+                            raise
 
                 elif provider == "xai" or "grok" in model_id.lower():
                     client = get_xai_client()
                     if client:
                         api_model = get_api_model_name(model_id)
-                        resp = client.chat.completions.create(
-                            model=api_model,
-                            messages=[{"role": "user", "content": edit_prompt}],
-                            max_tokens=4096
-                        )
-                        final_text = resp.choices[0].message.content
+                        try:
+                            resp = client.chat.completions.create(
+                                model=api_model,
+                                messages=[{"role": "user", "content": edit_prompt}],
+                                max_tokens=4096
+                            )
+                            record_api_call(
+                                kind="llm",
+                                provider="xai",
+                                model=api_model,
+                                success=True,
+                            )
+                            final_text = resp.choices[0].message.content
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider="xai",
+                                model=api_model,
+                                success=False,
+                            )
+                            raise
 
                 elif provider in ("openrouter", "deepseek", "meta") or "llama" in model_id.lower():
                     client = get_openrouter_client()
                     if client:
                         api_model = get_api_model_name(model_id)
-                        resp = client.chat.completions.create(
-                            model=api_model,
-                            messages=[{"role": "user", "content": edit_prompt}],
-                            max_tokens=4096
-                        )
-                        final_text = resp.choices[0].message.content
+                        try:
+                            resp = client.chat.completions.create(
+                                model=api_model,
+                                messages=[{"role": "user", "content": edit_prompt}],
+                                max_tokens=4096
+                            )
+                            record_api_call(
+                                kind="llm",
+                                provider="openrouter",
+                                model=api_model,
+                                success=True,
+                            )
+                            final_text = resp.choices[0].message.content
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider="openrouter",
+                                model=api_model,
+                                success=False,
+                            )
+                            raise
 
             except Exception as e:
                 logger.error(f"Fast mode edit failed: {e}")
@@ -762,13 +973,26 @@ class ChatOrchestrator:
                 if client:
                     from app.services.ai.model_registry import get_api_model_name
                     api_model = get_api_model_name("gpt-5-mini")
+                    provider_name = "vertex-openai" if hasattr(getattr(client, "models", None), "generate_content") else "openai"
                     resp = client.chat.completions.create(
                         model=api_model,
                         messages=[{"role": "user", "content": edit_prompt}],
                         max_tokens=4096
                     )
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name,
+                        model=api_model,
+                        success=True,
+                    )
                     return {"agent": "GPT", "response": resp.choices[0].message.content}
             except Exception as e:
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-openai" if "provider_name" in locals() and provider_name == "vertex-openai" else "openai",
+                    model="gpt-5-mini",
+                    success=False,
+                )
                 logger.error(f"GPT edit failed: {e}")
             return {"agent": "GPT", "response": None}
         
@@ -778,14 +1002,27 @@ class ChatOrchestrator:
                 if client:
                     from app.services.ai.model_registry import get_api_model_name
                     api_model = get_api_model_name("claude-4.5-sonnet")
+                    provider_name = "vertex-anthropic" if _is_anthropic_vertex_client(client) else "anthropic"
                     resp = client.messages.create(
                         model=api_model,
                         max_tokens=4096,
                         messages=[{"role": "user", "content": edit_prompt}]
                     )
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name,
+                        model=api_model,
+                        success=True,
+                    )
                     text = "".join([getattr(b, "text", "") for b in resp.content]).strip()
                     return {"agent": "Claude", "response": text}
             except Exception as e:
+                record_api_call(
+                    kind="llm",
+                    provider=provider_name if "provider_name" in locals() else "anthropic",
+                    model="claude-4.5-sonnet",
+                    success=False,
+                )
                 logger.error(f"Claude edit failed: {e}")
             return {"agent": "Claude", "response": None}
         
@@ -827,8 +1064,20 @@ Retorne APENAS o texto final, sem explicações.
                     model=api_model,
                     contents=judge_prompt
                 )
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-gemini",
+                    model=api_model,
+                    success=True,
+                )
                 final_text = extract_genai_text(resp)
         except Exception as e:
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model="gemini-3-flash",
+                success=False,
+            )
             logger.error(f"Gemini judge failed: {e}")
             final_text = evaluations.get("GPT") or evaluations.get("Claude") or target_text
         
@@ -852,17 +1101,75 @@ Retorne APENAS o texto final, sem explicações.
         thread_id: str,
         user_message: str,
         selected_models: List[str],
+        attachment_docs: Optional[List[Any]] = None,
+        attachment_mode: str = "auto",
+        tenant_id: str = "default",
         chat_personality: str = "juridico",
+        reasoning_level: str = "medium",
+        verbosity: Optional[str] = None,
+        thinking_budget: Optional[int] = None,
+        temperature: Optional[float] = None,
         web_search: bool = False,
         multi_query: bool = True,
         breadth_first: bool = False,
-        search_mode: str = "hybrid"
+        search_mode: str = "hybrid",
+        perplexity_search_mode: Optional[str] = None,
+        perplexity_search_type: Optional[str] = None,
+        perplexity_search_context_size: Optional[str] = None,
+        perplexity_search_classifier: bool = False,
+        perplexity_disable_search: bool = False,
+        perplexity_stream_mode: Optional[str] = None,
+        perplexity_search_domain_filter: Optional[object] = None,
+        perplexity_search_language_filter: Optional[object] = None,
+        perplexity_search_recency_filter: Optional[str] = None,
+        perplexity_search_after_date: Optional[str] = None,
+        perplexity_search_before_date: Optional[str] = None,
+        perplexity_last_updated_after: Optional[str] = None,
+        perplexity_last_updated_before: Optional[str] = None,
+        perplexity_search_max_results: Optional[int] = None,
+        perplexity_search_max_tokens: Optional[int] = None,
+        perplexity_search_max_tokens_per_page: Optional[int] = None,
+        perplexity_search_country: Optional[str] = None,
+        perplexity_search_region: Optional[str] = None,
+        perplexity_search_city: Optional[str] = None,
+        perplexity_search_latitude: Optional[object] = None,
+        perplexity_search_longitude: Optional[object] = None,
+        perplexity_return_images: bool = False,
+        perplexity_return_videos: bool = False,
+        rag_sources: Optional[List[str]] = None,
+        rag_top_k: Optional[int] = None,
+        adaptive_routing: bool = False,
+        crag_gate: bool = False,
+        crag_min_best_score: float = 0.45,
+        crag_min_avg_score: float = 0.35,
+        hyde_enabled: bool = False,
+        graph_rag_enabled: bool = False,
+        argument_graph_enabled: Optional[bool] = None,
+        graph_hops: int = 1,
+        dense_research: bool = False,
+        rag_scope: str = "case_and_global",  # case_only, case_and_global, global_only
+        deep_research_effort: Optional[str] = None,
+        deep_research_search_focus: Optional[str] = None,
+        deep_research_domain_filter: Optional[object] = None,
+        deep_research_search_after_date: Optional[str] = None,
+        deep_research_search_before_date: Optional[str] = None,
+        deep_research_last_updated_after: Optional[str] = None,
+        deep_research_last_updated_before: Optional[str] = None,
+        deep_research_country: Optional[str] = None,
+        deep_research_latitude: Optional[object] = None,
+        deep_research_longitude: Optional[object] = None,
+        deep_research_points_multiplier: Optional[float] = None,
+        max_web_search_requests: Optional[int] = None,
+        research_policy: str = "auto",
+        per_model_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         1. Save User Message
         2. Stream back responses from selected models in parallel
         3. Save Assistant Messages
         """
+        dispatch_t0 = time.perf_counter()
+        request_id = f"{thread_id}:{uuid.uuid4().hex}"
         
         # 1. Save User Message
         self.thread_manager.add_message(thread_id, "user", user_message)
@@ -872,6 +1179,14 @@ Retorne APENAS o texto final, sem explicações.
         if not thread:
             yield {"error": "Thread not found"}
             return
+
+        try:
+            temperature = float(temperature) if temperature is not None else (
+                0.6 if chat_personality == "geral" else 0.3
+            )
+        except (TypeError, ValueError):
+            temperature = 0.6 if chat_personality == "geral" else 0.3
+        temperature = max(0.0, min(1.0, temperature))
             
         history = [
             {"role": m.role, "content": m.content} 
@@ -883,12 +1198,336 @@ Retorne APENAS o texto final, sem explicações.
         system_instruction = base_instruction
 
         history = _trim_history_for_models(history, selected_models, base_instruction, user_message)
+        history_block = _format_history_block(history)
+
+        attachment_docs = attachment_docs or []
+        attachment_mode = (attachment_mode or "auto").lower()
+        if attachment_mode not in ("auto", "rag_local", "prompt_injection"):
+            attachment_mode = "auto"
+
+        budget_model_id = _pick_smallest_context_model(selected_models)
+        attachment_injection_context = ""
+        if attachment_docs:
+            if attachment_mode == "prompt_injection":
+                attachment_injection_context = get_document_generator()._build_attachment_prompt_context(attachment_docs)
+            elif attachment_mode == "auto":
+                base_context = _join_context_parts(base_instruction, history_block)
+                attachment_tokens, attachment_chars = _estimate_attachment_stats(attachment_docs)
+                if attachment_tokens > 0:
+                    available_tokens = _estimate_available_tokens(budget_model_id, user_message, base_context)
+                    available_chars = max(0, int(available_tokens * 3.5))
+                    if available_tokens > 0 and attachment_chars > 0 and attachment_chars <= available_chars:
+                        max_chars = min(attachment_chars, available_chars)
+                        attachment_injection_context = get_document_generator()._build_attachment_prompt_context(
+                            attachment_docs,
+                            max_chars=max_chars,
+                            per_doc_chars=max_chars,
+                        )
+
+        if attachment_mode == "auto":
+            if not attachment_injection_context:
+                attachment_mode = "rag_local"
+            else:
+                budget_context = _join_context_parts(
+                    base_instruction,
+                    history_block,
+                    attachment_injection_context,
+                )
+                if _should_use_precise_budget(budget_model_id):
+                    budget = await token_budget_service.check_budget_precise(
+                        user_message,
+                        {"system": budget_context},
+                        budget_model_id,
+                    )
+                else:
+                    budget = token_budget_service.check_budget(
+                        user_message,
+                        {"system": budget_context},
+                        budget_model_id,
+                    )
+                if budget["status"] == "error":
+                    attachment_mode = "rag_local"
+                    attachment_injection_context = ""
+                else:
+                    attachment_mode = "prompt_injection"
+        if attachment_mode == "prompt_injection" and not attachment_injection_context:
+            attachment_mode = "rag_local"
+
+        # =====================================================================
+        # RAG SCOPE CONTROL
+        # rag_scope: case_only | case_and_global | global_only
+        # =====================================================================
+        rag_scope = (rag_scope or "case_and_global").lower()
+        if rag_scope not in ("case_only", "case_and_global", "global_only"):
+            rag_scope = "case_and_global"
+
+        # Build local RAG context (case attachments) - skip if global_only
+        local_rag_context = ""
+        if rag_scope != "global_only" and attachment_mode == "rag_local" and attachment_docs:
+            local_query_override: Optional[str] = None
+            local_queries: Optional[List[str]] = None
+            try:
+                from app.services.ai.rag_helpers import (
+                    generate_hypothetical_document,
+                    generate_multi_queries,
+                )
+            except Exception:
+                generate_hypothetical_document = None
+                generate_multi_queries = None
+
+            if hyde_enabled and generate_hypothetical_document:
+                try:
+                    local_query_override = await generate_hypothetical_document(
+                        query=user_message,
+                        history=history,
+                        summary_text=None,
+                    )
+                except Exception as exc:
+                    logger.warning(f"HyDE local falhou: {exc}")
+
+            if multi_query and generate_multi_queries:
+                try:
+                    max_q = int(os.getenv("RAG_MULTI_QUERY_MAX", "3") or 3)
+                except Exception:
+                    max_q = 3
+                try:
+                    local_queries = await generate_multi_queries(
+                        user_message,
+                        history=history,
+                        summary_text=None,
+                        max_queries=max(2, max_q),
+                    )
+                except Exception as exc:
+                    logger.warning(f"Multi-query local falhou: {exc}")
+
+            local_rag_context = get_document_generator()._build_local_rag_context(
+                attachment_docs,
+                user_message,
+                tenant_id=tenant_id,
+                queries=local_queries,
+                query_override=local_query_override,
+                multi_query=bool(multi_query),
+                crag_gate=bool(crag_gate),
+                graph_rag_enabled=bool(graph_rag_enabled),
+                argument_graph_enabled=bool(argument_graph_enabled),
+                graph_hops=int(graph_hops or 2),
+            )
+
+        effective_sources = rag_sources if rag_sources is not None else ["lei", "juris", "pecas_modelo"]
+        research_decision = decide_research_flags(
+            user_message,
+            bool(web_search),
+            bool(dense_research),
+            research_policy,
+        )
+        effective_web_search = bool(research_decision.get("web_search"))
+        effective_dense_research = bool(research_decision.get("deep_research")) and bool(deep_research_effort)
+        planned_queries = research_decision.get("planned_queries") or []
+        max_query_cap = None
+        if max_web_search_requests is not None:
+            try:
+                max_query_cap = int(max_web_search_requests)
+            except (TypeError, ValueError):
+                max_query_cap = None
+        if max_query_cap is not None and max_query_cap <= 0:
+            effective_web_search = False
+            planned_queries = []
+        elif max_query_cap is not None:
+            planned_queries = planned_queries[:max_query_cap]
+
+        # Build global RAG context - skip if case_only
+        rag_context = ""
+        graph_context = ""
+        if rag_scope != "case_only":
+            raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
+            scope_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
+            allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+            allow_group_scope = True if scope_groups else False
+            rag_context, graph_context, _ = await build_rag_context(
+                query=user_message,
+                rag_sources=effective_sources,
+                rag_top_k=rag_top_k,
+                attachment_mode="prompt_injection",
+                adaptive_routing=adaptive_routing,
+                crag_gate=crag_gate,
+                crag_min_best_score=crag_min_best_score,
+                crag_min_avg_score=crag_min_avg_score,
+                hyde_enabled=hyde_enabled,
+                multi_query=bool(multi_query),
+                graph_rag_enabled=graph_rag_enabled,
+                graph_hops=graph_hops,
+                argument_graph_enabled=argument_graph_enabled,
+                dense_research=effective_dense_research,
+                tenant_id=tenant_id,
+                user_id=None,
+                scope_groups=scope_groups,
+                allow_global_scope=allow_global_scope,
+                allow_group_scope=allow_group_scope,
+                history=history,
+                summary_text=None,
+                rewrite_query=len(history) > 1,
+                request_id=request_id,
+            )
+
+        # Combine contexts based on rag_scope
+        if rag_context:
+            base_instruction += f"\n\n{rag_context}"
+        if graph_context:
+            base_instruction += f"\n\n{graph_context}"
+        if local_rag_context:
+            base_instruction += f"\n\n{local_rag_context}"
+        if attachment_injection_context:
+            base_instruction += f"\n\n{attachment_injection_context}"
+        system_instruction = base_instruction
+        if os.getenv("RAG_TRACE_ENABLED", "false").lower() in ("1", "true", "yes", "on"):
+            preview = _redact_prompt(system_instruction)
+            trace_event(
+                "prompt_final",
+                {
+                    "preview": preview,
+                    "length": len(system_instruction),
+                    "graph_rag_enabled": graph_rag_enabled,
+                    "argument_graph_enabled": argument_graph_enabled,
+                },
+                request_id=request_id,
+                tenant_id=tenant_id,
+                conversation_id=thread_id,
+            )
+
+        if effective_dense_research:
+            deep_report = ""
+            yield {"type": "research_start", "researchmode": "deep"}
+            try:
+                deep_config: Dict[str, Any] = {"effort": deep_research_effort}
+                if deep_research_points_multiplier is not None:
+                    deep_config["points_multiplier"] = deep_research_points_multiplier
+                deep_provider_raw = (deep_research_provider or "").strip().lower()
+                if deep_provider_raw in ("pplx", "sonar"):
+                    deep_provider_raw = "perplexity"
+                if deep_provider_raw in ("gemini",):
+                    deep_provider_raw = "google"
+                if deep_provider_raw and deep_provider_raw != "auto":
+                    deep_config["provider"] = deep_provider_raw
+                if deep_research_model:
+                    deep_config["model"] = deep_research_model
+                if deep_search_focus:
+                    deep_config["search_focus"] = deep_search_focus
+                if deep_domain_filter:
+                    deep_config["search_domain_filter"] = deep_domain_filter
+                if deep_search_after:
+                    deep_config["search_after_date"] = deep_search_after
+                if deep_search_before:
+                    deep_config["search_before_date"] = deep_search_before
+                if deep_updated_after:
+                    deep_config["last_updated_after"] = deep_updated_after
+                if deep_updated_before:
+                    deep_config["last_updated_before"] = deep_updated_before
+                if deep_country:
+                    deep_config["search_country"] = deep_country
+                if deep_latitude is not None:
+                    deep_config["search_latitude"] = deep_latitude
+                if deep_longitude is not None:
+                    deep_config["search_longitude"] = deep_longitude
+
+                async for event in deep_research_service.stream_research_task(
+                    user_message,
+                    config=deep_config,
+                ):
+                    etype = (event or {}).get("type")
+                    if etype == "cache_hit":
+                        yield {"type": "cache_hit", "key": event.get("key")}
+                    elif etype == "thinking":
+                        text = event.get("text") or ""
+                        if text:
+                            yield {"type": "deepresearch_step", "text": text}
+                    elif etype == "content":
+                        deep_report += event.get("text") or ""
+            except Exception as exc:
+                logger.warning(f"Deep research falhou: {exc}")
+                yield {"type": "research_error", "message": str(exc)}
+
+            if deep_report:
+                trimmed = deep_report.strip()[:5000]
+                system_instruction += "\n\n## PESQUISA PROFUNDA (resumo)\n" + trimmed
+            yield {"type": "research_done", "researchmode": "deep"}
+
+        citations_by_url: Dict[str, Dict[str, Any]] = {}
+
+        def _merge_citations(items: List[Dict[str, Any]]):
+            for item in items or []:
+                url = str(item.get("url") or "").strip()
+                number = item.get("number")
+                key = str(number).strip() if number is not None else ""
+                if not key:
+                    key = url
+                if not key:
+                    continue
+                if key not in citations_by_url:
+                    citations_by_url[key] = item
 
         sources = []
+        web_search = bool(effective_web_search)
+        dense_research = bool(effective_dense_research)
         breadth_first = bool(breadth_first) or (web_search and is_breadth_first(user_message))
+        if dense_research:
+            multi_query = True
+            breadth_first = True
         search_mode = (search_mode or "hybrid").lower()
-        if search_mode not in ("shared", "native", "hybrid"):
+        if search_mode not in ("shared", "native", "hybrid", "perplexity"):
             search_mode = "hybrid"
+        perplexity_search_mode = normalize_perplexity_search_mode(perplexity_search_mode)
+        search_domain_filter = parse_csv_list(perplexity_search_domain_filter, max_items=20)
+        search_language_filter = parse_csv_list(perplexity_search_language_filter, max_items=10)
+        search_recency_filter = normalize_perplexity_recency(perplexity_search_recency_filter)
+        search_after_date = normalize_perplexity_date(perplexity_search_after_date)
+        search_before_date = normalize_perplexity_date(perplexity_search_before_date)
+        last_updated_after = normalize_perplexity_date(perplexity_last_updated_after)
+        last_updated_before = normalize_perplexity_date(perplexity_last_updated_before)
+        search_country = (perplexity_search_country or "").strip() or None
+        search_region = (perplexity_search_region or "").strip() or None
+        search_city = (perplexity_search_city or "").strip() or None
+        search_latitude = normalize_float(perplexity_search_latitude)
+        search_longitude = normalize_float(perplexity_search_longitude)
+        return_images = bool(perplexity_return_images)
+        return_videos = bool(perplexity_return_videos)
+        try:
+            search_max_results = int(perplexity_search_max_results) if perplexity_search_max_results else None
+        except (TypeError, ValueError):
+            search_max_results = None
+        if search_max_results is not None and search_max_results <= 0:
+            search_max_results = None
+        if search_max_results is not None and search_max_results > 20:
+            search_max_results = 20
+        try:
+            search_max_tokens = int(perplexity_search_max_tokens) if perplexity_search_max_tokens else None
+        except (TypeError, ValueError):
+            search_max_tokens = None
+        if search_max_tokens is not None and search_max_tokens <= 0:
+            search_max_tokens = None
+        if search_max_tokens is not None and search_max_tokens > 1_000_000:
+            search_max_tokens = 1_000_000
+        try:
+            search_max_tokens_per_page = (
+                int(perplexity_search_max_tokens_per_page)
+                if perplexity_search_max_tokens_per_page
+                else None
+            )
+        except (TypeError, ValueError):
+            search_max_tokens_per_page = None
+        if search_max_tokens_per_page is not None and search_max_tokens_per_page <= 0:
+            search_max_tokens_per_page = None
+        if search_max_tokens_per_page is not None and search_max_tokens_per_page > 1_000_000:
+            search_max_tokens_per_page = 1_000_000
+        deep_search_focus = normalize_perplexity_search_mode(deep_research_search_focus)
+        deep_domain_filter = parse_csv_list(deep_research_domain_filter, max_items=20)
+        deep_search_after = normalize_perplexity_date(deep_research_search_after_date)
+        deep_search_before = normalize_perplexity_date(deep_research_search_before_date)
+        deep_updated_after = normalize_perplexity_date(deep_research_last_updated_after)
+        deep_updated_before = normalize_perplexity_date(deep_research_last_updated_before)
+        deep_country = (deep_research_country or "").strip() or None
+        deep_latitude = normalize_float(deep_research_latitude)
+        deep_longitude = normalize_float(deep_research_longitude)
+        max_sources = search_max_results or 20
 
         from app.services.ai.model_registry import get_model_config
         gpt_client = get_gpt_client()
@@ -904,6 +1543,8 @@ Retorne APENAS o texto final, sem explicações.
                 return bool(claude_client)
             if provider == "google":
                 return bool(gemini_client)
+            if provider == "perplexity":
+                return bool(os.getenv("PERPLEXITY_API_KEY"))
             mid = (model_id or "").lower()
             if "gemini" in mid:
                 return bool(gemini_client)
@@ -914,9 +1555,9 @@ Retorne APENAS o texto final, sem explicações.
             return False
 
         allow_native_search = web_search and search_mode in ("native", "hybrid")
-        allow_shared_search = web_search and search_mode in ("shared", "hybrid")
+        allow_shared_search = web_search and search_mode in ("shared", "hybrid", "perplexity")
         use_shared_search = allow_shared_search and (
-            search_mode == "shared"
+            search_mode in ("shared", "perplexity")
             or any(not _supports_native_search(model_id) for model_id in selected_models)
         )
 
@@ -929,10 +1570,114 @@ Retorne APENAS o texto final, sem explicações.
             ).strip()
             if search_query:
                 yield {"type": "search_started", "query": search_query}
-                if multi_query:
-                    search_payload = await web_search_service.search_multi(search_query, num_results=8)
+
+                if planned_queries and multi_query:
+                    per_query = max(2, int(max_sources / max(1, len(planned_queries))))
+                    tasks = [
+                        web_search_service.search(
+                            q,
+                            num_results=per_query,
+                            search_mode=perplexity_search_mode,
+                            country=search_country,
+                            domain_filter=search_domain_filter,
+                            language_filter=search_language_filter,
+                            recency_filter=search_recency_filter,
+                            search_after_date=search_after_date,
+                            search_before_date=search_before_date,
+                            last_updated_after=last_updated_after,
+                            last_updated_before=last_updated_before,
+                            max_tokens=search_max_tokens,
+                            max_tokens_per_page=search_max_tokens_per_page,
+                            return_images=return_images,
+                            return_videos=return_videos,
+                        )
+                        for q in planned_queries
+                    ]
+                    results_list = await asyncio.gather(*tasks, return_exceptions=True)
+                    combined: list[dict] = []
+                    cached_all = True
+                    for payload in results_list:
+                        if isinstance(payload, Exception):
+                            cached_all = False
+                            continue
+                        if not payload.get("cached"):
+                            cached_all = False
+                        combined.extend(payload.get("results") or [])
+
+                    deduped = []
+                    seen = set()
+                    for item in combined:
+                        url = (item.get("url") or "").strip()
+                        if not url or url in seen:
+                            continue
+                        seen.add(url)
+                        deduped.append(item)
+
+                    search_payload = {
+                        "success": True,
+                        "query": search_query,
+                        "queries": planned_queries,
+                        "results": deduped[:max_sources],
+                        "source": "multi-planned",
+                        "cached": cached_all,
+                    }
+                elif multi_query:
+                    if max_query_cap is not None:
+                        search_payload = await web_search_service.search_multi(
+                            search_query,
+                            num_results=max_sources,
+                            max_queries=max_query_cap,
+                            search_mode=perplexity_search_mode,
+                            country=search_country,
+                            domain_filter=search_domain_filter,
+                            language_filter=search_language_filter,
+                            recency_filter=search_recency_filter,
+                            search_after_date=search_after_date,
+                            search_before_date=search_before_date,
+                            last_updated_after=last_updated_after,
+                            last_updated_before=last_updated_before,
+                            max_tokens=search_max_tokens,
+                            max_tokens_per_page=search_max_tokens_per_page,
+                            return_images=return_images,
+                            return_videos=return_videos,
+                        )
+                    else:
+                        search_payload = await web_search_service.search_multi(
+                            search_query,
+                            num_results=max_sources,
+                            search_mode=perplexity_search_mode,
+                            country=search_country,
+                            domain_filter=search_domain_filter,
+                            language_filter=search_language_filter,
+                            recency_filter=search_recency_filter,
+                            search_after_date=search_after_date,
+                            search_before_date=search_before_date,
+                            last_updated_after=last_updated_after,
+                            last_updated_before=last_updated_before,
+                            max_tokens=search_max_tokens,
+                            max_tokens_per_page=search_max_tokens_per_page,
+                            return_images=return_images,
+                            return_videos=return_videos,
+                        )
                 else:
-                    search_payload = await web_search_service.search(search_query, num_results=8)
+                    search_payload = await web_search_service.search(
+                        search_query,
+                        num_results=max_sources,
+                        search_mode=perplexity_search_mode,
+                        country=search_country,
+                        domain_filter=search_domain_filter,
+                        language_filter=search_language_filter,
+                        recency_filter=search_recency_filter,
+                        search_after_date=search_after_date,
+                        search_before_date=search_before_date,
+                        last_updated_after=last_updated_after,
+                        last_updated_before=last_updated_before,
+                        max_tokens=search_max_tokens,
+                        max_tokens_per_page=search_max_tokens_per_page,
+                        return_images=return_images,
+                        return_videos=return_videos,
+                    )
+
                 results = search_payload.get("results") or []
                 yield {
                     "type": "search_done",
@@ -940,19 +1685,29 @@ Retorne APENAS o texto final, sem explicações.
                     "count": len(results),
                     "cached": bool(search_payload.get("cached")),
                     "source": search_payload.get("source"),
-                    "queries": search_payload.get("queries") if multi_query else None
+                    "queries": search_payload.get("queries") if multi_query else None,
                 }
                 if search_payload.get("success") and results:
-                    web_context = build_web_context(search_payload, max_items=8)
                     url_title_stream = [
                         (res.get("url", ""), res.get("title", ""))
                         for res in results
                     ]
-                    _, sources = stable_numbering(url_title_stream)
+                    url_to_number, sources = stable_numbering(url_title_stream)
+                    web_context = build_web_context(search_payload, max_items=max_sources)
+                    web_rag_context, web_citations = await web_rag_service.build_web_rag_context(
+                        user_message,
+                        results,
+                        max_docs=3,
+                        max_chunks=6,
+                        max_chars=6000,
+                        url_to_number=url_to_number,
+                    )
+                    if web_citations:
+                        _merge_citations(web_citations)
                     system_instruction += (
                         "\n- Use as fontes numeradas abaixo quando relevante."
                         "\n- Cite no texto com [n] e finalize com uma seção 'Fontes:' apenas com as URLs citadas."
-                        f"\n\n{web_context}"
+                        f"\n\n{web_rag_context or web_context}"
                     )
 
         async def _call_native_search(
@@ -960,8 +1715,9 @@ Retorne APENAS o texto final, sem explicações.
             messages: List[Dict[str, str]],
             prompt: str,
             max_tokens: int = 4096,
-            temperature: float = 0.3
-        ) -> Optional[str]:
+            temperature: float = 0.3,
+            system_instruction_override: Optional[str] = None,
+        ) -> tuple[Optional[str], List[dict]]:
             from app.services.ai.model_registry import get_api_model_name, get_model_config
 
             cfg = get_model_config(model_id)
@@ -970,7 +1726,7 @@ Retorne APENAS o texto final, sem explicações.
 
             if provider == "openai":
                 if not gpt_client or not hasattr(gpt_client, "responses"):
-                    return None
+                    return None, []
                 try:
                     resp = gpt_client.responses.create(
                         model=api_model,
@@ -979,38 +1735,69 @@ Retorne APENAS o texto final, sem explicações.
                         temperature=temperature,
                         max_output_tokens=max_tokens,
                     )
-                    text = to_perplexity("openai", resp)
-                    return text or getattr(resp, "output_text", "") or None
+                    record_api_call(
+                        kind="llm",
+                        provider="openai",
+                        model=api_model,
+                        success=True,
+                        meta={"tool": "web_search"},
+                    )
+                    text, sources = extract_perplexity("openai", resp)
+                    citations = sources_to_citations(sources)
+                    return text or getattr(resp, "output_text", "") or None, citations
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider="openai",
+                        model=api_model,
+                        success=False,
+                        meta={"tool": "web_search"},
+                    )
                     logger.error(f"OpenAI web search failed ({model_id}): {e}")
-                    return None
+                    return None, []
 
             if provider == "anthropic":
                 if not claude_client:
-                    return None
+                    return None, []
                 try:
                     kwargs: Dict[str, Any] = {
                         "model": api_model,
                         "max_tokens": max_tokens,
                         "messages": messages,
-                        "system": base_instruction,
+                        "system": system_instruction_override or base_instruction,
                         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
                     }
                     beta_header = os.getenv("ANTHROPIC_WEB_SEARCH_BETA", "web-search-2025-03-05").strip()
                     if beta_header:
                         kwargs["extra_headers"] = {"anthropic-beta": beta_header}
+                    provider_name = "anthropic"
                     if _is_anthropic_vertex_client(claude_client):
                         kwargs["anthropic_version"] = os.getenv("ANTHROPIC_VERTEX_VERSION", "vertex-2023-10-16")
+                        provider_name = "vertex-anthropic"
                     resp = claude_client.messages.create(**kwargs)
-                    text = to_perplexity("claude", resp)
-                    return text or None
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name,
+                        model=api_model,
+                        success=True,
+                        meta={"tool": "web_search"},
+                    )
+                    text, sources = extract_perplexity("claude", resp)
+                    return text or None, sources_to_citations(sources)
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider=provider_name if "provider_name" in locals() else "anthropic",
+                        model=api_model,
+                        success=False,
+                        meta={"tool": "web_search"},
+                    )
                     logger.error(f"Claude web search failed ({model_id}): {e}")
-                    return None
+                    return None, []
 
             if provider == "google":
                 if not gemini_client:
-                    return None
+                    return None, []
                 try:
                     from google.genai import types as genai_types
                     tool = genai_types.Tool(google_search=genai_types.GoogleSearch())
@@ -1025,13 +1812,29 @@ Retorne APENAS o texto final, sem explicações.
                         contents=prompt,
                         config=config,
                     )
-                    text = to_perplexity("gemini", resp)
-                    return text or (resp.text or "").strip() or None
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-gemini",
+                        model=api_model,
+                        success=True,
+                        meta={"tool": "web_search"},
+                    )
+                    text, sources = extract_perplexity("gemini", resp)
+                    if not text:
+                        text = (resp.text or "").strip() or None
+                    return text or None, sources_to_citations(sources)
                 except Exception as e:
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-gemini",
+                        model=api_model,
+                        success=False,
+                        meta={"tool": "web_search"},
+                    )
                     logger.error(f"Gemini web search failed ({model_id}): {e}")
-                    return None
+                    return None, []
 
-            return None
+            return None, []
         
         if breadth_first and len(selected_models) == 1:
             from app.services.ai.model_registry import get_api_model_name, get_model_config
@@ -1050,13 +1853,16 @@ Retorne APENAS o texto final, sem explicações.
                         ]
                     else:
                         messages = [{"role": "user", "content": prompt}]
-                    return await _call_native_search(
+                    text, native_citations = await _call_native_search(
                         model_id,
                         messages=messages,
                         prompt=prompt,
                         max_tokens=tokens,
-                        temperature=0.4,
+                        temperature=temperature,
                     )
+                    if native_citations:
+                        _merge_citations(native_citations)
+                    return text
 
                 if provider == "openai":
                     return await call_openai_async(
@@ -1064,7 +1870,7 @@ Retorne APENAS o texto final, sem explicações.
                         prompt,
                         model=api_model,
                         max_tokens=tokens,
-                        temperature=0.4,
+                        temperature=temperature,
                         system_instruction=system_instruction,
                     )
                 if provider == "anthropic":
@@ -1073,7 +1879,7 @@ Retorne APENAS o texto final, sem explicações.
                         prompt,
                         model=api_model,
                         max_tokens=tokens,
-                        temperature=0.4,
+                        temperature=temperature,
                         system_instruction=system_instruction,
                     )
                 if provider == "google":
@@ -1082,7 +1888,7 @@ Retorne APENAS o texto final, sem explicações.
                         prompt,
                         model=api_model,
                         max_tokens=tokens,
-                        temperature=0.4,
+                        temperature=temperature,
                         system_instruction=system_instruction,
                     )
                 return None
@@ -1115,50 +1921,121 @@ Retorne APENAS o texto final, sem explicações.
                 lead_text = await call_model(lead_prompt, 1800)
                 if not lead_text:
                     lead_text = "Não foi possível gerar resposta no momento."
-                if sources and "fontes:" not in lead_text.lower():
+                if sources and "fontes:" not in lead_text.lower() and not citations_by_url:
                     lead_text = render_perplexity(lead_text, sources)
+                if sources and not citations_by_url:
+                    _merge_citations(sources_to_citations(sources))
 
                 # Save final message
                 self.thread_manager.add_message(thread_id, "assistant", lead_text, model=model_id)
 
+                start_ms = int(time.time() * 1000)
+                yield {"type": "meta", "phase": "start", "t": start_ms, "model": model_id}
+                yield {"type": "meta", "phase": "answer_start", "t": start_ms, "model": model_id}
                 for i in range(0, len(lead_text), 64):
                     yield {"type": "token", "model": model_id, "delta": lead_text[i:i + 64]}
-                yield {"type": "done", "model": model_id, "full_text": lead_text}
+                yield {
+                    "type": "done",
+                    "model": model_id,
+                    "full_text": lead_text,
+                    "citations": list(citations_by_url.values()),
+                }
                 return
 
         # 3. Parallel Execution Logic
         # We will yield chunks as { "model": "gpt-4o", "delta": "..." }
-        
+        dispatch_preprocess_done_t = time.perf_counter()
+        ttft_logged: Dict[str, float] = {}
+
+        def _log_model_ttft(model_id: str, event_type: str) -> None:
+            if model_id in ttft_logged:
+                return
+            now = time.perf_counter()
+            pre_ms = int((dispatch_preprocess_done_t - dispatch_t0) * 1000)
+            ttft_ms = int((now - dispatch_preprocess_done_t) * 1000)
+            total_ms = int((now - dispatch_t0) * 1000)
+            ttft_logged[model_id] = now
+            logger.info(
+                "TTFT multi_chat thread_id=%s model=%s pre_ms=%d ttft_ms=%d total_ms=%d event=%s",
+                thread_id,
+                model_id,
+                pre_ms,
+                ttft_ms,
+                total_ms,
+                event_type,
+            )
+
         async def stream_model(model_id: str):
             """Stream wrapper for a single model"""
             full_response = ""
+            full_thinking = ""
             used_native_search = False
+            answer_started = False
+
+            def _mark_answer_started() -> bool:
+                nonlocal answer_started
+                if answer_started:
+                    return False
+                answer_started = True
+                _log_model_ttft(model_id, "token")
+                return True
             
             try:
-                from app.services.ai.model_registry import get_api_model_name, get_model_config
+                from app.services.ai.model_registry import get_api_model_name, get_model_config, get_thinking_category
 
                 model_cfg = get_model_config(model_id)
                 provider = model_cfg.provider if model_cfg else None
-                stream_instruction = system_instruction
+                thinking_category = get_thinking_category(model_id)
+                model_override = (per_model_overrides or {}).get(model_id) or {}
+                override_reasoning = (
+                    model_override.get("reasoning_level")
+                    if isinstance(model_override, dict)
+                    else None
+                )
+                raw_reasoning = override_reasoning or (reasoning_level or "medium")
+                normalized_reasoning = str(raw_reasoning).strip().lower()
+                if normalized_reasoning in ("standard",):
+                    normalized_reasoning = "medium"
+                elif normalized_reasoning in ("extended",):
+                    normalized_reasoning = "high"
+                elif normalized_reasoning in ("x-high", "x_high", "xh"):
+                    normalized_reasoning = "xhigh"
+                if normalized_reasoning not in ("none", "minimal", "low", "medium", "high", "xhigh"):
+                    normalized_reasoning = "medium"
+                override_verbosity = model_override.get("verbosity") if isinstance(model_override, dict) else None
+                stream_instruction = apply_verbosity_instruction(
+                    system_instruction,
+                    override_verbosity or verbosity,
+                )
+                model_thinking_budget = thinking_budget
+                if isinstance(model_override, dict) and "thinking_budget" in model_override:
+                    model_thinking_budget = model_override.get("thinking_budget")
+
+                yield {"type": "meta", "phase": "start", "t": int(time.time() * 1000), "model": model_id}
 
                 if allow_native_search and not use_shared_search and _supports_native_search(model_id):
                     native_messages = []
                     if provider == "openai":
-                        native_messages = [{"role": "system", "content": base_instruction}] + history
+                        native_messages = [{"role": "system", "content": stream_instruction}] + history
                     elif provider == "anthropic":
                         native_messages = history
 
-                    native_text = await _call_native_search(
+                    native_text, native_citations = await _call_native_search(
                         model_id,
                         messages=native_messages,
                         prompt=user_message,
                         max_tokens=4096,
-                        temperature=0.3,
+                        temperature=temperature,
+                        system_instruction_override=stream_instruction,
                     )
+                    if native_citations:
+                        _merge_citations(native_citations)
                     if native_text:
                         full_response = native_text
                         used_native_search = True
                         for i in range(0, len(full_response), 64):
+                            if _mark_answer_started():
+                                yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
                             yield {
                                 "type": "token",
                                 "model": model_id,
@@ -1167,20 +2044,238 @@ Retorne APENAS o texto final, sem explicações.
                             await asyncio.sleep(0)
 
                 if not used_native_search and model_id == "internal-rag":
-                    # Internal RAG (Gemini + Docs)
-                    from app.services.ai.gemini_drafter import GeminiDrafterWrapper
-                    drafter = GeminiDrafterWrapper()
-                    # Use programmatic chat interface
-                    # TODO: Implement proper streaming for programmatic chat
-                    # For now, non-streaming fallback
-                    response = drafter._generate_with_retry(user_message)
-                    full_response = response.text if response else "Erro ao gerar resposta."
+                    # Internal RAG Agent (NotebookLM-like) powered by Gemini 3 Flash (Vertex).
+                    if not gemini_client:
+                        yield {"type": "error", "model": model_id, "error": "Gemini Client unavailable"}
+                    else:
+                        internal_system = build_internal_rag_system_instruction(stream_instruction)
+                        internal_prompt = build_internal_rag_prompt(user_message, history_block=history_block)
+                        thinking_mode = None
+                        if normalized_reasoning in ("high", "xhigh"):
+                            thinking_mode = "high"
+                        elif normalized_reasoning == "medium":
+                            thinking_mode = "high"
+                        elif normalized_reasoning == "low":
+                            thinking_mode = "low"
+                        elif normalized_reasoning == "minimal":
+                            thinking_mode = "minimal"
+                        # "none" -> thinking_mode stays None (completely disabled)
 
-                    yield {
-                        "type": "token",
-                        "model": model_id,
-                        "delta": full_response
-                    }
+                        api_model = get_api_model_name(model_id)
+                        with billing_context(node="internal_rag_agent", size="M"):
+                            async for chunk_data in stream_vertex_gemini_async(
+                                gemini_client,
+                                internal_prompt,
+                                model=api_model,
+                                max_tokens=4096,
+                                temperature=temperature,
+                                system_instruction=internal_system,
+                                thinking_mode=thinking_mode,
+                            ):
+                                if isinstance(chunk_data, tuple):
+                                    chunk_type, delta = chunk_data
+                                    if chunk_type in ("thinking", "thinking_summary") and delta:
+                                        full_thinking += str(delta)
+                                        payload: Dict[str, Any] = {
+                                            "type": "thinking",
+                                            "model": model_id,
+                                            "delta": str(delta),
+                                        }
+                                        if chunk_type == "thinking_summary":
+                                            payload["thinking_type"] = "summary"
+                                        yield payload
+                                        await asyncio.sleep(0)
+                                    elif chunk_type == "text" and delta:
+                                        if _mark_answer_started():
+                                            yield {
+                                                "type": "meta",
+                                                "phase": "answer_start",
+                                                "t": int(time.time() * 1000),
+                                                "model": model_id,
+                                            }
+                                        full_response += str(delta)
+                                        yield {"type": "token", "model": model_id, "delta": str(delta)}
+                                        await asyncio.sleep(0)
+                                elif chunk_data:
+                                    if _mark_answer_started():
+                                        yield {
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "model": model_id,
+                                        }
+                                    full_response += str(chunk_data)
+                                    yield {"type": "token", "model": model_id, "delta": str(chunk_data)}
+                                    await asyncio.sleep(0)
+
+                elif not used_native_search and provider == "perplexity":
+                    perplexity_key = os.getenv("PERPLEXITY_API_KEY")
+                    if not perplexity_key:
+                        yield {"type": "error", "model": model_id, "error": "PERPLEXITY_API_KEY não configurada"}
+                    else:
+                        try:
+                            from perplexity import AsyncPerplexity
+                        except Exception:
+                            yield {"type": "error", "model": model_id, "error": "Pacote perplexityai não instalado (pip install perplexityai)"}
+                            AsyncPerplexity = None  # type: ignore
+
+                        if AsyncPerplexity:
+                            import inspect
+
+                            def _get(obj: Any, key: str, default=None):
+                                if isinstance(obj, dict):
+                                    return obj.get(key, default)
+                                return getattr(obj, key, default)
+
+                            api_model = get_api_model_name(model_id) or model_id
+                            messages = [{"role": "system", "content": stream_instruction}] + history
+                            client = AsyncPerplexity(api_key=perplexity_key)
+                            disable_search_effective = bool(perplexity_disable_search) or bool(use_shared_search)
+                            pplx_meta = {
+                                "size": "M",
+                                "stream": True,
+                                "search_type": perplexity_search_type,
+                                "search_context_size": perplexity_search_context_size,
+                                "disable_search": disable_search_effective,
+                                "search_mode": perplexity_search_mode,
+                                "search_domain_filter": search_domain_filter,
+                                "search_language_filter": search_language_filter,
+                                "search_recency_filter": search_recency_filter,
+                                "search_after_date": search_after_date,
+                                "search_before_date": search_before_date,
+                                "last_updated_after": last_updated_after,
+                                "last_updated_before": last_updated_before,
+                                "search_country": search_country,
+                                "search_region": search_region,
+                                "search_city": search_city,
+                                "search_latitude": search_latitude,
+                                "search_longitude": search_longitude,
+                                "return_images": return_images,
+                                "return_videos": return_videos,
+                            }
+                            perplexity_kwargs = build_perplexity_chat_kwargs(
+                                api_model=api_model,
+                                web_search_enabled=web_search,
+                                search_mode=perplexity_search_mode,
+                                search_type=perplexity_search_type,
+                                search_context_size=perplexity_search_context_size,
+                                search_domain_filter=search_domain_filter,
+                                search_language_filter=search_language_filter,
+                                search_recency_filter=search_recency_filter,
+                                search_after_date=search_after_date,
+                                search_before_date=search_before_date,
+                                last_updated_after=last_updated_after,
+                                last_updated_before=last_updated_before,
+                                search_country=search_country,
+                                search_region=search_region,
+                                search_city=search_city,
+                                search_latitude=search_latitude,
+                                search_longitude=search_longitude,
+                                return_images=return_images,
+                                return_videos=return_videos,
+                                enable_search_classifier=perplexity_search_classifier,
+                                disable_search=disable_search_effective,
+                                stream_mode=perplexity_stream_mode,
+                            )
+
+                            search_results: List[Any] = []
+                            citation_items: List[Any] = []
+
+                            try:
+                                stream_obj = client.chat.completions.create(
+                                    model=api_model,
+                                    messages=messages,
+                                    temperature=temperature,
+                                    max_tokens=4096,
+                                    stream=True,
+                                    **perplexity_kwargs,
+                                )
+                                record_api_call(
+                                    kind="llm",
+                                    provider="perplexity",
+                                    model=api_model,
+                                    success=True,
+                                    meta=pplx_meta,
+                                )
+                            except Exception:
+                                record_api_call(
+                                    kind="llm",
+                                    provider="perplexity",
+                                    model=api_model,
+                                    success=False,
+                                    meta=pplx_meta,
+                                )
+                                raise
+                            if inspect.isawaitable(stream_obj):
+                                stream_obj = await stream_obj
+
+                            if hasattr(stream_obj, "__aiter__"):
+                                async for chunk in stream_obj:
+                                    choices = _get(chunk, "choices", []) or []
+                                    if choices:
+                                        delta = _get(choices[0], "delta", None) or {}
+                                        content = _get(delta, "content", None) or ""
+                                        if content:
+                                            if _mark_answer_started():
+                                                yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
+                                            full_response += str(content)
+                                            yield {"type": "token", "model": model_id, "delta": str(content)}
+                                            await asyncio.sleep(0)
+
+                                    chunk_results = _get(chunk, "search_results", None) or _get(chunk, "searchResults", None)
+                                    if isinstance(chunk_results, list) and chunk_results:
+                                        search_results.extend(chunk_results)
+
+                                    chunk_citations = _get(chunk, "citations", None)
+                                    if isinstance(chunk_citations, list) and chunk_citations:
+                                        citation_items.extend(chunk_citations)
+                            else:
+                                for chunk in stream_obj:
+                                    choices = _get(chunk, "choices", []) or []
+                                    if choices:
+                                        delta = _get(choices[0], "delta", None) or {}
+                                        content = _get(delta, "content", None) or ""
+                                        if content:
+                                            if _mark_answer_started():
+                                                yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
+                                            full_response += str(content)
+                                            yield {"type": "token", "model": model_id, "delta": str(content)}
+                                            await asyncio.sleep(0)
+
+                                    chunk_results = _get(chunk, "search_results", None) or _get(chunk, "searchResults", None)
+                                    if isinstance(chunk_results, list) and chunk_results:
+                                        search_results.extend(chunk_results)
+
+                                    chunk_citations = _get(chunk, "citations", None)
+                                    if isinstance(chunk_citations, list) and chunk_citations:
+                                        citation_items.extend(chunk_citations)
+
+                            def _to_url_title(item: Any) -> tuple[str, str]:
+                                if isinstance(item, str):
+                                    return item, item
+                                if isinstance(item, dict):
+                                    url = str(item.get("url") or item.get("uri") or "").strip()
+                                    title = str(item.get("title") or item.get("name") or url).strip()
+                                    return url, title
+                                url = str(getattr(item, "url", "") or getattr(item, "uri", "") or "").strip()
+                                title = str(getattr(item, "title", "") or getattr(item, "name", "") or url).strip()
+                                return url, title
+
+                            url_title_stream: List[tuple[str, str]] = []
+                            if citation_items:
+                                for item in citation_items:
+                                    url, title = _to_url_title(item)
+                                    if url:
+                                        url_title_stream.append((url, title or url))
+                            elif search_results:
+                                for item in search_results:
+                                    url, title = _to_url_title(item)
+                                    if url:
+                                        url_title_stream.append((url, title or url))
+
+                            if url_title_stream and not use_shared_search:
+                                _, model_sources = stable_numbering(url_title_stream)
+                                _merge_citations(sources_to_citations(model_sources))
 
                 elif not used_native_search and (
                     provider in ("openai", "xai", "openrouter", "deepseek", "meta")
@@ -1197,21 +2292,121 @@ Retorne APENAS o texto final, sem explicações.
                     if client:
                         api_model = get_api_model_name(model_id)
                         messages = [{"role": "system", "content": stream_instruction}] + history
-                        stream = client.chat.completions.create(
-                            model=api_model,
-                            messages=messages,
-                            stream=True
-                        )
-                        for chunk in stream:
-                            content = chunk.choices[0].delta.content or ""
-                            if content:
-                                full_response += content
-                                yield {
-                                    "type": "token",
-                                    "model": model_id,
-                                    "delta": content
+
+                        # Prefer Responses API for OpenAI provider so we can stream reasoning summaries when available.
+                        used_responses_stream = False
+                        if provider == "openai" and hasattr(client, "responses"):
+                            try:
+                                reasoning_arg = None
+                                effort = normalized_reasoning
+                                if effort and effort != "none":
+                                    if effort == "minimal":
+                                        effort = "low"
+                                    if effort == "xhigh":
+                                        effort = "high"
+                                    reasoning_arg = {"effort": effort, "summary": "auto"}
+
+                                req_kwargs = {
+                                    "model": api_model,
+                                    "input": messages,
+                                    "max_output_tokens": 4096,
+                                    "temperature": temperature,
+                                    "stream": True,
                                 }
-                                await asyncio.sleep(0) # Yield for event loop
+                                if reasoning_arg is not None:
+                                    req_kwargs["reasoning"] = reasoning_arg
+
+                                stream = client.responses.create(**req_kwargs)
+                                record_api_call(
+                                    kind="llm",
+                                    provider="openai",
+                                    model=api_model,
+                                    success=True,
+                                    meta={"stream": True, "api": "responses"},
+                                )
+                                used_responses_stream = True
+                                for ev in stream:
+                                    ev_type = getattr(ev, "type", "") or ""
+                                    if ev_type == "response.reasoning_summary_text.delta":
+                                        delta = getattr(ev, "delta", None)
+                                        if delta:
+                                            full_thinking += str(delta)
+                                            yield {"type": "thinking", "model": model_id, "delta": str(delta)}
+                                            await asyncio.sleep(0)
+                                    elif ev_type == "response.output_text.delta":
+                                        delta = getattr(ev, "delta", None)
+                                        if delta:
+                                            if _mark_answer_started():
+                                                yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
+                                            full_response += str(delta)
+                                            yield {"type": "token", "model": model_id, "delta": str(delta)}
+                                            await asyncio.sleep(0)
+                            except Exception as e:
+                                record_api_call(
+                                    kind="llm",
+                                    provider="openai",
+                                    model=api_model,
+                                    success=False,
+                                    meta={"stream": True, "api": "responses"},
+                                )
+                                used_responses_stream = False
+                                logger.warning(f"OpenAI Responses streaming failed for {api_model}: {e}")
+
+                        if not used_responses_stream:
+                            provider_name = "openai"
+                            if provider == "xai" or "grok" in model_id.lower():
+                                provider_name = "xai"
+                            elif provider in ("openrouter", "deepseek", "meta") or "llama" in model_id.lower():
+                                provider_name = "openrouter"
+                            try:
+                                stream = client.chat.completions.create(
+                                    model=api_model,
+                                    messages=messages,
+                                    temperature=temperature,
+                                    stream=True
+                                )
+                                record_api_call(
+                                    kind="llm",
+                                    provider=provider_name,
+                                    model=api_model,
+                                    success=True,
+                                    meta={"stream": True},
+                                )
+                            except Exception:
+                                record_api_call(
+                                    kind="llm",
+                                    provider=provider_name,
+                                    model=api_model,
+                                    success=False,
+                                    meta={"stream": True},
+                                )
+                                raise
+                            for chunk in stream:
+                                delta = getattr(chunk.choices[0], "delta", None)
+                                if delta is None:
+                                    continue
+
+                                reasoning_delta = getattr(delta, "reasoning_content", None)
+                                if reasoning_delta:
+                                    full_thinking += str(reasoning_delta)
+                                    yield {
+                                        "type": "thinking",
+                                        "model": model_id,
+                                        "delta": str(reasoning_delta),
+                                    }
+                                    await asyncio.sleep(0)
+
+                                content = getattr(delta, "content", None) or ""
+                                if content:
+                                    if _mark_answer_started():
+                                        yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
+                                    full_response += content
+                                    yield {
+                                        "type": "token",
+                                        "model": model_id,
+                                        "delta": content
+                                    }
+                                    await asyncio.sleep(0) # Yield for event loop
                     else:
                         yield {"type": "error", "model": model_id, "error": "OpenAI-compatible client unavailable"}
                 
@@ -1220,55 +2415,154 @@ Retorne APENAS o texto final, sem explicações.
                     client = claude_client
                     if client:
                         api_model = get_api_model_name(model_id)
-                        stream = client.messages.create(
-                            model=api_model,
-                            max_tokens=4096,
-                            messages=history,
-                            system=stream_instruction,
-                            stream=True
-                        )
+                        max_tokens = 4096
+                        create_kwargs: Dict[str, Any] = {
+                            "model": api_model,
+                            "max_tokens": max_tokens,
+                            "messages": history,
+                            "system": stream_instruction,
+                            "stream": True,
+                        }
+
+                        # Enable native thinking for Claude Sonnet (extended thinking API)
+                        budget_tokens = None
+                        if thinking_category == "native":
+                            if model_thinking_budget is not None:
+                                budget_tokens = clamp_thinking_budget(model_thinking_budget, model_id)
+                            elif normalized_reasoning in ("medium", "high", "xhigh"):
+                                budget_tokens = 1024 if normalized_reasoning == "medium" else 2048
+                        if budget_tokens is not None and budget_tokens > 0:
+                            if max_tokens <= budget_tokens:
+                                max_tokens = budget_tokens + 1024
+                                create_kwargs["max_tokens"] = max_tokens
+                            create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+                            create_kwargs["temperature"] = 1.0
+                        else:
+                            create_kwargs["temperature"] = temperature
+                        provider_name = "vertex-anthropic" if _is_anthropic_vertex_client(client) else "anthropic"
+                        try:
+                            stream = client.messages.create(**create_kwargs)
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=True,
+                                meta={"stream": True},
+                            )
+                        except Exception:
+                            record_api_call(
+                                kind="llm",
+                                provider=provider_name,
+                                model=api_model,
+                                success=False,
+                                meta={"stream": True},
+                            )
+                            raise
                         for event in stream:
                             if event.type == "content_block_delta":
-                                content = event.delta.text
-                                full_response += content
-                                yield {
-                                    "type": "token",
-                                    "model": model_id,
-                                    "delta": content
-                                }
-                                await asyncio.sleep(0)
+                                delta = getattr(event, "delta", None)
+                                if not delta:
+                                    continue
+                                delta_type = getattr(delta, "type", None)
+
+                                if delta_type == "thinking_delta":
+                                    thinking_text = getattr(delta, "thinking", "") or ""
+                                    if thinking_text:
+                                        full_thinking += thinking_text
+                                        yield {
+                                            "type": "thinking",
+                                            "model": model_id,
+                                            "delta": thinking_text,
+                                        }
+                                        await asyncio.sleep(0)
+                                    continue
+
+                                # text_delta (Anthropic SDK) or older delta.text fallback
+                                text = getattr(delta, "text", None) or ""
+                                if text:
+                                    if _mark_answer_started():
+                                        yield {"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "model": model_id}
+                                    full_response += text
+                                    yield {
+                                        "type": "token",
+                                        "model": model_id,
+                                        "delta": text,
+                                    }
+                                    await asyncio.sleep(0)
                     else:
                         yield {"type": "error", "model": model_id, "error": "Claude Client unavailable"}
 
                 elif not used_native_search and ("gemini" in model_id or model_id.startswith("gemini")):
                     from app.services.ai.model_registry import get_api_model_name
+
                     client = gemini_client
                     if client:
                         api_model = get_api_model_name(model_id)
-                        try:
-                            from google.genai import types as genai_types
-                            config = genai_types.GenerateContentConfig(system_instruction=stream_instruction)
-                        except Exception:
-                            config = {"system_instruction": stream_instruction}
-                        response = client.models.generate_content(
+                        thinking_mode = None
+                        if normalized_reasoning in ("high", "xhigh"):
+                            thinking_mode = "high"
+                        elif normalized_reasoning == "medium":
+                            thinking_mode = "medium"
+                        elif normalized_reasoning == "low":
+                            thinking_mode = "low"
+                        elif normalized_reasoning == "minimal":
+                            thinking_mode = "minimal"
+                        # "none" -> thinking_mode stays None (completely disabled)
+
+                        async for chunk_data in stream_vertex_gemini_async(
+                            client,
+                            user_message,
                             model=api_model,
-                            contents=user_message,
-                            config=config
-                        )
-                        full_response = extract_genai_text(response)
-                        yield {
-                            "type": "token",
-                            "model": model_id,
-                            "delta": full_response
-                        }
+                            max_tokens=4096,
+                            temperature=temperature,
+                            system_instruction=stream_instruction,
+                            thinking_mode=thinking_mode,
+                        ):
+                            if isinstance(chunk_data, tuple):
+                                chunk_type, delta = chunk_data
+                                if chunk_type in ("thinking", "thinking_summary") and delta:
+                                    full_thinking += str(delta)
+                                    payload: Dict[str, Any] = {
+                                        "type": "thinking",
+                                        "model": model_id,
+                                        "delta": str(delta),
+                                    }
+                                    if chunk_type == "thinking_summary":
+                                        payload["thinking_type"] = "summary"
+                                    yield payload
+                                    await asyncio.sleep(0)
+                                elif chunk_type == "text" and delta:
+                                    if _mark_answer_started():
+                                        yield {
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "model": model_id,
+                                        }
+                                    full_response += str(delta)
+                                    yield {"type": "token", "model": model_id, "delta": str(delta)}
+                                    await asyncio.sleep(0)
+                            elif chunk_data:
+                                if _mark_answer_started():
+                                    yield {
+                                        "type": "meta",
+                                        "phase": "answer_start",
+                                        "t": int(time.time() * 1000),
+                                        "model": model_id,
+                                    }
+                                full_response += str(chunk_data)
+                                yield {"type": "token", "model": model_id, "delta": str(chunk_data)}
+                                await asyncio.sleep(0)
                     else:
-                         yield {"type": "error", "model": model_id, "error": "Gemini Client unavailable"}
+                        yield {"type": "error", "model": model_id, "error": "Gemini Client unavailable"}
                 
                 else:
                     yield {"type": "error", "model": model_id, "error": f"Unknown model: {model_id}"}
                 
-                if sources and not used_native_search and "fontes:" not in full_response.lower():
+                if sources and not used_native_search and "fontes:" not in full_response.lower() and not citations_by_url:
                     full_response = render_perplexity(full_response, sources)
+                if sources and not citations_by_url:
+                    _merge_citations(sources_to_citations(sources))
 
                 # Save final message
                 self.thread_manager.add_message(thread_id, "assistant", full_response, model=model_id)
@@ -1276,7 +2570,9 @@ Retorne APENAS o texto final, sem explicações.
                 yield {
                     "type": "done",
                     "model": model_id,
-                    "full_text": full_response
+                    "full_text": full_response,
+                    "thinking": full_thinking or None,
+                    "citations": list(citations_by_url.values()),
                 }
                 
             except Exception as e:

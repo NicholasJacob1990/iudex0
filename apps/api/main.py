@@ -12,6 +12,8 @@ if __name__ == "__main__":
         host=settings.HOST,
         port=settings.PORT,
         reload=settings.DEBUG,
+        reload_dirs=["app"] if settings.DEBUG else None,
+        reload_excludes=["*.pyc", "__pycache__", ".venv*", "venv", ".git", "*.log"],
         workers=settings.WORKERS if not settings.DEBUG else 1,
         log_level=settings.LOG_LEVEL.lower(),
     )

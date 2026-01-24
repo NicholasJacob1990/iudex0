@@ -42,17 +42,27 @@ export function DeepResearchViewer({ jobId, isVisible, events }: DeepResearchVie
         events.forEach(e => {
             if (!e) return;
             // We treat any of these as "research is active/was active"
-            if (e.type === 'deep_research_start') { currentStatus = 'running'; sawAnyResearchSignal = true; }
-            if (e.type === 'cache_hit') { currentStatus = 'cached'; sawAnyResearchSignal = true; sawCacheHit = true; }
-            if (e.type === 'thinking') {
-                newSteps.push({
-                    text: e.text,
-                    timestamp: new Date().toISOString(),
-                    from_cache: e.from_cache
-                });
+            if (e.type === 'deep_research_start' || e.type === 'research_start') {
+                currentStatus = 'running';
                 sawAnyResearchSignal = true;
             }
-            if (e.type === 'deep_research_done') { currentStatus = 'done'; sawAnyResearchSignal = true; sawDone = true; }
+            if (e.type === 'cache_hit') { currentStatus = 'cached'; sawAnyResearchSignal = true; sawCacheHit = true; }
+            if (e.type === 'thinking' || e.type === 'deepresearch_step') {
+                const text = typeof e.text === 'string'
+                    ? e.text
+                    : typeof e.data?.step === 'string'
+                        ? e.data.step
+                        : '';
+                if (text) {
+                    newSteps.push({
+                        text,
+                        timestamp: new Date().toISOString(),
+                        from_cache: e.from_cache ?? e.data?.from_cache
+                    });
+                    sawAnyResearchSignal = true;
+                }
+            }
+            if (e.type === 'deep_research_done' || e.type === 'research_done') { currentStatus = 'done'; sawAnyResearchSignal = true; sawDone = true; }
         });
 
         // Fallbacks:

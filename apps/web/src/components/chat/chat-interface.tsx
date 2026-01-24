@@ -6,13 +6,11 @@ import { ChatMessage } from './chat-message';
 import { MultiModelResponse } from './multi-model-response';
 import { ChatInput } from './chat-input';
 import { DeepResearchViewer } from './deep-research-viewer';
-import { JobQualityPanel } from './job-quality-panel';
-import { JobQualityPipelinePanel } from './job-quality-pipeline-panel';
-import { HumanReviewModal } from './human-review-modal';
 import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
-import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy } from 'lucide-react';
+import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy, PanelRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
+import { MessageBudgetModal } from '@/components/billing/message-budget-modal';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,13 +24,24 @@ interface ChatInterfaceProps {
   chatId: string;
   hideInput?: boolean;
   placeholder?: string;
+  autoCanvasOnDocumentRequest?: boolean;
+  showCanvasButton?: boolean;
+  renderBudgetModal?: boolean;
 }
 
-export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceProps) {
+export function ChatInterface({
+  chatId,
+  hideInput,
+  placeholder,
+  autoCanvasOnDocumentRequest = false,
+  showCanvasButton = false,
+  renderBudgetModal = true,
+}: ChatInterfaceProps) {
   const {
-    currentChat, setCurrentChat, sendMessage, isSending, isLoading,
-    currentJobId, jobEvents, reviewData, submitReview,
-    showMultiModelComparator, chatMode, selectedModel, selectedModels, denseResearch
+    currentChat, setCurrentChat, sendMessage, startAgentGeneration, isSending, isLoading,
+    currentJobId, jobEvents,
+    showMultiModelComparator, chatMode, selectedModel, selectedModels, denseResearch, useMultiAgent,
+    billingModal, closeBillingModal, retryWithBudgetOverride
   } = useChatStore();
   const {
     selectedText,
@@ -57,6 +66,23 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
     range: { from: number; to: number } | null;
   } | null>(null);
   const showDeepResearch = denseResearch && !!currentJobId;
+
+  const latestTokenPercent = useMemo(() => {
+    const msgs = (currentChat?.messages || []) as any[];
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      const percent = m?.metadata?.token_usage?.limits?.percent_used;
+      if (typeof percent === 'number' && Number.isFinite(percent)) {
+        return percent;
+      }
+    }
+    return null;
+  }, [currentChat?.messages]);
+
+  const latestTokenPercentLabel = useMemo(() => {
+    if (latestTokenPercent === null) return null;
+    return `${latestTokenPercent.toFixed(1)}%`;
+  }, [latestTokenPercent]);
 
   /* 
    * NEW: Deep Debate Toggle for Committee Mode 
@@ -95,6 +121,20 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
   const openCanvas = () => {
     showCanvas();
     setActiveTab('editor');
+  };
+
+  const isCommandOrContextMessage = (raw: string) => {
+    const trimmed = raw.trim();
+    if (!trimmed) return false;
+    if (/^[@/]/.test(trimmed)) return true;
+    return /^(contexto|fatos|dados|informacoes|informações|anexos|documentos)\s*:/i.test(trimmed);
+  };
+
+  const isDocumentRequest = (raw: string) => {
+    if (!autoCanvasOnDocumentRequest) return false;
+    if (isCommandOrContextMessage(raw)) return false;
+    const lower = raw.toLowerCase();
+    return /\b(minuta|documento|pe[cç]a|peti[cç][aã]o|inicial|contesta[cç][aã]o|recurso|agravo|apela[cç][aã]o|mandado\s+de\s+seguran[cç]a|habeas|contrato|parecer|relat[oó]rio|manifest[aã]o)\b/.test(lower);
   };
 
   useEffect(() => {
@@ -230,12 +270,33 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
       const canvasCommand = parseCanvasCommand(content);
       if (canvasCommand !== null) {
         openCanvas();
-        if (!documentContent?.trim()) {
-          toast.error("Canvas vazio. Gere ou cole um documento antes.");
-          return;
-        }
         if (!canvasCommand.payload) {
           toast.error("Descreva a alteração após o comando.");
+          return;
+        }
+        const hasDocument = !!documentContent?.trim();
+        const canUsePipeline = chatMode === 'standard' && !denseResearch && !useMultiAgent;
+        const shouldGenerate = canvasCommand.action === 'replace' || !hasDocument;
+        if (canUsePipeline && shouldGenerate) {
+          if (selectedText) {
+            clearSelectedText();
+          }
+          const prompt = normalizeCanvasPrompt(canvasCommand.payload);
+          useChatStore.getState().addMessage({
+            id: `user-${Date.now()}`,
+            role: 'user',
+            content,
+            timestamp: new Date().toISOString(),
+          });
+          await sendMessage(prompt, {
+            skipUserMessage: true,
+            canvasWrite: 'replace',
+            outlinePipeline: true,
+          });
+          return;
+        }
+        if (!hasDocument) {
+          toast.error("Canvas vazio. Gere ou cole um documento antes.");
           return;
         }
         const message =
@@ -265,6 +326,29 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
         return;
       }
 
+      if (isDocumentRequest(content)) {
+        openCanvas();
+        if (selectedText) {
+          clearSelectedText();
+        }
+        useChatStore.getState().addMessage({
+          id: `user-${Date.now()}`,
+          role: 'user',
+          content,
+          timestamp: new Date().toISOString(),
+        });
+        if (chatMode === 'standard' && !denseResearch && !useMultiAgent) {
+          await sendMessage(content, {
+            skipUserMessage: true,
+            canvasWrite: 'replace',
+            outlinePipeline: true,
+          });
+        } else {
+          await startAgentGeneration(content);
+        }
+        return;
+      }
+
       const targetExplicit = /\b(canvas|editor|minuta|documento|pe[cç]a|peti[cç]ao)\b/.test(lower);
       const targetContextual = /\bno\s+documento\b/.test(lower)
         || /\bna\s+minuta\b/.test(lower)
@@ -275,7 +359,7 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
         || /\bna\s+inicial\b/.test(lower)
         || /\bna\s+contesta[cç][aã]o\b/.test(lower);
       const wantsCanvas = targetExplicit || targetContextual;
-      const wantsWrite = /(escrev|gerar|redigir|criar|elaborar|montar|produzir|rascunhar|esbocar|preparar|fazer)/.test(lower);
+      const wantsWrite = /(escrev|gerar|gera|gere|redigir|redija|criar|crie|elaborar|elabore|montar|monte|produzir|produza|rascunhar|rascunhe|esbocar|esboce|preparar|prepare|fazer|fa[cç]a)/.test(lower);
       const wantsAppend = /(adicion|acresc|append|incluir|anexar|complementar)/.test(lower);
       if (wantsCanvas && wantsWrite) {
         openCanvas();
@@ -467,16 +551,46 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
   }
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col font-google-sans-text" data-testid="chat-interface">
+    <div className="flex h-full min-h-0 flex-col font-google-sans-text" data-testid="chat-interface">
+      {renderBudgetModal ? (
+        <MessageBudgetModal
+          open={billingModal.open}
+          quote={billingModal.quote}
+          onClose={closeBillingModal}
+          onSelectBudget={retryWithBudgetOverride}
+        />
+      ) : null}
       {/* Messages Area */}
       <div
         ref={messagesContainerRef}
         onScroll={() => { isNearBottomRef.current = checkIfNearBottom(); }}
-        className="flex-1 min-h-0 overflow-y-auto p-6 space-y-5 relative bg-[#f7f7f8]"
+        className="flex-1 min-h-0 overflow-y-auto py-4 px-2 md:px-4 relative"
+        style={{ background: '#f7f7f8' }}
       >
         {/* Export Actions - Absolute Top Right */}
         {currentChat && currentChat.messages?.length > 0 && (
-          <div className="absolute top-2 right-4 z-10 transition-opacity">
+          <div className="absolute top-2 right-4 z-10 flex items-center gap-2 transition-opacity">
+            {showCanvasButton && (
+              <Button
+                variant="outline"
+                size="icon"
+                className="h-8 w-8 bg-white/80 backdrop-blur border-slate-200 shadow-sm"
+                title="Abrir canvas"
+                onClick={openCanvas}
+              >
+                <PanelRight className="h-4 w-4 text-muted-foreground" />
+              </Button>
+            )}
+            {latestTokenPercentLabel && (
+              <span
+                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-700 ring-1 ring-slate-200"
+                title="Uso da janela de contexto do modelo (última resposta)"
+                aria-label="Uso da janela de contexto do modelo (última resposta)"
+              >
+                {latestTokenPercentLabel.replace('%', '')}
+                <span className="sr-only">%</span>
+              </span>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="icon" className="h-8 w-8 bg-white/80 backdrop-blur border-slate-200 shadow-sm">
@@ -498,92 +612,99 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
           </div>
         )}
 
-        {showDeepResearch && (
-          <DeepResearchViewer
-            jobId={currentJobId || ''}
-            isVisible={showDeepResearch}
-            events={jobEvents}
-          />
-        )}
+        <div className="mx-auto w-full max-w-none min-h-full flex flex-col">
+          {showDeepResearch && (
+            <div className="mb-4">
+              <DeepResearchViewer
+                jobId={currentJobId || ''}
+                isVisible={showDeepResearch}
+                events={jobEvents}
+              />
+            </div>
+          )}
 
-        {(currentChat.messages?.length ?? 0) === 0 ? (
-          <div className="flex h-full items-center justify-center text-slate-500">
-            Nenhuma mensagem ainda. Comece a conversar!
-          </div>
-        ) : (
-          <>
-            {(() => {
-              const items = [];
-              const msgs = currentChat.messages;
-              let i = 0;
+          {(currentChat.messages?.length ?? 0) === 0 ? (
+            <div className="flex flex-1 items-center justify-center text-slate-500">
+              Nenhuma mensagem ainda. Comece a conversar!
+            </div>
+          ) : (
+            <div className="flex flex-1 flex-col space-y-6">
+              {(() => {
+                const items = [];
+                const msgs = currentChat.messages;
+                let i = 0;
 
-              while (i < msgs.length) {
-                const current = msgs[i] as any;
+                while (i < msgs.length) {
+                  const current = msgs[i] as any;
 
-                // Check for multi-model group: assistant messages that share the same turn_id
-                // (Robusto: evita agrupar mensagens de turns diferentes por acidente)
-                const turnId = current?.metadata?.turn_id;
-                if (showMultiModelComparator && current.role === 'assistant' && current.metadata?.model && turnId) {
-                  const group = [current];
-                  let j = i + 1;
-                  while (
-                    j < msgs.length &&
-                    (msgs[j] as any).role === 'assistant' &&
-                    (msgs[j] as any).metadata?.model &&
-                    (msgs[j] as any).metadata?.turn_id === turnId
-                  ) {
-                    group.push(msgs[j]);
-                    j++;
+                  // Check for multi-model group: assistant messages that share the same turn_id
+                  // (Robusto: evita agrupar mensagens de turns diferentes por acidente)
+                  const turnId = current?.metadata?.turn_id;
+                  if (showMultiModelComparator && current.role === 'assistant' && current.metadata?.model && turnId) {
+                    const group = [current];
+                    let j = i + 1;
+                    while (
+                      j < msgs.length &&
+                      (msgs[j] as any).role === 'assistant' &&
+                      (msgs[j] as any).metadata?.model &&
+                      (msgs[j] as any).metadata?.turn_id === turnId
+                    ) {
+                      group.push(msgs[j]);
+                      j++;
+                    }
+
+                    // Só mostra comparador se houver 2+ modelos no mesmo turno
+                    const uniqueModels = new Set(group.map((m: any) => m?.metadata?.model).filter(Boolean));
+                    if (uniqueModels.size > 1) {
+                      items.push(
+                        <MultiModelResponse
+                          key={`turn-${turnId}`}
+                          messages={group}
+                          onCopy={handleCopyMessage}
+                          onRegenerate={handleRegenerateFromMessage}
+                          disableRegenerate={isSending}
+                        />
+                      );
+                      i = j;
+                      continue;
+                    }
                   }
 
-                  // Só mostra comparador se houver 2+ modelos no mesmo turno
-                  const uniqueModels = new Set(group.map((m: any) => m?.metadata?.model).filter(Boolean));
-                  if (uniqueModels.size > 1) {
-                    items.push(
-                      <MultiModelResponse
-                        key={`turn-${turnId}`}
-                        messages={group}
-                        onCopy={handleCopyMessage}
-                        onRegenerate={handleRegenerateFromMessage}
-                        disableRegenerate={isSending}
-                      />
-                    );
-                    i = j;
-                    continue;
-                  }
+                  items.push(
+                    <ChatMessage
+                      key={current.id}
+                      message={current}
+                      onCopy={handleCopyMessage}
+                      onRegenerate={handleRegenerateFromMessage}
+                      disableRegenerate={isSending}
+                    />
+                  );
+                  i++;
                 }
+                return items;
+              })()}
+              <div ref={messagesEndRef} />
+            </div>
+          )}
 
-                items.push(
-                  <ChatMessage
-                    key={current.id}
-                    message={current}
-                    onCopy={handleCopyMessage}
-                    onRegenerate={handleRegenerateFromMessage}
-                    disableRegenerate={isSending}
-                  />
-                );
-                i++;
-              }
-              return items;
-            })()}
-            <div ref={messagesEndRef} />
-          </>
-        )}
-
-        {isSending && (
-          <div className="flex items-center space-x-2 text-slate-500">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            <span className="text-sm">IA está pensando...</span>
-          </div>
-        )}
+          {isSending && (
+            <div className="flex items-center space-x-2 text-slate-500">
+              <Loader2 className="h-4 w-4 animate-spin" />
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Input Area */}
       {
         !hideInput && (
-          <div className="border-t border-slate-200 bg-white p-4">
-            <JobQualityPanel isVisible={!!currentJobId} events={jobEvents} />
-            <JobQualityPipelinePanel isVisible={!!currentJobId} events={jobEvents} />
+          <div className="border-t border-slate-200 bg-white p-3 md:p-4">
+            {/* Job Quality Panels - Moved to Canvas Quality Tab */}
+            {useChatStore.getState().useMultiAgent && (
+              <>
+                {/* Panels removed from here */}
+              </>
+            )}
 
             {/* Selection Indicator */}
             {selectedText && (
@@ -624,34 +745,7 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
               </div>
             )}
 
-            {lastAssistantMessage && !selectedText && (
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-500">
-                <span className="max-w-[65%] truncate">
-                  Última resposta: {lastAssistantSnippet || '—'}
-                </span>
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    className="h-7 gap-1 text-[11px]"
-                    onClick={() => handleCopyMessage(lastAssistantMessage)}
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                    Copiar
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    className="h-7 gap-1 text-[11px]"
-                    onClick={() => handleRegenerateFromMessage(lastAssistantMessage)}
-                    disabled={isSending}
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    Regerar resposta
-                  </Button>
-                </div>
-              </div>
-            )}
+
             <ChatInput
               onSend={handleSendMessage}
               disabled={isSending}
@@ -665,11 +759,6 @@ export function ChatInterface({ chatId, hideInput, placeholder }: ChatInterfaceP
         )
       }
 
-      <HumanReviewModal
-        isOpen={!!reviewData}
-        data={reviewData}
-        onSubmit={submitReview}
-      />
       <DiffConfirmDialog
         open={editPreviewOpen}
         onOpenChange={(open) => {

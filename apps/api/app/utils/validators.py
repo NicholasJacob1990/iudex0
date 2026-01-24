@@ -3,12 +3,49 @@ Validadores e sanitizadores para segurança e qualidade de dados
 """
 
 import re
-from typing import Optional, List
+from typing import Optional, List, Dict
+
+from app.core.config import settings
 from loguru import logger
 
 
 class InputValidator:
     """Validação e sanitização de inputs do usuário"""
+
+    _PROVIDER_UPLOAD_LIMITS_MB: Dict[str, int] = {
+        "openai": 512,
+        "anthropic": 30,
+        "google": 2048,
+        "vertex": 2048,
+        "gemini": 2048,
+    }
+
+    @staticmethod
+    def _normalize_provider(provider: Optional[str]) -> str:
+        if not provider:
+            return ""
+        return str(provider).strip().lower()
+
+    @classmethod
+    def get_provider_upload_limit_mb(cls, provider: Optional[str]) -> int:
+        norm = cls._normalize_provider(provider)
+        if norm in ("vertex", "google", "gemini"):
+            norm = "google"
+        if norm in ("anthropic", "claude"):
+            norm = "anthropic"
+        if norm in ("openai", "gpt"):
+            norm = "openai"
+        return cls._PROVIDER_UPLOAD_LIMITS_MB.get(norm, settings.MAX_UPLOAD_SIZE_MB)
+
+    @classmethod
+    def get_provider_upload_limits_mb(cls) -> Dict[str, int]:
+        return dict(cls._PROVIDER_UPLOAD_LIMITS_MB)
+
+    @classmethod
+    def validate_upload_for_provider(cls, size_bytes: int, provider: Optional[str]) -> bool:
+        limit_mb = cls.get_provider_upload_limit_mb(provider)
+        max_bytes = limit_mb * 1024 * 1024
+        return int(size_bytes or 0) <= max_bytes
     
     @staticmethod
     def sanitize_text(text: str, max_length: Optional[int] = None) -> str:
@@ -210,8 +247,10 @@ class InputValidator:
         return ext in [e.lower().lstrip('.') for e in allowed_extensions]
     
     @staticmethod
-    def validate_file_size(size_bytes: int, max_size_mb: int = 500) -> bool:
+    def validate_file_size(size_bytes: int, max_size_mb: Optional[int] = None) -> bool:
         """Valida tamanho de arquivo"""
+        if max_size_mb is None:
+            max_size_mb = settings.MAX_UPLOAD_SIZE_MB
         max_size_bytes = max_size_mb * 1024 * 1024
         return size_bytes <= max_size_bytes
     

@@ -33,7 +33,7 @@ export function TokenUsageBar({ data, compact = false }: TokenUsageBarProps) {
     else if (percent_used > 75) colorClass = "bg-yellow-500";
 
     return (
-        <div className={cn("flex flex-col gap-1 w-full max-w-md", compact ? "text-[10px]" : "text-xs")}>
+        <div className={cn("flex flex-col gap-1 w-full max-w-md", compact ? "text-[11px]" : "text-xs")}>
             <div className="flex justify-between items-center text-muted-foreground">
                 <span>Contexto ({data.model})</span>
                 <span className={percent_used > 90 ? "text-red-500 font-bold" : ""}>

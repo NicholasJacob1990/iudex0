@@ -14,6 +14,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from loguru import logger
 
+from app.services.ai.document_store import resolve_full_document, store_full_document_state
+
 
 @dataclass
 class PatchOperation:
@@ -283,7 +285,7 @@ async def targeted_patch_node(state: dict) -> dict:
             "patch_result": PatchResult(0, 0, 0, False).to_dict()
         }
     
-    document = state.get("full_document", "")
+    document = resolve_full_document(state)
     mode = state.get("mode", "PETICAO")
     
     patches = await generate_targeted_patches(document, issues, drafter, mode)
@@ -314,9 +316,8 @@ async def targeted_patch_node(state: dict) -> dict:
                 "corrections_diff": f"{result.patches_applied} patches aplicados"
             }
 
-        return {
+        updated_state = {
             **state,
-            "full_document": modified_doc,
             "proposed_corrections": None,
             "patches_applied": result.details,
             "targeted_patch_used": True,
@@ -324,6 +325,7 @@ async def targeted_patch_node(state: dict) -> dict:
             "corrections_diff": f"{result.patches_applied} patches aplicados",
             "human_approved_corrections": True
         }
+        return store_full_document_state(updated_state, modified_doc)
     
     return {
         **state,

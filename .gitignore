@@ -154,3 +154,10 @@ pasta sem t*/
 *_SUGESTOES.json
 transcricao-*.md
 audit_*.md
+
+# Claude Code
+.claude/settings.json
+
+# Virtual environments
+.venv*/
+*.venv/

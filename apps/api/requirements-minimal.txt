@@ -2,6 +2,7 @@
 
 # FastAPI e servidor
 fastapi==0.115.0
+sse-starlette==1.8.2
 uvicorn[standard]==0.32.0
 python-multipart==0.0.17
 python-jose[cryptography]==3.3.0
@@ -13,6 +14,7 @@ sqlalchemy==2.0.36
 alembic==1.14.0
 psycopg2-binary==2.9.10
 asyncpg==0.30.0
+aiosqlite==0.20.0
 
 # Redis e Celery
 redis==5.2.0
@@ -44,6 +46,7 @@ pydantic==2.10.2
 pydantic-settings==2.6.1
 python-slugify==8.0.4
 pytz==2024.2
+networkx==3.4.2
 
 # Validação e Schemas
 email-validator==2.2.0
@@ -54,7 +57,6 @@ loguru==0.7.2
 # Segurança
 cryptography==43.0.3
 bcrypt==4.2.1
-
 
 
 

@@ -11,6 +11,13 @@ from loguru import logger
 
 class DocumentType(str, Enum):
     """Tipos de documentos jurídicos"""
+    DECISAO_INTERLOCUTORIA = "decisao_interlocutoria"
+    SENTENCA = "sentenca"
+    ACORDAO = "acordao"
+    VOTO = "voto"
+    OFICIO = "oficio"
+    NOTIFICACAO_EXTRAJUDICIAL = "notificacao_extrajudicial"
+    ESCRITURA_PUBLICA = "escritura_publica"
     MANDADO_SEGURANCA = "mandado_seguranca"
     HABEAS_CORPUS = "habeas_corpus"
     RECLAMACAO_TRABALHISTA = "reclamacao_trabalhista"
@@ -747,4 +754,3 @@ _____________________
 
 # Instância global da biblioteca
 legal_template_library = LegalTemplateLibrary()
-

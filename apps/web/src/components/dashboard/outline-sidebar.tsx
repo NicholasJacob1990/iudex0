@@ -13,6 +13,7 @@ import {
     Loader2
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 
 export type SectionStatus = 'pending' | 'generating' | 'done' | 'review' | 'error';
 
@@ -21,6 +22,7 @@ export interface OutlineSection {
     title: string;
     status: SectionStatus;
     level?: number; // 1 = h1, 2 = h2, etc.
+    stage?: string;
 }
 
 interface OutlineSidebarProps {
@@ -36,6 +38,25 @@ const statusConfig: Record<SectionStatus, { icon: typeof CheckCircle2; color: st
     done: { icon: CheckCircle2, color: 'text-green-500', label: 'Pronto' },
     review: { icon: AlertCircle, color: 'text-yellow-500', label: 'Precisa revisão' },
     error: { icon: AlertCircle, color: 'text-red-500', label: 'Erro' },
+};
+
+const stageMeta = (stage?: string) => {
+    if (!stage) return null;
+    const normalized = stage.toLowerCase();
+    switch (normalized) {
+        case 'draft':
+            return { label: 'Rascunho', className: 'border-sky-200 text-sky-700' };
+        case 'critique':
+            return { label: 'Critica', className: 'border-amber-200 text-amber-700' };
+        case 'revise':
+            return { label: 'Revisao', className: 'border-violet-200 text-violet-700' };
+        case 'merge':
+            return { label: 'Consolidacao', className: 'border-emerald-200 text-emerald-700' };
+        case 'done':
+            return { label: 'Concluida', className: 'border-emerald-200 text-emerald-700' };
+        default:
+            return { label: stage, className: 'border-outline/30 text-muted-foreground' };
+    }
 };
 
 export function OutlineSidebar({
@@ -126,6 +147,7 @@ export function OutlineSidebar({
                 ) : (
                     displaySections.map((section) => {
                         const StatusIcon = statusConfig[section.status].icon;
+                        const stage = stageMeta(section.stage);
                         const indent = (section.level || 1) - 1;
 
                         return (
@@ -146,6 +168,11 @@ export function OutlineSidebar({
                                 <span className="truncate flex-1 text-foreground/90">
                                     {section.title}
                                 </span>
+                                {stage && (
+                                    <Badge variant="outline" className={`text-[9px] ${stage.className}`}>
+                                        {stage.label}
+                                    </Badge>
+                                )}
                             </button>
                         );
                     })

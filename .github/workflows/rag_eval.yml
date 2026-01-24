@@ -1,0 +1,36 @@
+name: rag-eval
+on:
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - "evals/**"
+      - "eval_rag.py"
+
+jobs:
+  rag-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ragas datasets chromadb sentence-transformers rank_bm25
+      - name: Run RAG eval
+        env:
+          RAG_EVAL_WITH_LLM: "false"
+        run: |
+          python eval_rag.py --dataset evals/sample_eval.jsonl --out evals/eval_results.json
+      - name: Build report
+        run: |
+          python eval_report.py --input evals/eval_results.json --md evals/eval_report.md --html evals/eval_report.html
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: rag-eval-report
+          path: |
+            evals/eval_results.json
+            evals/eval_report.md
+            evals/eval_report.html

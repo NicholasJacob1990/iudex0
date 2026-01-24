@@ -27,12 +27,55 @@ type SectionProcessedEvent = {
   claims_requiring_citation?: ClaimRequiringCitation[];
   removed_claims?: RemovedClaim[];
   divergence_details?: string;
+  review?: {
+    critique?: {
+      issues?: any[];
+      summary?: string;
+    };
+  };
 };
 
 interface JobQualityPanelProps {
   isVisible: boolean;
   events: any[];
 }
+
+const truncate = (value: string, max = 140) => {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  if (text.length <= max) return text;
+  const sliced = text.slice(0, max);
+  return `${sliced.replace(/\s+\S*$/, '').trim()}...`;
+};
+
+const extractReviewIssues = (review: SectionProcessedEvent['review'], limit = 3) => {
+  const critique = review?.critique;
+  const rawIssues = Array.isArray(critique?.issues) ? critique?.issues : [];
+  const issues = rawIssues
+    .map((issue) => {
+      if (typeof issue === 'string') return issue;
+      if (!issue || typeof issue !== 'object') return String(issue || '').trim();
+      const message =
+        String(
+          issue.message
+          ?? issue.summary
+          ?? issue.label
+          ?? issue.issue
+          ?? issue.text
+          ?? ''
+        ).trim();
+      const issueType = String(issue.type || '').trim();
+      if (issueType && message && !message.startsWith(`${issueType}:`)) {
+        return `${issueType}: ${message}`;
+      }
+      return message || issueType;
+    })
+    .filter(Boolean)
+    .slice(0, limit)
+    .map((item) => truncate(String(item), 160));
+  const summary = typeof critique?.summary === 'string' ? truncate(critique.summary, 160) : '';
+  return { count: rawIssues.length, issues, summary };
+};
 
 export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
   const [isExpanded, setIsExpanded] = useState(true);
@@ -45,7 +88,11 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
       const key = ev.section || 'Seção';
       bySection.set(key, ev); // latest snapshot wins
     }
-    return Array.from(bySection.entries()).map(([section, ev]) => ({ section, ev }));
+    return Array.from(bySection.entries()).map(([section, ev]) => ({
+      section,
+      ev,
+      reviewInfo: extractReviewIssues(ev.review),
+    }));
   }, [events]);
 
   const summary = useMemo(() => {
@@ -53,15 +100,17 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
     let removed = 0;
     const riskFlags = new Set<string>();
     let divergences = 0;
+    let reviewIssues = 0;
 
-    for (const { ev } of sections) {
+    for (const { ev, reviewInfo } of sections) {
       pending += ev.pending_citations_count || (ev.claims_requiring_citation?.length || 0);
       removed += ev.removed_claims_count || (ev.removed_claims?.length || 0);
       if (ev.has_divergence) divergences += 1;
       (ev.risk_flags || []).forEach((rf) => rf && riskFlags.add(rf));
+      reviewIssues += reviewInfo.count;
     }
 
-    return { pending, removed, riskFlags: Array.from(riskFlags), divergences };
+    return { pending, removed, riskFlags: Array.from(riskFlags), divergences, reviewIssues };
   }, [sections]);
 
   // Auto-collapse when nothing to show
@@ -99,6 +148,11 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
             >
               {summary.divergences} seção(ões) com divergência
             </Badge>
+            {summary.reviewIssues > 0 && (
+              <Badge variant="outline" className="border-amber-500/30 text-[10px] text-amber-200">
+                {summary.reviewIssues} issue(s)
+              </Badge>
+            )}
           </div>
         </div>
 
@@ -125,7 +179,7 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
 
           <ScrollArea className="h-[240px] w-full p-3">
             <div className="space-y-3">
-              {sections.map(({ section, ev }) => (
+              {sections.map(({ section, ev, reviewInfo }) => (
                 <div key={section} className="rounded-lg border border-amber-500/15 bg-white/5 p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-sm font-semibold text-amber-50">{section}</div>
@@ -138,6 +192,11 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
                       </Badge>
                       {ev.has_divergence && (
                         <Badge className="bg-amber-500/20 text-amber-100">divergência</Badge>
+                      )}
+                      {reviewInfo.count > 0 && (
+                        <Badge variant="outline" className="border-amber-500/30 text-[10px] text-amber-200">
+                          {reviewInfo.count} issue(s)
+                        </Badge>
                       )}
                     </div>
                   </div>
@@ -184,6 +243,22 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
                     </div>
                   )}
 
+                  {(reviewInfo.count > 0 || reviewInfo.summary) && (
+                    <div className="mt-3 space-y-2">
+                      <div className="text-xs font-semibold text-amber-200">Issues do review</div>
+                      {reviewInfo.summary && (
+                        <p className="text-[11px] text-amber-100/80">{reviewInfo.summary}</p>
+                      )}
+                      {reviewInfo.issues.length > 0 && (
+                        <ul className="list-disc space-y-1 pl-4 text-[11px] text-amber-100/80">
+                          {reviewInfo.issues.map((issue, idx) => (
+                            <li key={`issue-${idx}`}>{issue}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+
                   {/* Divergence details (raw) */}
                   {ev.has_divergence && ev.divergence_details && (
                     <div className="mt-3">
@@ -208,7 +283,6 @@ export function JobQualityPanel({ isVisible, events }: JobQualityPanelProps) {
     </Card>
   );
 }
-
 
 
 

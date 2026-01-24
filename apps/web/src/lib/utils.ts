@@ -8,6 +8,7 @@ export function cn(...inputs: ClassValue[]) {
 export function formatDate(date: Date | string | number): string {
   if (!date) return '';
   const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat('pt-BR', {
     day: 'numeric',
     month: 'short',
@@ -18,6 +19,7 @@ export function formatDate(date: Date | string | number): string {
 export function formatDateTime(date: Date | string | number): string {
   if (!date) return '';
   const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat('pt-BR', {
     day: '2-digit',
     month: '2-digit',

@@ -94,6 +94,9 @@ class User(Base):
     )
 
     cases = relationship("Case", back_populates="user", cascade="all, delete-orphan")
+    watchlist_items = relationship("ProcessWatchlist", back_populates="user", cascade="all, delete-orphan")
+    oab_watchlist_items = relationship("DjenOabWatchlist", back_populates="user", cascade="all, delete-orphan")
+    djen_intimations = relationship("DjenIntimation", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email}, name={self.name}, type={self.account_type})>"

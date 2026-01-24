@@ -1,0 +1,2 @@
+{"query": "Qual o prazo para recurso em licitacao na Lei 8.666?", "ground_truth": "A Lei 8.666/93 estabelece prazos especificos para recursos conforme o tipo de ato e fase do processo.", "sources": ["lei", "juris"]}
+{"query": "O que diz a Sumula 7 do STJ?", "ground_truth": "A Sumula 7 do STJ veda o reexame de provas em recurso especial.", "sources": ["juris"]}

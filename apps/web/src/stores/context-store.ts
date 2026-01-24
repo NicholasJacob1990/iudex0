@@ -31,6 +31,8 @@ interface ContextState {
   toggleSource: (id: ContextSourceId) => void;
   toggleMeta: (id: ContextSourceId, key: 'ocr' | 'rigorous') => void;
   setSourceCounts: (counts: Partial<Record<ContextSourceId, number>>) => void;
+  setItems: (items: ContextItem[]) => void;
+  clearItems: () => void;
   addItem: (item: ContextItem) => void;
   removeItem: (id: string) => void;
 }
@@ -99,6 +101,8 @@ export const useContextStore = create<ContextState>((set) => ({
   items: [],
   activeTab: 'files',
   setActiveTab: (value) => set({ activeTab: value }),
+  setItems: (items) => set({ items }),
+  clearItems: () => set({ items: [] }),
   addItem: (item) => set((state) => ({ items: [...state.items, item] })),
   removeItem: (id) => set((state) => ({ items: state.items.filter((i) => i.id !== id) })),
 }));

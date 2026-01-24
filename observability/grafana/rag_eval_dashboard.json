@@ -1,0 +1,83 @@
+{
+  "uid": "rag-eval",
+  "title": "RAG Eval Metrics",
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "refresh": "30s",
+  "tags": ["rag", "eval"],
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Context Precision/Recall",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT created_at AS time, context_precision AS value, 'context_precision' AS metric FROM rag_eval_metrics WHERE dataset = ${dataset:sqlstring} ORDER BY created_at",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawSql": "SELECT created_at AS time, context_recall AS value, 'context_recall' AS metric FROM rag_eval_metrics WHERE dataset = ${dataset:sqlstring} ORDER BY created_at",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "decimals": 3}
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Faithfulness / Answer Relevancy",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT created_at AS time, faithfulness AS value, 'faithfulness' AS metric FROM rag_eval_metrics WHERE dataset = ${dataset:sqlstring} ORDER BY created_at",
+          "interval": ""
+        },
+        {
+          "refId": "B",
+          "format": "time_series",
+          "rawSql": "SELECT created_at AS time, answer_relevancy AS value, 'answer_relevancy' AS metric FROM rag_eval_metrics WHERE dataset = ${dataset:sqlstring} ORDER BY created_at",
+          "interval": ""
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percentunit", "decimals": 3}
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "Latest Run",
+      "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT created_at, dataset, context_precision, context_recall, faithfulness, answer_relevancy FROM rag_eval_metrics WHERE dataset = ${dataset:sqlstring} ORDER BY created_at DESC LIMIT 1",
+          "interval": ""
+        }
+      ]
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "dataset",
+        "type": "query",
+        "datasource": {"type": "postgres", "uid": "${DS_POSTGRES}"},
+        "refresh": 1,
+        "query": "SELECT DISTINCT dataset FROM rag_eval_metrics ORDER BY dataset",
+        "current": {"value": "evals/sample_eval.jsonl", "text": "evals/sample_eval.jsonl"}
+      }
+    ]
+  }
+}

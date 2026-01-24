@@ -1,10 +1,12 @@
 import os
 import sys
 import time
+import argparse
 import subprocess
 import traceback
 import hashlib
 from pathlib import Path
+from typing import Optional
 try:
     from colorama import init, Fore, Style
 except ImportError:
@@ -25,24 +27,146 @@ import json
 import asyncio
 from google import genai
 from google.genai import types
-import vertexai
-from vertexai.generative_models import GenerativeModel
 from openai import OpenAI, AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 import threading
 import random
+from collections import deque
 from time import sleep # Added for RateLimiter fallback if needed
 import logging
 
 init(autoreset=True)
 
-# v2.18: Import do módulo de auditoria jurídica
 try:
-    from audit_module import auditar_consistencia_legal
-    AUDIT_AVAILABLE = True
-except ImportError:
+    from app.services.api_call_tracker import record_api_call as _record_api_call
+except Exception:
+    _record_api_call = None
+
+
+def _safe_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_llm_usage(
+    *,
+    provider: str,
+    model: Optional[str],
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+    cached_tokens_in: Optional[int] = None,
+    seconds_audio: Optional[float] = None,
+    seconds_video: Optional[float] = None,
+):
+    if not _record_api_call or not model:
+        return
+    meta = {}
+    if tokens_in is not None:
+        meta["tokens_in"] = int(tokens_in)
+        meta["context_tokens"] = int(tokens_in)
+    if tokens_out is not None:
+        meta["tokens_out"] = int(tokens_out)
+    if cached_tokens_in is not None:
+        meta["cached_tokens_in"] = int(cached_tokens_in)
+    if seconds_audio is not None:
+        meta["seconds_audio"] = float(seconds_audio)
+    if seconds_video is not None:
+        meta["seconds_video"] = float(seconds_video)
+    try:
+        _record_api_call(kind="llm", provider=provider, model=model, success=True, meta=meta)
+    except Exception:
+        pass
+
+
+def _record_openai_usage(response, *, model: Optional[str], provider: str = "openai"):
+    usage = getattr(response, "usage", None)
+    tokens_in = _safe_int(getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None))
+    tokens_out = _safe_int(getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None))
+    details = getattr(usage, "prompt_tokens_details", None) or getattr(usage, "input_tokens_details", None)
+    cached_tokens = _safe_int(getattr(details, "cached_tokens", None) or getattr(details, "cached", None))
+    _record_llm_usage(
+        provider=provider,
+        model=model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cached_tokens_in=cached_tokens,
+    )
+
+
+def _record_genai_usage(response, *, model: Optional[str], provider: str = "gemini"):
+    usage = getattr(response, "usage_metadata", None)
+    tokens_in = _safe_int(
+        getattr(usage, "prompt_token_count", None) or getattr(usage, "input_tokens", None)
+    )
+    tokens_out = _safe_int(
+        getattr(usage, "candidates_token_count", None) or getattr(usage, "output_tokens", None)
+    )
+    cached_tokens = _safe_int(
+        getattr(usage, "cached_content_token_count", None)
+        or getattr(usage, "cached_token_count", None)
+        or getattr(usage, "cached_tokens", None)
+    )
+    seconds_audio = _safe_float(
+        getattr(usage, "prompt_audio_duration_seconds", None)
+        or getattr(usage, "audio_duration_seconds", None)
+        or getattr(usage, "audio_seconds", None)
+    )
+    seconds_video = _safe_float(
+        getattr(usage, "prompt_video_duration_seconds", None)
+        or getattr(usage, "video_duration_seconds", None)
+        or getattr(usage, "video_seconds", None)
+    )
+    _record_llm_usage(
+        provider=provider,
+        model=model,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cached_tokens_in=cached_tokens,
+        seconds_audio=seconds_audio,
+        seconds_video=seconds_video,
+    )
+
+class HILCheckpointException(Exception):
+    """Interrompe o pipeline quando a revisão humana é obrigatória."""
+    pass
+
+# v2.18: Import do módulo de auditoria jurídica (desativado por padrão)
+LEGAL_AUDIT_ENABLED = os.getenv("ENABLE_LEGAL_AUDIT", "").lower() in ("1", "true", "yes", "on")
+if LEGAL_AUDIT_ENABLED:
+    try:
+        from audit_module import auditar_consistencia_legal
+        AUDIT_AVAILABLE = True
+    except ImportError:
+        AUDIT_AVAILABLE = False
+        print("⚠️ audit_module não encontrado. Auditoria jurídica desabilitada.")
+else:
     AUDIT_AVAILABLE = False
-    print(f"⚠️ audit_module não encontrado. Auditoria jurídica desabilitada.")
+
+# v2.27: Auditoria preventiva de fidelidade (não limitada à autoria)
+FIDELITY_AUDIT_ENABLED = os.getenv("ENABLE_FIDELITY_AUDIT", "1").lower() in ("1", "true", "yes", "on")
+# Backup opcional da validação full-context
+FIDELITY_BACKUP_ENABLED = os.getenv("ENABLE_FIDELITY_BACKUP", "1").lower() in ("1", "true", "yes", "on")
+try:
+    from audit_fidelity_preventive import (
+        auditar_fidelidade_preventiva,
+        gerar_relatorio_markdown_completo,
+    )
+    FIDELITY_AUDIT_AVAILABLE = True
+except ImportError as e:
+    FIDELITY_AUDIT_AVAILABLE = False
+    print(f"⚠️ audit_fidelity_preventive não encontrado ou erro de importação: {e}. Auditoria preventiva desabilitada.")
+
+# v2.27: Auditoria de fontes integrada (controla inclusão no relatório preventivo)
+SOURCES_AUDIT_ENABLED = os.getenv("ENABLE_SOURCES_AUDIT", "1").lower() in ("1", "true", "yes", "on")
 
 # v2.24: Import auto_fix_apostilas for post-processing
 try:
@@ -152,46 +276,51 @@ class RateLimiter:
     """Controla requisições por minuto para não estourar rate limit da API"""
     def __init__(self, max_requests_per_minute=60): # Vertex AI Limit
         self.max_rpm = max_requests_per_minute
-        self.requests = []
-        self.lock = threading.Lock()
+        self._window_seconds = 60.0
+        self._requests_sync = deque()
+        self._requests_async = deque()
+        self._lock = threading.Lock()
+        self._async_lock = asyncio.Lock()
+
+    def _prune_requests(self, requests, now):
+        cutoff = now - self._window_seconds
+        while requests and requests[0] <= cutoff:
+            requests.popleft()
     
     def wait_if_needed(self):
-        with self.lock:
-            now = time.time()
-            # Remove requisições antigas (>60s)
-            self.requests = [t for t in self.requests if now - t < 60]
-            
-            if len(self.requests) >= self.max_rpm:
-                oldest = min(self.requests)
-                wait_time = 60 - (now - oldest) + 0.5
-                if wait_time > 0:
-                    print(f"{Fore.YELLOW}⏱️  Rate limit: aguardando {wait_time:.1f}s...")
-                    sleep(wait_time)
-                self.requests = [t for t in self.requests if time.time() - t < 60]
-            
-            self.requests.append(time.time())
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                self._prune_requests(self._requests_sync, now)
+
+                if len(self._requests_sync) < self.max_rpm:
+                    self._requests_sync.append(now)
+                    return
+
+                oldest = self._requests_sync[0]
+                wait_time = self._window_seconds - (now - oldest) + 0.5
+
+            if wait_time > 0:
+                print(f"{Fore.YELLOW}⏱️  Rate limit: aguardando {wait_time:.1f}s...")
+                sleep(wait_time)
 
     async def wait_if_needed_async(self):
         """Versão async do rate limiter para não bloquear o event loop"""
-        wait_time = 0
-        with self.lock:
-            now = time.time()
-            self.requests = [t for t in self.requests if now - t < 60]
-            
-            if len(self.requests) >= self.max_rpm:
-                oldest = min(self.requests)
-                wait_time = 60 - (now - oldest) + 0.5
-                # Reserva o slot mas espera fora do lock
-            
-            if wait_time <= 0:
-                 self.requests.append(time.time())
-        
-        if wait_time > 0:
-            print(f"{Fore.YELLOW}⏱️  Rate limit (Async): aguardando {wait_time:.1f}s...")
-            await asyncio.sleep(wait_time)
-            # Re-adquire slot após espera (simplificado)
-            with self.lock:
-                self.requests.append(time.time())
+        while True:
+            async with self._async_lock:
+                now = time.monotonic()
+                self._prune_requests(self._requests_async, now)
+
+                if len(self._requests_async) < self.max_rpm:
+                    self._requests_async.append(now)
+                    return
+
+                oldest = self._requests_async[0]
+                wait_time = self._window_seconds - (now - oldest) + 0.5
+
+            if wait_time > 0:
+                print(f"{Fore.YELLOW}⏱️  Rate limit (Async): aguardando {wait_time:.1f}s...")
+                await asyncio.sleep(wait_time)
 
 # Instância global
 rate_limiter = RateLimiter(max_requests_per_minute=60)
@@ -1454,7 +1583,9 @@ async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None,
                 provider="gemini",
                 prompt_tokens=getattr(usage, 'prompt_token_count', 0) or 0,
                 completion_tokens=getattr(usage, 'candidates_token_count', 0) or 0,
-                duration=duration
+                duration=duration,
+                model=model,
+                cached_tokens_in=getattr(usage, 'cached_content_token_count', 0) or 0,
             )
         except:
             pass  # Silently ignore metrics errors
@@ -1596,7 +1727,9 @@ async def ai_structure_review(texto, client, model, estrutura_mapeada=None, metr
                 provider="gemini",
                 prompt_tokens=getattr(usage, 'prompt_token_count', 0) or 0,
                 completion_tokens=getattr(usage, 'candidates_token_count', 0) or 0,
-                duration=duration
+                duration=duration,
+                model=model,
+                cached_tokens_in=getattr(usage, 'cached_content_token_count', 0) or 0,
             )
         except:
             pass  # Silently ignore metrics errors
@@ -1841,6 +1974,82 @@ def mover_tabelas_para_fim_de_secao(texto):
     linhas = texto.split('\n')
     resultado = []
     tabelas_pendentes = [] 
+
+    def _is_table_title_line(line: str) -> bool:
+        s = (line or "").strip()
+        if not s:
+            return False
+        is_heading = bool(re.match(r'^#{3,5}\s+', s))
+        is_bold = s.startswith('**')
+        if not (is_heading or is_bold):
+            # Alguns modelos às vezes emitem o título sem markdown de heading.
+            if s.startswith('📋') or 'quadro-síntese' in s.lower() or 'quadro-sintese' in s.lower():
+                return True
+            return False
+
+        lowered = s.lower()
+        return any(
+            x in lowered
+            for x in [
+                'tabela',
+                'resumo',
+                'quadro',
+                'síntese',
+                'sintese',
+                'esquema',
+                '📋',
+                'prova',
+                'banca',
+                'pegadinha',
+                'questão',
+                'questao',
+                'questões',
+                'questoes',
+            ]
+        )
+
+    def _pop_recent_table_title(result_lines: list, max_lookback_nonempty: int = 12):
+        """
+        Recupera um título de tabela recente (H3-H5 / bold / 📋) mesmo que
+        haja algumas linhas de texto entre o título e a tabela.
+        """
+        nonempty_seen = 0
+        for idx in range(len(result_lines) - 1, -1, -1):
+            s = (result_lines[idx] or "").strip()
+            if not s:
+                continue
+            if s.startswith('# ') or s.startswith('## '):
+                break
+            nonempty_seen += 1
+            if nonempty_seen > max_lookback_nonempty:
+                break
+            if _is_table_title_line(result_lines[idx]):
+                return result_lines.pop(idx)
+        return None
+
+    def _is_table_separator_line(line: str) -> bool:
+        s = (line or "").strip()
+        return bool(s) and s.startswith("|") and set(s.replace("|", "").strip()).issubset({"-", ":", " "})
+
+    def _next_nonempty_index(lines: list, start_idx: int) -> int | None:
+        j = start_idx
+        while j < len(lines):
+            if (lines[j] or "").strip():
+                return j
+            j += 1
+        return None
+
+    def _is_table_header_at(lines: list, idx: int) -> bool:
+        """Heurística: linha com '|' seguida de uma linha separadora (pula vazias)."""
+        if idx < 0 or idx >= len(lines):
+            return False
+        s = (lines[idx] or "").strip()
+        if not s or "|" not in s:
+            return False
+        nxt = _next_nonempty_index(lines, idx + 1)
+        if nxt is None:
+            return False
+        return _is_table_separator_line(lines[nxt])
     
     i = 0
     while i < len(linhas):
@@ -1882,27 +2091,38 @@ def mover_tabelas_para_fim_de_secao(texto):
             tabela_linhas = []
             titulo_tabela = None
             
-            # Tenta recuperar o título da tabela que ficou na linha anterior
-            if resultado and len(resultado) > 0:
-                last_line = resultado[-1].strip()
-                # v2.24: aceitar títulos de tabela em H3-H5 (ex: #### 📋 Quadro-síntese — ...)
-                if ((re.match(r'^#{3,5}\s+', last_line) or last_line.startswith('**')) and
-                   any(x in last_line.lower() for x in ['tabela', 'resumo', 'quadro', 'síntese', 'esquema', '📋', 'prova', 'banca', 'pegadinha', 'questão', 'questoes'])):
-                    titulo_tabela = resultado.pop() 
+            # v2.24+: Recupera título de tabela mesmo com "texto intruso" entre o título e a tabela.
+            # Se o LLM inserir explicação após "📋 Quadro-síntese", este trecho remove o título
+            # da posição original para reagrupá-lo com a tabela no flush do bloco.
+            if resultado:
+                titulo_tabela = _pop_recent_table_title(resultado)
 
             # Captura as linhas da tabela
             j = i
+            seen_separator = False
             while j < len(linhas):
                 curr = linhas[j].strip()
-                if '|' in curr:
-                    tabela_linhas.append(linhas[j])
+                if not curr:
+                    # Evita "colar" duas tabelas distintas separadas por linhas vazias.
+                    # Linhas vazias dentro de tabela são raras; aqui preferimos robustez.
+                    # Se a próxima tabela começar após a quebra, ela será capturada no loop externo.
+                    nxt = _next_nonempty_index(linhas, j + 1)
+                    if nxt is None:
+                        break
+                    if seen_separator and _is_table_header_at(linhas, nxt):
+                        break
+                    # Caso contrário, apenas pula vazios (não inclui no buffer da tabela).
                     j += 1
-                elif not curr:
-                    if j + 1 < len(linhas) and '|' in linhas[j+1]:
-                        tabela_linhas.append(linhas[j]) 
-                        j += 1
-                    else:
-                        break # Fim da tabela
+                    continue
+                if '|' in curr:
+                    # Se já vimos o separador, e encontrarmos um novo header+separador,
+                    # tratamos como início de OUTRA tabela (não continuação).
+                    if seen_separator and _is_table_header_at(linhas, j):
+                        break
+                    tabela_linhas.append(linhas[j])
+                    if _is_table_separator_line(linhas[j]):
+                        seen_separator = True
+                    j += 1
                 else:
                     break # Texto normal
 
@@ -1996,6 +2216,10 @@ def mesclar_tabelas_divididas(texto: str) -> str:
                     if next_line.startswith('#'):
                         # Novo título = tabelas são de seções diferentes, NÃO mesclar
                         break
+                    if not is_table_line(lines[i + lookahead]):
+                        # Qualquer linha não-tabela (ex.: "📋 Quadro-síntese" em bold, explicação, etc.)
+                        # indica que não é continuação direta da mesma tabela.
+                        break
                     if is_table_line(lines[i + lookahead]):
                         next_table_cols = count_columns(lines[i + lookahead])
                         next_table_header = lines[i + lookahead].strip()
@@ -2027,6 +2251,47 @@ def mesclar_tabelas_divididas(texto: str) -> str:
         print(f"   ℹ️  Nenhuma tabela dividida detectada")
     
     return '\n'.join(result)
+
+def garantir_titulo_tabela_banca(texto: str) -> str:
+    """
+    Garante que a tabela "Como a banca cobra / pegadinhas" tenha título visível.
+    Evita que a tabela fique colada ao quadro-síntese sem o subtítulo.
+    """
+    lines = texto.split('\n')
+    output = []
+
+    def _is_banca_header(line: str) -> bool:
+        return (line or "").strip().lower().startswith('| como a banca cobra |')
+
+    def _is_banca_title(line: str) -> bool:
+        s = (line or "").strip().lower()
+        return s.startswith('#') and ('banca cobra' in s or 'pegadinha' in s)
+
+    def _is_heading(line: str) -> bool:
+        return (line or "").strip().startswith('#')
+
+    for line in lines:
+        if _is_banca_header(line):
+            has_title = False
+            nonempty_seen = 0
+            for back in range(len(output) - 1, -1, -1):
+                s = (output[back] or "").strip()
+                if not s:
+                    continue
+                nonempty_seen += 1
+                if _is_banca_title(output[back]):
+                    has_title = True
+                    break
+                if _is_heading(output[back]) or nonempty_seen >= 8:
+                    break
+            if not has_title:
+                if output and output[-1].strip():
+                    output.append('')
+                output.append('#### 🎯 Tabela — Como a banca cobra / pegadinhas')
+                output.append('')
+        output.append(line)
+
+    return '\n'.join(output)
 
 
 def limpar_estrutura_para_review(mapping: str) -> str:
@@ -2365,7 +2630,15 @@ class MetricsCollector:
         """Updates the provider for cost calculation."""
         self.provider = provider
     
-    def record_call(self, provider: str, prompt_tokens: int, completion_tokens: int, duration: float):
+    def record_call(
+        self,
+        provider: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        duration: float,
+        model: Optional[str] = None,
+        cached_tokens_in: Optional[int] = None,
+    ):
         """Records a single API call."""
         self.api_calls += 1
         if provider == "gemini":
@@ -2376,6 +2649,13 @@ class MetricsCollector:
         self.total_completion_tokens += completion_tokens
         self.total_time_seconds += duration
         self.call_times.append(duration)
+        _record_llm_usage(
+            provider=provider,
+            model=model,
+            tokens_in=prompt_tokens,
+            tokens_out=completion_tokens,
+            cached_tokens_in=cached_tokens_in,
+        )
     
     def record_cache_hit(self):
         self.cache_hits += 1
@@ -2474,6 +2754,22 @@ def delete_checkpoint(video_name, folder):
     if path.exists(): 
         path.unlink()
         print(f"🧹 Checkpoint removido: {path.name}")
+
+def get_hil_output_path(video_name, folder, mode_suffix):
+    return Path(folder) / f"{video_name}_{mode_suffix}_HIL.md"
+
+def save_hil_output(formatted_text, video_name, folder, mode_suffix, reason=None):
+    """Salva o texto formatado para revisão humana (HIL)."""
+    path = get_hil_output_path(video_name, folder, mode_suffix)
+    reason_note = f" | motivo: {reason}" if reason else ""
+    header = f"<!-- HIL_CHECKPOINT{reason_note} | {time.strftime('%Y-%m-%d %H:%M:%S')} -->\n\n"
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(header)
+            f.write(formatted_text or "")
+        print(f"{Fore.YELLOW}⏸️  HIL checkpoint salvo: {path.name}")
+    except Exception as e:
+        print(f"{Fore.YELLOW}⚠️ Falha ao salvar HIL checkpoint: {e}")
 
 class VomoMLX:
     # GPT-5 Mini: 400k tokens input, 128k output
@@ -2701,17 +2997,24 @@ Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **
 VOCÊ É UM REDATOR TÉCNICO FORENSE.
 - **Tom:** objetivo, fiel e formal.
 - **Pessoa:** preserve a pessoa original da fala.
-- **Objetivo:** reproduzir a audiência/reunião de forma clara e organizada, SEM RESUMIR.
+- **Objetivo:** reproduzir a audiência de forma clara e organizada, SEM RESUMIR.
 
 ## OBJETIVO
 - Transformar a transcrição em texto legível e coeso, mantendo a fidelidade integral.
 - **Tamanho:** saída entre **95% e 115%** do trecho original (apenas limpeza de oralidade).
 
-## NÃO FAZER
-1. **NÃO RESUMA**. Não omita falas, datas, valores, nomes, eventos.
-2. **NÃO ALTERE** a ordem dos fatos.
-3. **NÃO INVENTE** informações ausentes.
-4. **NÃO PADRONIZE** falas de pessoas diferentes: preserve o estilo de cada fala."""
+    ## NÃO FAZER
+    1. **NÃO RESUMA**. Não omita falas, datas, valores, nomes, eventos.
+    2. **NÃO ALTERE** a ordem dos fatos.
+    3. **NÃO INVENTE** informações ausentes.
+    4. **NÃO PADRONIZE** falas de pessoas diferentes: preserve o estilo de cada fala.
+
+    ## REGRAS CRÍTICAS
+    1. **NÃO transforme em discurso indireto** (ex.: "o juiz disse que..."). Mantenha fala direta.
+    2. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
+    3. **NÃO infira nomes/papéis**: use exatamente os rótulos existentes (ex.: SPEAKER 1/2).
+    4. **PRESERVE marcações existentes**: [inaudível], [risos], [interrupção] e timestamps.
+    5. **NÃO fundir falas de pessoas diferentes no mesmo parágrafo**. Uma fala por parágrafo."""
 
     PROMPT_STYLE_AUDIENCIA = """## ✅ DIRETRIZES DE ESTILO
 1. Corrija erros gramaticais leves sem alterar o sentido.
@@ -2729,6 +3032,52 @@ VOCÊ É UM REDATOR TÉCNICO FORENSE.
     PROMPT_TABLE_AUDIENCIA = """## 📌 OBSERVAÇÃO SOBRE TABELAS
 Não gere quadros-síntese automaticamente. Só use tabelas se solicitado explicitamente."""
 
+    # --- REUNIÃO MODE ---
+    PROMPT_HEAD_REUNIAO = """# DIRETRIZES DE TRANSCRIÇÃO PROFISSIONAL (MODO REUNIÃO)
+
+## PAPEL
+VOCÊ É UM REDATOR DE ATA/REUNIÃO.
+- **Tom:** objetivo, formal e direto.
+- **Pessoa:** preserve a pessoa original da fala.
+- **Objetivo:** registrar a reunião de forma clara e fiel, SEM RESUMIR.
+
+## OBJETIVO
+- Transformar a transcrição em texto legível e coeso, mantendo a fidelidade integral.
+- **Tamanho:** saída entre **95% e 115%** do trecho original (apenas limpeza de oralidade).
+
+    ## NÃO FAZER
+    1. **NÃO RESUMA**. Não omita falas, decisões, encaminhamentos, datas ou valores.
+    2. **NÃO ALTERE** a ordem cronológica das falas.
+    3. **NÃO INVENTE** informações ausentes.
+    4. **NÃO PADRONIZE** falas de participantes diferentes.
+
+    ## REGRAS CRÍTICAS
+    1. **NÃO transforme em discurso indireto**. Mantenha fala direta.
+    2. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
+    3. **NÃO invente responsáveis, prazos ou decisões**.
+    4. **PRESERVE marcações existentes**: [inaudível], [risos], [interrupção] e timestamps.
+    5. **NÃO fundir falas de pessoas diferentes no mesmo parágrafo**. Uma fala por parágrafo.
+    6. **DESTAQUES VERBATIM (SE EXISTIREM)**: quando houver frases explícitas de decisão/encaminhamento
+       (ex.: "ficou definido que..."), você pode isolá-las em bloco de citação ou lista simples,
+       copiando o trecho literalmente, sem reescrever e sem reorganizar o conteúdo."""
+
+    PROMPT_STYLE_REUNIAO = """## ✅ DIRETRIZES DE ESTILO
+1. Corrija erros gramaticais leves sem alterar o sentido.
+2. Remova muletas orais (ex.: "né", "tá", "tipo").
+3. Preserve nomes, cargos, datas, valores, prazos e referências.
+4. Use parágrafos curtos e claros.
+5. Mantenha identificação de participantes quando presente (ex.: PARTICIPANTE 1/2/3).
+6. Se houver decisões/encaminhamentos explícitos, destaque-os com listas curtas, sem criar conteúdo novo."""
+
+    PROMPT_STRUCTURE_REUNIAO = """## 📝 ESTRUTURA E TÍTULOS
+- Mantenha a ordem cronológica das falas.
+- Use títulos Markdown (##, ###) apenas quando houver mudança clara de pauta/tema.
+- Se aparecerem blocos explícitos de abertura/encerramento/decisões/encaminhamentos, você pode criar subtítulos correspondentes.
+- Preserve perguntas e respostas em sequência quando houver."""
+
+    PROMPT_TABLE_REUNIAO = """## 📌 OBSERVAÇÃO SOBRE TABELAS
+Não gere quadros-síntese automaticamente. Só use tabelas se solicitado explicitamente."""
+
     # --- DEPOIMENTO MODE ---
     PROMPT_HEAD_DEPOIMENTO = """# DIRETRIZES DE TRANSCRIÇÃO JURÍDICA (MODO DEPOIMENTO)
 
@@ -2739,8 +3088,10 @@ VOCÊ É UM REDATOR TÉCNICO FORENSE.
 
 ## REGRAS CRÍTICAS
 1. **NÃO RESUMA**. Preserve conteúdo integral.
-2. **PRESERVE** pausas, negações e afirmações relevantes.
-3. **MANTENHA** perguntas e respostas em sequência."""
+2. **NÃO transforme em discurso indireto**. Mantenha fala direta.
+3. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
+4. **PRESERVE** pausas, negações e afirmações relevantes.
+5. **MANTENHA** perguntas e respostas em sequência."""
 
     PROMPT_STYLE_DEPOIMENTO = """## ✅ DIRETRIZES DE ESTILO
 1. Corrija apenas erros gramaticais leves.
@@ -3095,7 +3446,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 - **CRÍTICO:** Se o texto começar repetindo a última frase do contexto, **IGNORE A REPETIÇÃO.**
 """
 
-    SYSTEM_PROMPT_FORMAT = PROMPT_APOSTILA_ACTIVE # Default
+    SYSTEM_PROMPT_FORMAT = PROMPT_APOSTILA_ACTIVE  # Default
 
     def __init__(self, model_size="large-v3-turbo", provider="gemini"):
         """
@@ -3107,49 +3458,87 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         self.provider = provider.lower()
         self.thinking_level = "medium"
         self.use_openai_primary = False
-        
+
         # Provider Configuration
         if self.provider == "openai":
             print(f"{Fore.GREEN}🧠 Provider: OpenAI (GPT-5 Mini)")
             self.llm_model = "gpt-5-mini-2025-08-07" # Modelo principal
             self.client = OpenAI() # Assumes OPENAI_API_KEY env var
         else:
-            print(f"{Fore.BLUE}✨ Provider: Google Vertex AI (Gemini 1.5 Pro/Flash)")
+            print(f"{Fore.BLUE}✨ Provider: Google Gemini")
             self.llm_model = "gemini-3-flash-preview"
-            # Initialize Vertex AI
-            try:
-                vertexai.init(project="agente-juridico-444501", location="us-central1")
-                self.client = GenerativeModel(self.llm_model)
-            except Exception as e:
-                print(f"{Fore.RED}❌ Erro ao inicializar Vertex AI: {e}")
-                sys.exit(1)
+            self.client = None
+            self._gemini_use_vertex = False
+            self._gemini_vertex_project = None
+            self._gemini_vertex_location = None
         
-        # Carrega variável de ambiente com override
+        # Carrega variáveis de ambiente (sem sobrescrever env já exportadas pelo caller,
+        # ex: uvicorn/serviço). Para forçar override, exporte antes no shell.
         from dotenv import load_dotenv
-        load_dotenv(override=True)
+        load_dotenv(override=False)
         
         # Sync global metrics with provider for cost calculation
         metrics.set_provider(self.provider)
         
-        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gen-lang-client-0727883752")
+        project_id_env = os.getenv("GOOGLE_CLOUD_PROJECT")
+        project_id = project_id_env or "gen-lang-client-0727883752"
 
         # Configuração de Credenciais (Explicit Fallback)
-        CREDENTIALS_PATH = "/Users/nicholasjacob/Documents/Aplicativos/Iudex/gen-lang-client-0727883752-0bfab2f33e08.json"
+        CREDENTIALS_PATH = "/Users/nicholasjacob/Documents/Aplicativos/Iudex/gen-lang-client-0727883752-f72a632e4ec2.json"
         if os.path.exists(CREDENTIALS_PATH) and not os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = CREDENTIALS_PATH
             print(f"{Fore.CYAN}🔑 Credenciais Vertex carregadas de: {CREDENTIALS_PATH}")
         
         # Estratégia Estrita de Autenticação (Vertex AI Only) - SKIP if OpenAI provider
         if self.provider != "openai":
-            print(f"{Fore.CYAN}☁️  Conectando via Vertex AI (Enterprise - Global Endpoint)...")
-            self.client = genai.Client(
-                vertexai=True,
-                project=project_id,
-                location="global"
-            )
-            # Teste rápido de permissão (dry-run)
-            self.client.models.count_tokens(model=self.llm_model, contents="teste")
-            print(f"{Fore.GREEN}   ✅ Conectado ao Vertex AI com sucesso.")
+            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            auth_mode = (os.getenv("IUDEX_GEMINI_AUTH") or "auto").strip().lower()
+            if auth_mode in ("apikey", "api_key", "key", "dev", "developer", "ai-studio", "aistudio"):
+                use_vertex = False
+            elif auth_mode in ("vertex", "vertexai", "gcp"):
+                use_vertex = True
+            else:
+                # Auto: prefer Vertex when a project or application creds are available.
+                has_vertex_creds = bool(project_id_env) or bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+                use_vertex = has_vertex_creds or not bool(api_key)
+
+            if use_vertex:
+                location = (os.getenv("VERTEX_AI_LOCATION") or "us-central1").strip()
+                print(f"{Fore.YELLOW}DEBUG: VERTEX_AI_LOCATION: {location}")
+                print(f"{Fore.CYAN}☁️  Conectando via Vertex AI ({project_id})...")
+                self._gemini_use_vertex = True
+                self._gemini_vertex_project = project_id
+                self._gemini_vertex_location = location
+
+                # Use user's preferred auth style if API key is present but Vertex is requested
+                if api_key and os.getenv("GOOGLE_APPLICATION_CREDENTIALS") is None:
+                    self.client = genai.Client(
+                        vertexai=True,
+                        api_key=api_key,
+                        # project and location might be needed depending on the key type
+                    )
+                else:
+                    self.client = genai.Client(
+                        vertexai=True,
+                        project=project_id,
+                        location=location,
+                    )
+            else:
+                if not api_key:
+                    raise RuntimeError("GOOGLE_API_KEY (ou GEMINI_API_KEY) não configurada.")
+                print(f"{Fore.CYAN}🔑 Conectando via Google AI Studio (API key)...")
+                self._gemini_use_vertex = False
+                self._gemini_vertex_project = None
+                self._gemini_vertex_location = None
+                self.client = genai.Client(api_key=api_key)
+
+            # Teste rápido (best-effort)
+            try:
+                self.client.models.count_tokens(model=self.llm_model, contents="teste")
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️  Aviso: Falha no teste inicial do modelo {self.llm_model}: {e}")
+                # Não explode agora, tenta usar depois.
+            print(f"{Fore.GREEN}   ✅ Gemini conectado com sucesso.")
 
         # Inicializa OpenAI como Fallback Terciário
         self.openai_model = "gpt-5-mini-2025-08-07"
@@ -3179,7 +3568,13 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             return "LOW"
         return "MEDIUM"
 
-    def _build_system_prompt(self, mode: str = "APOSTILA", custom_style_override: str = None) -> str:
+    def _build_system_prompt(
+        self,
+        mode: str = "APOSTILA",
+        custom_style_override: str = None,
+        allow_indirect: bool = False,
+        allow_summary: bool = False,
+    ) -> str:
         """
         v2.22: Composes the system prompt from modular components.
         
@@ -3187,9 +3582,11 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         default STYLE and TABLE components, while preserving HEAD, STRUCTURE, and FOOTER.
         
         Args:
-            mode: "APOSTILA" or "FIDELIDADE"
+            mode: "APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO" ou "DEPOIMENTO"
             custom_style_override: Optional custom prompt for style/table layers.
                                    If provided, replaces STYLE+TABLE components.
+            allow_indirect: Se True, permite discurso indireto em modos AUDIENCIA/REUNIAO/DEPOIMENTO.
+            allow_summary: Se True, permite ata resumida em modos AUDIENCIA/REUNIAO/DEPOIMENTO.
         
         Returns:
             Complete system prompt string.
@@ -3204,6 +3601,11 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             style = self.PROMPT_STYLE_AUDIENCIA
             structure = self.PROMPT_STRUCTURE_AUDIENCIA
             table = self.PROMPT_TABLE_AUDIENCIA
+        elif mode == "REUNIAO":
+            head = self.PROMPT_HEAD_REUNIAO
+            style = self.PROMPT_STYLE_REUNIAO
+            structure = self.PROMPT_STRUCTURE_REUNIAO
+            table = self.PROMPT_TABLE_REUNIAO
         elif mode == "DEPOIMENTO":
             head = self.PROMPT_HEAD_DEPOIMENTO
             style = self.PROMPT_STYLE_DEPOIMENTO
@@ -3214,6 +3616,24 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             style = self.PROMPT_STYLE_APOSTILA
             structure = self.PROMPT_STRUCTURE_APOSTILA
             table = self.PROMPT_TABLE_APOSTILA
+
+        if allow_indirect:
+            for line in (
+                "**NÃO transforme em discurso indireto**. Mantenha fala direta.",
+                "**NÃO transforme em discurso indireto** (ex.: \"o juiz disse que...\"). Mantenha fala direta.",
+            ):
+                if line in head:
+                    head = head.replace(
+                        line,
+                        "**Discurso indireto permitido**. Você pode reescrever falas em estilo indireto, sem inventar conteúdo."
+                    )
+
+        if allow_summary and "**NÃO transforme em ata resumida**. Preserve a sequência real das falas." in head:
+            head = head.replace(
+                "**NÃO transforme em ata resumida**. Preserve a sequência real das falas.",
+                "**Ata resumida permitida**. Você pode condensar falas, mantendo decisões, encaminhamentos, nomes, datas, valores e prazos."
+            )
+            structure = f"{structure}\n- Com ata resumida habilitada, você pode agrupar por pauta/tema e condensar falas, sem inventar informações."
         
         footer = self.PROMPT_FOOTER
         
@@ -3349,7 +3769,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 print("   🗣️  Iniciando Diarização (Pyannote)...")
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=HF_TOKEN
+                    token=HF_TOKEN
                 )
                 
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -3363,22 +3783,39 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 print(f"{Fore.YELLOW}⚠️ Erro na Diarização: {e}")
         
         if transcript_result is None:
-            # Fallback sem diarização
-            formatted_output = []
-            last_timestamp = None  # Rastreia último timestamp inserido
+            # Fallback sem diarização - v2.28: pré-formatação condensada
+            lines = []
+            current_block = []
+            last_timestamp = None
             
             for segment in result['segments']:
                 start = segment['start']
+                text = segment['text'].strip()
                 
-                # Adiciona timestamp apenas a cada 30 minutos
-                if self._should_add_timestamp(start, last_timestamp, interval_minutes=20):
+                if not text:
+                    continue
+                
+                # Normalização leve de ruído
+                text = self._normalize_raw_text(text)
+                
+                # Timestamp a cada 60 segundos
+                if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+                    # Flush previous block
+                    if current_block:
+                        lines.append(" ".join(current_block))
+                        current_block = []
+                    
                     ts = self._format_timestamp(start)
-                    formatted_output.append(f"[{ts}] {segment['text'].strip()}")
+                    current_block.append(f"[{ts}] {text}")
                     last_timestamp = start
                 else:
-                    formatted_output.append(segment['text'].strip())
+                    current_block.append(text)
             
-            transcript_result = " ".join(formatted_output)
+            # Flush final block
+            if current_block:
+                lines.append(" ".join(current_block))
+            
+            transcript_result = "\n\n".join(lines).strip()
         
         # Salvar cache
         try:
@@ -3441,21 +3878,29 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             word_timestamps=True,
         )
         
-        # Formatar output
-        formatted_output = []
+        # Formatar output - v2.28: pré-formatação com line breaks
+        lines = []
         last_timestamp = None
         
         for segment in segments:
             start = segment.start
+            text = segment.text.strip()
             
-            if self._should_add_timestamp(start, last_timestamp, interval_minutes=20):
+            if not text:
+                continue
+            
+            # Normalização leve de ruído
+            text = self._normalize_raw_text(text)
+            
+            # Timestamp a cada 30 segundos
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
                 ts = self._format_timestamp(start)
-                formatted_output.append(f"[{ts}] {segment.text.strip()}")
+                lines.append(f"[{ts}] {text}")
                 last_timestamp = start
             else:
-                formatted_output.append(segment.text.strip())
+                lines.append(text)
         
-        transcript_result = " ".join(formatted_output)
+        transcript_result = "\n".join(lines).strip()
         
         elapsed = time.time() - start_time
         audio_duration = info.duration if info else 0
@@ -3507,7 +3952,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             try:
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=HF_TOKEN
+                    token=HF_TOKEN
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))
@@ -3581,7 +4026,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             try:
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=HF_TOKEN
+                    token=HF_TOKEN
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))
@@ -3616,23 +4061,84 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             "diarization": diarization_segments
         }
 
-    def _segments_to_text(self, segments):
-        raw_output = []
+    def _segments_to_text(self, segments, timestamp_interval_seconds=60):
+        """
+        Converte segmentos em texto pré-formatado para melhor chunking.
+        
+        v2.28: Pré-formatação orientada a segmentos:
+        - 1 segmento = 1 linha (melhora chunking)
+        - Mudança de speaker → quebra dupla + header
+        - Timestamps a cada 30s (não 20 min)
+        - Normalizações leves de ruído
+        """
+        if not segments:
+            return ""
+        
+        lines = []
         current_speaker = None
         last_timestamp = None
+        
         for segment in segments:
-            speaker_label = segment.get("speaker_label", "SPEAKER 1")
-            if speaker_label != current_speaker:
-                raw_output.append(f"\n{speaker_label}\n")
-                current_speaker = speaker_label
+            speaker_label = segment.get("speaker_label", "")
+            text = (segment.get("text") or "").strip()
             start = segment.get("start") or 0
-            if self._should_add_timestamp(start, last_timestamp, interval_minutes=20):
+            
+            # Pular segmentos vazios
+            if not text:
+                continue
+            
+            # Normalização leve de ruído
+            text = self._normalize_raw_text(text)
+            
+            # Mudança de speaker → quebra dupla + header
+            if speaker_label and speaker_label != current_speaker:
+                if lines:  # Não adiciona linha em branco se for o primeiro
+                    lines.append("")  # Linha em branco para separar
+                lines.append(f"**{speaker_label}**")  # Header em bold markdown
+                current_speaker = speaker_label
+                last_timestamp = None  # Reset timestamp para novo speaker
+            
+            # Timestamp a cada N segundos ou em mudança de speaker
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=timestamp_interval_seconds):
                 timestamp_str = f"[{self._format_timestamp(start)}] "
                 last_timestamp = start
             else:
                 timestamp_str = ""
-            raw_output.append(f"{timestamp_str}{(segment.get('text') or '').strip()}")
-        return " ".join(raw_output)
+            
+            lines.append(f"{timestamp_str}{text}")
+        
+        return "\n".join(lines).strip()
+    
+    def _normalize_raw_text(self, text):
+        """
+        Normalizações leves e seguras no texto raw (sem reescrever frases).
+        
+        v2.28: Limpeza determinística:
+        - Remove whitespace excessivo
+        - Converte ruídos em tokens padrão
+        - Preserva todo conteúdo semântico
+        """
+        import re
+        
+        # Remove whitespace excessivo
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Normaliza traços e reticências
+        text = re.sub(r'—|–', '-', text)  # Em-dash/en-dash → hífen
+        text = re.sub(r'…', '...', text)  # Ellipsis → três pontos
+        
+        # Tokens padrão para ruídos (se detectados)
+        noise_patterns = [
+            (r'\[inaudível\]|\(inaudível\)|\[inaudible\]', '[inaudível]'),
+            (r'\[risos\]|\(risos\)|\[laughter\]', '[risos]'),
+            (r'\[pausa\]|\(pausa\)|\[pause\]', '[pausa]'),
+            (r'\[música\]|\(música\)|\[music\]', '[música]'),
+            (r'\[aplausos\]|\(aplausos\)|\[applause\]', '[aplausos]'),
+        ]
+        for pattern, replacement in noise_patterns:
+            text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
+        
+        return text.strip()
 
     def _assign_diarization_labels(self, segments, diarization_output):
         try:
@@ -3690,14 +4196,15 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         h, m = divmod(m, 60)
         return f"{int(h):02d}:{int(m):02d}:{int(s):02d}" if h > 0 else f"{int(m):02d}:{int(s):02d}"
     
-    def _should_add_timestamp(self, current_seconds, last_timestamp_seconds, interval_minutes=20):
+    def _should_add_timestamp(self, current_seconds, last_timestamp_seconds, interval_minutes=None, interval_seconds=None):
         """
         Determina se um timestamp deve ser adicionado baseado no intervalo configurado.
         
         Args:
             current_seconds: Tempo atual em segundos
             last_timestamp_seconds: Último timestamp inserido (None se for o primeiro)
-            interval_minutes: Intervalo em minutos entre timestamps (padrão: 30)
+            interval_minutes: Intervalo em minutos entre timestamps (padrão: 20 se nenhum especificado)
+            interval_seconds: Intervalo em segundos (tem precedência sobre interval_minutes)
         
         Returns:
             bool: True se deve adicionar timestamp
@@ -3705,15 +4212,21 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         if last_timestamp_seconds is None:
             return True  # Sempre adiciona o primeiro timestamp
         
-        interval_seconds = interval_minutes * 60
-        return (current_seconds - last_timestamp_seconds) >= interval_seconds
+        # interval_seconds tem precedência
+        if interval_seconds is not None:
+            target_interval = interval_seconds
+        elif interval_minutes is not None:
+            target_interval = interval_minutes * 60
+        else:
+            target_interval = 20 * 60  # Default: 20 minutos
+        
+        return (current_seconds - last_timestamp_seconds) >= target_interval
 
     def _align_diarization(self, segments, diarization_output):
         """
         Alinha segmentos com diarização (Versão Otimizada com IntervalTree)
         
-        Fase 2.2: Substituição de busca O(n) por IntervalTree O(log n)
-        Ganho esperado: 10-20x mais rápido em áudios longos (>30 min)
+        v2.28: Saída pré-formatada com line breaks e timestamps frequentes
         """
         try:
             from intervaltree import IntervalTree
@@ -3721,87 +4234,141 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             print("⚠️ intervaltree não instalado, usando fallback O(n)")
             return self._align_diarization_fallback(segments, diarization_output)
         
-        raw_output = []
+        lines = []
         current_speaker = None
-        last_timestamp = None  # Rastreia último timestamp inserido
+        current_block = []
+        last_timestamp = None
         
-        # ========== FASE 2.2: PRÉ-COMPUTAR SPATIAL INDEX ==========
-        # Evita recalcular overlaps O(n) para cada segmento
-        # IntervalTree permite busca O(log n) por range
+        # Pré-computar spatial index
         tree = IntervalTree()
         for turn, _, speaker in diarization_output.itertracks(yield_label=True):
-            # Adiciona intervalo com speaker como data
             tree[turn.start:turn.end] = speaker
         
-        # Processar cada segmento do Whisper
         for segment in segments:
             start, end = segment['start'], segment['end']
+            text = segment.get('text', '').strip()
             
-            # ========== FASE 2.2: BUSCA O(log n) EM VEZ DE O(n) ==========
+            if not text:
+                continue
+            
+            # Normalização leve
+            text = self._normalize_raw_text(text)
+            
+            # Busca O(log n) para speaker
             overlaps = tree[start:end]
             
             if overlaps:
-                # Seleciona speaker com maior overlap temporal
                 best_overlap = max(
                     overlaps,
                     key=lambda interval: min(end, interval.end) - max(start, interval.begin)
                 )
-                # Extrai speaker ID do pyannote format (SPEAKER_XX)
                 speaker_id = best_overlap.data.split('_')[-1]
                 best_speaker = f"SPEAKER {int(speaker_id) + 1}"
             else:
-                best_speaker = "SPEAKER 0"
+                best_speaker = "SPEAKER 1"
             
-            # Adiciona header de speaker se mudou
+            # Mudança de speaker
             if best_speaker != current_speaker:
-                raw_output.append(f"\n{best_speaker}\n")
+                # Flush previous block
+                if current_block:
+                    lines.append(" ".join(current_block))
+                    current_block = []
+                
+                if lines:
+                    lines.append("")  # Linha em branco extra
+                
+                lines.append(f"**{best_speaker}**")
                 current_speaker = best_speaker
+                last_timestamp = None  # Reset timestamp logic for new speaker? Or keep continuous? 
+                # Keeping continuous is usually better for "every 60s" regardless of speaker, 
+                # but resetting ensures first line of speaker has timestamp if we want.
+                # User asked "timestamps a cada 60 segundos".
+                # Let's keep logic simple: Check timestamp interval.
+                # If we reset last_timestamp, we force a timestamp at speaker start.
+                last_timestamp = None 
             
-            # Adiciona timestamp apenas a cada 30 minutos
-            if self._should_add_timestamp(start, last_timestamp, interval_minutes=20):
-                timestamp_str = f"[{self._format_timestamp(start)}] "
+            # Timestamp a cada 60 segundos
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+                if current_block:
+                    lines.append(" ".join(current_block))
+                    current_block = []
+                
+                ts = self._format_timestamp(start)
+                current_block.append(f"[{ts}] {text}")
                 last_timestamp = start
             else:
-                timestamp_str = ""
-            
-            # Adiciona texto do segmento com timestamp condicional
-            raw_output.append(f"{timestamp_str}{segment['text'].strip()}")
+                current_block.append(text)
         
-        return " ".join(raw_output)
+        # Flush final block
+        if current_block:
+            lines.append(" ".join(current_block))
+        
+        return "\n\n".join(lines).strip()
     
     def _align_diarization_fallback(self, segments, diarization_output):
-        """Fallback O(n) caso intervaltree não esteja disponível (código original)"""
-        raw_output = []
+        """
+        Fallback O(n) caso intervaltree não esteja disponível.
+        
+        v2.28: Saída pré-formatada condensada com line breaks e timestamps frequentes
+        """
+        lines = []
         current_speaker = None
-        last_timestamp = None  # Rastreia último timestamp inserido
+        current_block = []
+        last_timestamp = None
         diarization_segments = [(t.start, t.end, s) for t, _, s in diarization_output.itertracks(yield_label=True)]
 
         for segment in segments:
             start, end = segment['start'], segment['end']
-            best_speaker = "SPEAKER 0"
+            text = segment.get('text', '').strip()
+            
+            if not text:
+                continue
+            
+            # Normalização leve
+            text = self._normalize_raw_text(text)
+            
+            best_speaker = "SPEAKER 1"
             max_overlap = 0
-
-            # Busca O(n) através de todos os segmentos de diarização
+            
+            # Busca O(n)
             for d_start, d_end, d_speaker in diarization_segments:
                 overlap = max(0, min(end, d_end) - max(start, d_start))
                 if overlap > max_overlap:
                     max_overlap = overlap
-                    best_speaker = f"SPEAKER {int(d_speaker.split('_')[-1]) + 1}" 
+                    speaker_id = d_speaker.split('_')[-1]
+                    best_speaker = f"SPEAKER {int(speaker_id) + 1}"
             
+            # Mudança de speaker
             if best_speaker != current_speaker:
-                raw_output.append(f"\n{best_speaker}\n")
+                # Flush previous block
+                if current_block:
+                    lines.append(" ".join(current_block))
+                    current_block = []
+                
+                if lines:
+                    lines.append("")  # Linha em branco extra
+                
+                lines.append(f"**{best_speaker}**")
                 current_speaker = best_speaker
+                last_timestamp = None
             
-            # Adiciona timestamp apenas a cada 30 minutos
-            if self._should_add_timestamp(start, last_timestamp, interval_minutes=30):
-                timestamp_str = f"[{self._format_timestamp(start)}] "
+            # Timestamp a cada 60 segundos
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+                if current_block:
+                    lines.append(" ".join(current_block))
+                    current_block = []
+                    
+                ts = self._format_timestamp(start)
+                current_block.append(f"[{ts}] {text}")
                 last_timestamp = start
             else:
-                timestamp_str = ""
-            
-            raw_output.append(f"{timestamp_str}{segment['text'].strip()}")
-            
-        return " ".join(raw_output)
+                current_block.append(text)
+        
+        # Flush final block
+        if current_block:
+            lines.append(" ".join(current_block))
+
+        return "\n\n".join(lines).strip()
 
     def _segment_raw_transcription(self, raw_text):
         lines = raw_text.split('\n')
@@ -4122,7 +4689,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
                     oai_prompt = getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0
                     oai_compl = getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0
-                    metrics.record_call("openai", oai_prompt, oai_compl, duration_oai)
+                    cached_tokens = 0
+                    if hasattr(response, 'usage'):
+                        details = getattr(response.usage, 'prompt_tokens_details', None)
+                        cached_tokens = getattr(details, 'cached_tokens', 0) or 0 if details else 0
+                    metrics.record_call(
+                        "openai",
+                        oai_prompt,
+                        oai_compl,
+                        duration_oai,
+                        model=self.openai_model,
+                        cached_tokens_in=cached_tokens,
+                    )
 
                     if contexto_estilo and result:
                         result = remover_eco_do_contexto(result, contexto_estilo)
@@ -4136,9 +4714,9 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     return result
                 except Exception as e_openai:
                     print(f"{Fore.YELLOW}⚠️ Falha no OpenAI primário (Chunk {idx}): {e_openai}. Tentando Gemini...")
-            
+
             def call_gemini():
-                # Configuração
+                nonlocal cached_content
                 gen_config = types.GenerateContentConfig(
                     max_output_tokens=max_output_tokens,
                     temperature=0.1,
@@ -4147,10 +4725,10 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     safety_settings=safety_config,
                     thinking_config=types.ThinkingConfig(
                         include_thoughts=False,
-                        thinking_level=self._resolve_thinking_level()
-                    )
+                        thinking_level=self._resolve_thinking_level(),
+                    ),
                 )
-                
+
                 # SE USAR CACHE: Passar cached_content e APENAS user_content
                 if cached_content:
                     gen_config.cached_content = cached_content.name
@@ -4159,15 +4737,90 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     # Sem cache: System + User
                     contents = f"{system_prompt}\n\n{user_content}"
 
-                return self.client.models.generate_content(
-                    model=self.llm_model,
-                    contents=contents,
-                    config=gen_config
-                )
+                max_retries = int(os.getenv("IUDEX_GEMINI_RETRY_ATTEMPTS", "4"))
+                base_sleep = float(os.getenv("IUDEX_GEMINI_RETRY_BASE_SECONDS", "6"))
+                attempt = 0
+                tried_global = False
 
-            # Executa chamada síncrona em thread separada
+                while True:
+                    try:
+                        return self.client.models.generate_content(
+                            model=self.llm_model,
+                            contents=contents,
+                            config=gen_config,
+                        )
+                    except Exception as e:
+                        msg = str(e)
+                        is_model_not_found = (
+                            ("404" in msg or "NOT_FOUND" in msg)
+                            and "Publisher Model" in msg
+                            and "was not found" in msg
+                        )
+                        if (
+                            is_model_not_found
+                            and not tried_global
+                            and getattr(self, "_gemini_use_vertex", False)
+                            and (getattr(self, "_gemini_vertex_location", None) or "").lower() not in ("", "global")
+                            and os.getenv("IUDEX_VERTEX_FALLBACK_GLOBAL_ON_NOT_FOUND", "true").lower() in ("1", "true", "yes")
+                        ):
+                            tried_global = True
+                            prev_loc = getattr(self, "_gemini_vertex_location", None)
+                            print(
+                                f"{Fore.YELLOW}⚠️  Modelo '{self.llm_model}' indisponível em '{prev_loc}'. "
+                                f"Tentando Vertex AI em 'global'..."
+                            )
+                            cached_content = None
+                            try:
+                                gen_config.cached_content = None
+                            except Exception:
+                                pass
+                            project = (
+                                getattr(self, "_gemini_vertex_project", None)
+                                or os.getenv("GOOGLE_CLOUD_PROJECT")
+                            )
+                            self.client = genai.Client(vertexai=True, project=project, location="global")
+                            self._gemini_vertex_location = "global"
+                            contents = f"{system_prompt}\n\n{user_content}"
+                            continue
+
+                        is_rate_limit = (
+                            "429" in msg
+                            or "RESOURCE_EXHAUSTED" in msg
+                            or "rate limit" in msg.lower()
+                        )
+                        if not is_rate_limit:
+                            raise
+                        attempt += 1
+                        if attempt > max_retries:
+                            raise
+                        sleep_for = min(base_sleep * (2 ** (attempt - 1)), 60.0)
+                        sleep_for += random.uniform(0.2, 1.5)
+                        print(
+                            f"{Fore.YELLOW}⏳ Rate limit Gemini (Chunk {idx}). "
+                            f"Aguardando {sleep_for:.1f}s (tentativa {attempt}/{max_retries})..."
+                        )
+                        time.sleep(sleep_for)
+
+            # Executa chamada síncrona em thread separada com timeout
             start_time = time.time()
-            response = await asyncio.to_thread(call_gemini)
+            timeout_seconds = int(os.getenv("IUDEX_GEMINI_TIMEOUT_SECONDS", "300"))
+            try:
+                response = await asyncio.wait_for(asyncio.to_thread(call_gemini), timeout=timeout_seconds)
+            except asyncio.TimeoutError as e:
+                print(f"{Fore.YELLOW}⏱️ Timeout no Gemini (Chunk {idx}) após {timeout_seconds}s")
+                if depth < 2 and len(chunk_text) > 4000:
+                    print(f"{Fore.MAGENTA}✂️ Timeout detectado. Tentando ADAPTIVE CHUNKING...")
+                    return await self._split_and_retry_async(
+                        chunk_text,
+                        idx,
+                        system_prompt,
+                        total,
+                        contexto_estilo,
+                        depth,
+                        max_output_tokens_override=max_output_tokens_override,
+                        disable_cache=disable_cache
+                    )
+                raise e
             duration = time.time() - start_time
             
             # Extract token counts from response metadata
@@ -4180,7 +4833,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     completion_tokens = getattr(usage, 'candidates_token_count', 0) or 0
             except: pass
             
-            metrics.record_call("gemini", prompt_tokens, completion_tokens, duration)
+            cached_tokens = 0
+            if hasattr(response, 'usage_metadata'):
+                usage = response.usage_metadata
+                cached_tokens = getattr(usage, 'cached_content_token_count', 0) or 0
+            metrics.record_call(
+                "gemini",
+                prompt_tokens,
+                completion_tokens,
+                duration,
+                model=self.llm_model,
+                cached_tokens_in=cached_tokens,
+            )
             
             try:
                 result = response.text
@@ -4292,7 +4956,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     # Record OpenAI metrics
                     oai_prompt = getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0
                     oai_compl = getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0
-                    metrics.record_call("openai", oai_prompt, oai_compl, duration_oai)
+                    cached_tokens = 0
+                    if hasattr(response, 'usage'):
+                        details = getattr(response.usage, 'prompt_tokens_details', None)
+                        cached_tokens = getattr(details, 'cached_tokens', 0) or 0 if details else 0
+                    metrics.record_call(
+                        "openai",
+                        oai_prompt,
+                        oai_compl,
+                        duration_oai,
+                        model=self.openai_model,
+                        cached_tokens_in=cached_tokens,
+                    )
                     
                     # Apply cleanup to OpenAI result too
                     if contexto_estilo and result:
@@ -4413,6 +5088,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 )
 
             response = await asyncio.to_thread(call_gemini)
+            _record_genai_usage(response, model=self.llm_model)
             content_json = response.text
             self.speaker_cache[speaker_label] = content_json
             return content_json
@@ -4454,6 +5130,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     )
                 )
             )
+            _record_genai_usage(response, model=self.llm_model)
             return response.text
         except:
             return "{'professores': []}"
@@ -4494,6 +5171,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                         )
                     )
                 response = await asyncio.to_thread(call_gemini)
+                _record_genai_usage(response, model=self.llm_model)
                 return response.text.strip()
             except Exception as e:
                 print(f"{Fore.YELLOW}⚠️  Falha no header (Gemini): {e}")
@@ -4506,6 +5184,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                             messages=[{"role": "user", "content": prompt}],
                             max_tokens=100
                         )
+                        _record_openai_usage(response, model=self.openai_model)
                         return response.choices[0].message.content.strip()
                      except Exception as e_openai:
                          print(f"{Fore.RED}❌ Falha também no OpenAI: {e_openai}")
@@ -4591,8 +5270,10 @@ Retorne APENAS os trechos extraídos, sem comentários adicionais."""
                     )
                 )
             )
+            _record_genai_usage(extract_response, model=self.llm_model)
             
-            missing_content = extract_response.choices[0].message.content
+            # Gemini client returns .text, not .choices[0].message.content (OpenAI style)
+            missing_content = extract_response.text
             print(f"{Fore.CYAN}   📝 Conteúdo omitido extraído ({len(missing_content)} caracteres)")
             
             chunks = self._smart_chunk_with_overlap(formatted_text, max_size=self.MAX_CHUNK_SIZE)
@@ -4631,6 +5312,7 @@ Retorne o trecho (modificado ou inalterado)."""
                             )
                         )
                     )
+                    _record_genai_usage(fix_response, model=self.llm_model)
                     fixed_chunks.append(fix_response.text)
                 except Exception as chunk_error:
                     print(f"{Fore.YELLOW}   ⚠️  Erro no chunk {i+1}, mantendo original: {chunk_error}")
@@ -4733,6 +5415,8 @@ Compare o TEXTO ORIGINAL (transcrição bruta) com o TEXTO FORMATADO (apostila) 
 - NÃO considere como omissão: hesitações, "né", "então", dados repetitivos, conversas paralelas.
 - CONSIDERE como omissão: qualquer lei, súmula, artigo, jurisprudência, exemplo prático ou dica de prova.
 - Preste atenção especial em: números de leis, prazos, percentuais, valores monetários.
+- NÃO faça análise jurídica externa nem verifique a veracidade de leis.
+- Sua saída deve refletir apenas divergências entre o texto bruto e o formatado.
 
 ## FORMATO DE RESPOSTA (JSON)
 {
@@ -4770,6 +5454,7 @@ Retorne APENAS o JSON, sem markdown."""
                     )
                 )
             )
+            _record_genai_usage(response, model=self.llm_model)
             
             # === ROBUST JSON PARSING (v2.25) ===
             result = None
@@ -4829,6 +5514,7 @@ O JSON deve ter exatamente esta estrutura:
                         max_output_tokens=2000
                     )
                 )
+                _record_genai_usage(retry_response, model=self.llm_model)
                 try:
                     result = json.loads(retry_response.text.strip())
                 except json.JSONDecodeError:
@@ -4883,6 +5569,38 @@ O JSON deve ter exatamente esta estrutura:
                 'problemas_estrutura': [],
                 'observacoes': f'Erro na validação: {str(e)}'
             }
+
+    def validate_fidelity_primary(
+        self,
+        raw_transcript,
+        formatted_text,
+        video_name,
+        modo="APOSTILA",
+        include_sources=False,
+    ):
+        """
+        Auditoria de fidelidade primária (preventiva) com fallback para full-context.
+        Retorna um relatório compatível com o formato antigo (_fidelidade.json).
+        """
+        if FIDELITY_AUDIT_AVAILABLE and FIDELITY_AUDIT_ENABLED:
+            result = auditar_fidelidade_preventiva(
+                self.client,
+                raw_transcript,
+                formatted_text,
+                video_name,
+                output_path=None,
+                modo=modo,
+                include_sources=include_sources,
+            )
+            compat = (result or {}).get("compat_fidelidade")
+            if isinstance(compat, dict) and compat:
+                return compat
+            return result or {}
+
+        fallback = self.validate_completeness_full(raw_transcript, formatted_text, video_name, None)
+        if isinstance(fallback, dict):
+            fallback["source"] = "validate_completeness_full"
+        return fallback
 
     def _validate_by_sampling(self, raw_transcript, formatted_text, video_name):
         """Fallback: Validação por amostragem para documentos muito grandes."""
@@ -4963,6 +5681,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     )
                 )
             )
+            _record_genai_usage(response, model=self.llm_model)
             
             fixed_text = response.text.strip()
             
@@ -5011,6 +5730,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     ],
                     max_completion_tokens=16384 # Garante output longo
                 )
+                _record_openai_usage(response, model=self.llm_model)
                 content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
                 print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (OpenAI/GPT-5).")
                 return content
@@ -5030,6 +5750,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     )
 
                 response = await asyncio.to_thread(call_gemini)
+                _record_genai_usage(response, model=self.llm_model)
                 # Clean markdown code blocks if present
                 content = response.text.replace('```markdown', '').replace('```', '')
                 print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (Vertex AI).")
@@ -5049,6 +5770,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                         ],
                         max_completion_tokens=10000
                     )
+                    _record_openai_usage(response, model=self.openai_model)
                     content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
                     print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (OpenAI Fallback).")
                     return content
@@ -5234,7 +5956,22 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             print(f"{Fore.GREEN}   ✅ Estrutura auditada - Sem duplicatas ou omissões de tópicos.")
             return formatted_text, []
 
-    async def format_transcription_async(self, transcription, video_name, output_folder, mode="APOSTILA", custom_prompt=None, dry_run=False, progress_callback=None):
+    async def format_transcription_async(
+        self,
+        transcription,
+        video_name,
+        output_folder,
+        mode="APOSTILA",
+        custom_prompt=None,
+        dry_run=False,
+        progress_callback=None,
+        skip_audit=False,
+        skip_fidelity_audit=False,
+        skip_sources_audit=False,
+        hil_strict=False,
+        allow_indirect: bool = False,
+        allow_summary: bool = False,
+    ):
         """
         Orquestrador Principal com Checkpoint e Robustez (Sequential Mode)
         
@@ -5242,9 +5979,13 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             transcription: Texto da transcrição
             video_name: Nome do vídeo
             output_folder: Pasta de saída
-            mode: "APOSTILA" ou "FIDELIDADE" (ignorado se custom_prompt for fornecido)
+            mode: "APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO" ou "DEPOIMENTO" (ignorado se custom_prompt for fornecido)
             custom_prompt: Prompt customizado opcional (substitui os prompts padrão)
             dry_run: Se True, apenas valida divisão de chunks
+            skip_audit: Se True, pula a auditoria jurídica
+            skip_sources_audit: Se True, pula a auditoria de fontes integrada
+            allow_indirect: Se True, permite discurso indireto em AUDIENCIA/REUNIAO/DEPOIMENTO.
+            allow_summary: Se True, permite ata resumida em AUDIENCIA/REUNIAO/DEPOIMENTO.
         """
         async def emit(stage: str, progress: int, message: str):
             if not progress_callback:
@@ -5263,13 +6004,25 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         
         # v2.22: Modular prompt composition
         # custom_prompt now only overrides the STYLE+TABLE layers, not the entire system prompt.
-        self.prompt_apostila = self._build_system_prompt(mode=mode, custom_style_override=custom_prompt)
+        self.prompt_apostila = self._build_system_prompt(
+            mode=mode,
+            custom_style_override=custom_prompt,
+            allow_indirect=allow_indirect,
+            allow_summary=allow_summary,
+        )
         
         if not custom_prompt:
-            if mode == "FIDELIDADE":
-                print(f"{Fore.CYAN}🎨 Modo FIDELIDADE ativo (Prompt modular)")
-            else:
-                print(f"{Fore.CYAN}📚 Modo APOSTILA ativo (Prompt modular)")
+            mode_label = (mode or "APOSTILA").upper()
+            pretty_map = {
+                "APOSTILA": "APOSTILA",
+                "FIDELIDADE": "FIDELIDADE",
+                "AUDIENCIA": "AUDIÊNCIA",
+                "REUNIAO": "REUNIÃO",
+                "DEPOIMENTO": "DEPOIMENTO",
+            }
+            pretty = pretty_map.get(mode_label, mode_label)
+            icon = "📚" if mode_label == "APOSTILA" else "🎨"
+            print(f"{Fore.CYAN}{icon} Modo {pretty} ativo (Prompt modular)")
         
         # 0. Context Extraction
         pass
@@ -5449,6 +6202,10 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         print("  Passada 2.7: Mesclando tabelas divididas (v2.27)...")
         await emit("formatting", 97, "Passada 2.7: Mesclando tabelas divididas...")
         full_formatted = mesclar_tabelas_divididas(full_formatted)
+
+        print("  Passada 2.8: Ajustando títulos de tabela de banca...")
+        await emit("formatting", 97, "Passada 2.8: Ajustando títulos de tabela...")
+        full_formatted = garantir_titulo_tabela_banca(full_formatted)
         
         print("  Passada 3: Normalizando títulos similares...")
         await emit("formatting", 97, "Passada 3: Normalizando títulos...")
@@ -5509,76 +6266,288 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     f.write(f"{issue}\n")
             print(f"📄 Relatório de auditoria salvo: {audit_path.name}")
         
-        # 7. v2.16: Validação Full-Context LLM (Novo!)
-        print(f"\n{Fore.CYAN}🔬 Validação Full-Context LLM...")
-        validation_result = self.validate_completeness_full(
-            transcription, full_formatted, video_name, global_structure
-        )
-        
-        # Salvar relatório JSON da validação
-        validation_report_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
-        with open(validation_report_path, "w", encoding='utf-8') as f:
-            json.dump(validation_result, f, ensure_ascii=False, indent=2)
-        print(f"📄 Relatório de fidelidade Full-Context salvo: {validation_report_path.name}")
-        
-        # Se houver problemas graves, gerar também um markdown legível
-        if not validation_result.get('aprovado', True):
-            fidelity_md_path = Path(output_folder) / f"{video_name}_{mode_suffix}_REVISAO.md"
-            with open(fidelity_md_path, "w", encoding='utf-8') as f:
-                f.write(f"# ⚠️ REVISÃO NECESSÁRIA: {video_name}\n\n")
-                f.write(f"**Nota de Fidelidade:** {validation_result.get('nota', 0)}/10\n\n")
-                if validation_result.get('omissoes'):
-                    f.write("## 📌 Omissões Detectadas\n")
-                    for o in validation_result['omissoes']:
-                        f.write(f"- {o}\n")
-                    f.write("\n")
-                if validation_result.get('distorcoes'):
-                    f.write("## ⚠️ Distorções Detectadas\n")
-                    for d in validation_result['distorcoes']:
-                        f.write(f"- {d}\n")
-                    f.write("\n")
-                if validation_result.get('problemas_estrutura'):
-                    f.write("## 🏗️ Problemas de Estrutura\n")
-                    for p in validation_result['problemas_estrutura']:
-                        f.write(f"- {p}\n")
-                    f.write("\n")
-                if validation_result.get('observacoes'):
-                    f.write(f"## Observações\n{validation_result['observacoes']}\n")
-            print(f"{Fore.RED}📄 ATENÇÃO: Documento requer revisão! Veja: {fidelity_md_path.name}")
-        
-        # 7.1 v2.17: Corretor IA Ativo - Corrige problemas estruturais automaticamente
-        # 7.1 v2.18: Corretor IA Seguro (Safe Mode) - Corrige problemas estruturais
-        if validation_result and not validation_result.get('aprovado', True):
-            print(f"\n{Fore.CYAN}🔁 Iniciando Auto-Fix Loop (Safe Mode)...")
-            
-            # Chama o novo corretor seguro
-            full_formatted = await self.auto_fix_smart(full_formatted, validation_result, global_structure)
-            
-            # Re-validar após correção
-            print(f"{Fore.CYAN}🔬 Re-validando após correção automática...")
-            revalidation_result = self.validate_completeness_full(
+        # 7. v2.16: Validação Full-Context LLM (Backup opcional)
+        validation_result = None
+        primary_fidelity_written = False
+        if FIDELITY_BACKUP_ENABLED:
+            print(f"\n{Fore.CYAN}🔬 Validação Full-Context LLM (backup)...")
+            validation_result = self.validate_completeness_full(
                 transcription, full_formatted, video_name, global_structure
             )
-            
-            # Atualizar o relatório com a revalidação
-            validation_result = revalidation_result
-            validation_report_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
+
+            # Salvar relatório JSON do backup
+            validation_report_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade_backup.json"
             with open(validation_report_path, "w", encoding='utf-8') as f:
                 json.dump(validation_result, f, ensure_ascii=False, indent=2)
-            print(f"📄 Relatório de fidelidade atualizado: {validation_report_path.name}")
+            print(f"📄 Relatório de fidelidade (backup) salvo: {validation_report_path.name}")
+
+            # Se houver problemas graves, gerar também um markdown legível
+            if not validation_result.get('aprovado', True):
+                fidelity_md_path = Path(output_folder) / f"{video_name}_{mode_suffix}_REVISAO.md"
+                with open(fidelity_md_path, "w", encoding='utf-8') as f:
+                    f.write(f"# ⚠️ REVISÃO NECESSÁRIA: {video_name}\n\n")
+                    f.write(f"**Nota de Fidelidade:** {validation_result.get('nota', 0)}/10\n\n")
+                    if validation_result.get('omissoes'):
+                        f.write("## 📌 Omissões Detectadas\n")
+                        for o in validation_result['omissoes']:
+                            f.write(f"- {o}\n")
+                        f.write("\n")
+                    if validation_result.get('distorcoes'):
+                        f.write("## ⚠️ Distorções Detectadas\n")
+                        for d in validation_result['distorcoes']:
+                            f.write(f"- {d}\n")
+                        f.write("\n")
+                    if validation_result.get('problemas_estrutura'):
+                        f.write("## 🏗️ Problemas de Estrutura\n")
+                        for p in validation_result['problemas_estrutura']:
+                            f.write(f"- {p}\n")
+                        f.write("\n")
+                    if validation_result.get('observacoes'):
+                        f.write(f"## Observações\n{validation_result['observacoes']}\n")
+                print(f"{Fore.RED}📄 ATENÇÃO: Documento requer revisão! Veja: {fidelity_md_path.name}")
+
+            # 7.1 v2.18: Corretor IA Seguro (Safe Mode) - Corrige problemas estruturais
+            if validation_result and not validation_result.get('aprovado', True):
+                print(f"\n{Fore.CYAN}🔁 Iniciando Auto-Fix Loop (Safe Mode)...")
+
+                # Chama o novo corretor seguro
+                full_formatted = await self.auto_fix_smart(full_formatted, validation_result, global_structure)
+
+                # Re-validar após correção
+                print(f"{Fore.CYAN}🔬 Re-validando após correção automática...")
+                revalidation_result = self.validate_completeness_full(
+                    transcription, full_formatted, video_name, global_structure
+                )
+
+                # Atualizar o relatório com a revalidação
+                validation_result = revalidation_result
+                validation_report_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade_backup.json"
+                with open(validation_report_path, "w", encoding='utf-8') as f:
+                    json.dump(validation_result, f, ensure_ascii=False, indent=2)
+                print(f"📄 Relatório de fidelidade (backup) atualizado: {validation_report_path.name}")
         
+        def _build_fidelity_report(result):
+            if not isinstance(result, dict):
+                return ""
+            nota = result.get("nota_fidelidade", result.get("nota", 0))
+            aprovado = result.get("aprovado", True)
+            omissoes = result.get("omissoes_graves", result.get("omissoes", [])) or []
+            distorcoes = result.get("distorcoes", []) or []
+            estrutura = result.get("problemas_estrutura", []) or []
+            observacoes = result.get("observacoes", "") or ""
+
+            def _sanitize(text):
+                return str(text).replace("-->", "-- >").strip()
+
+            lines = [
+                "# Relatório de Fidelidade (RAW x Formatado)",
+                f"Aprovado: {'sim' if aprovado else 'nao'}",
+                f"Nota: {nota}/10",
+            ]
+
+            if omissoes:
+                lines.append(f"Omissões graves: {len(omissoes)}")
+                lines.extend([f"- {_sanitize(item)}" for item in omissoes[:20]])
+            else:
+                lines.append("Omissões graves: 0")
+
+            if distorcoes:
+                lines.append(f"Distorções: {len(distorcoes)}")
+                lines.extend([f"- {_sanitize(item)}" for item in distorcoes[:20]])
+            else:
+                lines.append("Distorções: 0")
+
+            if estrutura:
+                lines.append(f"Problemas de estrutura: {len(estrutura)}")
+                lines.extend([f"- {_sanitize(item)}" for item in estrutura[:20]])
+            else:
+                lines.append("Problemas de estrutura: 0")
+
+            if observacoes:
+                lines.append(f"Observações: {_sanitize(observacoes)}")
+
+            return "\n".join(lines).strip()
+
+        fidelity_report = _build_fidelity_report(validation_result)
+        # Relatório salvo apenas em arquivo JSON separado, não incluído no markdown
+        # if fidelity_report:
+        #     full_formatted += f"\n\n<!-- RELATÓRIO: {fidelity_report} -->"
+
+        # v2.27: Auditoria Preventiva de Fidelidade (antes do DOCX)
+        print(f"{Fore.CYAN}📊 [DIAG] Audit Check: AVAILABLE={FIDELITY_AUDIT_AVAILABLE}, ENABLED={FIDELITY_AUDIT_ENABLED}, skip={skip_fidelity_audit}, output_folder={output_folder}")
+        if FIDELITY_AUDIT_AVAILABLE and FIDELITY_AUDIT_ENABLED and not skip_fidelity_audit:
+            print(f"\n{Fore.CYAN}🔬 Auditoria Preventiva de Fidelidade (v2.27)...")
+            await emit("formatting", 99, "Auditoria preventiva de fidelidade...")
+
+            preventive_json = Path(output_folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json"
+            preventive_md = Path(output_folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md"
+
+            try:
+                preventive_result = auditar_fidelidade_preventiva(
+                    self.client,
+                    transcription,
+                    full_formatted,
+                    video_name,
+                    str(preventive_json),
+                    modo=mode_suffix,
+                    include_sources=(SOURCES_AUDIT_ENABLED and not skip_sources_audit),
+                )
+                if not isinstance(preventive_result, dict):
+                    preventive_result = {
+                        "aprovado": False,
+                        "nota_fidelidade": 0,
+                        "gravidade_geral": "CRÍTICA",
+                        "erro": f"Auditoria preventiva retornou tipo inválido: {type(preventive_result)}",
+                        "recomendacao_hil": {"pausar_para_revisao": True, "motivo": "Resultado inválido", "areas_criticas": ["auditoria_preventiva"]},
+                        "omissoes_criticas": [],
+                        "distorcoes": [],
+                        "alucinacoes": [],
+                        "problemas_estruturais": [],
+                        "problemas_contexto": [],
+                        "metricas": {},
+                    }
+                try:
+                    needs_persist = True
+                    try:
+                        needs_persist = (not preventive_json.exists()) or preventive_json.stat().st_size == 0
+                    except Exception:
+                        needs_persist = True
+                    if needs_persist:
+                        with open(preventive_json, "w", encoding="utf-8") as f:
+                            json.dump(preventive_result, f, ensure_ascii=False, indent=2, default=str)
+                except Exception as write_err:
+                    print(f"{Fore.YELLOW}⚠️ Falha ao salvar JSON da auditoria preventiva: {write_err}")
+                # Markdown generation should never abort/overwrite the JSON result.
+                try:
+                    gerar_relatorio_markdown_completo(preventive_result, str(preventive_md), video_name)
+                except Exception as md_err:
+                    try:
+                        md_fallback = (
+                            f"# 🔬 AUDITORIA PREVENTIVA DE FIDELIDADE: {video_name}\n\n"
+                            f"**Status:** ⚠️ REQUER REVISÃO\n"
+                            f"**Nota de Fidelidade:** 0.0/10\n"
+                            f"**Gravidade Geral:** N/A\n\n"
+                            f"## ❌ Erro\n\nFalha ao gerar relatório Markdown: {md_err}\n"
+                        )
+                        with open(preventive_md, "w", encoding="utf-8") as f:
+                            f.write(md_fallback)
+                    except Exception as md_write_err:
+                        print(f"{Fore.YELLOW}⚠️ Falha ao salvar markdown fallback: {md_write_err}")
+
+                compat = (preventive_result or {}).get("compat_fidelidade")
+                if isinstance(compat, dict) and compat:
+                    fidelity_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
+                    with open(fidelity_path, "w", encoding="utf-8") as f:
+                        json.dump(compat, f, ensure_ascii=False, indent=2)
+                    print(f"📄 Relatório de fidelidade (preventiva) salvo: {fidelity_path.name}")
+                    primary_fidelity_written = True
+
+                recomendacao = (preventive_result or {}).get("recomendacao_hil", {}) or {}
+                if hil_strict and recomendacao.get("pausar_para_revisao"):
+                    save_hil_output(
+                        full_formatted,
+                        video_name,
+                        output_folder,
+                        mode_suffix,
+                        reason="auditoria_preventiva",
+                    )
+                    raise HILCheckpointException(
+                        f"Auditoria preventiva exige revisão humana. Veja: {preventive_md.name}"
+                    )
+            except HILCheckpointException:
+                raise
+            except Exception as e:
+                import traceback
+                print(f"{Fore.YELLOW}⚠️ Falha na auditoria preventiva: {e}. Continuando...")
+                print(f"{Fore.RED}Traceback: {traceback.format_exc()}")
+                # Save minimal error report so frontend doesn't show "unavailable"
+                error_result = {
+                    "aprovado": False,
+                    "nota_fidelidade": 0,
+                    "gravidade_geral": "N/A",
+                    "erro": str(e),
+                    "recomendacao_hil": {"pausar_para_revisao": False, "motivo": f"Falha na execução da auditoria: {str(e)}", "areas_criticas": []},
+                    "compat_fidelidade": {"aprovado": False, "nota": 0, "erro": str(e)},
+                    "omissoes_criticas": [],
+                    "distorcoes": [],
+                    "alucinacoes": [],
+                    "problemas_estruturais": [],
+                    "problemas_contexto": [],
+                    "metricas": {},
+                    "observacoes_gerais": f"Erro na auditoria: {str(e)}"
+                }
+                try:
+                    with open(preventive_json, "w", encoding="utf-8") as f:
+                        json.dump(error_result, f, ensure_ascii=False, indent=2)
+                    gerar_relatorio_markdown_completo(error_result, str(preventive_md), video_name)
+                except Exception as write_err:
+                    print(f"{Fore.RED}❌ Falha ao salvar relatório de erro: {write_err}")
+
+        elif not skip_fidelity_audit:
+            # Audit wanted but unavailable/disabled - write placeholder
+            print(f"{Fore.YELLOW}⚠️ Auditoria preventiva indisponível ou desativada. Gerando relatório de status.")
+            preventive_json = Path(output_folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json"
+            preventive_md = Path(output_folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md"
+            
+            reason = "Módulo de auditoria não encontrado ou falha na importação." if not FIDELITY_AUDIT_AVAILABLE else "Auditoria desativada por configuração."
+            
+            placeholder_result = {
+                "aprovado": True,
+                "nota_fidelidade": 0,
+                "gravidade_geral": "INFO",
+                "recomendacao_hil": {
+                    "pausar_para_revisao": False, 
+                    "motivo": f"Auditoria não executada: {reason}", 
+                    "areas_criticas": []
+                },
+                "observacoes_gerais": f"A auditoria preventiva não foi executada. {reason}",
+                "compat_fidelidade": {"aprovado": True, "nota": 0},
+                "omissoes_criticas": [],
+                "distorcoes": [],
+                "alucinacoes": [],
+                "problemas_estruturais": [],
+                "problemas_contexto": [],
+                "metricas": {}
+            }
+            try:
+                with open(preventive_json, "w", encoding="utf-8") as f:
+                    json.dump(placeholder_result, f, ensure_ascii=False, indent=2)
+                
+                # Write simple markdown
+                md_content = f"# Auditoria Preventiva\n\n**Status:** Não executada\n\n**Motivo:** {reason}"
+                with open(preventive_md, "w", encoding="utf-8") as f:
+                    f.write(md_content)
+                    
+            except Exception as e:
+                print(f"{Fore.RED}❌ Falha ao salvar placeholder de auditoria: {e}")
+
+        if not primary_fidelity_written and isinstance(validation_result, dict):
+            fidelity_path = Path(output_folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
+            try:
+                with open(fidelity_path, "w", encoding="utf-8") as f:
+                    json.dump(validation_result, f, ensure_ascii=False, indent=2)
+                print(f"📄 Relatório de fidelidade (fallback) salvo: {fidelity_path.name}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Falha ao salvar relatório de fidelidade fallback: {e}")
+
         # Checkpoint cleanup success
         delete_checkpoint(video_name, output_folder)
         
         # 8. v2.18: Auditoria Jurídica Pós-Processamento
-        if AUDIT_AVAILABLE:
+        if AUDIT_AVAILABLE and not skip_audit:
             print(f"\n{Fore.CYAN}🕵️ Auditoria Jurídica Pós-Processamento...")
             audit_report_path = Path(output_folder) / f"{video_name}_{mode_suffix}_AUDITORIA.md"
-            audit_content = auditar_consistencia_legal(self.client, full_formatted, str(audit_report_path))
+            audit_content = auditar_consistencia_legal(
+                self.client,
+                full_formatted,
+                str(audit_report_path),
+                raw_transcript=transcription,
+            )
             
             if audit_content:
-                print(f"{Fore.GREEN}   📎 Anexando relatório de auditoria ao output final...")
-                full_formatted += f"\n\n<!-- RELATÓRIO: {audit_content} -->"
+                print(f"{Fore.GREEN}   📎 Relatório de auditoria salvo em arquivo separado...")
+                # Não incluir no markdown para não poluir a apostila final
+                # full_formatted += f"\n\n<!-- RELATÓRIO: {audit_content} -->"
         
         # v2.19: Cleanup manual do cache para economia
         if cached_context:
@@ -5609,6 +6578,12 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         
         report = "### PROBLEMAS ESTRUTURAIS:\n" + "\n".join([f"- {p}" for p in problemas_estrut]) + "\n"
             
+        global_reference = (
+            "## ESTRUTURA DE REFERÊNCIA (Guia):\n" + global_structure
+            if global_structure
+            else ""
+        )
+
         PROMPT_FIX = f"""Você é um editor técnico de elite.
         
 ## TAREFA: LIMPEZA ESTRUTURAL (SEM ALTERAR CONTEÚDO)
@@ -5626,7 +6601,7 @@ Você deve corrigir APENAS a formatação e estrutura do documento.
 3. **Parágrafos Repetidos**: Delete duplicações EXATAS de parágrafos (copia-cola acidental).
 4. **Renumeração**: Garanta sequência lógica (1, 2, 3...) nos títulos.
 
-{f"## ESTRUTURA DE REFERÊNCIA (Guia):\n{global_structure}" if global_structure else ""}
+{global_reference}
 
 ## RELATÓRIO DE ERROS:
 {report}
@@ -5650,6 +6625,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                 )
 
             response = await asyncio.to_thread(call_gemini)
+            _record_genai_usage(response, model=self.llm_model)
             
             resultado = response.text.replace('```markdown', '').replace('```', '').strip()
             
@@ -5732,8 +6708,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         
         # Data de geração e Modo
         date_para = doc.add_paragraph()
-        modo_info = MODO_NOME if 'MODO_NOME' in globals() else "APOSTILA"
-        date_run = date_para.add_run(f"Gerado em {time.strftime('%d/%m/%Y às %H:%M')} - Modo: {modo_info}")
+        date_run = date_para.add_run(f"Gerado em {time.strftime('%d/%m/%Y às %H:%M')} - Modo: {mode_suffix}")
         date_run.italic = True
         date_run.font.size = Pt(10)
         date_run.font.color.rgb = RGBColor(128, 128, 128)
@@ -5751,39 +6726,78 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         i = 0
         in_table = False
         table_rows = []
+        current_table_cols = None
+
+        def _is_table_separator(line: str) -> bool:
+            return bool(re.match(r'^\s*\|[\s:|-]+\|[\s:|-]*$', line))
+
+        def _count_table_cols(line: str) -> int:
+            if '|' not in line:
+                return 0
+            return max(0, line.count('|') - 1)
+
+        def _looks_like_table_header(idx: int) -> bool:
+            if idx + 1 >= len(lines):
+                return False
+            if '|' not in lines[idx]:
+                return False
+            return _is_table_separator(lines[idx + 1].strip())
         
         while i < len(lines):
             line = lines[i].strip()
             
-            if not line:
-                if in_table and table_rows:
-                    self._add_table_to_doc(doc, table_rows)
-                    in_table = False
-                    table_rows = []
-                i += 1
-                continue
-            
-            # Tabelas
-            if '|' in line and not in_table:
-                in_table = True
-                table_rows = []
-            
             if in_table:
-                # Ignora linha separadora
-                is_separator = re.match(r'^\s*\|[\s:|-]+\|[\s:|-]*$', line)
-                if '|' in line and not is_separator:
-                    table_rows.append([cell.strip() for cell in line.split('|')[1:-1]])
-                
-                if '|' not in line or i == len(lines) - 1:
-                    if len(table_rows) > 0:
+                if not line:
+                    if table_rows:
                         self._add_table_to_doc(doc, table_rows)
                     in_table = False
                     table_rows = []
-                    if '|' not in line:
-                        continue
+                    current_table_cols = None
+                    i += 1
+                    continue
+
+                if '|' in line:
+                    if _looks_like_table_header(i):
+                        candidate_cols = _count_table_cols(line)
+                        if current_table_cols and table_rows and candidate_cols != current_table_cols:
+                            self._add_table_to_doc(doc, table_rows)
+                            table_rows = []
+                            current_table_cols = None
+
+                    is_separator = _is_table_separator(line)
+                    if not is_separator:
+                        row = [cell.strip() for cell in line.split('|')[1:-1]]
+                        table_rows.append(row)
+                        if row:
+                            current_table_cols = max(current_table_cols or 0, len(row))
+
+                    if i == len(lines) - 1:
+                        if table_rows:
+                            self._add_table_to_doc(doc, table_rows)
+                        in_table = False
+                        table_rows = []
+                        current_table_cols = None
+                    i += 1
+                    continue
+
+                if table_rows:
+                    self._add_table_to_doc(doc, table_rows)
+                in_table = False
+                table_rows = []
+                current_table_cols = None
+                continue
+
+            if not line:
                 i += 1
                 continue
-            
+
+            # Tabelas
+            if '|' in line:
+                in_table = True
+                table_rows = []
+                current_table_cols = None
+                continue
+
             # Headings
             if line.startswith('##### '):
                 h = doc.add_heading('', level=5)
@@ -5959,15 +6973,38 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         fldChar.set(qn('w:fldCharType'), 'end')
         run._r.append(fldChar)
 
-def process_single_video(video_path, dry_run=False, mode="APOSTILA", skip_formatting=False, custom_prompt=None, high_accuracy=False):
+def process_single_video(
+    video_path,
+    dry_run=False,
+    mode="APOSTILA",
+    skip_formatting=False,
+    custom_prompt=None,
+    high_accuracy=False,
+    skip_audit=False,
+    skip_fidelity_audit=False,
+    skip_sources_audit=False,
+    hil_strict=False,
+    resume_hil=False,
+    provider="gemini",
+    word_only=False,
+    auto_apply_fixes=False,
+):
     if not os.path.exists(video_path): return
     folder = os.path.dirname(video_path)
     video_name = Path(video_path).stem
     
     try:
-        vomo = VomoMLX()
+        vomo = VomoMLX(provider=provider)
+
+        if word_only and video_path.lower().endswith('.md'):
+            print(f"{Fore.CYAN}📄 Modo --word-only: Gerando Word a partir de MD existente...")
+            with open(video_path, 'r', encoding='utf-8') as f:
+                md_content = f.read()
+            vomo.save_as_word(md_content, video_name, folder)
+            print(f"{Fore.GREEN}✅ DOCX gerado com sucesso!")
+            return
         
-        if video_path.lower().endswith('.txt'):
+        if video_path.lower().endswith(('.txt', '.md')):
             print(f"{Fore.CYAN}📄 Input é arquivo de texto. Pulando transcrição...")
             with open(video_path, 'r', encoding='utf-8') as f:
                 transcription = f.read()
@@ -5988,21 +7025,137 @@ def process_single_video(video_path, dry_run=False, mode="APOSTILA", skip_format
                     transcription = vomo.transcribe(audio)
                 with open(raw_path, 'w') as f: f.write(transcription)
         
-        if skip_formatting:
+        if skip_formatting and not resume_hil:
             print(f"{Fore.GREEN}✅ Transcrição RAW concluída: {raw_path}")
             print(f"{Fore.YELLOW}   ℹ️  Formatação pulada (--skip-formatting usado).{Style.RESET_ALL}")
             return
 
-        word_only_flag = "--word-only" in sys.argv
-        if word_only_flag and video_path.lower().endswith('.md'):
-            print(f"{Fore.CYAN}📄 Modo --word-only: Gerando Word a partir de MD existente...")
-            with open(video_path, 'r', encoding='utf-8') as f:
-                md_content = f.read()
-            vomo.save_as_word(md_content, video_name, folder)
-            print(f"{Fore.GREEN}✅ DOCX gerado com sucesso!")
-            return
-            
-        formatted = asyncio.run(vomo.format_transcription_async(transcription, video_name, folder, mode=mode, custom_prompt=custom_prompt, dry_run=dry_run))
+        formatted = None
+        mode_suffix = (mode or "APOSTILA").upper()
+
+        if resume_hil:
+            hil_path = get_hil_output_path(video_name, folder, mode_suffix)
+            if not hil_path.exists():
+                print(f"{Fore.RED}❌ HIL checkpoint não encontrado: {hil_path.name}")
+                return
+            with open(hil_path, 'r', encoding='utf-8') as f:
+                formatted = f.read()
+            print(f"{Fore.YELLOW}⏯️  Retomando a partir do HIL checkpoint: {hil_path.name}")
+            primary_fidelity_written = False
+            validation_result = None
+
+            # Revalidação preventiva (opcional) após correções manuais
+            if FIDELITY_AUDIT_AVAILABLE and FIDELITY_AUDIT_ENABLED and not skip_fidelity_audit:
+                print(f"\n{Fore.CYAN}🔬 Revalidando Auditoria Preventiva de Fidelidade...")
+                preventive_json = Path(folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json"
+                preventive_md = Path(folder) / f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md"
+                try:
+                    preventive_result = auditar_fidelidade_preventiva(
+                        vomo.client,
+                        transcription,
+                        formatted,
+                        video_name,
+                        str(preventive_json),
+                        modo=mode_suffix,
+                        include_sources=(SOURCES_AUDIT_ENABLED and not skip_sources_audit),
+                    )
+                    gerar_relatorio_markdown_completo(preventive_result, str(preventive_md), video_name)
+                    compat = (preventive_result or {}).get("compat_fidelidade")
+                    if isinstance(compat, dict) and compat:
+                        fidelity_path = Path(folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
+                        with open(fidelity_path, "w", encoding="utf-8") as f:
+                            json.dump(compat, f, ensure_ascii=False, indent=2)
+                        print(f"📄 Relatório de fidelidade (preventiva) salvo: {fidelity_path.name}")
+                        primary_fidelity_written = True
+                    recomendacao = (preventive_result or {}).get("recomendacao_hil", {}) or {}
+                    if hil_strict and recomendacao.get("pausar_para_revisao"):
+                        save_hil_output(
+                            formatted,
+                            video_name,
+                            folder,
+                            mode_suffix,
+                            reason="auditoria_preventiva_resumo",
+                        )
+                        raise HILCheckpointException(
+                            f"Auditoria preventiva exige revisão humana. Veja: {preventive_md.name}"
+                        )
+                except HILCheckpointException:
+                    raise
+                except Exception as e:
+                    print(f"{Fore.YELLOW}⚠️ Falha na auditoria preventiva: {e}. Continuando...")
+
+            # Validação Full-Context (backup)
+            if FIDELITY_BACKUP_ENABLED:
+                try:
+                    print(f"\n{Fore.CYAN}🔬 Validação Full-Context LLM (revalidação/backup)...")
+                    validation_result = vomo.validate_completeness_full(
+                        transcription, formatted, video_name, None
+                    )
+                    validation_report_path = Path(folder) / f"{video_name}_{mode_suffix}_fidelidade_backup.json"
+                    with open(validation_report_path, "w", encoding='utf-8') as f:
+                        json.dump(validation_result, f, ensure_ascii=False, indent=2)
+                    print(f"📄 Relatório de fidelidade (backup) salvo: {validation_report_path.name}")
+
+                    if not validation_result.get('aprovado', True):
+                        fidelity_md_path = Path(folder) / f"{video_name}_{mode_suffix}_REVISAO.md"
+                        with open(fidelity_md_path, "w", encoding='utf-8') as f:
+                            f.write(f"# ⚠️ REVISÃO NECESSÁRIA: {video_name}\n\n")
+                            f.write(f"**Nota de Fidelidade:** {validation_result.get('nota', 0)}/10\n\n")
+                            if validation_result.get('omissoes'):
+                                f.write("## 📌 Omissões Detectadas\n")
+                                for o in validation_result['omissoes']:
+                                    f.write(f"- {o}\n")
+                                f.write("\n")
+                            if validation_result.get('distorcoes'):
+                                f.write("## ⚠️ Distorções Detectadas\n")
+                                for d in validation_result['distorcoes']:
+                                    f.write(f"- {d}\n")
+                                f.write("\n")
+                            if validation_result.get('problemas_estrutura'):
+                                f.write("## 🏗️ Problemas de Estrutura\n")
+                                for p in validation_result['problemas_estrutura']:
+                                    f.write(f"- {p}\n")
+                                f.write("\n")
+                            if validation_result.get('observacoes'):
+                                f.write(f"## Observações\n{validation_result['observacoes']}\n")
+                        print(f"{Fore.RED}📄 ATENÇÃO: Documento requer revisão! Veja: {fidelity_md_path.name}")
+                except Exception as e:
+                    print(f"{Fore.YELLOW}⚠️ Erro na revalidação Full-Context: {e}")
+
+            if not primary_fidelity_written and isinstance(validation_result, dict):
+                fidelity_path = Path(folder) / f"{video_name}_{mode_suffix}_fidelidade.json"
+                try:
+                    with open(fidelity_path, "w", encoding="utf-8") as f:
+                        json.dump(validation_result, f, ensure_ascii=False, indent=2)
+                    print(f"📄 Relatório de fidelidade (fallback) salvo: {fidelity_path.name}")
+                except Exception as e:
+                    print(f"{Fore.YELLOW}⚠️ Falha ao salvar relatório de fidelidade fallback: {e}")
+
+            # Auditoria Jurídica (opcional)
+            if AUDIT_AVAILABLE and not skip_audit:
+                print(f"\n{Fore.CYAN}🕵️ Auditoria Jurídica Pós-Processamento...")
+                audit_report_path = Path(folder) / f"{video_name}_{mode_suffix}_AUDITORIA.md"
+                audit_content = auditar_consistencia_legal(
+                    vomo.client,
+                    formatted,
+                    str(audit_report_path),
+                    raw_transcript=transcription,
+                )
+                if audit_content:
+                    print(f"{Fore.GREEN}   📎 Relatório de auditoria salvo em arquivo separado...")
+        else:
+            formatted = asyncio.run(vomo.format_transcription_async(
+                transcription,
+                video_name,
+                folder,
+                mode=mode,
+                custom_prompt=custom_prompt,
+                dry_run=dry_run,
+                skip_audit=skip_audit,
+                skip_fidelity_audit=skip_fidelity_audit,
+                skip_sources_audit=skip_sources_audit,
+                hil_strict=hil_strict,
+            ))
         
         with open(os.path.join(folder, f"{video_name}_{mode}.md"), 'w') as f:
             f.write(formatted)
@@ -6017,7 +7170,7 @@ def process_single_video(video_path, dry_run=False, mode="APOSTILA", skip_format
         
         # v2.24: Auto-Fix Post-Processing (Structural Analysis - HIL Mode)
         md_output_path = os.path.join(folder, f"{video_name}_{mode}.md")
-        auto_apply_flag = "--auto-apply-fixes" in sys.argv
+        auto_apply_flag = auto_apply_fixes
         
         if AUTO_FIX_AVAILABLE:
             print(f"\n{Fore.CYAN}🔧 Auto-Fix Structural Analysis (v2.24 HIL)...")
@@ -6053,84 +7206,97 @@ def process_single_video(video_path, dry_run=False, mode="APOSTILA", skip_format
         
         print(f"{Fore.GREEN}✨ SUCESSO!")
         
+    except HILCheckpointException as e:
+        print(f"{Fore.YELLOW}⏸️  HIL checkpoint acionado: {e}")
+        return
     except Exception as e:
         print(f"{Fore.RED}❌ Erro: {e}")
         traceback.print_exc()
 
+def _parse_mode(value):
+    normalized = value.strip().upper()
+    allowed = {"APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO", "DEPOIMENTO"}
+    if normalized not in allowed:
+        raise argparse.ArgumentTypeError(f"Modo invalido: {value}. Use {', '.join(sorted(allowed))}.")
+    return normalized
+
+
+def _parse_provider(value):
+    normalized = value.strip().lower()
+    allowed = {"gemini", "openai"}
+    if normalized not in allowed:
+        raise argparse.ArgumentTypeError(f"Provider invalido: {value}. Use {', '.join(sorted(allowed))}.")
+    return normalized
+
+
+def _load_custom_prompt(prompt_value):
+    if not prompt_value:
+        return None
+    if prompt_value.endswith('.txt') and os.path.exists(prompt_value):
+        with open(prompt_value, 'r', encoding='utf-8') as f:
+            custom_prompt = f.read()
+        print(f"{Fore.YELLOW}📝 Prompt carregado de arquivo: {prompt_value} ({len(custom_prompt):,} chars)")
+        return custom_prompt
+    custom_prompt = prompt_value
+    print(f"{Fore.YELLOW}📝 Usando prompt direto ({len(custom_prompt):,} chars)")
+    return custom_prompt
+
+
+def _build_arg_parser():
+    parser = argparse.ArgumentParser(
+        description="MLX Vomo - transcricao e formatacao juridica.",
+    )
+    parser.add_argument("input_file", nargs="?", help="Arquivo de video/audio ou .txt/.md de entrada.")
+    parser.add_argument("--mode", type=_parse_mode, default="FIDELIDADE",
+                        help="Modo de formatacao: APOSTILA, FIDELIDADE, AUDIENCIA, REUNIAO, DEPOIMENTO.")
+    parser.add_argument("--provider", type=_parse_provider, default="gemini",
+                        help="Provider LLM: gemini ou openai.")
+    parser.add_argument("--prompt", help="Prompt customizado (texto direto ou arquivo .txt).")
+    parser.add_argument("--dry-run", action="store_true", help="Executa apenas etapas locais.")
+    parser.add_argument("--skip-formatting", action="store_true", help="Pula a formatacao final.")
+    parser.add_argument("--high-accuracy", action="store_true", help="Usa beam search na transcricao.")
+    parser.add_argument("--skip-fidelity-audit", action="store_true", help="Desativa auditoria de fidelidade.")
+    parser.add_argument("--skip-sources-audit", action="store_true", help="Desativa auditoria de fontes.")
+    parser.add_argument("--hil-strict", action="store_true", help="Habilita checkpoint estrito de HIL.")
+    parser.add_argument("--resume-hil", action="store_true", help="Retoma a partir do checkpoint HIL.")
+    parser.add_argument("--word-only", action="store_true", help="Gera DOCX a partir de um .md existente.")
+    parser.add_argument("--auto-apply-fixes", action="store_true", help="Aplica correcoes estruturais automaticamente.")
+    parser.add_argument("--no-audit", "--skip-legal-audit", "--skip-audit",
+                        dest="skip_audit", action="store_true",
+                        help="Desativa auditoria juridica.")
+    return parser
+
+
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        dry_run_flag = "--dry-run" in sys.argv
-        skip_formatting_flag = "--skip-formatting" in sys.argv
-        high_accuracy_flag = "--high-accuracy" in sys.argv  # v2.22: Beam Search
-        mode = "APOSTILA"  # Default mode
-        custom_prompt = None  # v2.21: Prompt customizado
-        provider = "gemini" # Default provider
-        
-        # Check for --mode flag
-        for arg in sys.argv:
-            if arg.startswith("--mode="):
-                mode = arg.split("=")[1].upper()
-            if arg.startswith("--provider="):
-                provider = arg.split("=")[1].lower()
-        
-        # v2.21: Check for --prompt flag (arquivo .txt ou texto direto)
-        for i, arg in enumerate(sys.argv):
-            if arg.startswith("--prompt="):
-                prompt_value = arg.split("=", 1)[1]
-                # Detecta se é arquivo ou texto direto
-                if prompt_value.endswith('.txt') and os.path.exists(prompt_value):
-                    with open(prompt_value, 'r', encoding='utf-8') as f:
-                        custom_prompt = f.read()
-                    print(f"{Fore.YELLOW}📝 Prompt carregado de arquivo: {prompt_value} ({len(custom_prompt):,} chars)")
-                else:
-                    custom_prompt = prompt_value
-                    print(f"{Fore.YELLOW}📝 Usando prompt direto ({len(custom_prompt):,} chars)")
-                break
-            elif arg == "--prompt" and i + 1 < len(sys.argv):
-                # Suporta --prompt "texto" ou --prompt arquivo.txt
-                prompt_value = sys.argv[i + 1]
-                if prompt_value.endswith('.txt') and os.path.exists(prompt_value):
-                    with open(prompt_value, 'r', encoding='utf-8') as f:
-                        custom_prompt = f.read()
-                    print(f"{Fore.YELLOW}📝 Prompt carregado de arquivo: {prompt_value} ({len(custom_prompt):,} chars)")
-                else:
-                    custom_prompt = prompt_value
-                    print(f"{Fore.YELLOW}📝 Usando prompt direto ({len(custom_prompt):,} chars)")
-                break
-        
-        # Get input file (skip flags and --prompt value)
-        input_file = None
-        skip_next = False
-        for arg in sys.argv[1:]:
-            if skip_next:
-                skip_next = False
-                continue
-            if arg == "--prompt":
-                skip_next = True
-                continue
-            if not arg.startswith("--"):
-                input_file = arg
-                break
-                
-        if input_file:
-            print(f"{Fore.CYAN}🚀 Iniciando MLX Vomo (v2.26)...")
-            # Pass provider to constructor
-            vomo = VomoMLX(provider=provider)
-            try:
-                # Use asyncio.run for top-level await
-                asyncio.run(vomo.process_video(
-                    input_file, 
-                    mode=mode, 
-                    custom_prompt=custom_prompt,
-                    dry_run=dry_run_flag
-                ))
-            except KeyboardInterrupt:
-                print(f"\n{Fore.YELLOW}⚠️ Interrupção pelo usuário.")
-                sys.exit(0)
-            except Exception as e:
-                print(f"\n{Fore.RED}❌ Erro fatal: {e}")
-                sys.exit(1)
-        else:
-            print(f"{Fore.YELLOW}⚠️  Uso: python mlx_vomo.py <video_file> [--mode=APOSTILA|FIDELIDADE] [--prompt=custom_prompt.txt] [--provider=gemini|openai]")
-    else:
-        print(f"{Fore.YELLOW}⚠️  Uso: python mlx_vomo.py <video_file> [--mode=APOSTILA|FIDELIDADE] [--prompt=custom_prompt.txt] [--provider=gemini|openai]")
+    parser = _build_arg_parser()
+    args = parser.parse_args()
+
+    if not args.input_file:
+        parser.print_usage()
+        sys.exit(1)
+
+    custom_prompt = _load_custom_prompt(args.prompt)
+    print(f"{Fore.CYAN}🚀 Iniciando MLX Vomo (v2.26)...")
+    try:
+        process_single_video(
+            args.input_file,
+            mode=args.mode,
+            custom_prompt=custom_prompt,
+            dry_run=args.dry_run,
+            high_accuracy=args.high_accuracy,
+            skip_formatting=args.skip_formatting,
+            skip_audit=args.skip_audit,
+            skip_fidelity_audit=args.skip_fidelity_audit,
+            skip_sources_audit=args.skip_sources_audit,
+            hil_strict=args.hil_strict,
+            resume_hil=args.resume_hil,
+            provider=args.provider,
+            word_only=args.word_only,
+            auto_apply_fixes=args.auto_apply_fixes,
+        )
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}⚠️ Interrupção pelo usuário.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"\n{Fore.RED}❌ Erro fatal: {e}")
+        sys.exit(1)

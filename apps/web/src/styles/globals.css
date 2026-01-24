@@ -117,11 +117,11 @@
   }
 
   .chat-markdown {
-    @apply text-[12px] leading-relaxed text-black;
+    @apply text-[16px] md:text-[17px] leading-[1.85] text-slate-900;
   }
 
   .chat-markdown p {
-    @apply mb-2;
+    @apply mb-3;
   }
 
   .chat-markdown p:last-child {
@@ -145,15 +145,15 @@
   }
 
   .chat-markdown pre {
-    @apply my-3 overflow-auto rounded-md bg-slate-100 p-3 text-[11px] leading-relaxed;
+    @apply my-3 overflow-auto rounded-md bg-slate-100 p-4 text-[12px] leading-relaxed;
   }
 
   .chat-markdown code {
-    @apply rounded bg-slate-100 px-1 py-0.5 text-[11px];
+    @apply rounded bg-slate-100 px-1 py-0.5 text-[12px];
   }
 
   .chat-markdown pre code {
-    @apply bg-transparent p-0 text-[11px];
+    @apply bg-transparent p-0 text-[12px];
   }
 
   .chat-markdown table {
@@ -185,16 +185,20 @@
     @apply text-blue-600 underline underline-offset-2;
   }
 
+  .chat-markdown .citation-inline {
+    @apply align-super text-[10px] ml-0.5 px-1 py-0.5 rounded border border-slate-200 bg-slate-100 text-slate-600;
+  }
+
   .chat-markdown h1 {
-    @apply mb-2 text-[16px] font-semibold;
+    @apply mb-2 text-[18px] font-semibold;
   }
 
   .chat-markdown h2 {
-    @apply mb-2 text-[14px] font-semibold;
+    @apply mb-2 text-[16px] font-semibold;
   }
 
   .chat-markdown h3 {
-    @apply mb-2 text-[13px] font-semibold;
+    @apply mb-2 text-[15px] font-semibold;
   }
 
   .chat-markdown h4,
@@ -368,13 +372,3 @@
   animation: fadeIn 0.3s ease-out;
 }
 
-
-
-@layer base {
-  * {
-    @apply border-border;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-}

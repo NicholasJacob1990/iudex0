@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useChatStore, useCanvasStore } from '@/stores';
 import { useAuthStore } from '@/stores/auth-store';
@@ -21,6 +21,8 @@ import {
   Settings2,
   Zap,
   Scale,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { CanvasContainer, OutlineApprovalModal } from '@/components/dashboard';
@@ -39,11 +41,75 @@ import {
 
 type GenerationMode = 'individual' | 'multi-agent';
 
+type HilSectionPolicy = 'none' | 'optional' | 'required';
+
+const QUALITY_PROFILE_SPECS = [
+  {
+    id: 'rapido',
+    label: 'Rápido',
+    description: '1 rodada • meta seção: inativa, final ≥ 9.0 • HIL só no final.',
+    targetSectionScore: 8.5,
+    targetFinalScore: 9.0,
+    maxRounds: 1,
+    hilSectionPolicy: 'none',
+    hilFinalRequired: true,
+  },
+  {
+    id: 'padrao',
+    label: 'Padrão',
+    description: '2 rodadas • meta seção ≥ 9.0, final ≥ 9.4 • HIL por seção opcional + final.',
+    targetSectionScore: 9.0,
+    targetFinalScore: 9.4,
+    maxRounds: 2,
+    hilSectionPolicy: 'optional',
+    hilFinalRequired: true,
+  },
+  {
+    id: 'rigoroso',
+    label: 'Rigoroso',
+    description: '4 rodadas • meta seção ≥ 9.4, final ≥ 9.8 • HIL por seção obrigatório + final obrigatório.',
+    targetSectionScore: 9.4,
+    targetFinalScore: 9.8,
+    maxRounds: 4,
+    hilSectionPolicy: 'required',
+    hilFinalRequired: true,
+  },
+  {
+    id: 'auditoria',
+    label: 'Auditoria',
+    description: '6 rodadas • meta seção ≥ 9.6, final ≥ 10.0 • HIL por seção obrigatório + final obrigatório.',
+    targetSectionScore: 9.6,
+    targetFinalScore: 10.0,
+    maxRounds: 6,
+    hilSectionPolicy: 'required',
+    hilFinalRequired: true,
+  },
+] as const;
+
+type QualityProfileSpec = (typeof QUALITY_PROFILE_SPECS)[number];
+
+const formatScoreLabel = (value: number) => value.toFixed(1);
+
+const formatRoundsLabel = (value: number) => `${value} rodada${value === 1 ? '' : 's'}`;
+
+const formatHilPolicyLabel = (policy: HilSectionPolicy, finalRequired: boolean) => {
+  if (policy === 'none') {
+    return finalRequired ? 'HIL só no final.' : 'Sem HIL.';
+  }
+  if (policy === 'optional') {
+    return finalRequired ? 'HIL por seção opcional + final.' : 'HIL por seção opcional.';
+  }
+  return finalRequired ? 'HIL por seção obrigatório + final obrigatório.' : 'HIL por seção obrigatório.';
+};
+
 export default function MinutaPage() {
   const router = useRouter();
   const params = useParams<{ chatId?: string | string[] }>();
   const { isAuthenticated } = useAuthStore();
   const autoCreateAttemptedRef = useRef(false);
+  const pageRootRef = useRef<HTMLDivElement>(null);
+  const chatPanelRef = useRef<HTMLDivElement>(null);
+  const canvasPanelRef = useRef<HTMLDivElement>(null);
   const routeChatId = (() => {
     const raw = params?.chatId as unknown;
     if (typeof raw === 'string') return raw;
@@ -71,6 +137,7 @@ export default function MinutaPage() {
     resetPageRange,
     reviewData,
     submitReview,
+    retryProgress,
     // Chat settings
     selectedModel,
     setSelectedModel,
@@ -82,6 +149,8 @@ export default function MinutaPage() {
     setBreadthFirst,
     hilOutlineEnabled,
     setHilOutlineEnabled,
+    autoApproveHil,
+    setAutoApproveHil,
     chatOutlineReviewEnabled,
     setChatOutlineReviewEnabled,
     auditMode,
@@ -95,10 +164,34 @@ export default function MinutaPage() {
     setQualityTargetFinalScore,
     qualityMaxRounds,
     setQualityMaxRounds,
+    qualityMaxFinalReviewLoops,
+    setQualityMaxFinalReviewLoops,
+    qualityStyleRefineMaxRounds,
+    setQualityStyleRefineMaxRounds,
+    qualityMaxResearchVerifierAttempts,
+    setQualityMaxResearchVerifierAttempts,
+    qualityMaxRagRetries,
+    setQualityMaxRagRetries,
+    qualityRagRetryExpandScope,
+    setQualityRagRetryExpandScope,
+    recursionLimitOverride,
+    setRecursionLimitOverride,
     strictDocumentGateOverride,
     setStrictDocumentGateOverride,
+    hilSectionPolicyOverride,
+    setHilSectionPolicyOverride,
+    hilFinalRequiredOverride,
+    setHilFinalRequiredOverride,
     documentChecklist,
     setDocumentChecklist,
+    cragMinBestScoreOverride,
+    setCragMinBestScoreOverride,
+    cragMinAvgScoreOverride,
+    setCragMinAvgScoreOverride,
+    forceGranularDebate,
+    setForceGranularDebate,
+    maxDivergenceHilRounds,
+    setMaxDivergenceHilRounds,
     formattingOptions,
     setFormattingOptions,
     chatMode,
@@ -107,9 +200,17 @@ export default function MinutaPage() {
     setSelectedModels,
     setShowMultiModelComparator,
     webSearch,
+    webSearchModel,
+    setWebSearchModel,
     denseResearch,
+    deepResearchProvider,
+    setDeepResearchProvider,
+    deepResearchModel,
+    setDeepResearchModel,
     reasoningLevel,
     setReasoningLevel,
+    researchPolicy,
+    setResearchPolicy,
     agentStrategistModel,
     setAgentStrategistModel,
     agentDrafterModels,
@@ -118,23 +219,94 @@ export default function MinutaPage() {
     setAgentReviewerModels,
     chatPersonality,
     setChatPersonality,
+    cragGate,
+    creativityMode,
+    setCreativityMode,
+    temperatureOverride,
+    setTemperatureOverride,
   } = useChatStore();
 
-  const { state: canvasState, showCanvas, setActiveTab } = useCanvasStore();
+  const { state: canvasState, showCanvas, hideCanvas, setState: setCanvasState, setActiveTab } = useCanvasStore();
   const { items: contextItems } = useContextStore();
 
   const [showFontes, setShowFontes] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showAdvancedTuning, setShowAdvancedTuning] = useState(false);
   const [mode, setMode] = useState<GenerationMode>('multi-agent');
-  const [creativityMode, setCreativityMode] = useState<'rigoroso' | 'padrao' | 'criativo'>('padrao');
   const [chatPanelWidth, setChatPanelWidth] = useState(45);
   const [isResizing, setIsResizing] = useState(false);
   const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [pendingFullscreenTarget, setPendingFullscreenTarget] = useState<'chat' | 'canvas' | 'split' | null>(null);
 
   const MAX_ROLE_MODELS = 3;
   const DEFAULT_COMPARE_MODELS = ['gpt-5.2', 'claude-4.5-sonnet', 'gemini-3-flash'];
   const agentModelOptions = listModels({ forAgents: true });
   const baseModelOptions = listModels({ forJuridico: true });
+  const getModelLabel = (modelId: string) => {
+    const found = agentModelOptions.find((m) => m.id === modelId)
+      || baseModelOptions.find((m) => m.id === modelId);
+    return found?.label || modelId;
+  };
+  const committeeModelIds = useMemo(
+    () => Array.from(new Set([...(agentDrafterModels || []), ...(agentReviewerModels || [])])),
+    [agentDrafterModels, agentReviewerModels]
+  );
+  const webSearchModelOptions = useMemo(
+    () =>
+      agentModelOptions.filter((m) =>
+        ['openai', 'anthropic', 'google', 'perplexity'].includes(m.provider)
+        && !m.capabilities.includes('deep_research')
+      ),
+    [agentModelOptions]
+  );
+  const expandScopeMode =
+    qualityRagRetryExpandScope === null ? 'auto' : qualityRagRetryExpandScope ? 'on' : 'off';
+  const hilSectionPolicyMode =
+    hilSectionPolicyOverride === null ? 'auto' : hilSectionPolicyOverride;
+  const hilFinalRequiredMode =
+    hilFinalRequiredOverride === null ? 'auto' : hilFinalRequiredOverride ? 'on' : 'off';
+  const canExpandScope = auditMode !== 'sei_only';
+  const selectedProfileSpec =
+    QUALITY_PROFILE_SPECS.find((profile) => profile.id === qualityProfile) ?? QUALITY_PROFILE_SPECS[1];
+  const effectiveHilSectionPolicy = hilSectionPolicyOverride ?? selectedProfileSpec.hilSectionPolicy;
+  const hasQualityOverrides =
+    qualityTargetSectionScore != null
+    || qualityTargetFinalScore != null
+    || qualityMaxRounds != null
+    || qualityMaxFinalReviewLoops != null
+    || hilSectionPolicyOverride != null
+    || hilFinalRequiredOverride != null
+    || maxDivergenceHilRounds != null
+    || forceGranularDebate;
+  const qualityProfileMeta = hasQualityOverrides
+    ? 'Valores ajustados pelos overrides abaixo.'
+    : undefined;
+  const buildProfileDescription = (profile: QualityProfileSpec) => {
+    if (!hasQualityOverrides) {
+      return profile.description;
+    }
+    const targetSectionScore = qualityTargetSectionScore ?? profile.targetSectionScore;
+    const targetFinalScore = qualityTargetFinalScore ?? profile.targetFinalScore;
+    const maxRounds = qualityMaxRounds ?? profile.maxRounds;
+    const hilPolicy = hilSectionPolicyOverride ?? profile.hilSectionPolicy;
+    const hilFinalRequired = hilFinalRequiredOverride ?? profile.hilFinalRequired;
+    const extras: string[] = [];
+    if (qualityMaxFinalReviewLoops != null) extras.push(`refino final: ${Math.floor(qualityMaxFinalReviewLoops)}`);
+    if (maxDivergenceHilRounds != null) extras.push(`divergência HIL: ${Math.floor(maxDivergenceHilRounds)}`);
+    if (forceGranularDebate) extras.push('granular: on');
+    const sectionLabel =
+      hilPolicy === 'none'
+        ? 'meta seção: inativa'
+        : `meta seção ≥ ${formatScoreLabel(targetSectionScore)}`;
+
+    const base = `${formatRoundsLabel(maxRounds)} • ${sectionLabel}, final ≥ ${formatScoreLabel(targetFinalScore)} • ${formatHilPolicyLabel(hilPolicy, hilFinalRequired)}`;
+    return extras.length > 0 ? `${base} • ${extras.join(' • ')}` : base;
+  };
+  const sectionScoreMeta =
+    effectiveHilSectionPolicy === 'none' ? 'Sem efeito no perfil atual.' : undefined;
+  const sectionScoreDescription =
+    'Meta minima para cada secao antes de aceitar a saida. So aplica quando HIL por secao esta ativo; sobrescreve o perfil quando definida.';
 
   const parseOptionalNumber = (value: string) => {
     const n = Number(String(value).replace(',', '.'));
@@ -146,7 +318,31 @@ export default function MinutaPage() {
   };
   const clampRounds = (value: number | null) => {
     if (value === null) return null;
-    return Math.max(1, Math.min(10, Math.floor(value)));
+    return Math.max(1, Math.min(6, Math.floor(value)));
+  };
+  const clampStyleRounds = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(0, Math.min(6, Math.floor(value)));
+  };
+  const clampRetry = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(0, Math.min(5, Math.floor(value)));
+  };
+  const clampCragScore = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(0, Math.min(1, value));
+  };
+  const clampTemperature = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(0, Math.min(1, value));
+  };
+  const clampDivergenceHilRounds = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(1, Math.min(5, Math.floor(value)));
+  };
+  const clampRecursionLimit = (value: number | null) => {
+    if (value === null) return null;
+    return Math.max(20, Math.min(500, Math.floor(value)));
   };
 
   const [criticalChecklistText, setCriticalChecklistText] = useState('');
@@ -189,6 +385,12 @@ export default function MinutaPage() {
     setUseMultiAgent(mode === 'multi-agent');
   }, [mode, setUseMultiAgent]);
 
+  useEffect(() => {
+    if (mode !== 'multi-agent') return;
+    if (agentStrategistModel === selectedModel) return;
+    setAgentStrategistModel(selectedModel);
+  }, [mode, agentStrategistModel, selectedModel, setAgentStrategistModel]);
+
   // Sync context items to ChatStore
   useEffect(() => {
     setContext(contextItems);
@@ -198,6 +400,15 @@ export default function MinutaPage() {
   useEffect(() => {
     showCanvas();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Track browser fullscreen state (ESC exits fullscreen)
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
+    onChange();
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
   useEffect(() => {
@@ -388,6 +599,109 @@ export default function MinutaPage() {
     setActiveTab('audit');
   };
 
+  // Layout mode: chat-only | split | canvas-only
+  const layoutMode: 'chat' | 'split' | 'canvas' =
+    canvasState === 'hidden' ? 'chat' : canvasState === 'expanded' ? 'canvas' : 'split';
+  const chatActive = layoutMode !== 'canvas';
+  const canvasActive = layoutMode !== 'chat';
+
+  const fullscreenApi = useMemo(() => {
+    if (typeof document === 'undefined') return { supported: false as const };
+    const supported = typeof document.documentElement?.requestFullscreen === 'function';
+    return { supported };
+  }, []);
+
+  const enterFullscreen = async (target?: HTMLElement | null) => {
+    if (!fullscreenApi.supported) return;
+    try {
+      const el = target || pageRootRef.current || document.documentElement;
+      // @ts-ignore
+      await el.requestFullscreen?.();
+    } catch {
+      // ignore
+    }
+  };
+
+  const exitFullscreen = async () => {
+    if (typeof document === 'undefined') return;
+    if (!document.fullscreenElement) return;
+    try {
+      await document.exitFullscreen();
+    } catch {
+      // ignore
+    }
+  };
+
+  // Perform fullscreen requests only after the relevant panel is mounted.
+  useEffect(() => {
+    if (!pendingFullscreenTarget) return;
+    if (typeof document === 'undefined') return;
+
+    const targetEl =
+      pendingFullscreenTarget === 'chat'
+        ? chatPanelRef.current
+        : pendingFullscreenTarget === 'canvas'
+          ? canvasPanelRef.current
+          : pageRootRef.current;
+
+    if (!targetEl) return;
+
+    (async () => {
+      // If currently fullscreen on a different element, exit first (more compatible across browsers).
+      if (document.fullscreenElement && document.fullscreenElement !== targetEl) {
+        await exitFullscreen();
+      }
+      await enterFullscreen(targetEl);
+      setPendingFullscreenTarget(null);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingFullscreenTarget, layoutMode]);
+
+  const toggleChatMode = () => {
+    // Chat button toggles between chat-only and split (sem forçar tela cheia)
+    if (layoutMode === 'chat') {
+      showCanvas();
+      setCanvasState('normal');
+      return;
+    }
+    hideCanvas();
+  };
+
+  const toggleCanvasMode = () => {
+    // Canvas button toggles between canvas-only and split (sem forçar tela cheia)
+    if (layoutMode === 'canvas') {
+      showCanvas();
+      setCanvasState('normal');
+      return;
+    }
+    showCanvas();
+    setCanvasState('expanded');
+  };
+
+  const layoutLabel =
+    layoutMode === 'chat'
+      ? 'Chat'
+      : layoutMode === 'canvas'
+        ? 'Canvas'
+        : 'Tela dividida';
+
+  const handleToggleFullscreen = () => {
+    if (!fullscreenApi.supported) return;
+    if (isFullscreen) {
+      void exitFullscreen();
+      return;
+    }
+    if (layoutMode === 'chat') {
+      setPendingFullscreenTarget('chat');
+      return;
+    }
+    if (layoutMode === 'canvas') {
+      setPendingFullscreenTarget('canvas');
+      return;
+    }
+    setPendingFullscreenTarget('split');
+  };
+
   // Sync checklist textareas from store (once)
   useEffect(() => {
     const criticalText = (documentChecklist || [])
@@ -405,7 +719,7 @@ export default function MinutaPage() {
   }, [documentChecklist]);
 
   return (
-    <div className="flex h-full flex-1 min-h-0 flex-col gap-3">
+    <div ref={pageRootRef} className="flex h-full flex-1 min-h-0 flex-col gap-3">
       {/* Compact Toolbar */}
       <div className="flex flex-none flex-wrap items-center justify-between gap-2 rounded-xl bg-white/90 border border-slate-200/60 px-4 py-2.5 shadow-sm">
         {/* Left: Mode controls */}
@@ -419,7 +733,10 @@ export default function MinutaPage() {
               icon={<Zap className="h-3.5 w-3.5" />}
             >
               <button
-                onClick={() => setMode('individual')}
+                onClick={() => {
+                  setMode('individual');
+                  hideCanvas();
+                }}
                 className={cn(
                   "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
                   mode === 'individual'
@@ -559,11 +876,57 @@ export default function MinutaPage() {
             Auditoria
           </Button>
 
+          <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 px-2 text-[11px]", chatActive && "bg-white shadow-sm")}
+              onClick={toggleChatMode}
+              title={
+                layoutMode === 'chat'
+                  ? "Voltar ao modo dividido (Chat + Canvas)"
+                  : "Foco no Chat (oculta o Canvas)"
+              }
+            >
+              Chat
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className={cn("h-8 px-2 text-[11px]", canvasActive && "bg-white shadow-sm")}
+              onClick={toggleCanvasMode}
+              title={
+                layoutMode === 'canvas'
+                  ? "Voltar ao modo dividido (Chat + Canvas)"
+                  : "Foco no Canvas (oculta o Chat)"
+              }
+            >
+              Canvas
+            </Button>
+          </div>
+
+          {fullscreenApi.supported && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 px-2 text-[11px]"
+              onClick={handleToggleFullscreen}
+              title={isFullscreen ? "Sair da tela cheia" : `Tela cheia (${layoutLabel})`}
+            >
+              {isFullscreen ? <Minimize2 className="mr-1 h-3.5 w-3.5" /> : <Maximize2 className="mr-1 h-3.5 w-3.5" />}
+              {isFullscreen ? "Sair" : "Tela cheia"}
+            </Button>
+          )}
+
           <Button
             variant="ghost"
             size="icon"
             className={cn("h-8 w-8 rounded-lg", showSettings && "bg-slate-100")}
             onClick={() => setShowSettings(!showSettings)}
+            data-testid="settings-toggle"
           >
             <Settings2 className="h-4 w-4" />
           </Button>
@@ -573,6 +936,7 @@ export default function MinutaPage() {
             size="sm"
             className="h-8 rounded-lg text-xs"
             onClick={handleStartNewMinuta}
+            data-testid="minuta-new-chat"
           >
             <FileText className="mr-1.5 h-3.5 w-3.5" />
             Novo chat
@@ -592,7 +956,10 @@ export default function MinutaPage() {
 
       {/* Expanded Settings Panel */}
       {showSettings && (
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 rounded-xl border border-indigo-200/60 bg-indigo-50/30 px-4 py-3 animate-in slide-in-from-top-1 duration-200">
+        <div
+          className="grid grid-cols-2 lg:grid-cols-4 gap-4 rounded-xl border border-indigo-200/60 bg-indigo-50/30 px-4 py-3 animate-in slide-in-from-top-1 duration-200 max-h-[60vh] overflow-y-auto scrollbar-thin scrollbar-thumb-indigo-200"
+          data-testid="settings-panel"
+        >
           {/* Document Type */}
           <div className="space-y-1.5">
             <RichTooltip
@@ -606,6 +973,7 @@ export default function MinutaPage() {
               className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5 focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-400 transition"
               value={useChatStore.getState().documentType || 'PETICAO_INICIAL'}
               onChange={(e) => useChatStore.getState().setDocumentType(e.target.value)}
+              data-testid="document-type-select"
             >
               <option value="PETICAO_INICIAL">Petição Inicial</option>
               <option value="CONTESTACAO">Contestação</option>
@@ -652,7 +1020,7 @@ export default function MinutaPage() {
           <div className="space-y-1.5">
             <RichTooltip
               title="Criatividade (Temperatura)"
-              description="Define o equilibrio entre fidelidade e fluidez no texto."
+              description="Escolha manualmente a temperatura para equilibrar rigor e fluidez."
               badge="Estilo"
             >
               <label className="text-[10px] font-semibold uppercase text-indigo-700/70">Criatividade</label>
@@ -662,17 +1030,17 @@ export default function MinutaPage() {
                 {
                   id: 'rigoroso',
                   label: 'Rigoroso',
-                  description: 'Segue estritamente fatos e modelos. Zero alucinação. Ideal para uso final.',
+                  description: 'Temperatura 0.1 • segue estritamente fatos e modelos. Ideal para uso final.',
                 },
                 {
                   id: 'padrao',
                   label: 'Padrão',
-                  description: 'Equilibrio entre precisao juridica e fluidez.',
+                  description: 'Temperatura 0.3 • equilibrio entre precisao juridica e fluidez.',
                 },
                 {
                   id: 'criativo',
                   label: 'Criativo',
-                  description: 'Maior fluidez na escrita. Util para brainstorms ou rascunhos iniciais.',
+                  description: 'Temperatura 0.6 • maior fluidez na escrita. Util para brainstorms ou rascunhos iniciais.',
                 },
               ] as const).map((option) => (
                 <RichTooltip
@@ -681,13 +1049,16 @@ export default function MinutaPage() {
                   description={option.description}
                   badge="Temperatura"
                 >
-                  <button
-                    type="button"
-                    onClick={() => setCreativityMode(option.id)}
-                    className={cn(
-                      "h-8 flex-1 rounded-md text-xs font-bold transition-all",
-                      creativityMode === option.id
-                        ? "bg-rose-500 text-white"
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      setCreativityMode(option.id);
+	                      setTemperatureOverride(null);
+	                    }}
+	                    className={cn(
+	                      "h-8 flex-1 rounded-md text-xs font-bold transition-all",
+	                      creativityMode === option.id
+	                        ? "bg-rose-500 text-white"
                         : "bg-white text-rose-300 border border-rose-200/60 hover:bg-rose-50"
                     )}
                   >
@@ -838,14 +1209,25 @@ export default function MinutaPage() {
               <label className="text-[10px] font-semibold uppercase text-indigo-700/70 flex items-center gap-2">
                 <Users className="h-3 w-3" /> Modelos do Comitê de Agentes
               </label>
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-500">
+                <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                  Juiz: {getModelLabel(selectedModel)}
+                </span>
+                <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                  Estrategista: {getModelLabel(agentStrategistModel)}
+                </span>
+                <span className="rounded-full border border-slate-200 bg-white px-2 py-0.5">
+                  Comitê: {committeeModelIds.length} modelo{committeeModelIds.length === 1 ? '' : 's'}
+                </span>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* Strategist */}
                 <div className="space-y-1">
                   <span className="text-[10px] text-slate-500 font-medium">Estrategista (Planejamento)</span>
                   <select
                     className="w-full text-[10px] h-7 rounded border border-indigo-200 bg-white"
-                    value={agentStrategistModel}
-                    onChange={(e) => setAgentStrategistModel(e.target.value)}
+                    value={selectedModel}
+                    onChange={(e) => setSelectedModel(e.target.value)}
                   >
                     {agentModelOptions.map((model) => (
                       <option key={model.id} value={model.id}>
@@ -919,6 +1301,44 @@ export default function MinutaPage() {
             >
               <label className="text-[10px] font-semibold uppercase text-indigo-700/70">Pesquisa</label>
             </RichTooltip>
+            <div className="flex flex-wrap items-center gap-1">
+              <RichTooltip
+                title="Decisão de pesquisa"
+                description="Auto permite que a IA ative Web/Deep quando necessário. Manual respeita apenas os toggles."
+                badge="Modo"
+              >
+                <button
+                  type="button"
+                  onClick={() => setResearchPolicy('auto')}
+                  className={cn(
+                    "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                    researchPolicy === 'auto'
+                      ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                      : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                  )}
+                >
+                  Auto
+                </button>
+              </RichTooltip>
+              <RichTooltip
+                title="Decisão de pesquisa"
+                description="Manual respeita apenas os toggles de Web/Deep."
+                badge="Modo"
+              >
+                <button
+                  type="button"
+                  onClick={() => setResearchPolicy('force')}
+                  className={cn(
+                    "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                    researchPolicy === 'force'
+                      ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                      : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                  )}
+                >
+                  Manual
+                </button>
+              </RichTooltip>
+            </div>
             <div className="flex flex-col gap-1">
               <RichTooltip
                 title="Web Search"
@@ -951,6 +1371,107 @@ export default function MinutaPage() {
                 </label>
               </RichTooltip>
             </div>
+            <div className={cn("mt-2 space-y-1", !denseResearch && "opacity-60")}>
+              <RichTooltip
+                title="Backend do Deep Research"
+                description="Escolhe qual provedor executa o Deep Research no fluxo LangGraph. Recomendado: Google."
+                badge="LangGraph"
+              >
+                <div className="text-[10px] font-semibold uppercase text-slate-500">
+                  Backend do Deep Research
+                </div>
+              </RichTooltip>
+              <div className="flex flex-wrap gap-1">
+                <RichTooltip
+                  title="Auto"
+                  description="Usa o melhor disponível (com fallback)."
+                  badge="Recomendado"
+                >
+                  <button
+                    type="button"
+                    disabled={!denseResearch}
+                    onClick={() => setDeepResearchProvider('auto')}
+                    className={cn(
+                      "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                      deepResearchProvider === 'auto'
+                        ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                        : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50",
+                      !denseResearch && "pointer-events-none"
+                    )}
+                  >
+                    Auto
+                  </button>
+                </RichTooltip>
+                <RichTooltip
+                  title="Google"
+                  description="Usa o agente Deep Research do Gemini (mais adequado para atuar como agente)."
+                  badge="Recomendado"
+                >
+                  <button
+                    type="button"
+                    disabled={!denseResearch}
+                    onClick={() => setDeepResearchProvider('google')}
+                    className={cn(
+                      "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                      deepResearchProvider === 'google'
+                        ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                        : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50",
+                      !denseResearch && "pointer-events-none"
+                    )}
+                  >
+                    Google
+                  </button>
+                </RichTooltip>
+                <RichTooltip
+                  title="Perplexity"
+                  description="Não recomendado para atuar como agente no LangGraph (use apenas se você souber o trade-off)."
+                  badge="Não recomendado"
+                >
+                  <button
+                    type="button"
+                    disabled={!denseResearch}
+                    onClick={() => setDeepResearchProvider('perplexity')}
+                    className={cn(
+                      "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                      deepResearchProvider === 'perplexity'
+                        ? "border-rose-300 bg-rose-500/15 text-rose-700"
+                        : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50",
+                      !denseResearch && "pointer-events-none"
+                    )}
+                  >
+                    Perplexity
+                  </button>
+                </RichTooltip>
+              </div>
+
+              {deepResearchProvider === 'perplexity' && (
+                <div className={cn("space-y-1", !denseResearch && "pointer-events-none")}>
+                  <div className="text-[10px] text-slate-500 font-medium">
+                    Modelo (Perplexity Deep Research)
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    <button
+                      type="button"
+                      disabled={!denseResearch}
+                      onClick={() => setDeepResearchModel('sonar-deep-research')}
+                      className={cn(
+                        "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                        deepResearchModel === 'sonar-deep-research'
+                          ? "border-rose-300 bg-rose-500/15 text-rose-700"
+                          : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50",
+                        !denseResearch && "pointer-events-none"
+                      )}
+                      title="sonar-deep-research"
+                    >
+                      Sonar Deep Research
+                    </button>
+                  </div>
+                  <div className="text-[10px] text-rose-700/80">
+                    Dica: para atuar como agente, prefira <span className="font-semibold">Google</span>.
+                  </div>
+                </div>
+              )}
+            </div>
             <div className={cn("mt-2 space-y-1", !webSearch && "opacity-60")}>
               <RichTooltip
                 title="Modo de busca"
@@ -964,7 +1485,8 @@ export default function MinutaPage() {
                   {
                     id: 'shared',
                     label: 'Compartilhada',
-                    description: 'Uma unica busca alimenta todos os modelos. Mais rapida e consistente.',
+                    description:
+                      'Uma unica busca alimenta todos os modelos. Usa Perplexity Search API quando disponível (com fallback).',
                   },
                   {
                     id: 'native',
@@ -994,6 +1516,35 @@ export default function MinutaPage() {
                     </button>
                   </RichTooltip>
                 ))}
+              </div>
+              <div className="mt-2 space-y-1">
+                <RichTooltip
+                  title="Modelo de pesquisa (LangGraph)"
+                  description="Escolhe qual modelo executa o passo de Web Search (nativo) para gerar um contexto compartilhado no LangGraph. Funciona quando Modo de busca = Nativa por modelo."
+                  badge="Compartilhado"
+                >
+                  <div className="text-[10px] font-semibold uppercase text-slate-500">
+                    Modelo de pesquisa (LangGraph)
+                  </div>
+                </RichTooltip>
+                <select
+                  className="w-full text-[10px] h-8 rounded border border-slate-200 bg-white px-2"
+                  value={webSearchModel}
+                  disabled={!webSearch || searchMode !== 'native'}
+                  onChange={(e) => setWebSearchModel(e.target.value)}
+                >
+                  <option value="auto">Auto (usar Juiz)</option>
+                  {webSearchModelOptions.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.label}
+                    </option>
+                  ))}
+                </select>
+                {webSearch && searchMode !== 'native' && (
+                  <div className="text-[10px] text-slate-500">
+                    Disponível apenas em <span className="font-semibold">Nativa por modelo</span>.
+                  </div>
+                )}
               </div>
               <RichTooltip
                 title="Multi-query"
@@ -1146,12 +1697,32 @@ export default function MinutaPage() {
                       className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500/20 h-3.5 w-3.5"
                       checked={hilOutlineEnabled}
                       onChange={(e) => setHilOutlineEnabled(e.target.checked)}
+                      disabled={autoApproveHil}
                     />
                     <span className="text-slate-600">Aprovar outline (HIL — Minuta)</span>
                   </label>
                 </RichTooltip>
                 <p className="text-[10px] text-slate-500">
                   No comitê de agentes, pausa para você aprovar/editar a outline antes da redação.
+                </p>
+                <RichTooltip
+                  title="Forcar nunca interromper"
+                  description="Quando ativo, o fluxo nao abre modais de revisao (HIL), mesmo que o quality gate detecte risco. O sistema segue automaticamente e pode entregar algo com problemas."
+                  badge="Risco"
+                  meta="Equivale a auto-aprovar HIL"
+                >
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500/20 h-3.5 w-3.5"
+                      checked={autoApproveHil}
+                      onChange={(e) => setAutoApproveHil(e.target.checked)}
+                    />
+                    <span className="text-slate-600">Forçar nunca interromper (auto‑aprovar revisões)</span>
+                  </label>
+                </RichTooltip>
+                <p className="text-[10px] text-slate-500">
+                  Se ativado, overrides de HIL continuam sendo calculados, mas não interrompem o fluxo.
                 </p>
               </div>
             )}
@@ -1164,35 +1735,20 @@ export default function MinutaPage() {
               <div className="space-y-1.5 col-span-2">
                 <RichTooltip
                   title="Perfil de qualidade"
-                  description="Define rodadas, metas de nota e politica de HIL para a minuta."
+                  description="Define valores base de rodadas, metas de nota e politica de HIL para a minuta."
                   badge="Minuta"
                 >
                   <label className="text-[10px] font-semibold uppercase text-indigo-700/70">Perfil de qualidade</label>
                 </RichTooltip>
                 <div className="flex flex-wrap gap-1">
-                  {([
-                    {
-                      id: 'rapido',
-                      label: 'Rápido',
-                      description: '1 rodada • meta seção ≥ 8.5, final ≥ 9.0 • HIL só no final.',
-                    },
-                    {
-                      id: 'padrao',
-                      label: 'Padrão',
-                      description: '2 rodadas • meta seção ≥ 9.0, final ≥ 9.4 • HIL por seção opcional + final.',
-                    },
-                    {
-                      id: 'rigoroso',
-                      label: 'Rigoroso',
-                      description: '4 rodadas • meta seção ≥ 9.4, final ≥ 9.8 • HIL por seção + final.',
-                    },
-                    {
-                      id: 'auditoria',
-                      label: 'Auditoria',
-                      description: '6 rodadas • meta seção ≥ 9.6, final = 10.0 • HIL por seção obrigatório + final obrigatório.',
-                    },
-                  ] as const).map((p) => (
-                    <RichTooltip key={p.id} title={p.label} description={p.description} badge="Perfil">
+                  {QUALITY_PROFILE_SPECS.map((p) => (
+                    <RichTooltip
+                      key={p.id}
+                      title={p.label}
+                      description={buildProfileDescription(p)}
+                      badge="Perfil"
+                      meta={qualityProfileMeta}
+                    >
                       <button
                         type="button"
                         onClick={() => setQualityProfile(p.id)}
@@ -1208,30 +1764,36 @@ export default function MinutaPage() {
                     </RichTooltip>
                   ))}
                 </div>
-                <div className="grid grid-cols-3 gap-2 pt-2">
-                  <div className="space-y-1">
-                    <RichTooltip
-                      title="Nota da seção"
-                      description="Meta minima para cada secao antes de aceitar a saida. Sobrescreve o perfil quando definida."
-                      badge="Override"
-                    >
-                      <div className="text-[10px] font-semibold uppercase text-slate-500">Nota seção</div>
-                    </RichTooltip>
-                    <input
-                      type="number"
-                      min={0}
-                      max={10}
-                      step={0.1}
-                      className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
-                      placeholder="Ex.: 9.2"
-                      value={qualityTargetSectionScore ?? ''}
-                      onChange={(e) => setQualityTargetSectionScore(clampScore(parseOptionalNumber(e.target.value)))}
-                    />
-                  </div>
+                <div className={cn(
+                  "grid gap-2 pt-2",
+                  effectiveHilSectionPolicy === 'none' ? "grid-cols-2" : "grid-cols-3"
+                )}>
+                  {effectiveHilSectionPolicy !== 'none' && (
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="Nota da seção"
+                        description={sectionScoreDescription}
+                        badge="Override"
+                        meta={sectionScoreMeta}
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Nota seção</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={10}
+                        step={0.1}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Ex.: 9.2"
+                        value={qualityTargetSectionScore ?? ''}
+                        onChange={(e) => setQualityTargetSectionScore(clampScore(parseOptionalNumber(e.target.value)))}
+                      />
+                    </div>
+                  )}
                   <div className="space-y-1">
                     <RichTooltip
                       title="Nota final"
-                      description="Meta minima para a nota global do documento. Sobrescreve o perfil quando definida."
+                      description="Valor padrão: segue o perfil selecionado. Sobrescreve quando definido."
                       badge="Override"
                     >
                       <div className="text-[10px] font-semibold uppercase text-slate-500">Nota final</div>
@@ -1249,8 +1811,8 @@ export default function MinutaPage() {
                   </div>
                   <div className="space-y-1">
                     <RichTooltip
-                      title="Rodadas"
-                      description="Limita o numero de iteracoes de melhoria. Sobrescreve o perfil quando definido."
+                      title="Rodadas do comitê"
+                      description="Valor padrão (comitê R2/R3): Rápido 1, Padrão 2, Rigoroso 4, Auditoria 6. Sobrescreve o perfil (máx. 6)."
                       badge="Override"
                     >
                       <div className="text-[10px] font-semibold uppercase text-slate-500">Rodadas</div>
@@ -1258,13 +1820,103 @@ export default function MinutaPage() {
                     <input
                       type="number"
                       min={1}
-                      max={10}
+                      max={6}
                       step={1}
                       className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
                       placeholder="Ex.: 3"
                       value={qualityMaxRounds ?? ''}
                       onChange={(e) => setQualityMaxRounds(clampRounds(parseOptionalNumber(e.target.value)))}
                     />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-3 pt-2">
+                  <div className="space-y-1">
+                    <RichTooltip
+                      title="HIL por secao"
+                      description="Sobrescreve a politica do perfil para revisao humana por secao. Se 'Forcar nunca interromper' estiver ativo, nao havera pausas (auto-aprovacao)."
+                      badge="Override"
+                      meta={qualityProfileMeta}
+                    >
+                      <div className="text-[10px] font-semibold uppercase text-slate-500">HIL por secao</div>
+                    </RichTooltip>
+                    <div className="flex flex-wrap gap-1">
+                      {([
+                        { id: 'auto', label: 'Perfil' },
+                        { id: 'none', label: 'Desligado' },
+                        { id: 'optional', label: 'Opcional' },
+                        { id: 'required', label: 'Obrigatorio' },
+                      ] as const).map((opt) => (
+                        <RichTooltip
+                          key={opt.id}
+                          title={opt.label}
+                          description="Checkpoint de secao: pode pausar para aprovar/editar cada secao selecionada."
+                          badge="HIL"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (opt.id === 'auto') setHilSectionPolicyOverride(null);
+                              if (opt.id === 'none') setHilSectionPolicyOverride('none');
+                              if (opt.id === 'optional') setHilSectionPolicyOverride('optional');
+                              if (opt.id === 'required') setHilSectionPolicyOverride('required');
+                            }}
+                            className={cn(
+                              "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                              hilSectionPolicyMode === opt.id
+                                ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                                : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                            )}
+                          >
+                            {opt.label}
+                          </button>
+                        </RichTooltip>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <RichTooltip
+                      title="HIL final"
+                      description="Sobrescreve se ha aprovacao humana no fim. Mesmo com 'Nao exigir', o quality gate pode forcar revisao se detectar risco; para nunca pausar, use 'Forcar nunca interromper'."
+                      badge="Override"
+                      meta={qualityProfileMeta}
+                    >
+                      <div className="text-[10px] font-semibold uppercase text-slate-500">HIL final</div>
+                    </RichTooltip>
+                    <div className="flex flex-wrap gap-1">
+                      {([
+                        { id: 'auto', label: 'Perfil' },
+                        { id: 'on', label: 'Exigir' },
+                        { id: 'off', label: 'Nao exigir' },
+                      ] as const).map((opt) => (
+                        <RichTooltip
+                          key={opt.id}
+                          title={opt.label}
+                          description={
+                            opt.id === 'off'
+                              ? "Desliga o checkpoint final do perfil. Observacao: quality gates ainda podem exigir revisao se detectarem risco."
+                              : "Define se a entrega final exige aprovacao humana."
+                          }
+                          badge="HIL"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (opt.id === 'auto') setHilFinalRequiredOverride(null);
+                              if (opt.id === 'on') setHilFinalRequiredOverride(true);
+                              if (opt.id === 'off') setHilFinalRequiredOverride(false);
+                            }}
+                            className={cn(
+                              "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                              hilFinalRequiredMode === opt.id
+                                ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                                : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+                            )}
+                          >
+                            {opt.label}
+                          </button>
+                        </RichTooltip>
+                      ))}
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1368,6 +2020,284 @@ export default function MinutaPage() {
                 </div>
               </div>
 
+              {/* Ajustes avançados */}
+              <div className="space-y-1.5 col-span-full">
+                <div className="flex items-center justify-between gap-2">
+                  <RichTooltip
+                    title="Ajustes avançados"
+                    description="Controles finos para casos sensiveis. Deixe em 'Auto (perfil)' se nao souber."
+                    badge="Opcional"
+                  >
+                    <label className="text-[10px] font-semibold uppercase text-indigo-700/70">Ajustes avançados</label>
+                  </RichTooltip>
+                  <label className="flex items-center gap-2 text-xs cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500/20 h-3.5 w-3.5"
+                      checked={showAdvancedTuning}
+                      onChange={(e) => setShowAdvancedTuning(e.target.checked)}
+                    />
+                    <span className="text-slate-600">Mostrar detalhes</span>
+                  </label>
+                </div>
+                <p className="text-[10px] text-slate-500">
+                  Use apenas se precisar de mais insistencia na pesquisa ou de ajustes finos de estilo.
+                </p>
+	                {showAdvancedTuning && (
+	                  <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+	                    <div className="space-y-1">
+	                      <RichTooltip
+	                        title="Refinamentos finais (pós-comitê)"
+	                        description="Quantas passagens finais de polimento o workflow faz antes do gate final. Mais alto = mais qualidade, mas mais lento/caro."
+	                        badge="Final"
+	                        meta="Auto segue o perfil (limitado pelo plano)"
+	                      >
+	                        <div className="text-[10px] font-semibold uppercase text-slate-500">Refino final</div>
+	                      </RichTooltip>
+	                      <input
+	                        type="number"
+	                        min={0}
+	                        max={6}
+	                        step={1}
+	                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+	                        placeholder="Auto (perfil)"
+	                        value={qualityMaxFinalReviewLoops ?? ''}
+	                        onChange={(e) =>
+	                          setQualityMaxFinalReviewLoops(clampStyleRounds(parseOptionalNumber(e.target.value)))
+	                        }
+	                      />
+	                    </div>
+	                    <div className="space-y-1">
+	                      <RichTooltip
+	                        title="Divergência (HIL)"
+	                        description="Limita quantas vezes você pode iterar na resolução de divergências via HIL antes do fluxo encerrar/seguir."
+	                        badge="HIL"
+	                        meta="1–5 (recomendado: 2)"
+	                      >
+	                        <div className="text-[10px] font-semibold uppercase text-slate-500">Divergência HIL</div>
+	                      </RichTooltip>
+	                      <input
+	                        type="number"
+	                        min={1}
+	                        max={5}
+	                        step={1}
+	                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+	                        placeholder="Auto (2)"
+	                        value={maxDivergenceHilRounds ?? ''}
+	                        onChange={(e) =>
+	                          setMaxDivergenceHilRounds(clampDivergenceHilRounds(parseOptionalNumber(e.target.value)))
+	                        }
+	                      />
+	                    </div>
+	                    <div className="space-y-1">
+	                      <RichTooltip
+	                        title="Temperatura (custom)"
+	                        description="Sobrescreve a criatividade (preset) por um valor contínuo 0.0–1.0. Deixe vazio para usar o preset."
+	                        badge="Estilo"
+	                        meta="0.1–0.3 conservador; 0.4–0.7 mais variado"
+	                      >
+	                        <div className="text-[10px] font-semibold uppercase text-slate-500">Temperatura</div>
+	                      </RichTooltip>
+	                      <input
+	                        type="number"
+	                        min={0}
+	                        max={1}
+	                        step={0.05}
+	                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+	                        placeholder="Auto (preset)"
+	                        value={temperatureOverride ?? ''}
+	                        onChange={(e) => setTemperatureOverride(clampTemperature(parseOptionalNumber(e.target.value)))}
+	                      />
+	                    </div>
+	                    <div className="space-y-1">
+	                      <RichTooltip
+	                        title="Debate granular"
+	                        description="Força o subgrafo granular em todas as seções. Útil para casos sensíveis/debug; tende a aumentar bastante a latência."
+	                        badge="Rigor"
+	                      >
+	                        <label className="flex items-center gap-2 text-xs cursor-pointer h-8">
+	                          <input
+	                            type="checkbox"
+	                            className="rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500/20 h-3.5 w-3.5"
+	                            checked={forceGranularDebate}
+	                            onChange={(e) => setForceGranularDebate(e.target.checked)}
+	                          />
+	                          <span className="text-slate-600">Forçar granular</span>
+	                        </label>
+	                      </RichTooltip>
+	                    </div>
+	                    <div className="space-y-1">
+	                      <RichTooltip
+	                        title="Refino de estilo"
+	                        description="Quantas vezes o sistema ajusta o tom (linguagem/consistencia) quando a nota de estilo fica baixa."
+	                        badge="Estilo"
+                        meta="0 = nao refinar"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Refino de estilo</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={6}
+                        step={1}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={qualityStyleRefineMaxRounds ?? ''}
+                        onChange={(e) => setQualityStyleRefineMaxRounds(clampStyleRounds(parseOptionalNumber(e.target.value)))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="Tentativas de pesquisa"
+                        description="Se faltarem citacoes/jurisprudencia, quantas vezes tenta pesquisar de novo."
+                        badge="Pesquisa"
+                        meta="0 = nao tenta"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Tentativas de pesquisa</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={1}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={qualityMaxResearchVerifierAttempts ?? ''}
+                        onChange={(e) => setQualityMaxResearchVerifierAttempts(clampRetry(parseOptionalNumber(e.target.value)))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="Retentativas no RAG"
+                        description="Quando a qualidade das fontes locais estiver baixa, repete a busca com parametros mais agressivos."
+                        badge="RAG"
+                        meta="0 = nao repete"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Retentativas no RAG</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={5}
+                        step={1}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={qualityMaxRagRetries ?? ''}
+                        onChange={(e) => setQualityMaxRagRetries(clampRetry(parseOptionalNumber(e.target.value)))}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="Expandir fontes se faltar prova local"
+                        description="Se nao achar evidencias nos autos, permite buscar em lei/jurisprudencia. Em modo restrito, fica bloqueado."
+                        badge="Politica"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Expandir fontes</div>
+                      </RichTooltip>
+                      <div className="flex flex-wrap gap-1">
+                        {([
+                          { id: 'auto', label: 'Perfil', description: 'Segue o perfil de qualidade atual.' },
+                          { id: 'on', label: 'Permitir', description: 'Expande para fontes globais quando faltar prova local.' },
+                          { id: 'off', label: 'Bloquear', description: 'Nunca expande para fontes globais.' },
+                        ] as const).map((opt) => (
+                          <RichTooltip key={opt.id} title={opt.label} description={opt.description} badge="Fonte">
+                            <button
+                              type="button"
+                              disabled={!canExpandScope}
+                              onClick={() => {
+                                if (opt.id === 'auto') setQualityRagRetryExpandScope(null);
+                                if (opt.id === 'on') setQualityRagRetryExpandScope(true);
+                                if (opt.id === 'off') setQualityRagRetryExpandScope(false);
+                              }}
+                              className={cn(
+                                "rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors",
+                                expandScopeMode === opt.id
+                                  ? "border-indigo-300 bg-indigo-500/15 text-indigo-700"
+                                  : "border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50",
+                                !canExpandScope && "opacity-50 cursor-not-allowed"
+                              )}
+                            >
+                              {opt.label}
+                            </button>
+                          </RichTooltip>
+                        ))}
+                      </div>
+                      {!canExpandScope && (
+                        <p className="text-[10px] text-slate-500">
+                          Bloqueado porque o modo de auditoria esta em &quot;Somente Base local&quot;.
+                        </p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="CRAG: melhor fonte"
+                        description="Define o minimo de qualidade da melhor evidencia. Quanto maior, mais conservador."
+                        badge="CRAG"
+                        meta="Usado apenas se CRAG estiver ligado"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">CRAG (melhor fonte)</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={cragMinBestScoreOverride ?? ''}
+                        onChange={(e) => setCragMinBestScoreOverride(clampCragScore(parseOptionalNumber(e.target.value)))}
+                      />
+                      {!cragGate && (
+                        <p className="text-[10px] text-slate-400">Ative o CRAG no menu RAG para usar.</p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="CRAG: media das 3 melhores"
+                        description="Define o minimo de qualidade media das 3 melhores fontes. Evita usar evidencias fracas."
+                        badge="CRAG"
+                        meta="Usado apenas se CRAG estiver ligado"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">CRAG (media top 3)</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={0}
+                        max={1}
+                        step={0.05}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={cragMinAvgScoreOverride ?? ''}
+                        onChange={(e) => setCragMinAvgScoreOverride(clampCragScore(parseOptionalNumber(e.target.value)))}
+                      />
+                      {!cragGate && (
+                        <p className="text-[10px] text-slate-400">Ative o CRAG no menu RAG para usar.</p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <RichTooltip
+                        title="Limite de recursão"
+                        description="Número máximo de passos/loops que o agente pode executar antes de parar. Aumente para documentos muito longos ou fluxos complexos com muitas tentativas."
+                        badge="Avançado"
+                        meta="Padrão definido pelo perfil (140-320)"
+                      >
+                        <div className="text-[10px] font-semibold uppercase text-slate-500">Limite de recursão</div>
+                      </RichTooltip>
+                      <input
+                        type="number"
+                        min={20}
+                        max={500}
+                        step={10}
+                        className="w-full text-xs h-8 rounded-lg border border-indigo-200/60 bg-white px-2.5"
+                        placeholder="Auto (perfil)"
+                        value={recursionLimitOverride ?? ''}
+                        onChange={(e) => setRecursionLimitOverride(clampRecursionLimit(parseOptionalNumber(e.target.value)))}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Checklist complementar */}
               <div className="space-y-1.5 col-span-full">
                 <RichTooltip
@@ -1435,11 +2365,16 @@ export default function MinutaPage() {
       >
         {/* Left Panel: Chat - Resizable via divider, hidden when canvas is expanded */}
         <div
+          ref={chatPanelRef}
           className={cn(
-            "flex min-h-0 h-full flex-col rounded-l-xl border border-slate-200/60 bg-white shadow-sm overflow-hidden transition-all duration-300 font-google-sans-text",
-            canvasState === 'expanded' && "hidden"
+            "relative flex flex-col min-w-0 bg-white/50 backdrop-blur-sm transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
+            layoutMode === 'split' ? 'border-r border-slate-200/60' : '',
+            canvasState === 'expanded' ? 'hidden w-0 opacity-0' : '',
+            isFullscreen && pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full bg-white' : ''
           )}
-          style={{ width: canvasState === 'expanded' ? '0%' : `${chatPanelWidth}%`, minWidth: canvasState === 'expanded' ? '0px' : '300px', maxWidth: '70%' }}
+          style={{
+            width: canvasState === 'normal' ? `${chatPanelWidth}%` : '100%',
+          }}
         >
           {/* Mode Status Bar */}
           <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-slate-100 bg-slate-50/50">
@@ -1497,13 +2432,38 @@ export default function MinutaPage() {
                   </div>
                 ))}
               </div>
+              {/* Retry Progress Indicator */}
+              {retryProgress?.isRetrying && (
+                <div className="mt-2 pt-2 border-t border-indigo-200/50">
+                  <div className="flex items-center gap-2 text-xs">
+                    <div className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-100 text-amber-600 flex-shrink-0">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    </div>
+                    <span className="text-amber-700 font-medium">
+                      Tentando novamente ({retryProgress?.progress || '...'})
+                    </span>
+                  </div>
+                  {retryProgress?.reason && (
+                    <p className="text-[10px] text-amber-600/80 mt-1 ml-6">
+                      Razão: {retryProgress?.reason === 'missing_citations_for_jurisprudence'
+                        ? 'Faltam citações de jurisprudência'
+                        : retryProgress?.reason}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
           {/* Chat Content */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
             {activeChatId ? (
-              <ChatInterface chatId={activeChatId} hideInput={false} />
+              <ChatInterface
+                chatId={activeChatId}
+                hideInput={false}
+                autoCanvasOnDocumentRequest
+                showCanvasButton
+              />
             ) : (
               <>
                 {/* Empty state message */}
@@ -1552,6 +2512,7 @@ export default function MinutaPage() {
             <button
               onClick={() => setShowFontes(!showFontes)}
               className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-500 hover:bg-slate-50 transition-colors"
+              data-testid="fontes-toggle"
             >
               <div className="flex items-center gap-2">
                 <FileSearch className="h-4 w-4" />
@@ -1564,7 +2525,10 @@ export default function MinutaPage() {
             </button>
 
             {showFontes && (
-              <div className="max-h-[150px] overflow-y-auto p-3 bg-slate-50/50 space-y-1.5">
+              <div
+                className="max-h-[150px] overflow-y-auto p-3 bg-slate-50/50 space-y-1.5"
+                data-testid="fontes-panel"
+              >
                 {contextItems.length > 0 ? (
                   contextItems.map((item: ContextItem, idx: number) => (
                     <div key={idx} className="flex items-center gap-2 text-sm p-2.5 rounded-lg bg-white border border-slate-100">
@@ -1604,9 +2568,11 @@ export default function MinutaPage() {
         {/* Right Panel: Canvas */}
         {canvasState !== 'hidden' && (
           <div className={cn(
-            "min-h-0 h-full rounded-r-xl border border-l-0 border-slate-200/60 bg-white shadow-sm overflow-hidden transition-all duration-300",
+            "min-h-0 h-full rounded-r-xl border border-l-0 border-slate-200/60 bg-white shadow-sm overflow-hidden transition-[flex-grow,width,opacity,transform] duration-300 ease-in-out",
             canvasState === 'expanded' ? "flex-1 rounded-xl border-l" : "flex-1"
-          )}>
+          )}
+            ref={canvasPanelRef}
+          >
             <CanvasContainer />
           </div>
         )}

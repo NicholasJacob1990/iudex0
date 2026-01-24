@@ -17,8 +17,9 @@ function escapeHtml(raw: string): string {
         .replace(/'/g, '&#39;');
 }
 
-function isSafeUrl(href: string): boolean {
-    const v = (href || '').trim().toLowerCase();
+function isSafeUrl(href: unknown): boolean {
+    if (typeof href !== 'string') return false;
+    const v = href.trim().toLowerCase();
     if (!v) return false;
     // bloqueia esquemas perigosos
     if (v.startsWith('javascript:')) return false;
@@ -40,19 +41,28 @@ function configureMarkedOnce() {
         breaks: true,
     } as any);
 
-    // Override do renderer para bloquear HTML bruto e higienizar links/imagens
+    // Override do renderer para bloquear HTML bruto e higienizar links/imagens.
+    // Observação: marked v17 chama `renderer.link/image` com um único token (não com href/title/text).
     marked.use({
         renderer: {
             // HTML inline no markdown: renderiza como texto escapado (não executa)
             html(token: any) {
                 return escapeHtml(token?.text || '');
             },
-            link(href: string | null, title: string | null, text: string) {
+            link(token: any) {
+                const href = typeof token?.href === 'string' ? token.href : null;
+                const title = typeof token?.title === 'string' ? token.title : null;
+                const text = token?.tokens ? (this as any).parser.parseInline(token.tokens) : escapeHtml(token?.text || '');
+
                 const safeHref = href && isSafeUrl(href) ? href : '#';
                 const safeTitle = title ? escapeHtml(title) : '';
                 return `<a href="${escapeHtml(safeHref)}"${safeTitle ? ` title="${safeTitle}"` : ''} target="_blank" rel="noreferrer noopener">${text}</a>`;
             },
-            image(href: string | null, title: string | null, text: string) {
+            image(token: any) {
+                const href = typeof token?.href === 'string' ? token.href : null;
+                const title = typeof token?.title === 'string' ? token.title : null;
+                const text = typeof token?.text === 'string' ? token.text : '';
+
                 // imagens podem vazar requests; mantém apenas se URL for segura (http/https)
                 const safeHref = href && isSafeUrl(href) && href.startsWith('http') ? href : '';
                 if (!safeHref) return '';

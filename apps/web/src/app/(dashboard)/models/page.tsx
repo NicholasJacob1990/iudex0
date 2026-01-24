@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Plus, FileUp, HelpCircle, Trash2 } from 'lucide-react';
-import { ApplyTemplateDialog, ModelsBoard } from '@/components/dashboard';
+import { ApplyTemplateDialog, ModelsBoard, TemplateWizardDialog } from '@/components/dashboard';
 import { StyleLearner } from '@/components/dashboard/style-learner';
 import apiClient from '@/lib/api-client';
 import { toast } from 'sonner';
@@ -33,6 +33,7 @@ export default function ModelsPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isDocxOpen, setIsDocxOpen] = useState(false);
   const [isClauseDialogOpen, setIsClauseDialogOpen] = useState(false);
+  const [isWizardOpen, setIsWizardOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isIndexing, setIsIndexing] = useState(false);
   const [isClauseSaving, setIsClauseSaving] = useState(false);
@@ -340,7 +341,7 @@ export default function ModelsPage() {
     });
   };
 
-  const handleDragStart = (index: number, event: DragEvent<HTMLDivElement>) => {
+  const handleDragStart = (index: number, event: DragEvent<HTMLElement>) => {
     setDraggedBlockIndex(index);
     event.dataTransfer.effectAllowed = 'move';
     event.dataTransfer.setData('text/plain', String(index));
@@ -470,6 +471,14 @@ export default function ModelsPage() {
           >
             <FileUp className="mr-2 h-4 w-4" />
             Aplicar Template DOCX
+          </Button>
+          <Button
+            variant="outline"
+            className="rounded-full"
+            onClick={() => setIsWizardOpen(true)}
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            Wizard de Templates
           </Button>
           <Button
             className="rounded-full bg-primary text-primary-foreground"
@@ -737,13 +746,25 @@ export default function ModelsPage() {
       </section>
 
       <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-        <DialogContent className="sm:max-w-[640px]">
+        <DialogContent className="sm:max-w-[720px] max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>Novo Modelo Estrutural</DialogTitle>
           </DialogHeader>
-          <div className="space-y-4">
+          <div className="space-y-4 overflow-y-auto flex-1 pr-2">
             <div className="space-y-2">
-              <Label htmlFor="model-name">Nome</Label>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="model-name">Nome</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs">
+                      Nome identificador do modelo. Será exibido na lista de templates disponíveis para geração de minutas.
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
               <Input
                 id="model-name"
                 value={formData.name}
@@ -752,7 +773,19 @@ export default function ModelsPage() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="model-type">Tipo de Documento</Label>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="model-type">Tipo de Documento</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs">
+                      Categoria jurídica do documento. A IA usará prompts especializados para cada tipo, garantindo estrutura e linguagem adequadas.
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
               <select
                 id="model-type"
                 className="w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -773,7 +806,20 @@ export default function ModelsPage() {
               </select>
             </div>
             <div className="space-y-2">
-              <Label>Modelo por blocos (IUDX_TEMPLATE_V1)</Label>
+              <div className="flex items-center gap-2">
+                <Label>Modelo por blocos (IUDX_TEMPLATE_V1)</Label>
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs text-xs">
+                      <p className="font-semibold mb-1">Modo avançado de templates</p>
+                      <p>Permite criar documentos com seções fixas (contratos, disclaimers) e variáveis dinâmicas. Ideal para padronizar minutas com partes que nunca mudam.</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
               <label className="flex items-center gap-2 text-xs text-muted-foreground">
                 <Checkbox
                   checked={useBlockTemplate}
@@ -787,7 +833,19 @@ export default function ModelsPage() {
               <div className="space-y-4 rounded-xl border border-border/60 bg-muted/10 p-4">
                 <div className="grid gap-4 md:grid-cols-2">
                   <div className="space-y-2">
-                    <Label htmlFor="model-meta-id">ID interno (opcional)</Label>
+                    <div className="flex items-center gap-2">
+                      <Label htmlFor="model-meta-id">ID interno (opcional)</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            Identificador único usado pelo sistema para referenciar este modelo em automações e APIs. Use snake_case sem espaços.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <Input
                       id="model-meta-id"
                       value={templateMetaId}
@@ -796,7 +854,19 @@ export default function ModelsPage() {
                     />
                   </div>
                   <div className="space-y-2">
-                    <Label htmlFor="model-version">Versão</Label>
+                    <div className="flex items-center gap-2">
+                      <Label htmlFor="model-version">Versão</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            Controle de versão semântico (ex: 1.0.0). Útil para rastrear alterações e manter histórico de templates.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <Input
                       id="model-version"
                       value={templateVersion}
@@ -807,7 +877,20 @@ export default function ModelsPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="model-system">Instruções fixas (system)</Label>
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="model-system">Instruções fixas (system)</Label>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs text-xs">
+                          <p className="font-semibold mb-1">Regras imutáveis do modelo</p>
+                          <p>Instruções que a IA sempre seguirá: tom, estilo, disclaimers obrigatórios, limitações. Ex: &quot;Use linguagem formal, nunca cite doutrina sem fonte.&quot;</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Textarea
                     id="model-system"
                     rows={3}
@@ -818,7 +901,20 @@ export default function ModelsPage() {
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="model-format">Formato de saída</Label>
+                  <div className="flex items-center gap-2">
+                    <Label htmlFor="model-format">Formato de saída</Label>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                        </TooltipTrigger>
+                        <TooltipContent className="max-w-xs text-xs">
+                          <p className="font-semibold mb-1">Estrutura do documento</p>
+                          <p>Defina a estrutura esperada usando marcadores de seção. Ex: &quot;# 1. QUALIFICAÇÃO DAS PARTES&quot;, &quot;# 2. DOS FATOS&quot;. A IA seguirá esta organização.</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
+                  </div>
                   <Textarea
                     id="model-format"
                     rows={4}
@@ -830,7 +926,24 @@ export default function ModelsPage() {
 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <Label>Campos do modelo</Label>
+                    <div className="flex items-center gap-2">
+                      <Label>Campos do modelo</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            <p className="font-semibold mb-1">Variáveis dinâmicas</p>
+                            <p>
+                              Campos que serão preenchidos em um formulário antes da geração. Use{' '}
+                              {'{{ nome_do_campo }}'} nos blocos para inserir valores. Ex: {'{{ nome_cliente }}'},{' '}
+                              {'{{ valor_contrato }}'}
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <Button
                       type="button"
                       variant="outline"
@@ -907,7 +1020,26 @@ export default function ModelsPage() {
 
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
-                    <Label>Blocos</Label>
+                    <div className="flex items-center gap-2">
+                      <Label>Blocos</Label>
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <HelpCircle className="h-3.5 w-3.5 text-muted-foreground cursor-help" />
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs text-xs">
+                            <p className="font-semibold mb-1">Seções do documento</p>
+                            <p>Cada bloco é uma seção. Tipos:</p>
+                            <ul className="list-disc pl-4 mt-1 space-y-1">
+                              <li><strong>LLM:</strong> IA gera conteúdo baseado no prompt</li>
+                              <li><strong>Fixo:</strong> Texto imutável (disclaimers, cláusulas padrão)</li>
+                              <li><strong>Cláusula:</strong> Referencia cláusulas da biblioteca</li>
+                              <li><strong>Variável:</strong> Inserção de campo dinâmico</li>
+                            </ul>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <Button
                       type="button"
                       variant="outline"
@@ -926,9 +1058,8 @@ export default function ModelsPage() {
                       {blocks.map((block, index) => (
                         <div
                           key={`${block.id}-${index}`}
-                          className={`space-y-3 rounded-lg border border-border/60 bg-white/90 p-3 ${
-                            dragOverIndex === index ? 'ring-2 ring-indigo-200' : ''
-                          }`}
+                          className={`space-y-3 rounded-lg border border-border/60 bg-white/90 p-3 ${dragOverIndex === index ? 'ring-2 ring-indigo-200' : ''
+                            }`}
                           onDragOver={(event) => handleDragOver(index, event)}
                           onDrop={(event) => handleDrop(index, event)}
                           onDragLeave={() => {
@@ -1288,6 +1419,12 @@ export default function ModelsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <TemplateWizardDialog
+        open={isWizardOpen}
+        onOpenChange={setIsWizardOpen}
+        onCreated={() => setRefreshKey((prev) => prev + 1)}
+      />
 
       <ApplyTemplateDialog open={isDocxOpen} onOpenChange={setIsDocxOpen} />
     </div>

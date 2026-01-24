@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Plus, Share2 } from 'lucide-react';
 import { LibraryTable, LibrarySidebar, ShareDialog } from '@/components/dashboard';
+import { CrossFileDuplicatesModal } from '@/components/dashboard/cross-file-duplicates-modal';
 
 export default function LibraryPage() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
@@ -19,6 +20,13 @@ export default function LibraryPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <CrossFileDuplicatesModal
+            availableFiles={[
+              'documento_auditoria_01.md',
+              'documento_auditoria_02_copia.md',
+              'relatorio_final_v1.md'
+            ]}
+          />
           <Button variant="outline" className="rounded-full">
             <Plus className="mr-2 h-4 w-4" />
             Nova pasta

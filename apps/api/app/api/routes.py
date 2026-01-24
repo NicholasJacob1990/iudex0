@@ -4,12 +4,14 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag
 
 api_router = APIRouter()
 
 # Incluir rotas
 api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(config.router, prefix="/config", tags=["config"])
+api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
 api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(cases.router, prefix="/cases", tags=["cases"])
 api_router.include_router(documents.router, prefix="/documents", tags=["documents"])
@@ -25,4 +27,6 @@ api_router.include_router(jobs.router, prefix="/jobs", tags=["jobs"])
 api_router.include_router(audit.router, prefix="/audit", tags=["audit"])
 api_router.include_router(quality_control.router, prefix="/quality", tags=["quality-control"])
 api_router.include_router(rag.router, prefix="/rag", tags=["rag"])
+api_router.include_router(admin_rag.router, tags=["admin-rag"])
 api_router.include_router(advanced.router, prefix="/advanced", tags=["advanced"])
+api_router.include_router(djen.router, prefix="/djen", tags=["djen"])

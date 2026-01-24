@@ -9,8 +9,10 @@ import { toast } from 'sonner';
 
 const DEFAULT_API_URL =
   typeof window !== 'undefined'
-    ? `${window.location.origin}/api`
-    : 'http://localhost:8000/api';
+    ? (/^https?:\/\//i.test(window.location.origin)
+      ? `${window.location.origin}/api`
+      : 'http://127.0.0.1:8000/api')
+    : 'http://127.0.0.1:8000/api';
 
 const normalizeApiUrl = (url: string): string => {
   const trimmed = url.replace(/\/+$/, '');
@@ -19,14 +21,32 @@ const normalizeApiUrl = (url: string): string => {
   return `${trimmed}/api`;
 };
 
+const coerceAbsoluteUrl = (value: string): string => {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('/')) return trimmed;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `http://${trimmed}`;
+};
+
 // In the browser, prefer same-origin `/api` (via Next rewrites) to avoid CORS/credentials issues in dev.
 // If an env points to a different origin (e.g. http://localhost:8000/api), we still route through `/api`.
 const resolveApiUrl = (): string => {
-  const env = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+  const envRaw = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+  const env = coerceAbsoluteUrl(envRaw);
   if (typeof window === 'undefined') {
     return normalizeApiUrl(env || DEFAULT_API_URL);
   }
-  if (!env) return normalizeApiUrl(DEFAULT_API_URL);
+  if (!envRaw) return normalizeApiUrl(DEFAULT_API_URL);
+  if (envRaw.startsWith('/')) {
+    // Only works when the app is served over HTTP(S) (Next proxy route `/api/*`).
+    // In packaged/webview contexts (origin may be "null" or a custom scheme),
+    // fall back to a direct backend URL.
+    if (!/^https?:\/\//i.test(window.location.origin)) {
+      return normalizeApiUrl(DEFAULT_API_URL);
+    }
+    return `${window.location.origin}${normalizeApiUrl(envRaw)}`;
+  }
   try {
     const u = new URL(env);
     const sameOrigin = u.origin === window.location.origin;
@@ -34,7 +54,7 @@ const resolveApiUrl = (): string => {
       return normalizeApiUrl(DEFAULT_API_URL);
     }
   } catch {
-    // allow relative URLs like "/api" or "https://example.com/api"
+    return normalizeApiUrl(DEFAULT_API_URL);
   }
   return normalizeApiUrl(env);
 };
@@ -116,10 +136,12 @@ interface GenerateDocumentRequest {
   effort_level?: number;
   use_profile?: 'full' | 'basic' | 'none';
   document_type?: string;
+  doc_kind?: string;
+  doc_subtype?: string;
   model?: string;
   chat_personality?: 'juridico' | 'geral';
   context_documents?: string[];
-  attachment_mode?: 'rag_local' | 'prompt_injection';
+  attachment_mode?: 'auto' | 'rag_local' | 'prompt_injection';
 
   // Agent Mode
   use_multi_agent?: boolean;
@@ -128,14 +150,45 @@ interface GenerateDocumentRequest {
   strategist_model?: string;
   drafter_models?: string[];
   reviewer_models?: string[];
-  reasoning_level?: 'low' | 'medium' | 'high';
+  reasoning_level?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  temperature?: number;
 
   web_search?: boolean;
-  search_mode?: 'shared' | 'native' | 'hybrid';
+  search_mode?: 'shared' | 'native' | 'hybrid' | 'perplexity';
+  perplexity_search_mode?: 'web' | 'academic' | 'sec';
+  perplexity_search_type?: 'fast' | 'pro' | 'auto';
+  perplexity_search_context_size?: 'low' | 'medium' | 'high';
+  perplexity_search_classifier?: boolean;
+  perplexity_disable_search?: boolean;
+  perplexity_stream_mode?: 'full' | 'concise';
+  perplexity_search_domain_filter?: string;
+  perplexity_search_language_filter?: string;
+  perplexity_search_recency_filter?: 'day' | 'week' | 'month' | 'year';
+  perplexity_search_after_date?: string;
+  perplexity_search_before_date?: string;
+  perplexity_last_updated_after?: string;
+  perplexity_last_updated_before?: string;
+  perplexity_search_country?: string;
+  perplexity_search_region?: string;
+  perplexity_search_city?: string;
+  perplexity_search_latitude?: string;
+  perplexity_search_longitude?: string;
+  perplexity_return_images?: boolean;
+  perplexity_return_videos?: boolean;
   multi_query?: boolean;
   breadth_first?: boolean;
+  research_policy?: 'auto' | 'force';
   dense_research?: boolean;
-  thinking_level?: 'low' | 'medium' | 'high';
+  deep_research_search_focus?: 'web' | 'academic' | 'sec';
+  deep_research_domain_filter?: string;
+  deep_research_search_after_date?: string;
+  deep_research_search_before_date?: string;
+  deep_research_last_updated_after?: string;
+  deep_research_last_updated_before?: string;
+  deep_research_country?: string;
+  deep_research_latitude?: string;
+  deep_research_longitude?: string;
+  thinking_level?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   min_pages?: number;
   max_pages?: number;
   audit?: boolean;
@@ -175,9 +228,13 @@ interface GenerateDocumentRequest {
   prompt_extra?: string;
   adaptive_routing?: boolean;
   crag_gate?: boolean;
+  crag_min_best_score?: number;
+  crag_min_avg_score?: number;
   hyde_enabled?: boolean;
   graph_rag_enabled?: boolean;
+  argument_graph_enabled?: boolean;
   graph_hops?: number;
+  rag_scope?: 'case_only' | 'case_and_global' | 'global_only';
   include_signature?: boolean;
   language?: string;
   tone?: string;
@@ -186,20 +243,29 @@ interface GenerateDocumentRequest {
   variables?: Record<string, any>;
   hil_outline_enabled?: boolean;
   hil_target_sections?: string[];
+  outline_override?: string[];
   audit_mode?: 'sei_only' | 'research';
   quality_profile?: 'rapido' | 'padrao' | 'rigoroso' | 'auditoria';
   target_section_score?: number;
   target_final_score?: number;
   max_rounds?: number;
+  style_refine_max_rounds?: number;
   strict_document_gate?: boolean;
   hil_section_policy?: 'none' | 'optional' | 'required';
   hil_final_required?: boolean;
+  auto_approve_hil?: boolean;
   recursion_limit?: number;
+  max_research_verifier_attempts?: number;
+  max_rag_retries?: number;
+  rag_retry_expand_scope?: boolean;
   document_checklist_hint?: Array<{
     id?: string;
     label: string;
     critical: boolean;
   }>;
+
+  // Poe-like billing
+  budget_override_points?: number;
 }
 
 interface GenerateDocumentResponse {
@@ -216,6 +282,8 @@ interface GenerateDocumentResponse {
 interface OutlineRequest {
   prompt: string;
   document_type?: string;
+  doc_kind?: string;
+  doc_subtype?: string;
   thesis?: string;
   model?: string;
   min_pages?: number;
@@ -229,10 +297,12 @@ interface OutlineResponse {
 
 class ApiClient {
   private axios: AxiosInstance;
+  private baseUrl: string;
   private isRefreshing = false;
   private refreshSubscribers: ((token: string) => void)[] = [];
 
   constructor() {
+    this.baseUrl = API_URL;
     this.axios = axios.create({
       baseURL: API_URL,
       headers: {
@@ -244,7 +314,9 @@ class ApiClient {
     this.axios.interceptors.request.use(
       (config: InternalAxiosRequestConfig) => {
         const token = this.getAccessToken();
-        if (token && config.headers) {
+        // Do not override an explicit Authorization header (e.g. refresh flow uses refresh_token).
+        const hadAuthHeader = Boolean(config.headers && (config.headers as any).Authorization);
+        if (token && config.headers && !hadAuthHeader) {
           config.headers.Authorization = `Bearer ${token}`;
         }
         return config;
@@ -254,7 +326,9 @@ class ApiClient {
 
     // Interceptor de respostas - trata erros e refresh de token
     this.axios.interceptors.response.use(
-      (response) => response,
+      (response) => {
+        return response;
+      },
       async (error: AxiosError) => {
         const originalRequest = error.config as InternalAxiosRequestConfig & { _retry?: boolean };
 
@@ -329,12 +403,196 @@ class ApiClient {
     }
   }
 
-  private clearTokens(): void {
+  clearTokens(): void {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('access_token');
       localStorage.removeItem('refresh_token');
       localStorage.removeItem('user');
     }
+  }
+
+  private async extractFetchErrorMessage(response: Response): Promise<string> {
+    try {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await response.json();
+        if (data && typeof data.detail === 'string') {
+          return data.detail;
+        }
+        if (data && typeof data.error === 'string') {
+          return data.error;
+        }
+      } else {
+        const text = await response.text();
+        if (text) return text;
+      }
+    } catch {
+      // ignore parsing errors
+    }
+    return response.statusText || 'Erro inesperado';
+  }
+
+  private getDirectApiUrl(): string | null {
+    const envRaw = (process.env.NEXT_PUBLIC_API_URL || '').trim();
+    const env = coerceAbsoluteUrl(envRaw);
+    if (envRaw) {
+      try {
+        // Only allow absolute URLs for direct fallback.
+        // Relative values like "/api" should defer to localhost in dev.
+        new URL(env);
+        return normalizeApiUrl(env);
+      } catch {
+        // Ignore relative env for direct fallback.
+      }
+    }
+    if (process.env.NODE_ENV === 'development') {
+      return 'http://127.0.0.1:8000/api';
+    }
+    return null;
+  }
+
+  private isLikelyHtmlNotFound(response: Response, detail: string): boolean {
+    if (response.status !== 404) return false;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) return true;
+    return /<!doctype html|next-error|this page could not be found/i.test(detail || '');
+  }
+
+  private isLikelyProxyFailure(response: Response, detail: string): boolean {
+    if (response.status < 500) return false;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('text/html')) return true;
+    return /next-error|__next_data__|this page could not be found/i.test(detail || '');
+  }
+
+  private async fetchStreamingWithFallback(
+    path: string,
+    buildBody: () => BodyInit,
+    headers: HeadersInit
+  ): Promise<Response> {
+    const directBase = this.getDirectApiUrl();
+    const primaryUrl = `${API_URL}${path}`;
+
+    // Prefer direct connection for streaming to avoid proxy buffering
+    if (directBase && directBase !== API_URL) {
+      try {
+        const directUrl = `${directBase}${path}`;
+        const directResponse = await fetch(directUrl, {
+          method: 'POST',
+          headers,
+          body: buildBody(),
+        });
+        if (directResponse.ok) return directResponse;
+        console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
+      } catch (err) {
+        console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
+      }
+    }
+
+    const primaryResponse = await fetch(primaryUrl, {
+      method: 'POST',
+      headers,
+      body: buildBody(),
+    });
+
+    if (primaryResponse.ok) return primaryResponse;
+
+    const detail = await this.extractFetchErrorMessage(primaryResponse);
+    if (!this.isLikelyHtmlNotFound(primaryResponse, detail) && !this.isLikelyProxyFailure(primaryResponse, detail)) {
+      throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+    }
+
+    // If directBase was already tried and failed, don't try again unless logic above was skipped
+    // But simplified: effectively we tried Direct -> Primary.
+    // If Primary fails, we throw. 
+    // The original logic tried Primary -> Direct. 
+    // If we want to be exhaustive: Direct -> Primary -> Direct (Retry?) No, that's silly.
+
+    // Original fallback logic was to handle "API_URL (Proxy) is down/bad, try Direct".
+    // We already tried Direct. So just throw.
+
+    // However, strictly adhering to "Fallback" name, we might want to ensure we hit Direct if we skipped it?
+    // But we prioritize Direct now.
+
+    throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+  }
+
+  private async fetchStreamingGetWithFallback(
+    path: string,
+    headers: HeadersInit
+  ): Promise<Response> {
+    const directBase = this.getDirectApiUrl();
+    const primaryUrl = `${API_URL}${path}`;
+
+    // Prefer direct connection for streaming to avoid proxy buffering
+    if (directBase && directBase !== API_URL) {
+      try {
+        const directUrl = `${directBase}${path}`;
+        const directResponse = await fetch(directUrl, {
+          method: 'GET',
+          headers,
+        });
+        if (directResponse.ok) return directResponse;
+        console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
+      } catch (err) {
+        console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
+      }
+    }
+
+    const primaryResponse = await fetch(primaryUrl, {
+      method: 'GET',
+      headers,
+    });
+
+    if (primaryResponse.ok) return primaryResponse;
+
+    const detail = await this.extractFetchErrorMessage(primaryResponse);
+    if (!this.isLikelyHtmlNotFound(primaryResponse, detail) && !this.isLikelyProxyFailure(primaryResponse, detail)) {
+      throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+    }
+
+    // Original fallback logic was to handle "API_URL (Proxy) is down/bad, try Direct".
+    // We already tried Direct. So just throw.
+    throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+  }
+
+  private async postFormDataWithFallback(
+    path: string,
+    buildFormData: () => FormData,
+    headers: HeadersInit
+  ): Promise<Response> {
+    const primaryUrl = `${API_URL}${path}`;
+    const primaryResponse = await fetch(primaryUrl, {
+      method: 'POST',
+      headers,
+      body: buildFormData(),
+    });
+
+    if (primaryResponse.ok) return primaryResponse;
+
+    const detail = await this.extractFetchErrorMessage(primaryResponse);
+    if (!this.isLikelyHtmlNotFound(primaryResponse, detail) && !this.isLikelyProxyFailure(primaryResponse, detail)) {
+      throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+    }
+
+    const directBase = this.getDirectApiUrl();
+    if (!directBase || directBase === API_URL) {
+      throw new Error(`HTTP ${primaryResponse.status}: ${detail}`);
+    }
+
+    const fallbackUrl = `${directBase}${path}`;
+    const fallbackResponse = await fetch(fallbackUrl, {
+      method: 'POST',
+      headers,
+      body: buildFormData(),
+    });
+
+    if (!fallbackResponse.ok) {
+      const fallbackDetail = await this.extractFetchErrorMessage(fallbackResponse);
+      throw new Error(`HTTP ${fallbackResponse.status}: ${fallbackDetail}`);
+    }
+
+    return fallbackResponse;
   }
 
   // ============= AUTH =============
@@ -574,10 +832,11 @@ class ApiClient {
       (headers as Record<string, string>)['Authorization'] = `Bearer ${token}`;
     }
 
-    return fetch(url, {
+    const res = await fetch(url, {
       ...options,
       headers,
     });
+    return res;
   }
 
   async deleteChat(chatId: string): Promise<void> {
@@ -646,12 +905,22 @@ class ApiClient {
       formData.append('metadata', JSON.stringify(metadata));
     }
 
-    const response = await this.axios.post('/documents/upload', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
+    const token = this.getAccessToken();
+    const response = await this.postFormDataWithFallback(
+      '/documents/upload',
+      () => {
+        const data = new FormData();
+        data.append('file', file);
+        if (metadata) {
+          data.append('metadata', JSON.stringify(metadata));
+        }
+        return data;
       },
-    });
-    return response.data;
+      {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      }
+    );
+    return response.json();
   }
 
   async getDocument(documentId: string): Promise<any> {
@@ -664,16 +933,60 @@ class ApiClient {
   }
 
   async createDocumentFromText(data: { title: string; content: string; tags?: string; folder_id?: string }): Promise<any> {
-    const formData = new FormData();
-    formData.append('title', data.title);
-    formData.append('content', data.content);
-    if (data.tags) formData.append('tags', data.tags);
-    if (data.folder_id) formData.append('folder_id', data.folder_id);
-
-    const response = await this.axios.post('/documents/from-text', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' } // Browser sets boundary automatically
-    });
-    return response.data;
+    const token = this.getAccessToken();
+    try {
+      const response = await this.postFormDataWithFallback(
+        '/documents/from-text',
+        () => {
+          const formData = new FormData();
+          formData.append('title', data.title);
+          formData.append('content', data.content);
+          if (data.tags) formData.append('tags', data.tags);
+          if (data.folder_id) formData.append('folder_id', data.folder_id);
+          return formData;
+        },
+        {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        }
+      );
+      return response.json();
+    } catch (error: any) {
+      const message = String(error?.message || '');
+      const canFallback = typeof window !== 'undefined' && typeof File !== 'undefined';
+      const shouldFallbackToUpload = /expected pattern|invalid url|failed to construct 'url'/i.test(message);
+      if (canFallback && shouldFallbackToUpload) {
+        const safeName = String(data.title || 'documento')
+          .replace(/[\\/:*?"<>|]+/g, '_')
+          .slice(0, 80) || 'documento';
+        const file = new File([data.content], `${safeName}.txt`, { type: 'text/plain' });
+        const tags = (data.tags || '')
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean);
+        return this.uploadDocument(file, {
+          tags,
+          folder_id: data.folder_id,
+          source: 'from_text_url_fallback',
+        });
+      }
+      const status = error?.response?.status;
+      if (canFallback && (status === 413 || (status >= 500 && status < 600))) {
+        const safeName = String(data.title || 'documento')
+          .replace(/[\\/:*?"<>|]+/g, '_')
+          .slice(0, 80) || 'documento';
+        const file = new File([data.content], `${safeName}.txt`, { type: 'text/plain' });
+        const tags = (data.tags || '')
+          .split(',')
+          .map((tag) => tag.trim())
+          .filter(Boolean);
+        return this.uploadDocument(file, {
+          tags,
+          folder_id: data.folder_id,
+          source: 'from_text_fallback',
+        });
+      }
+      throw error;
+    }
   }
 
   async createDocumentFromUrl(data: { url: string; tags?: string; folder_id?: string }): Promise<any> {
@@ -690,6 +1003,16 @@ class ApiClient {
 
   async processDocument(documentId: string, options?: any): Promise<any> {
     const response = await this.axios.post(`/documents/${documentId}/process`, options);
+    return response.data;
+  }
+
+  async getDocumentSummary(documentId: string): Promise<{ summary: string; document_id: string }> {
+    const response = await this.axios.post(`/documents/${documentId}/summary`);
+    return response.data;
+  }
+
+  async applyDocumentOcr(documentId: string): Promise<any> {
+    const response = await this.axios.post(`/documents/${documentId}/ocr`);
     return response.data;
   }
 
@@ -727,7 +1050,7 @@ class ApiClient {
     if (search) params.search = search;
     if (item_type) params.item_type = item_type;
 
-    const response = await this.axios.get('/library', {
+    const response = await this.axios.get('/library/items', {
       params,
     });
     return response.data;
@@ -794,7 +1117,7 @@ class ApiClient {
   }
 
   async createLibraryItem(data: any): Promise<any> {
-    const response = await this.axios.post('/library', data);
+    const response = await this.axios.post('/library/items', data);
     return response.data;
   }
 
@@ -834,6 +1157,31 @@ class ApiClient {
     const response = await this.axios.post(`/templates/${templateId}/duplicate`, {
       name,
     });
+    return response.data;
+  }
+
+  async getTemplateCatalogTypes(): Promise<any> {
+    const response = await this.axios.get('/templates/catalog/types');
+    return response.data;
+  }
+
+  async getTemplateCatalogDefaults(docKind: string, docSubtype: string): Promise<any> {
+    const response = await this.axios.get(`/templates/catalog/defaults/${docKind}/${docSubtype}`);
+    return response.data;
+  }
+
+  async validateTemplateCatalog(template: any): Promise<any> {
+    const response = await this.axios.post('/templates/catalog/validate', { template });
+    return response.data;
+  }
+
+  async parseTemplateDescription(data: {
+    description: string;
+    doc_kind?: string;
+    doc_subtype?: string;
+    model_id?: string;
+  }): Promise<any> {
+    const response = await this.axios.post('/templates/catalog/parse', data);
     return response.data;
   }
 
@@ -922,8 +1270,51 @@ class ApiClient {
     return response.data;
   }
 
-  async searchWeb(query: string): Promise<any> {
-    const response = await this.axios.get('/knowledge/web/search', { params: { query } });
+  async searchWeb(
+    query: string,
+    options?: {
+      limit?: number;
+      multi_query?: boolean;
+      use_cache?: boolean;
+      country?: string;
+      search_region?: string;
+      search_city?: string;
+      search_latitude?: string | number;
+      search_longitude?: string | number;
+      domain_filter?: string[];
+      language_filter?: string[];
+      recency_filter?: 'day' | 'week' | 'month' | 'year' | string;
+      search_mode?: 'web' | 'academic' | 'sec';
+      search_after_date?: string;
+      search_before_date?: string;
+      last_updated_after?: string;
+      last_updated_before?: string;
+      max_tokens?: number;
+      max_tokens_per_page?: number;
+      return_images?: boolean;
+      return_videos?: boolean;
+      return_snippets?: boolean;
+    }
+  ): Promise<any> {
+    const params = new URLSearchParams();
+    params.set('query', query);
+
+    const append = (key: string, value: unknown) => {
+      if (value === undefined || value === null) return;
+      if (Array.isArray(value)) {
+        value
+          .map((item) => (item === undefined || item === null ? '' : String(item).trim()))
+          .filter(Boolean)
+          .forEach((item) => params.append(key, item));
+        return;
+      }
+      const str = String(value).trim();
+      if (!str) return;
+      params.set(key, str);
+    };
+
+    Object.entries(options || {}).forEach(([key, value]) => append(key, value));
+    const response = await this.axios.get(`/knowledge/web/search?${params.toString()}`);
     return response.data;
   }
 
@@ -937,6 +1328,13 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
     }
   ): Promise<any> {
     const formData = new FormData();
@@ -946,6 +1344,17 @@ class ApiClient {
     if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
     if (options.model_selection) formData.append('model_selection', options.model_selection);
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+    if (options.auto_apply_fixes !== undefined) {
+      formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
+    }
+    if (options.auto_apply_content_fixes !== undefined) {
+      formData.append('auto_apply_content_fixes', options.auto_apply_content_fixes ? 'true' : 'false');
+    }
+    if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+    if (options.skip_audit) formData.append('skip_audit', 'true');
+    if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+    if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
 
     const response = await this.axios.post('/transcription/vomo', formData, {
       headers: {
@@ -954,6 +1363,326 @@ class ApiClient {
       // Aumentar timeout para transcrições longas (10 min)
       timeout: 600000,
     });
+    return response.data;
+  }
+
+  async startTranscriptionJob(
+    files: File[],
+    options: {
+      mode: string;
+      thinking_level: string;
+      custom_prompt?: string;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
+    }
+  ): Promise<{ job_id: string; status: string }> {
+    const formData = new FormData();
+    files.forEach((f) => formData.append('files', f));
+    formData.append('mode', options.mode);
+    formData.append('thinking_level', options.thinking_level);
+    if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+    if (options.model_selection) formData.append('model_selection', options.model_selection);
+    if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+    if (options.auto_apply_fixes !== undefined) {
+      formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
+    }
+    if (options.auto_apply_content_fixes !== undefined) {
+      formData.append('auto_apply_content_fixes', options.auto_apply_content_fixes ? 'true' : 'false');
+    }
+    if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+    if (options.skip_audit) formData.append('skip_audit', 'true');
+    if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+    if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+
+    const response = await this.axios.post('/transcription/vomo/jobs', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async startHearingJob(
+    file: File,
+    payload: {
+      case_id: string;
+      goal: string;
+      thinking_level: string;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      format_mode?: string;
+      custom_prompt?: string;
+      format_enabled?: boolean;
+      allow_indirect?: boolean;
+      allow_summary?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
+    }
+  ): Promise<{ job_id: string; status: string }> {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('case_id', payload.case_id);
+    formData.append('goal', payload.goal);
+    formData.append('thinking_level', payload.thinking_level);
+    if (payload.model_selection) formData.append('model_selection', payload.model_selection);
+    if (payload.high_accuracy) formData.append('high_accuracy', 'true');
+    if (payload.format_mode) formData.append('format_mode', payload.format_mode);
+    if (payload.custom_prompt) formData.append('custom_prompt', payload.custom_prompt);
+    if (payload.format_enabled !== undefined) {
+      formData.append('format_enabled', payload.format_enabled ? 'true' : 'false');
+    }
+    if (payload.allow_indirect) formData.append('allow_indirect', 'true');
+    if (payload.allow_summary) formData.append('allow_summary', 'true');
+    if (payload.use_cache !== undefined) formData.append('use_cache', payload.use_cache ? 'true' : 'false');
+    if (payload.auto_apply_fixes !== undefined) {
+      formData.append('auto_apply_fixes', payload.auto_apply_fixes ? 'true' : 'false');
+    }
+    if (payload.auto_apply_content_fixes !== undefined) {
+      formData.append('auto_apply_content_fixes', payload.auto_apply_content_fixes ? 'true' : 'false');
+    }
+    if (payload.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+    if (payload.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+    if (payload.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+
+    const response = await this.axios.post('/transcription/hearing/jobs', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async listTranscriptionJobs(limit: number = 20): Promise<{ jobs: any[] }> {
+    const response = await this.axios.get('/transcription/jobs', { params: { limit } });
+    return response.data;
+  }
+
+  async getTranscriptionJob(jobId: string): Promise<any> {
+    const response = await this.axios.get(`/transcription/jobs/${jobId}`);
+    return response.data;
+  }
+
+  async cancelTranscriptionJob(jobId: string): Promise<any> {
+    const response = await this.axios.post(`/transcription/jobs/${jobId}/cancel`);
+    return response.data;
+  }
+
+  async updateTranscriptionJobQuality(
+    jobId: string,
+    data: {
+      validation_report?: any;
+      analysis_result?: any;
+      selected_fix_ids?: string[];
+      applied_fixes?: string[];
+      suggestions?: string | null;
+      fixed_content?: string;
+    }
+  ): Promise<{ success: boolean; quality?: any }> {
+    const response = await this.axios.post(`/transcription/jobs/${jobId}/quality`, data);
+    return response.data;
+  }
+
+  async streamTranscriptionJob(
+    jobId: string,
+    onProgress: (stage: string, progress: number, message: string) => void,
+    onComplete: (payload: any) => void,
+    onError: (error: string) => void,
+    maxRetries: number = 3
+  ): Promise<void> {
+    const token = this.getAccessToken();
+    let retryCount = 0;
+    let lastProgress = 0;
+    let completed = false;
+
+    const attemptStream = async (): Promise<boolean> => {
+      try {
+        const response = await this.fetchStreamingGetWithFallback(
+          `/transcription/jobs/${jobId}/stream`,
+          {
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            Accept: 'text/event-stream',
+          }
+        );
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          console.warn('[SSE] Response body is not readable');
+          return false;
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (!line.startsWith('data:')) continue;
+            try {
+              const data = JSON.parse(line.slice(5).trim());
+              if (data.stage !== undefined) {
+                lastProgress = data.progress || lastProgress;
+                onProgress(data.stage, data.progress, data.message);
+              } else if (data.job_type || data.payload || data.content !== undefined) {
+                completed = true;
+                onComplete(data);
+                return true;
+              } else if (data.error !== undefined) {
+                onError(data.error);
+                return true; // Don't retry on explicit errors
+              }
+            } catch (parseError) {
+              console.warn('[SSE] Failed to parse SSE data:', line);
+            }
+          }
+        }
+
+        // Check remaining buffer
+        if (buffer.trim().startsWith('data:')) {
+          try {
+            const data = JSON.parse(buffer.trim().slice(5).trim());
+            if (data.job_type || data.payload || data.content !== undefined) {
+              completed = true;
+              onComplete(data);
+              return true;
+            } else if (data.error !== undefined) {
+              onError(data.error);
+              return true;
+            }
+          } catch (parseError) {
+            console.warn('[SSE] Failed to parse final SSE data:', buffer);
+          }
+        }
+
+        // Stream ended without completion - might need retry
+        return completed;
+      } catch (error: any) {
+        console.warn(`[SSE] Stream error (attempt ${retryCount + 1}/${maxRetries}):`, error.message);
+        return false;
+      }
+    };
+
+    // Try SSE with retries
+    while (retryCount < maxRetries && !completed) {
+      const success = await attemptStream();
+      if (success || completed) return;
+
+      retryCount++;
+      if (retryCount < maxRetries) {
+        console.log(`[SSE] Retrying in ${retryCount * 2}s... (attempt ${retryCount + 1}/${maxRetries})`);
+        onProgress('reconnecting', lastProgress, `Reconectando... (tentativa ${retryCount + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
+      }
+    }
+
+    // SSE failed - fall back to polling
+    if (!completed) {
+      console.log('[SSE] Falling back to polling...');
+      onProgress('polling', lastProgress, 'Conexão SSE perdida, verificando status...');
+
+      const pollForResult = async (): Promise<void> => {
+        const maxPolls = 720; // 60 minutes max (5s intervals)
+        for (let i = 0; i < maxPolls && !completed; i++) {
+          try {
+            const jobStatus = await this.getTranscriptionJobResult(jobId);
+            if (jobStatus?.status === 'completed' && (jobStatus.content || jobStatus.payload)) {
+              completed = true;
+              onComplete(jobStatus);
+              return;
+            } else if (jobStatus?.status === 'canceled') {
+              onError(jobStatus.message || 'Job cancelado');
+              return;
+            } else if (jobStatus?.status === 'error' || jobStatus?.status === 'failed') {
+              onError(jobStatus.error || 'Job failed');
+              return;
+            }
+            // Update progress from job status if available
+            if (jobStatus?.progress !== undefined) {
+              lastProgress = jobStatus.progress;
+              onProgress('processing', jobStatus.progress, jobStatus.message || 'Processando...');
+            }
+          } catch (pollError: any) {
+            console.warn('[Polling] Error:', pollError.message);
+          }
+          await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+        if (!completed) {
+          onError('Timeout: Unable to get transcription result');
+        }
+      };
+
+      await pollForResult();
+    }
+  }
+
+  async getTranscriptionJobResult(jobId: string): Promise<any> {
+    try {
+      // First get job status
+      const statusResponse = await this.axios.get(`/transcription/jobs/${jobId}`);
+      const jobStatus = statusResponse.data;
+
+      // If completed, fetch the full result with content
+      if (jobStatus?.status === 'completed') {
+        try {
+          const resultResponse = await this.axios.get(`/transcription/jobs/${jobId}/result`);
+          return { ...jobStatus, ...resultResponse.data };
+        } catch (resultError: any) {
+          console.warn('[getTranscriptionJobResult] Could not fetch full result:', resultError.message);
+          return jobStatus;
+        }
+      }
+
+      return jobStatus;
+    } catch (error: any) {
+      console.warn('[getTranscriptionJobResult] Error:', error.message);
+      return null;
+    }
+  }
+
+  async deleteTranscriptionJob(jobId: string, deleteOutputs: boolean = true): Promise<void> {
+    await this.axios.delete(`/transcription/jobs/${jobId}`, {
+      params: { delete_outputs: deleteOutputs ? 'true' : 'false' },
+    });
+  }
+
+  /**
+   * Get the URL for a job's media file (audio/video)
+   */
+  getJobMediaUrl(jobId: string, index: number = 0): string {
+    return `${this.baseUrl}/transcription/jobs/${jobId}/media?index=${index}`;
+  }
+
+  /**
+   * List all media files for a job
+   */
+  async listJobMedia(jobId: string): Promise<{ files: Array<{ index: number; name: string; size: number; url: string }> }> {
+    const response = await this.axios.get(`/transcription/jobs/${jobId}/media/list`);
+    return response.data;
+  }
+
+  async downloadTranscriptionReport(jobId: string, reportKey: string): Promise<Blob> {
+    const safeKey = encodeURIComponent(reportKey);
+    const response = await this.axios.get(`/transcription/jobs/${jobId}/reports/${safeKey}`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
+  async recomputeTranscriptionPreventiveAudit(jobId: string): Promise<{ success: boolean; reports?: any; audit_summary?: any }> {
+    const response = await this.axios.post(`/transcription/jobs/${jobId}/preventive-audit/recompute`);
     return response.data;
   }
 
@@ -968,35 +1697,51 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
-    onComplete: (content: string) => void,
+    onComplete: (payload: { content: string; raw_content?: string | null; reports?: any }) => void,
     onError: (error: string) => void
   ): Promise<void> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('mode', options.mode);
-    formData.append('thinking_level', options.thinking_level);
-    if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
-    if (options.model_selection) formData.append('model_selection', options.model_selection);
-    if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    const buildFormData = () => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('mode', options.mode);
+      formData.append('thinking_level', options.thinking_level);
+      if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+      if (options.model_selection) formData.append('model_selection', options.model_selection);
+      if (options.high_accuracy) formData.append('high_accuracy', 'true');
+      if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+      if (options.auto_apply_fixes !== undefined) {
+        formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
+      }
+      if (options.auto_apply_content_fixes !== undefined) {
+        formData.append('auto_apply_content_fixes', options.auto_apply_content_fixes ? 'true' : 'false');
+      }
+      if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+      if (options.skip_audit) formData.append('skip_audit', 'true');
+      if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+      if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      return formData;
+    };
 
     const token = this.getAccessToken();
 
     try {
-      const response = await fetch(`${API_URL}/transcription/vomo/stream`, {
-        method: 'POST',
-        headers: {
+      const response = await this.fetchStreamingWithFallback(
+        '/transcription/vomo/stream',
+        buildFormData,
+        {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           Accept: 'text/event-stream',
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        onError(`HTTP ${response.status}: ${response.statusText}`);
-        return;
-      }
+        }
+      );
 
       const reader = response.body?.getReader();
       if (!reader) {
@@ -1027,7 +1772,11 @@ class ApiClient {
                 onProgress(data.stage, data.progress, data.message);
               } else if (data.content !== undefined) {
                 // Complete event
-                onComplete(data.content);
+                onComplete({
+                  content: data.content,
+                  raw_content: data.raw_content,
+                  reports: data.reports,
+                });
               } else if (data.error !== undefined) {
                 // Error event
                 onError(data.error);
@@ -1044,7 +1793,11 @@ class ApiClient {
         try {
           const data = JSON.parse(buffer.trim().slice(5).trim());
           if (data.content !== undefined) {
-            onComplete(data.content);
+            onComplete({
+              content: data.content,
+              raw_content: data.raw_content,
+              reports: data.reports,
+            });
           } else if (data.error !== undefined) {
             onError(data.error);
           }
@@ -1068,35 +1821,51 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
-    onComplete: (content: string, filenames: string[], totalFiles: number) => void,
+    onComplete: (payload: { content: string; raw_content?: string | null; filenames: string[]; total_files: number; reports?: any }) => void,
     onError: (error: string) => void
   ): Promise<void> {
-    const formData = new FormData();
-    files.forEach(f => formData.append('files', f));
-    formData.append('mode', options.mode);
-    formData.append('thinking_level', options.thinking_level);
-    if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
-    if (options.model_selection) formData.append('model_selection', options.model_selection);
-    if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    const buildFormData = () => {
+      const formData = new FormData();
+      files.forEach(f => formData.append('files', f));
+      formData.append('mode', options.mode);
+      formData.append('thinking_level', options.thinking_level);
+      if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+      if (options.model_selection) formData.append('model_selection', options.model_selection);
+      if (options.high_accuracy) formData.append('high_accuracy', 'true');
+      if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+      if (options.auto_apply_fixes !== undefined) {
+        formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
+      }
+      if (options.auto_apply_content_fixes !== undefined) {
+        formData.append('auto_apply_content_fixes', options.auto_apply_content_fixes ? 'true' : 'false');
+      }
+      if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+      if (options.skip_audit) formData.append('skip_audit', 'true');
+      if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+      if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      return formData;
+    };
 
     const token = this.getAccessToken();
 
     try {
-      const response = await fetch(`${API_URL}/transcription/vomo/batch/stream`, {
-        method: 'POST',
-        headers: {
+      const response = await this.fetchStreamingWithFallback(
+        '/transcription/vomo/batch/stream',
+        buildFormData,
+        {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           Accept: 'text/event-stream',
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        onError(`HTTP ${response.status}: ${response.statusText}`);
-        return;
-      }
+        }
+      );
 
       const reader = response.body?.getReader();
       if (!reader) {
@@ -1123,7 +1892,13 @@ class ApiClient {
               if (data.stage !== undefined) {
                 onProgress(data.stage, data.progress, data.message);
               } else if (data.content !== undefined) {
-                onComplete(data.content, data.filenames || [], data.total_files || 1);
+                onComplete({
+                  content: data.content,
+                  raw_content: data.raw_content,
+                  filenames: data.filenames || [],
+                  total_files: data.total_files || 1,
+                  reports: data.reports,
+                });
               } else if (data.error !== undefined) {
                 onError(data.error);
               }
@@ -1139,7 +1914,13 @@ class ApiClient {
         try {
           const data = JSON.parse(buffer.trim().slice(5).trim());
           if (data.content !== undefined) {
-            onComplete(data.content, data.filenames || [], data.total_files || 1);
+            onComplete({
+              content: data.content,
+              raw_content: data.raw_content,
+              filenames: data.filenames || [],
+              total_files: data.total_files || 1,
+              reports: data.reports,
+            });
           } else if (data.error !== undefined) {
             onError(data.error);
           }
@@ -1176,38 +1957,56 @@ class ApiClient {
       format_mode?: string;
       custom_prompt?: string;
       format_enabled?: boolean;
+      allow_indirect?: boolean;
+      allow_summary?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
     onComplete: (payload: any) => void,
     onError: (error: string) => void
   ): Promise<void> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('case_id', options.case_id);
-    formData.append('goal', options.goal);
-    formData.append('thinking_level', options.thinking_level);
-    if (options.model_selection) formData.append('model_selection', options.model_selection);
-    if (options.high_accuracy) formData.append('high_accuracy', 'true');
-    if (options.format_mode) formData.append('format_mode', options.format_mode);
-    if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
-    if (options.format_enabled === false) formData.append('format_enabled', 'false');
+    const buildFormData = () => {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('case_id', options.case_id);
+      formData.append('goal', options.goal);
+      formData.append('thinking_level', options.thinking_level);
+      if (options.model_selection) formData.append('model_selection', options.model_selection);
+      if (options.high_accuracy) formData.append('high_accuracy', 'true');
+      if (options.format_mode) formData.append('format_mode', options.format_mode);
+      if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+      if (options.format_enabled === false) formData.append('format_enabled', 'false');
+      if (options.allow_indirect) formData.append('allow_indirect', 'true');
+      if (options.allow_summary) formData.append('allow_summary', 'true');
+      if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+      if (options.auto_apply_fixes !== undefined) {
+        formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
+      }
+      if (options.auto_apply_content_fixes !== undefined) {
+        formData.append('auto_apply_content_fixes', options.auto_apply_content_fixes ? 'true' : 'false');
+      }
+      if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
+      if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
+      if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      return formData;
+    };
 
     const token = this.getAccessToken();
 
     try {
-      const response = await fetch(`${API_URL}/transcription/hearing/stream`, {
-        method: 'POST',
-        headers: {
+      const response = await this.fetchStreamingWithFallback(
+        '/transcription/hearing/stream',
+        buildFormData,
+        {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           Accept: 'text/event-stream',
-        },
-        body: formData,
-      });
-
-      if (!response.ok) {
-        onError(`HTTP ${response.status}: ${response.statusText}`);
-        return;
-      }
+        }
+      );
 
       const reader = response.body?.getReader();
       if (!reader) {
@@ -1317,6 +2116,21 @@ class ApiClient {
     return response.data;
   }
 
+  async getConfigLimits(): Promise<Record<string, any>> {
+    const response = await this.axios.get('/config/limits');
+    return response.data;
+  }
+
+  async getBillingConfig(): Promise<Record<string, any>> {
+    const response = await this.axios.get('/config/billing');
+    return response.data;
+  }
+
+  async getBillingSummary(): Promise<Record<string, any>> {
+    const response = await this.axios.get('/billing/summary');
+    return response.data;
+  }
+
   async startJob(data: any): Promise<{ job_id: string; status: string }> {
     const response = await this.axios.post('/jobs/start', data);
     return response.data;
@@ -1421,6 +2235,15 @@ class ApiClient {
   async applyApprovedFixes(data: {
     content: string;
     approved_fix_ids: string[];
+    approved_fixes?: Array<{
+      id: string;
+      type: string;
+      description: string;
+      action: string;
+      severity: string;
+      fingerprint?: string;
+      title?: string;
+    }>;
   }): Promise<{
     success: boolean;
     fixed_content?: string;
@@ -1431,9 +2254,317 @@ class ApiClient {
     const response = await this.axios.post('/quality/apply-approved', data);
     return response.data;
   }
+
+  /**
+   * Apply transcription HIL revisions (structural + content fixes)
+   */
+  async applyTranscriptionRevisions(data: {
+    content: string;
+    raw_content?: string;
+    approved_issues: any[];
+    model_selection?: string;
+  }): Promise<{
+    revised_content: string;
+    changes_made: number;
+    issues_applied?: string[];
+    applied_issue_ids?: string[];
+    structural_fixes_applied?: string[];
+    content_fixes_applied?: string[];
+    structural_error?: string;
+    content_error?: string;
+    content_changed?: boolean;
+    content_change?: {
+      before_chars?: number;
+      after_chars?: number;
+      delta_chars?: number;
+    };
+    skipped_issue_ids?: string[];
+    skipped_reason?: string;
+    model_used?: string | null;
+  }> {
+    const response = await this.axios.post('/transcription/apply-revisions', data, {
+      timeout: 10 * 60 * 1000,
+    });
+    return response.data;
+  }
+
+  // ============= UNIFIED HIL (Structural + Semantic) =============
+
+  /**
+   * Convert validation results to unified HIL issues with patches
+   */
+  async convertToHilIssues(data: {
+    raw_content: string;
+    formatted_content: string;
+    document_name?: string;
+    omissions?: string[];
+    distortions?: string[];
+    include_structural?: boolean;
+    model_selection?: string;
+  }): Promise<{
+    document_name: string;
+    converted_at: string;
+    total_issues: number;
+    hil_issues: Array<{
+      id: string;
+      type: string;
+      description: string;
+      action: string;
+      severity: string;
+      source?: string;
+      fingerprint?: string;
+      title?: string;
+      patch?: {
+        anchor_text?: string;
+        old_text?: string;
+        new_text?: string;
+        confidence?: string;
+        confidence_score?: number;
+        validation_notes?: string[];
+      };
+      evidence?: string[];
+      confidence?: number;
+      confidence_level?: string;
+      validation_notes?: string[];
+      can_auto_apply?: boolean;
+    }>;
+    structural_count: number;
+    semantic_count: number;
+    requires_approval: boolean;
+    filtered_false_positives?: number;
+    compression_analysis?: {
+      ratio: number;
+      adjusted_ratio?: number;
+      status: string;
+      is_intentional_summarization: boolean;
+      notes: string[];
+    };
+    error?: string;
+  }> {
+    const response = await this.axios.post('/quality/convert-to-hil', data, {
+      timeout: 5 * 60 * 1000, // 5 min for AI patch generation
+    });
+    return response.data;
+  }
+
+  /**
+   * Generate legal checklist from document content
+   */
+  async generateLegalChecklist(data: {
+    content: string;
+    document_name?: string;
+    include_counts?: boolean;
+    append_to_content?: boolean;
+  }): Promise<{
+    document_name: string;
+    total_references: number;
+    checklist_markdown: string;
+    content_with_checklist?: string;
+    controle_concentrado: Array<{ identifier: string; count: number }>;
+    sumulas_vinculantes: Array<{ identifier: string; count: number }>;
+    sumulas_stf: Array<{ identifier: string; count: number }>;
+    sumulas_stj: Array<{ identifier: string; count: number }>;
+    recursos_repetitivos: Array<{ identifier: string; count: number }>;
+    temas_repetitivos: Array<{ identifier: string; count: number }>;
+    iac: Array<{ identifier: string; count: number }>;
+    irdr: Array<{ identifier: string; count: number }>;
+    constituicao: Array<{ identifier: string; count: number }>;
+    leis_federais: Array<{ identifier: string; count: number }>;
+    codigos: Array<{ identifier: string; count: number }>;
+  }> {
+    const response = await this.axios.post('/quality/generate-checklist', data);
+    return response.data;
+  }
+
+  // =========================================================================
+  // HEARING/MEETING QUALITY API
+  // =========================================================================
+
+  /**
+   * Validate hearing/meeting transcription
+   */
+  async validateHearing(data: {
+    segments: Array<{
+      id?: string;
+      text: string;
+      speaker_id?: string;
+      speaker_label?: string;
+      speaker_role?: string;
+      start?: number;
+      end?: number;
+      confidence?: number;
+    }>;
+    speakers?: Array<{
+      speaker_id: string;
+      name?: string;
+      label?: string;
+      role?: string;
+      party?: string;
+    }>;
+    formatted_content?: string;
+    raw_content?: string;
+    document_name?: string;
+    mode?: string;
+  }): Promise<{
+    document_name: string;
+    validated_at: string;
+    approved: boolean;
+    score: number;
+    mode: string;
+    completude_rate: number;
+    speaker_identification_rate: number;
+    evidence_preservation_rate: number;
+    chronology_valid: boolean;
+    issues: Array<{
+      id: string;
+      type: string;
+      description: string;
+      severity: string;
+      segment_id?: string;
+      speaker_id?: string;
+      timestamp?: string;
+      suggestion?: string;
+    }>;
+    total_issues: number;
+    requires_review: boolean;
+    review_reason?: string;
+    critical_areas: string[];
+    error?: string;
+  }> {
+    const response = await this.axios.post('/quality/validate-hearing', data);
+    return response.data;
+  }
+
+  /**
+   * Analyze hearing segments for detailed issues
+   */
+  async analyzeHearingSegments(data: {
+    segments: Array<{
+      id?: string;
+      text: string;
+      speaker_id?: string;
+      speaker_label?: string;
+      start?: number;
+      end?: number;
+    }>;
+    speakers?: Array<{
+      speaker_id: string;
+      name?: string;
+      label?: string;
+      role?: string;
+    }>;
+    document_name?: string;
+    include_contradictions?: boolean;
+  }): Promise<{
+    document_name: string;
+    analyzed_at: string;
+    total_segments: number;
+    segments_with_issues: number;
+    issues_by_segment: Record<string, Array<{
+      segment_id: string;
+      type: string;
+      description: string;
+      severity: string;
+      speaker_label?: string;
+      timestamp_range?: string;
+    }>>;
+    summary: Record<string, number>;
+  }> {
+    const response = await this.axios.post('/quality/analyze-hearing-segments', data);
+    return response.data;
+  }
+
+  /**
+   * Generate hearing-specific legal checklist with speaker attribution
+   */
+  async generateHearingChecklist(data: {
+    segments: Array<{
+      id?: string;
+      text: string;
+      speaker_id?: string;
+      speaker_label?: string;
+      start?: number;
+      end?: number;
+    }>;
+    speakers?: Array<{
+      speaker_id: string;
+      name?: string;
+      label?: string;
+      role?: string;
+    }>;
+    formatted_content?: string;
+    document_name?: string;
+    include_timeline?: boolean;
+    group_by_speaker?: boolean;
+  }): Promise<{
+    document_name: string;
+    total_references: number;
+    by_speaker: Record<string, Array<{
+      identifier: string;
+      category: string;
+      timestamp?: string;
+      segment_id?: string;
+      context?: string;
+    }>>;
+    by_category: Record<string, Array<{
+      identifier: string;
+      category: string;
+      timestamp?: string;
+      speaker?: string;
+    }>>;
+    timeline: Array<{
+      timestamp: string;
+      timestamp_seconds?: number;
+      speaker: string;
+      ref: string;
+      category: string;
+      segment_id?: string;
+    }>;
+    checklist_markdown: string;
+  }> {
+    const response = await this.axios.post('/quality/generate-hearing-checklist', data);
+    return response.data;
+  }
+
+  /**
+   * Apply unified HIL fixes (structural + semantic)
+   */
+  async applyUnifiedHilFixes(data: {
+    content: string;
+    raw_content?: string;
+    approved_fixes: Array<{
+      id: string;
+      type: string;
+      description: string;
+      action: string;
+      severity: string;
+      fingerprint?: string;
+      title?: string;
+      patch?: {
+        anchor_text?: string;
+        old_text?: string;
+        new_text?: string;
+      };
+    }>;
+    model_selection?: string;
+  }): Promise<{
+    success: boolean;
+    fixed_content?: string;
+    fixes_applied: string[];
+    structural_applied: number;
+    semantic_applied: number;
+    size_reduction?: string;
+    error?: string;
+  }> {
+    const response = await this.axios.post('/quality/apply-unified-hil', data, {
+      timeout: 5 * 60 * 1000,
+    });
+    return response.data;
+  }
 }
 
 // Exportar instância singleton
 const apiClient = new ApiClient();
+export const apiBaseUrl = API_URL;
 export { apiClient };
 export default apiClient;

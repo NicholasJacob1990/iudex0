@@ -154,11 +154,57 @@ class RAGManager:
         # BM25 indices (built on-demand)
         self._bm25_indices = {}
         self._bm25_docs = {}
+        
+        # Graph Integration
+        try:
+            from app.services.rag_graph import get_knowledge_graph, LegalEntityExtractor
+            self.graph = get_knowledge_graph()
+            self.extractor = LegalEntityExtractor(self.graph)
+            logger.info("🕸️ GraphRAG integration enabled")
+        except ImportError:
+            logger.warning("⚠️ GraphRAG module not found")
+            self.graph = None
+            self.extractor = None
+
+        self.argument_pack = None
+        if self.graph is not None:
+            try:
+                from app.services.argument_pack import ARGUMENT_PACK
+                enabled = os.getenv("ARGUMENT_RAG_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+                if enabled:
+                    self.argument_pack = ARGUMENT_PACK
+                    logger.info("🧩 ArgumentGraph pack enabled")
+                else:
+                    logger.info("🧩 ArgumentGraph pack disabled via ARGUMENT_RAG_ENABLED")
+            except ImportError:
+                logger.warning("⚠️ ArgumentGraph pack not available")
     
     # =========================================================================
     # INDEXING
     # =========================================================================
-    
+
+    def _ingest_argument_pack(
+        self,
+        text: str,
+        metadata: Optional[dict],
+        doc_id: Optional[str],
+        chunk_id: Optional[int]
+    ) -> bool:
+        if self.argument_pack is None or self.graph is None:
+            return False
+
+        try:
+            meta = dict(metadata or {})
+            if doc_id:
+                meta.setdefault("doc_id", doc_id)
+            if chunk_id is not None:
+                meta.setdefault("chunk_id", chunk_id)
+            self.argument_pack.ingest_chunk(self.graph, text=text, metadata=meta)
+            return True
+        except Exception as e:
+            logger.error(f"❌ ArgumentGraph ingestion failed: {e}")
+            return False
+
     def _generate_id(self, text: str, metadata: dict) -> str:
         """Gera ID único baseado no conteúdo"""
         content = text + json.dumps(metadata, sort_keys=True)
@@ -240,6 +286,10 @@ class RAGManager:
         embeddings = []
         documents = []
         metadatas = []
+        graph_dirty = False
+        graph_dirty = False
+        graph_dirty = False
+        graph_dirty = False
         
         for i, c in enumerate(chunks):
             doc_id = self._generate_id(c, meta_dict)
@@ -248,6 +298,14 @@ class RAGManager:
             documents.append(c)
             chunk_meta = {**meta_dict, "chunk_index": i}
             metadatas.append(chunk_meta)
+            if self._ingest_argument_pack(c, chunk_meta, doc_id, i):
+                graph_dirty = True
+            if self._ingest_argument_pack(c, chunk_meta, doc_id, i):
+                graph_dirty = True
+            if self._ingest_argument_pack(c, chunk_meta, doc_id, i):
+                graph_dirty = True
+            if self._ingest_argument_pack(c, chunk_meta, doc_id, i):
+                graph_dirty = True
         
         self.collections["lei"].add(
             ids=ids,
@@ -260,6 +318,17 @@ class RAGManager:
         self._bm25_indices.pop("lei", None)
         
         logger.info(f"✅ Adicionados {len(chunks)} chunks de legislação ({metadata.tipo} {metadata.numero}/{metadata.ano})")
+        
+        # Graph Extraction
+        if self.extractor:
+            try:
+                self.extractor.extract_from_text(text)
+                graph_dirty = True
+            except Exception as e:
+                logger.error(f"❌ Graph extraction failed for lei: {e}")
+        if graph_dirty and self.graph:
+            self.graph.save()
+                
         return len(chunks)
     
     def add_jurisprudencia(
@@ -309,6 +378,25 @@ class RAGManager:
         self._bm25_indices.pop("juris", None)
         
         logger.info(f"✅ Adicionados {len(chunks)} chunks de jurisprudência ({metadata.tribunal} {metadata.numero})")
+        
+        # Graph Extraction
+        if self.extractor:
+            try:
+                node_id = f"jurisprudencia:{metadata.tribunal}_{metadata.numero}"
+                if node_id not in self.graph.graph.nodes:
+                    self.graph.add_entity(
+                        "jurisprudencia",
+                        f"{metadata.tribunal}_{metadata.numero}",
+                        f"{metadata.tipo_decisao} {metadata.numero}",
+                        {"tribunal": metadata.tribunal}
+                    )
+                self.extractor.extract_relationships_from_text(text, node_id)
+                graph_dirty = True
+            except Exception as e:
+                logger.error(f"❌ Graph extraction failed for juris: {e}")
+        if graph_dirty and self.graph:
+            self.graph.save()
+
         return len(chunks)
     
     def add_sei(
@@ -359,6 +447,8 @@ class RAGManager:
         self._bm25_indices.pop("sei", None)
         
         logger.info(f"✅ Adicionados {len(chunks)} chunks SEI ({metadata.processo_sei})")
+        if graph_dirty and self.graph:
+            self.graph.save()
         return len(chunks)
     
     def add_peca_modelo(
@@ -409,6 +499,17 @@ class RAGManager:
         self._bm25_indices.pop("pecas_modelo", None)
         
         logger.info(f"✅ Adicionados {len(chunks)} chunks de modelo ({metadata.tipo_peca} - {metadata.area})")
+        
+        # Graph Extraction (extract mentioned entities)
+        if self.extractor:
+            try:
+                self.extractor.extract_from_text(text)
+                graph_dirty = True
+            except Exception as e:
+                logger.error(f"❌ Graph extraction failed for peca_modelo: {e}")
+        if graph_dirty and self.graph:
+            self.graph.save()
+
         return len(chunks)
     
     # =========================================================================
@@ -504,6 +605,7 @@ class RAGManager:
         top_k: int = 10,
         bm25_weight: float = 0.3,
         semantic_weight: float = 0.7,
+        rrf_k: int = 60,
         filters: Optional[Dict[str, Any]] = None,
         user_id: Optional[str] = None,
         tenant_id: str = "default",
@@ -529,6 +631,7 @@ class RAGManager:
         sources = sources or self.COLLECTIONS
         
         all_results = []
+        rrf_k = max(1, int(rrf_k))
         
         for source in sources:
             if source not in self.COLLECTIONS:
@@ -596,38 +699,43 @@ class RAGManager:
             
             # Create score dict for RRF
             doc_scores = {}
-            
-            # Add BM25 scores (normalized)
-            max_bm25 = max([s for _, s in bm25_results]) if bm25_results else 1
-            for doc, score in bm25_results:
+
+            bm25_ranked = sorted(bm25_results, key=lambda x: x[1], reverse=True)
+            semantic_ranked = sorted(semantic_results, key=lambda x: x["score"], reverse=True)
+
+            bm25_rank_map = {}
+            for rank, (doc, _) in enumerate(bm25_ranked, start=1):
                 doc_id = hashlib.md5(doc.encode()).hexdigest()
-                normalized_score = (score / max_bm25) * bm25_weight if max_bm25 > 0 else 0
-                doc_scores[doc_id] = {
-                    "text": doc,
-                    "bm25_score": normalized_score,
-                    "semantic_score": 0,
-                    "source": source,
-                    "metadata": {}
-                }
-            
-            # Add semantic scores
-            for result in semantic_results:
+                bm25_rank_map[doc_id] = (rank, doc)
+
+            semantic_rank_map = {}
+            for rank, result in enumerate(semantic_ranked, start=1):
                 doc_id = hashlib.md5(result["text"].encode()).hexdigest()
-                semantic_score = result["score"] * semantic_weight
-                
-                if doc_id in doc_scores:
-                    doc_scores[doc_id]["semantic_score"] = semantic_score
-                    doc_scores[doc_id]["metadata"] = result["metadata"]
-                else:
-                    doc_scores[doc_id] = {
-                        "text": result["text"],
-                        "bm25_score": 0,
-                        "semantic_score": semantic_score,
-                        "source": source,
-                        "metadata": result["metadata"]
-                    }
-            
-            # Compute final score (RRF-like)
+                semantic_rank_map[doc_id] = (rank, result)
+
+            all_doc_ids = set(bm25_rank_map.keys()) | set(semantic_rank_map.keys())
+
+            def rrf_score(rank: int, k: int) -> float:
+                return 1.0 / (k + rank)
+
+            for doc_id in all_doc_ids:
+                bm25_rank, bm25_doc = bm25_rank_map.get(doc_id, (None, None))
+                semantic_rank, semantic_result = semantic_rank_map.get(doc_id, (None, None))
+
+                bm25_rrf = rrf_score(bm25_rank, rrf_k) * bm25_weight if bm25_rank else 0.0
+                semantic_rrf = rrf_score(semantic_rank, rrf_k) * semantic_weight if semantic_rank else 0.0
+                text = semantic_result["text"] if semantic_result else bm25_doc
+                metadata = semantic_result["metadata"] if semantic_result else {}
+
+                doc_scores[doc_id] = {
+                    "text": text,
+                    "bm25_score": bm25_rrf,
+                    "semantic_score": semantic_rrf,
+                    "source": source,
+                    "metadata": metadata
+                }
+
+            # Compute final score (RRF)
             for doc_id, data in doc_scores.items():
                 data["final_score"] = data["bm25_score"] + data["semantic_score"]
                 all_results.append(data)
@@ -1131,4 +1239,3 @@ def get_deduplicator() -> TextDeduplicator:
                 _deduplicator = TextDeduplicator()
                 logger.info("TextDeduplicator initialized.")
     return _deduplicator
-

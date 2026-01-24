@@ -16,7 +16,7 @@ import {
   Users,
   Share2,
   Mic,
-  Bot,
+  Newspaper,
   ChevronsLeft,
   ChevronsRight,
   EyeOff,
@@ -29,8 +29,7 @@ const resourceShortcuts = [
   { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
   { id: 'diagrams', label: 'Diagramas', description: 'Mapas mentais automáticos', icon: 'Share2' },
   { id: 'sharing', label: 'Compartilhamentos', description: 'Pastas e grupos', icon: 'Users' },
-  { id: 'cnj', label: 'Metadados CNJ', description: 'Processos oficiais', icon: 'Scale' },
-  { id: 'djen', label: 'Comunicações DJEN', description: 'Diário de Justiça', icon: 'Newspaper' },
+  { id: 'cnj', label: 'Metadados CNJ e Comunicacoes DJEN', description: 'Processos e publicacoes oficiais', icon: 'Newspaper' },
 ];
 
 const mainNav = [
@@ -42,6 +41,7 @@ const mainNav = [
   { href: '/models', label: 'Modelos', icon: Layers },
   { href: '/legislation', label: 'Legislação', icon: Scale },
   { href: '/jurisprudence', label: 'Jurisprudência', icon: Gavel },
+  { href: '/cnj', label: 'Metadados CNJ + DJEN', icon: Newspaper },
   { href: '/web', label: 'Web', icon: Globe },
   { href: '/library', label: 'Biblioteca', icon: Library },
   { href: '/bibliotecarios', label: 'Bibliotecários', icon: Users },
@@ -51,8 +51,7 @@ const resourceIcons: Record<string, React.ComponentType<{ className?: string }>>
   Podcasts: Mic,
   Diagramas: Share2,
   Compartilhamentos: Users,
-  'Metadados CNJ': Scale,
-  'Comunicações DJEN': Bot,
+  'Metadados CNJ e Comunicacoes DJEN': Newspaper,
 };
 
 export function SidebarPro() {

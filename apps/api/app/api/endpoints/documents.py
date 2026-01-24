@@ -27,6 +27,7 @@ from app.models.document import Document, DocumentType, DocumentStatus
 from app.schemas.document import (
     DocumentGenerationRequest,
     DocumentGenerationResponse,
+    DocumentResponse,
     SignatureRequest,
     SignatureResponse,
 )
@@ -149,7 +150,7 @@ async def get_document(
     return document
 
 
-@router.post("/upload")
+@router.post("/upload", response_model=DocumentResponse)
 async def upload_document(
     file: UploadFile = File(...),
     metadata: str | None = Form(default=None),
@@ -220,6 +221,17 @@ async def upload_document(
             
         # Criar registro no banco
         file_size = os.path.getsize(file_path)
+        max_size_bytes = settings.max_upload_size_bytes
+        if file_size > max_size_bytes:
+            try:
+                os.remove(file_path)
+            except OSError:
+                pass
+            max_mb = settings.MAX_UPLOAD_SIZE_MB
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Arquivo excede o limite de {max_mb}MB.",
+            )
         
         document = Document(
             id=file_id,
@@ -338,14 +350,14 @@ async def upload_document(
             document.doc_metadata = {**document.doc_metadata, "error": str(e)}
             await db.commit()
             
-        return document
+        return DocumentResponse.from_document(document)
 
     except Exception as e:
         logger.error(f"Erro no upload: {e}")
         raise HTTPException(status_code=500, detail=f"Erro no upload: {str(e)}")
 
 
-@router.post("/from-text")
+@router.post("/from-text", response_model=DocumentResponse)
 async def create_document_from_text(
     title: str = Form(...),
     content: str = Form(...),
@@ -387,14 +399,49 @@ async def create_document_from_text(
         await db.refresh(document)
         
         logger.info(f"Documento criado a partir de texto: {doc_id}")
-        return document
+        return DocumentResponse.from_document(document)
         
     except Exception as e:
         logger.error(f"Erro ao criar documento de texto: {e}")
+        # Tentar fallback se for erro de integridade (ex: folder_id inválido)
+        if "foreign key constraint" in str(e).lower() or "integrity" in str(e).lower():
+            logger.warning(f"Falha de integridade ao salvar documento '{title}' com folder_id='{folder_id}'. Tentando salvar sem pasta.")
+            try:
+                # Rollback da transação falha
+                await db.rollback()
+                
+                # Criar nova instância sem folder_id
+                doc_id = str(uuid.uuid4())
+                retry_document = Document(
+                    id=doc_id,
+                    user_id=current_user.id,
+                    name=title,
+                    original_name=f"{title}.txt",
+                    type=DocumentType.TXT,
+                    status=DocumentStatus.READY,
+                    size=len(content.encode('utf-8')),
+                    url="",
+                    content=content,
+                    extracted_text=content,
+                    doc_metadata={"source": "manual_input", "fallback": "true", "original_error": str(e)},
+                    tags=tags_list,
+                    folder_id=None # Força None no retry
+                )
+                db.add(retry_document)
+                await db.commit()
+                await db.refresh(retry_document)
+                logger.info(f"Documento salvo com sucesso no fallback (sem pasta): {doc_id}")
+                return DocumentResponse.from_document(retry_document)
+            except Exception as retry_idx:
+                logger.error(f"Erro fatal no fallback de salvamento: {retry_idx}")
+                raise HTTPException(status_code=500, detail=f"Erro ao salvar documento (fallback falhou): {str(retry_idx)}")
+
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Erro ao criar documento: {str(e)}")
 
 
-@router.post("/from-url")
+@router.post("/from-url", response_model=DocumentResponse)
 async def create_document_from_url(
     url: str = Form(...),
     tags: str = Form(default=""),
@@ -456,7 +503,7 @@ async def create_document_from_url(
         await db.refresh(document)
         
         logger.info(f"Documento criado a partir de URL: {doc_id} - {url}")
-        return document
+        return DocumentResponse.from_document(document)
         
     except HTTPException:
         raise
@@ -809,7 +856,8 @@ async def audit_document(
         audit_result = await audit_service.auditar_peca(
             texto_completo=content_to_audit,
             output_folder=output_folder,
-            filename_base=filename_base
+            filename_base=filename_base,
+            raw_transcript=document.extracted_text or document.content or None,
         )
         
         if "error" in audit_result:

@@ -29,6 +29,12 @@ MODEL_REGISTRY = {
         "max_output": 8_192,
         "provider": "vertex"
     },
+    # Internal RAG Agent (powered by Gemini Flash)
+    "internal-rag": {
+        "context_window": 1_000_000,
+        "max_output": 8_192,
+        "provider": "vertex"
+    },
     "gemini-1.5-pro-001": {
         "context_window": 2_097_152, # 2M tokens
         "max_output": 8_192,
@@ -43,6 +49,11 @@ MODEL_REGISTRY = {
         "provider": "openai"
     },
     "gpt-5.2": {
+        "context_window": 400_000,
+        "max_output": 128_000,
+        "provider": "openai"
+    },
+    "gpt-5.2-instant": {
         "context_window": 400_000,
         "max_output": 128_000,
         "provider": "openai"
@@ -70,6 +81,11 @@ MODEL_REGISTRY = {
         "provider": "xai"
     },
     "grok-4.1-fast": {
+        "context_window": 2_000_000,
+        "max_output": 8_192,
+        "provider": "xai"
+    },
+    "grok-4.1": {
         "context_window": 2_000_000,
         "max_output": 8_192,
         "provider": "xai"
@@ -114,6 +130,34 @@ MODEL_REGISTRY = {
         "context_window": 128_000,
         "max_output": 8_192,
         "provider": "openrouter"
+    },
+    "llama-4-maverick-t": {
+        "context_window": 500_000,
+        "max_output": 8_192,
+        "provider": "openrouter"
+    },
+
+    # === PERPLEXITY (SONAR) ===
+    # Valores conservadores para budget (evita estourar contexto).
+    "sonar": {
+        "context_window": 128_000,
+        "max_output": 4_096,
+        "provider": "perplexity"
+    },
+    "sonar-pro": {
+        "context_window": 128_000,
+        "max_output": 4_096,
+        "provider": "perplexity"
+    },
+    "sonar-deep-research": {
+        "context_window": 128_000,
+        "max_output": 4_096,
+        "provider": "perplexity"
+    },
+    "sonar-reasoning-pro": {
+        "context_window": 128_000,
+        "max_output": 4_096,
+        "provider": "perplexity"
     }
 }
 

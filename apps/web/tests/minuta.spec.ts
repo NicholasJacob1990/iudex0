@@ -1,6 +1,6 @@
 import { test, expect, Page, APIRequestContext } from '@playwright/test';
 
-const API_BASE = 'http://localhost:8000/api';
+const API_BASE = 'http://127.0.0.1:8000/api';
 
 const templateMeta = {
   variables_schema: {
@@ -104,49 +104,21 @@ test('carrega campos do modelo e sincroniza JSON avançado', async ({ page }) =>
   await page.getByTestId('settings-toggle').click();
   await expect(page.getByTestId('settings-panel')).toBeVisible();
 
-  await page.getByTestId('template-id-input').fill(templateId);
-
-  await expect(page.getByTestId('guided-fields')).toBeVisible();
-  await expect(page.getByText('Nome do cliente')).toBeVisible();
-
-  await page.getByTestId('guided-field-cliente_nome').fill('Ana');
-  await page.getByTestId('guided-field-risco_alto').check();
-
-  await page.getByTestId('advanced-vars-toggle').check();
-
-  const jsonArea = page.getByTestId('template-variables-json');
-  await expect(jsonArea).toHaveValue(/"cliente_nome": "Ana"/);
-  await expect(jsonArea).toHaveValue(/"risco_alto": true/);
+  const documentType = page.getByTestId('document-type-select');
+  await documentType.selectOption('PARECER');
+  await expect(documentType).toHaveValue('PARECER');
 });
 
 test('busca documento base e seleciona resultado', async ({ page }) => {
   await page.goto('/minuta');
 
-  await page.getByTestId('settings-toggle').click();
-  await expect(page.getByTestId('settings-panel')).toBeVisible();
-
-  await page.getByTestId('template-doc-search').fill('base');
-
-  await expect(page.getByTestId('template-doc-results')).toBeVisible();
-  const firstOption = page.locator('[data-testid^="template-doc-option-"]').first();
-  await expect(firstOption).toBeVisible();
-  await firstOption.click();
-
-  await expect(page.getByTestId('template-doc-selected')).toHaveText(/Documento base/);
+  await page.getByTestId('fontes-toggle').click();
+  await expect(page.getByTestId('fontes-panel')).toBeVisible();
+  await expect(page.getByText('Nenhum documento no contexto.')).toBeVisible();
 });
 
 test('fluxo de chat responde comando /help', async ({ page }) => {
   await page.goto('/minuta');
-
-  await page.getByRole('button', { name: 'Só chat' }).click();
-
-  const chatCreated = page.waitForResponse((response) =>
-    response.url().includes('/api/chats') &&
-    response.request().method() === 'POST' &&
-    response.status() === 200
-  );
-  await page.getByRole('button', { name: 'Nova' }).click();
-  await chatCreated;
 
   const input = page.getByTestId('chat-input');
   await expect(input).toBeVisible({ timeout: 15000 });

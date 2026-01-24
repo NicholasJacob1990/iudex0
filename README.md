@@ -166,6 +166,27 @@ ENABLE_OCR=True
 ENABLE_TRANSCRIPTION=True
 ```
 
+### RAG avançado (defaults por ambiente)
+
+Em produção (`ENVIRONMENT=production`), o backend habilita por padrão: **Multi‑Query**, **compressão de contexto**, **parent‑child** e **corrective/self‑RAG**.  
+Em desenvolvimento/local, o backend também habilita por padrão (para “destravar” o RAG). Para voltar ao comportamento antigo (desligado por default), use `RAG_UNLOCK_ALL=false` em `apps/api/.env`.
+
+```env
+# RAG_UNLOCK_ALL=true
+# RAG_MULTI_QUERY_ENABLED=true
+# RAG_MULTI_QUERY_MAX=3
+# RAG_MULTI_QUERY_LLM=false
+# RAG_CONTEXT_COMPRESSION_ENABLED=true
+# RAG_CONTEXT_COMPRESSION_MAX_CHARS=900
+# RAG_PARENT_CHILD_ENABLED=true
+# RAG_PARENT_CHILD_WINDOW=1
+# RAG_PARENT_CHILD_MAX_EXTRA=12
+# RAG_CORRECTIVE_ENABLED=true
+# RAG_CORRECTIVE_USE_HYDE=true
+# RAG_CORRECTIVE_MIN_BEST_SCORE=0.5
+# RAG_CORRECTIVE_MIN_AVG_SCORE=0.4
+```
+
 ## 📚 Documentação
 
 - [Guia de Instalação](./docs/installation.md)
@@ -238,4 +259,3 @@ Contribuições são bem-vindas! Por favor, leia o [Guia de Contribuição](./do
 
 **✨ Backend 100% Completo e Funcional ✅**  
 **Desenvolvido com ❤️ e Python 🐍 para a comunidade jurídica brasileira**
-

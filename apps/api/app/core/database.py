@@ -51,6 +51,12 @@ async def init_db() -> None:
         from app.models.chat import Chat, ChatMessage
         from app.models.document import Document
         from app.models.library import LibraryItem
+        from app.models.djen import ProcessWatchlist, DjenIntimation, DjenOabWatchlist
+        from app.models.api_usage import ApiCallUsage
+        from app.models.rag_eval import RAGEvalMetric
+        from app.models.rag_ingestion import RAGIngestionEvent
+        from app.models.rag_trace import RAGTraceEvent
+        from app.models.rag_policy import RAGAccessPolicy
         
         # Testar conexão e criar tabelas
         async with engine.begin() as conn:

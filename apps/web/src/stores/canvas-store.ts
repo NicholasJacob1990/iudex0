@@ -135,7 +135,7 @@ const mergeOutline = (existing: OutlineSection[], derived: OutlineSection[]) => 
 };
 
 export type CanvasState = 'hidden' | 'normal' | 'expanded';
-export type CanvasTab = 'editor' | 'process' | 'audit';
+export type CanvasTab = 'editor' | 'process' | 'audit' | 'quality';
 export type SectionStatus = 'pending' | 'generating' | 'done' | 'review' | 'error';
 export type CitationStatus = 'valid' | 'suspicious' | 'hallucination' | 'warning';
 export type PendingAction = 'improve' | 'shorten' | 'rewrite' | 'formalize' | 'ground' | 'ementa' | 'verify' | null;

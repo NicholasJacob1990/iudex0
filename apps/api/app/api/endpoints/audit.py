@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+from app.core.config import settings
 from app.core.security import get_current_user
 from app.core.time_utils import utcnow
 from app.models.user import User
@@ -80,6 +81,13 @@ async def run_audit(
         try:
             with open(tmp_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
+            file_size = os.path.getsize(tmp_path)
+            if file_size > settings.max_upload_size_bytes:
+                max_mb = settings.MAX_UPLOAD_SIZE_MB
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail=f"Arquivo excede o limite de {max_mb}MB.",
+                )
 
             content = await _extract_text(tmp_path, ext)
             if not content or len(content.strip()) < 50:
@@ -92,6 +100,7 @@ async def run_audit(
                 texto_completo=content,
                 output_folder=tmpdir,
                 filename_base=f"{filename_base}_{current_user.id[:8]}",
+                raw_transcript=content,
             )
 
             docx_path = result.get("docx_path")

@@ -6,6 +6,7 @@ import { useDocumentStore } from '@/stores';
 import { Button } from '@/components/ui/button';
 import { Upload, FileText, X } from 'lucide-react';
 import { formatFileSize } from '@/lib/utils';
+import { useUploadLimits } from '@/lib/use-upload-limits';
 import { toast } from 'sonner';
 
 interface FileUploadProps {
@@ -18,6 +19,7 @@ export function FileUpload({
   acceptedFormats = ['.pdf', '.docx', '.doc', '.txt', '.odt'],
 }: FileUploadProps) {
   const { uploadDocument, isUploading } = useDocumentStore();
+  const { maxUploadBytes, maxUploadLabel } = useUploadLimits();
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -38,7 +40,7 @@ export function FileUpload({
   const { getRootProps, getInputProps, isDragActive, acceptedFiles, fileRejections } = useDropzone({
     onDrop,
     accept: acceptedFormats.reduce((acc, format) => ({ ...acc, [format]: [] }), {}),
-    maxSize: 100 * 1024 * 1024, // 100MB
+    maxSize: maxUploadBytes,
     disabled: isUploading,
   });
 
@@ -63,7 +65,7 @@ export function FileUpload({
               Arraste arquivos aqui ou clique para selecionar
             </p>
             <p className="text-xs text-muted-foreground">
-              Formatos: {acceptedFormats.join(', ')} (máx. 100MB)
+              Formatos: {acceptedFormats.join(', ')} (máx. {maxUploadLabel})
             </p>
           </>
         )}
@@ -109,4 +111,3 @@ export function FileUpload({
     </div>
   );
 }
-

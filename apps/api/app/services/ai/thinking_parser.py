@@ -17,29 +17,33 @@ logger = logging.getLogger(__name__)
 
 THINKING_PROMPT_INJECTION = """
 
-IMPORTANT - REASONING PROCESS:
-Before providing your final response, you MUST think through the problem step by step.
-Wrap your thinking process inside <thinking>...</thinking> XML tags.
-Only after closing the </thinking> tag, provide your final response to the user.
+IMPORTANTE - PROCESSO DE RACIOCINIO:
+Antes de fornecer sua resposta final, voce DEVE pensar passo a passo.
+Escreva seu raciocinio em portugues e envolva tudo entre as tags XML <thinking>...</thinking>.
+Somente depois de fechar </thinking>, forneca a resposta final ao usuario.
 
-Example format:
+Formato de exemplo:
 <thinking>
-1. First, I need to understand...
-2. The key considerations are...
-3. Based on this analysis...
+1. Primeiro, preciso entender...
+2. As consideracoes principais sao...
+3. Com base nessa analise...
 </thinking>
 
-[Your final response here]
+[Sua resposta final aqui]
 """
 
 THINKING_PROMPT_INJECTION_BRIEF = """
 
-IMPORTANT: Before responding, think briefly inside <thinking>...</thinking> tags.
-After </thinking>, write your final answer.
+IMPORTANTE: Antes de responder, pense brevemente em portugues dentro das tags <thinking>...</thinking>.
+Depois de </thinking>, escreva sua resposta final.
 """
 
 
-def inject_thinking_prompt(system_instruction: str, brief: bool = False) -> str:
+def inject_thinking_prompt(
+    system_instruction: str,
+    brief: bool = False,
+    budget_tokens: Optional[int] = None,
+) -> str:
     """Inject thinking instructions into the system prompt.
     
     Args:
@@ -50,6 +54,13 @@ def inject_thinking_prompt(system_instruction: str, brief: bool = False) -> str:
         Modified system instruction with thinking instructions
     """
     injection = THINKING_PROMPT_INJECTION_BRIEF if brief else THINKING_PROMPT_INJECTION
+    if budget_tokens is not None:
+        try:
+            budget_value = int(budget_tokens)
+        except (TypeError, ValueError):
+            budget_value = None
+        if budget_value is not None and budget_value > 0:
+            injection = f"{injection}\nMantenha seu raciocinio abaixo de {budget_value} tokens."
     return system_instruction + injection
 
 

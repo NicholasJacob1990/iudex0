@@ -155,7 +155,7 @@ export default function GeneratorPage() {
                     {/* Chat Interface */}
                     <div className="flex-1 overflow-hidden">
                         {currentChat ? (
-                            <ChatInterface chatId={currentChat.id} />
+                            <ChatInterface chatId={currentChat.id} autoCanvasOnDocumentRequest />
                         ) : (
                             <ContextDashboard />
                         )}

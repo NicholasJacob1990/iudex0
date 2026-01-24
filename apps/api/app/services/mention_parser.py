@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from loguru import logger
 
+from app.core.config import settings
 from app.models.document import Document
 from app.models.library import LibraryItem, Librarian
 
@@ -17,8 +18,8 @@ class MentionService:
     MENTION_PATTERN = r"@\[(.*?)\]\((.*?):(.*?)\)"
     
     # Limites
-    MAX_MENTIONS = 3
-    MAX_CONTENT_PER_MENTION = 10_000 # Caracteres (~2.5k tokens)
+    MAX_MENTIONS = settings.MENTION_MAX_ITEMS
+    MAX_CONTENT_PER_MENTION = settings.MENTION_MAX_CONTENT_CHARS
 
     async def parse_mentions(
         self, 

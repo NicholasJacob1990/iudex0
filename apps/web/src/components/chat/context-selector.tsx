@@ -10,6 +10,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Label } from '@/components/ui/label';
+import { useUploadLimits } from '@/lib/use-upload-limits';
 
 interface ContextFile {
     id: string;
@@ -30,6 +31,7 @@ export function ContextSelector({ onContextChange }: ContextSelectorProps) {
     const [ocrEnabled, setOcrEnabled] = useState(false);
     const [rigorousSearch, setRigorousSearch] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
+    const { maxUploadLabel } = useUploadLimits();
 
     // Estimate tokens (rough approximation: 1 token ≈ 4 characters)
     const estimateTokens = (sizeBytes: number) => {
@@ -157,7 +159,7 @@ export function ContextSelector({ onContextChange }: ContextSelectorProps) {
                                     Arraste arquivos ou clique para selecionar
                                 </p>
                                 <p className="text-[10px] text-muted-foreground/60 mt-1">
-                                    PDF, DOCX, TXT (Max 50MB) {ocrEnabled && '• OCR ativado'}
+                                    PDF, DOCX, TXT, MD, ZIP, HTML e imagens (PNG/JPG/GIF/BMP/TIFF) (até {maxUploadLabel}) {ocrEnabled && '• OCR ativado'}
                                 </p>
                             </div>
                         </TabsContent>

@@ -1,9 +1,9 @@
-
 'use client';
 
 import { useMemo, useState } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ChatMessage } from './chat-message';
+import { TokenUsageCircle } from './token-usage-circle';
 import { cn } from '@/lib/utils';
 import { Sparkles, Columns2, PanelTop } from 'lucide-react';
 import { getModelConfig, ModelId } from '@/config/models';
@@ -61,7 +61,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                             type="button"
                             size="sm"
                             variant={multiModelView === 'tabs' ? 'secondary' : 'ghost'}
-                            className="h-7 px-2 text-[11px]"
+                            className="h-7 px-2 text-xs"
                             onClick={() => setMultiModelView('tabs')}
                             title="Visualização por Tabs"
                         >
@@ -72,7 +72,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                             type="button"
                             size="sm"
                             variant={multiModelView === 'columns' ? 'secondary' : 'ghost'}
-                            className="h-7 px-2 text-[11px]"
+                            className="h-7 px-2 text-xs"
                             onClick={() => setMultiModelView('columns')}
                             title="Visualização lado a lado"
                         >
@@ -141,10 +141,9 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                                             </span>
                                         </div>
 
+                                        {/* Token usage circular per model */}
                                         {msg.metadata?.token_usage && (
-                                            <span className="text-[9px] text-muted-foreground opacity-70 font-mono">
-                                                {(msg.metadata.token_usage.total_tokens / 1000).toFixed(1)}k tok
-                                            </span>
+                                            <TokenUsageCircle data={msg.metadata.token_usage} size="sm" showLabel={true} />
                                         )}
                                     </div>
                                 </TabsTrigger>
@@ -218,7 +217,11 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                                                     <div className="h-2 w-2 rounded-full bg-current" />
                                                 </div>
                                             )}
-                                            {config?.label || msg.metadata?.model || 'Modelo'}
+                                            <span>{config?.label || msg.metadata?.model || 'Modelo'}</span>
+                                            {/* Token usage circular per model */}
+                                            {msg.metadata?.token_usage && (
+                                                <TokenUsageCircle data={msg.metadata.token_usage} size="sm" showLabel={true} />
+                                            )}
                                         </div>
                                         <Button
                                             type="button"
@@ -250,7 +253,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                 </div>
             )}
 
-            <div className="mt-2 text-[10px] text-center text-muted-foreground/60">
+            <div className="mt-2 text-xs text-center text-muted-foreground/60">
                 Compare as respostas, escolha um modelo para continuar, ou gere um consolidado (opcional).
             </div>
         </div>

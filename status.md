@@ -1,7 +1,146 @@
 # Status de Implementação - Iudex
 
-**Última Atualização**: 23 de dezembro de 2025
+**Última Atualização**: 20 de janeiro de 2026
 **Status**: Implementação de Funcionalidades Pendentes Completa ✅
+
+## ✅ Atualização (20/01/2026) — UI Activity Panel estilo ChatGPT ✅
+
+### Objetivo
+Implementar um painel de atividade colapsável estilo ChatGPT que mostra o processo de raciocínio, pesquisa e etapas do modelo em tempo real durante o streaming.
+
+### Alterações implementadas
+
+#### Frontend
+- ✅ **Novo componente `ActivityPanel`** (`apps/web/src/components/chat/activity-panel.tsx`):
+  - Painel colapsável com header mostrando "Activity" e duração do stream
+  - Seção "Thinking" colapsável com suporte a chunks de diferentes tipos (research, summary, llm)
+  - Seção "Steps" com itens expandíveis para cada etapa (chamada API, pesquisa web, deep research)
+  - Seção "Sources" com lista de citações/fontes clicáveis
+  - Indicadores visuais de status (running/done/error) com animações
+  - Tags/chips de domínios para mostrar fontes consultadas
+  - Auto-scroll durante streaming de thinking
+
+- ✅ **Atualizado `ChatMessage`** (`apps/web/src/components/chat/chat-message.tsx`):
+  - Integração com o novo `ActivityPanel`
+  - Painel unificado que combina Activity + Thinking + Sources
+  - Removido código duplicado do painel antigo
+
+- ✅ **Atualizado `chat-store.ts`** (`apps/web/src/stores/chat-store.ts`):
+  - Novo handler `handleActivityEvent` para processar eventos `activity` do backend
+  - Suporte a `tags` nos activity steps
+  - Processamento de eventos de atividade em ambos os blocos de buffer
+
+#### Backend
+- ✅ **Novos helpers SSE** (`apps/api/app/api/endpoints/chats.py`):
+  - `sse_keepalive()`: Comentário SSE para anti-buffering (evita timeout em proxies)
+  - `sse_activity_event()`: Helper para emitir eventos de activity estruturados
+
+- ✅ **Eventos de Activity no stream**:
+  - Emite `activity` com step "call" ao iniciar chamada ao modelo
+  - Emite `activity` com step "thinking" para raciocínio
+  - Emite `activity` com step "deep_research" para pesquisa profunda
+  - Emite `activity` com step "web_search" para busca na web (com tags de domínios)
+  - Todos os steps são finalizados com status "done" ao concluir
+
+- ✅ **Headers anti-buffering** no `StreamingResponse`:
+  - `Cache-Control: no-cache, no-transform`
+  - `Connection: keep-alive`
+  - `X-Accel-Buffering: no` (Nginx)
+
+### Comportamento esperado
+1. Ao enviar uma mensagem, o painel Activity aparece automaticamente
+2. Durante o stream, mostra etapas em andamento com animações
+3. Thinking expandível mostra o processo de raciocínio em tempo real
+4. Ao concluir, mostra fontes/citations se houver
+5. O painel pode ser fechado após o stream completar
+
+### Próximos passos sugeridos
+- Adicionar suporte a eventos de activity para ferramentas (tool_use) quando usar Claude/GPT com funções
+- Implementar timer visual no header igual à referência do ChatGPT ("Activity · 1m 21s")
+- Considerar persistir estado do painel (aberto/fechado) no localStorage
+
+---
+
+## ✅ Atualização (15/01/2026) — Correção: "Nenhuma alteração realizada" no Controle de Qualidade ✅
+
+### Diagnóstico
+- ✅ **Problema identificado**: Ao tentar aplicar correções estruturais de parágrafos duplicados, a mensagem "Nenhuma alteração realizada" era exibida mesmo quando havia correções selecionadas.
+- ✅ **Causa raiz 1**: Inconsistência nos IDs de correções - na análise, IDs de seções duplicadas eram `dup_section_{len(pending_fixes)}` (índice global), mas na aplicação eram buscados como `dup_section_{idx}` (índice específico do array de seções).
+- ✅ **Causa raiz 2**: O modelo `PendingFix` não incluía o campo `title`, necessário para identificar seções duplicadas.
+- ✅ **Causa raiz 3**: Falta de feedback adequado quando o backend retorna sucesso mas nenhuma correção foi efetivamente aplicada.
+
+### Correções aplicadas
+- ✅ `apps/api/app/services/quality_service.py`:
+  - Corrigido geração de IDs de `dup_section_{len(pending_fixes)}` para `dup_section_{idx}` (consistência com a aplicação)
+  - Logs sanitizados (sem exposição de conteúdo)
+- ✅ `apps/api/app/api/endpoints/quality_control.py`:
+  - Adicionado campo `title` ao modelo `PendingFix`
+  - Logs operacionais com contagens (sem payload sensível)
+- ✅ `apps/web/src/components/dashboard/quality-panel.tsx`:
+  - Adicionado campo `error` à interface `AnalyzeResponse`
+  - Melhorada mensagem quando nenhuma correção é aplicada (documento pode já ter sido corrigido)
+  - Removidos logs de console sensíveis no frontend
+- ✅ `auto_fix_apostilas.py`:
+  - Removidos logs sensíveis na função `apply_structural_fixes_to_file`
+  - Logs do backend ajustados para evitar exposição de conteúdo/documentos
+- ✅ `apps/api/app/services/transcription_service.py`:
+  - Auto-aplicar correções estruturais agora usa `auto_fix_apostilas.analyze_structural_issues` (formato correto)
+  - Correções automáticas aplicadas de forma consistente no fluxo de transcrição (single, SSE e batch)
+
+### Testes adicionados
+- ✅ `apps/api/tests/test_quality_structural_fixes.py` (10 testes):
+  - Testes unitários para fingerprinting de parágrafos (determinismo, normalização)
+  - Testes de detecção de parágrafos duplicados
+  - Testes de aplicação de correções estruturais
+  - Testes de integração do fluxo completo (análise → aprovação → aplicação)
+  - Testes de consistência de IDs entre análise e aplicação
+  - Testes de proteção contra falsos positivos
+
+### Correção adicional: "backend retornou conteúdo vazio"
+- ✅ **Problema**: Ao aplicar correções do HIL, a mensagem "Erro: o backend retornou conteúdo vazio" era exibida.
+- ✅ **Causa raiz**: A função `apply_structural_fixes_to_file` podia gerar conteúdo vazio quando a regex de seções não encontrava H2s válidos.
+- ✅ **Correções aplicadas**:
+  - `auto_fix_apostilas.py`: Adicionada verificação `if sections:` antes de processar, e só reconstrói conteúdo se realmente removeu algo
+  - `quality_service.py`: Adicionada proteção em `apply_structural_fixes_from_issues` e `apply_approved_fixes` para nunca retornar conteúdo vazio
+  - `transcription_service.py`: Adicionada proteção em `_auto_apply_structural_fixes` para nunca retornar conteúdo vazio
+
+## ✅ Atualização (14/01/2026) — Erro 500 na Transcrição (SSE) ✅
+
+- ✅ Backend: proteção para ausência de `sse-starlette` com mensagem clara e HTTP 500 explicativo.
+- ✅ Backend: tratamento de falhas ao salvar arquivos temporários nos endpoints SSE.
+- ✅ Frontend: leitura do corpo de erro em endpoints SSE para exibir a causa real no toast.
+
+## ✅ Atualização (14/01/2026) — Erro 404 na Transcrição (Proxy /api) ✅
+
+- ✅ Frontend: fallback automático para backend direto quando `/api/*` retorna HTML 404 do Next.
+- ✅ Frontend: requisições SSE reconstruídas para permitir retry seguro com FormData.
+
+## ✅ Atualização (14/01/2026) — Dependência SSE (sse-starlette) ✅
+
+- ✅ Backend: adicionada dependência `sse-starlette` em `requirements.txt` e `requirements-minimal.txt`.
+- ✅ Ambiente local: criado `.venv` no `apps/api` e instalada `sse-starlette==3.1.2`.
+
+## ✅ Atualização (14/01/2026) — Transcrição: TXT e Auto-save ✅
+
+- ✅ Frontend: suporte a upload de `.txt/.md` na tela de Transcrição (modo Aula/Apostila).
+- ✅ Frontend: auto-save de conteúdos gerados (formatado + raw) na Biblioteca.
+- ✅ Backend: SSE retorna `raw_content` para preservar transcrição bruta.
+
+### Ajustes adicionais
+- ✅ Auto-save também para audiências (transcript + formatado quando disponível).
+- ✅ Refresh da listagem de documentos após auto-save.
+
+## ✅ Atualização (15/01/2026) — Correção: Erro de Serialização no Auto-save ✅
+
+- ✅ **Causa identificada**: O schema `DocumentResponse` esperava `metadata`, mas o modelo usa `doc_metadata`.
+- ✅ **Correção**: Adicionado alias `doc_metadata → metadata` no schema com `populate_by_name=True`.
+- ✅ **Endpoints atualizados**: `/documents/from-text`, `/from-url`, `/upload` agora têm `response_model=DocumentResponse` explícito.
+- ✅ **Fallback de pasta**: Auto-save tenta salvar sem `folder_id` se houver erro de FK (pasta inexistente).
+
+## ✅ Atualização (14/01/2026) — Minuta: Tela cheia sob demanda ✅
+
+- ✅ Tela cheia deixou de ser ativada automaticamente ao alternar para Chat ou Canvas na página de Minuta.
+- ✅ Novo botão de tela cheia com saída explícita (além do ESC), respeitando o modo atual (Chat, Canvas ou Dividido).
 
 ## ✅ Atualização (23/12/2025) — Correções End-to-End (Web + API)
 

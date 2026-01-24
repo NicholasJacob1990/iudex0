@@ -6,6 +6,68 @@ import { useChatStore } from '@/stores';
 import { differenceInCalendarDays } from 'date-fns';
 import apiClient from '@/lib/api-client';
 
+const DRAFT_STORAGE_PREFIX = 'iudex_chat_drafts_';
+const QUALITY_SUMMARY_PREFIX = 'iudex_quality_summary:';
+const QUALITY_CHAT_PREFIX = 'chat:';
+
+type AuditSummary = {
+  status?: string;
+  date?: string;
+};
+
+type QualitySummary = {
+  score?: number;
+  approved?: boolean;
+  validated_at?: string;
+  total_issues?: number;
+  total_content_issues?: number;
+  analyzed_at?: string;
+};
+
+const loadLocalJson = (key: string) => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
+
+const normalizeAuditSummary = (audit: any): AuditSummary | null => {
+  if (!audit) return null;
+  const statusRaw = audit.status || audit.audit_status || audit.auditStatus;
+  const approved = typeof audit.approved === 'boolean' ? audit.approved : null;
+  let status = statusRaw;
+  if (!status && approved !== null) status = approved ? 'aprovado' : 'reprovado';
+  if (!status && (audit.audit_report_markdown || audit.markdown)) status = 'disponível';
+  if (!status) return null;
+  const normalized = String(status).toLowerCase();
+  const normalizedStatus =
+    normalized.includes('aprov') ? 'aprovado'
+    : normalized.includes('reprov') ? 'reprovado'
+    : normalized.includes('pend') || normalized.includes('revis') ? 'em revisão'
+    : normalized.includes('dispon') ? 'disponível'
+    : String(status);
+  const date = audit.audit_date || audit.date || audit.validated_at || audit.created_at;
+  return { status: normalizedStatus, date: typeof date === 'string' ? date : undefined };
+};
+
+const loadQualitySummary = (chatId: string): QualitySummary | null => {
+  const key = `${QUALITY_SUMMARY_PREFIX}${QUALITY_CHAT_PREFIX}${chatId}`;
+  const raw = loadLocalJson(key);
+  if (!raw) return null;
+  return {
+    score: typeof raw.score === 'number' ? raw.score : undefined,
+    approved: typeof raw.approved === 'boolean' ? raw.approved : undefined,
+    validated_at: typeof raw.validated_at === 'string' ? raw.validated_at : undefined,
+    total_issues: typeof raw.total_issues === 'number' ? raw.total_issues : undefined,
+    total_content_issues: typeof raw.total_content_issues === 'number' ? raw.total_content_issues : undefined,
+    analyzed_at: typeof raw.analyzed_at === 'string' ? raw.analyzed_at : undefined,
+  };
+};
+
 export default function DashboardPage() {
   const { chats, fetchChats } = useChatStore();
   const [documentsTotal, setDocumentsTotal] = useState(0);
@@ -16,6 +78,9 @@ export default function DashboardPage() {
       // erros tratados no interceptor
     });
   }, [fetchChats]);
+
+  useEffect(() => {
+  }, [chats]);
 
   useEffect(() => {
     let mounted = true;
@@ -44,6 +109,12 @@ export default function DashboardPage() {
       let group: 'Hoje' | 'Últimos 7 dias' | 'Últimos 30 dias' = 'Últimos 30 dias';
       if (daysDiff === 0) group = 'Hoje';
       else if (daysDiff <= 7) group = 'Últimos 7 dias';
+      const draftMeta = loadLocalJson(`${DRAFT_STORAGE_PREFIX}${chat.id}`);
+      const auditPayload = draftMeta?.audit
+        || chat.context?.audit
+        || (chat.context?.audit_status ? { audit_status: chat.context.audit_status } : null);
+      const auditSummary = normalizeAuditSummary(auditPayload);
+      const qualitySummary = loadQualitySummary(chat.id);
       return {
         id: chat.id,
         title: chat.title || 'Minuta sem título',
@@ -51,6 +122,8 @@ export default function DashboardPage() {
         group,
         jurisdiction: chat.mode || 'Chat',
         tokens: chat.context ? Object.keys(chat.context).length * 100 : 0,
+        audit: auditSummary ?? undefined,
+        quality: qualitySummary ?? undefined,
       };
     });
   }, [chats]);

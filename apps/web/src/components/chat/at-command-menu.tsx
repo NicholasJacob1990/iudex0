@@ -38,7 +38,9 @@ const AI_MODELS = [
     { id: 'grok-4', name: 'Grok 4', description: 'xAI - Raciocínio' },
     { id: 'grok-4-fast', name: 'Grok 4 Fast', description: 'xAI - Baixa latência' },
     { id: 'grok-4.1-fast', name: 'Grok 4.1 Fast', description: 'xAI - Baixa latência' },
+    { id: 'grok-4.1', name: 'Grok 4.1', description: 'xAI - Raciocínio Avançado' },
     { id: 'llama-4', name: 'Llama 4', description: 'Meta - OpenRouter' },
+    { id: 'llama-4-maverick-t', name: 'Llama 4 Maverick', description: 'Meta - Multimodal (Together)' },
 ];
 
 export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProps) {

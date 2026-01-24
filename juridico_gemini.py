@@ -8,6 +8,7 @@ import traceback
 from pathlib import Path
 from typing import List, Dict, Optional, Generator, Any
 import datetime
+from app.core.config import settings
 try:
     from audit_juridico import audit_document_text
     AUDIT_AVAILABLE = True
@@ -952,10 +953,11 @@ def crag_gate_retrieve(
                 query=query,
                 sources=sources,
                 top_k=current_top_k,
+                bm25_weight=current_bm25,
+                semantic_weight=max(0.0, 1.0 - current_bm25),
                 user_id=user_id,
                 tenant_id=tenant_id,
                 tipo_peca_filter=tipo_peca_filter,
-                # Note: bm25/semantic weights would need to be passed if rag_manager supports them
             )
         except Exception as e:
             logger.warning(f"CRAG Gate: Retrieval error attempt {attempt+1}: {e}")
@@ -2031,19 +2033,25 @@ def generate_document_programmatic(
                         verbose=verbose_rag
                     )
                 elif use_graph:
-                    # GraphRAG: First do hybrid search, then enrich with graph context
+                    # GraphRAG: Primary graph query with vector fallback
                     logger.info(f"  📊 Using GraphRAG for multi-hop reasoning")
-                    rag_results = rag_manager.hybrid_search(
-                        query=expanded_query,
-                        sources=effective_sources,
-                        top_k=effective_top_k,
-                        tenant_id=tenant_id,
-                        tipo_peca_filter=MODE_TO_TIPO_PECA.get(mode.upper())
-                    )
-                    # Enrich with knowledge graph
-                    if knowledge_graph and rag_results:
+                    if knowledge_graph:
                         hops = route_config.get("graph_hops", graph_hops)
-                        graph_context = knowledge_graph.enrich_context(rag_results, hops=hops)
+                        graph_context, _ = knowledge_graph.query_context_from_text(
+                            expanded_query,
+                            hops=hops
+                        )
+                    if not graph_context:
+                        rag_results = rag_manager.hybrid_search(
+                            query=expanded_query,
+                            sources=effective_sources,
+                            top_k=effective_top_k,
+                            tenant_id=tenant_id,
+                            tipo_peca_filter=MODE_TO_TIPO_PECA.get(mode.upper())
+                        )
+                        if knowledge_graph and rag_results:
+                            hops = route_config.get("graph_hops", graph_hops)
+                            graph_context = knowledge_graph.enrich_context(rag_results, hops=hops)
                 elif crag_gate:
                     # v4.0: Use CRAG Gate if enabled
                     gate_result = crag_gate_retrieve(
@@ -3149,29 +3157,60 @@ def chat_programmatic(
     # Handle RAG Local Search
     rag_context = ""
     sources_used = []
-    
-    if rag_config and rag_config.get("path"):
+    rag_paths = []
+    if rag_config:
+        raw_paths = rag_config.get("paths") or rag_config.get("context_files")
+        if isinstance(raw_paths, list):
+            rag_paths.extend([str(p) for p in raw_paths if str(p).strip()])
+        raw_path = rag_config.get("path")
+        if raw_path:
+            rag_paths.append(str(raw_path))
+    if not rag_paths and context_files:
+        rag_paths = [str(p) for p in context_files if str(p).strip()]
+
+    if rag_paths:
         try:
-            from rag_local import LegalSearchEngine
-            
-            search_path = [rag_config["path"]]
-            local_index = LegalSearchEngine(
-                doc_paths=search_path,
-                tenant_id=tenant_id
-            )
-            # Perform Search
-            results = local_index.search(message, top_k=5)
-            
-            if results:
-                rag_context = "\n### 📂 Trechos Relevantes (RAG Local):\n"
-                for r in results:
-                    rag_context += f"- **{r.get('citacao', 'Doc')}**: {r['text'][:400]}...\n"
-                    sources_used.append({
-                        "doc_id": r.get("metadata", {}).get("doc_id"),
-                        "citation": r.get('citacao'),
-                        "score": r.get('final_score'),
-                        "text_snippet": r['text'][:100]
-                    })
+            from pathlib import Path
+            from rag_local import LocalProcessIndex
+
+            allowed_exts = {".pdf", ".txt", ".md"}
+            max_files = max(1, int(settings.ATTACHMENT_RAG_LOCAL_MAX_FILES))
+            files = []
+            for raw_path in rag_paths:
+                path = Path(raw_path)
+                if path.is_dir():
+                    for ext in allowed_exts:
+                        files.extend(path.rglob(f"*{ext}"))
+                elif path.is_file() and path.suffix.lower() in allowed_exts:
+                    files.append(path)
+
+            files = [str(p) for p in files[:max_files]]
+            if files:
+                local_index = LocalProcessIndex(
+                    processo_id=f"upload-{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}",
+                    sistema="UPLOAD",
+                    tenant_id=tenant_id
+                )
+                try:
+                    for file_path in files:
+                        local_index.index_documento(file_path)
+                    top_k = max(1, int(settings.ATTACHMENT_RAG_LOCAL_TOP_K))
+                    if rag_config:
+                        top_k = int(rag_config.get("rag_top_k") or rag_config.get("top_k") or top_k)
+                    results = local_index.search(message, top_k=top_k)
+                finally:
+                    local_index.cleanup()
+
+                if results:
+                    rag_context = "\n### 📂 Trechos Relevantes (RAG Local):\n"
+                    for r in results:
+                        rag_context += f"- **{r.get('citacao', 'Doc')}**: {r['text'][:400]}...\n"
+                        sources_used.append({
+                            "doc_id": r.get("metadata", {}).get("doc_id"),
+                            "citation": r.get('citacao'),
+                            "score": r.get('final_score'),
+                            "text_snippet": r['text'][:100]
+                        })
         except ImportError:
             logger.warning("RAG Local module could not be imported.")
         except Exception as e:

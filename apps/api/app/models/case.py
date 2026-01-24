@@ -37,3 +37,4 @@ class Case(Base):
 
     # Relacionamentos
     user = relationship("User", back_populates="cases")
+    watchlist_items = relationship("ProcessWatchlist", back_populates="case")

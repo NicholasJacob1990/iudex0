@@ -73,22 +73,62 @@ async def search_web(
     limit: int = 10,
     multi_query: bool = True,
     use_cache: bool = True,
+    country: str | None = None,
+    search_region: str | None = None,
+    search_city: str | None = None,
+    search_latitude: str | None = None,
+    search_longitude: str | None = None,
+    domain_filter: list[str] | None = Query(None),
+    language_filter: list[str] | None = Query(None),
+    recency_filter: str | None = None,
+    search_mode: str | None = None,
+    search_after_date: str | None = None,
+    search_before_date: str | None = None,
+    last_updated_after: str | None = None,
+    last_updated_before: str | None = None,
+    max_tokens: int | None = None,
+    max_tokens_per_page: int | None = None,
+    return_images: bool = False,
+    return_videos: bool = False,
+    return_snippets: bool = True,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Pesquisa web real com cache (Serper ou DuckDuckGo).
+    Pesquisa web real com cache (Perplexity → Serper → DuckDuckGo).
     """
+    search_kwargs = {
+        "country": country,
+        "search_region": search_region,
+        "search_city": search_city,
+        "search_latitude": search_latitude,
+        "search_longitude": search_longitude,
+        "domain_filter": domain_filter,
+        "language_filter": language_filter,
+        "recency_filter": recency_filter,
+        "search_mode": search_mode,
+        "search_after_date": search_after_date,
+        "search_before_date": search_before_date,
+        "last_updated_after": last_updated_after,
+        "last_updated_before": last_updated_before,
+        "max_tokens": max_tokens,
+        "max_tokens_per_page": max_tokens_per_page,
+        "return_images": return_images,
+        "return_videos": return_videos,
+        "return_snippets": return_snippets,
+    }
     if multi_query:
         payload = await web_search_service.search_multi(
             query=query,
             num_results=limit,
-            use_cache=use_cache
+            use_cache=use_cache,
+            **search_kwargs,
         )
     else:
         payload = await web_search_service.search(
             query=query,
             num_results=limit,
-            use_cache=use_cache
+            use_cache=use_cache,
+            **search_kwargs,
         )
 
     raw_results = payload.get("results", []) if isinstance(payload, dict) else []
@@ -104,6 +144,10 @@ async def search_web(
                 "title": result.get("title") or url,
                 "url": url,
                 "snippet": result.get("snippet"),
+                "date": result.get("date"),
+                "last_updated": result.get("last_updated"),
+                "images": result.get("images"),
+                "query": result.get("query"),
                 "source": result.get("source") or payload.get("source"),
             }
         )
@@ -112,6 +156,8 @@ async def search_web(
         "items": items,
         "total": len(items),
         "query": query,
+        "queries": payload.get("queries"),
+        "search_id": payload.get("search_id"),
         "source": payload.get("source"),
         "cached": payload.get("cached", False),
     }

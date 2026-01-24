@@ -15,7 +15,7 @@ interface AuthState {
   isLoading: boolean;
   login: (email: string, password: string) => Promise<void>;
   loginTest: () => Promise<void>;
-  register: (data: { name: string; email: string; password: string; account_type: string; [key: string]: any }) => Promise<void>;
+  register: (data: { name: string; email: string; password: string; account_type: string;[key: string]: any }) => Promise<void>;
   logout: () => void;
   updateUser: (data: Partial<User>) => void;
   fetchProfile: () => Promise<void>;
@@ -44,19 +44,25 @@ export const useAuthStore = create<AuthState>()(
       },
 
       loginTest: async () => {
-        console.log('[Auth Store] loginTest chamado');
+        console.log('[Auth Store] loginTest iniciado');
         set({ isLoading: true });
+        // Limpar estado anterior para evitar conflitos
+        apiClient.clearTokens();
+        set({ user: null, isAuthenticated: false });
+
         try {
+          console.log('[Auth Store] Chamando API login-test...');
           const response = await apiClient.loginTest();
-          console.log('[Auth Store] Resposta recebida:', response.user?.email);
+          console.log('[Auth Store] Resposta recebida. User:', response.user?.email);
+
           set({
             user: response.user,
             isAuthenticated: true,
             isLoading: false,
           });
-          console.log('[Auth Store] Estado atualizado - isAuthenticated: true');
+          console.log('[Auth Store] Estado atualizado (isAuthenticated: true)');
         } catch (error) {
-          console.error('[Auth Store] Erro no loginTest:', error);
+          console.error('[Auth Store] Erro grave em loginTest:', error);
           set({ isLoading: false });
           throw error;
         }

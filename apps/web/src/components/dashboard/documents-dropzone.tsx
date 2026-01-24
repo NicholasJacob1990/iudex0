@@ -1,8 +1,10 @@
 'use client';
 
 import { ChangeEvent, useEffect, useState } from 'react';
-import { UploadCloud, FileText, Download, FolderDown, Link as LinkIcon, Type } from 'lucide-react';
-import { useDocumentStore } from '@/stores';
+import { useRouter } from 'next/navigation';
+import { UploadCloud, FileText, Download, FolderDown, Link as LinkIcon, Type, Loader2 } from 'lucide-react';
+import { useCanvasStore, useDocumentStore } from '@/stores';
+import { useUploadLimits } from '@/lib/use-upload-limits';
 import { formatFileSize } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog';
@@ -11,10 +13,19 @@ import { Label } from '@/components/ui/label';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
 
-export function DocumentsDropzone() {
+type DocumentsDropzoneProps = {
+  onOpenDocument?: (doc: any) => void;
+};
+
+export function DocumentsDropzone({ onOpenDocument }: DocumentsDropzoneProps) {
   const { uploadDocument, fetchDocuments, documents, total, isUploading } = useDocumentStore();
+  const { setContent, setMetadata, showCanvas, setActiveTab } = useCanvasStore();
+  const router = useRouter();
+  const { maxUploadLabel } = useUploadLimits();
   const [urlDialogOpen, setUrlDialogOpen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportingId, setExportingId] = useState<string | null>(null);
   const [url, setUrl] = useState('');
   const [textContent, setTextContent] = useState('');
   const [textTitle, setTextTitle] = useState('');
@@ -22,6 +33,15 @@ export function DocumentsDropzone() {
   useEffect(() => {
     fetchDocuments().catch(() => undefined);
   }, [fetchDocuments]);
+
+  const handleScrollToList = () => {
+    const listEl = document.getElementById('documents-list');
+    if (listEl) {
+      listEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return;
+    }
+    toast.info('A lista de documentos está mais abaixo na página.');
+  };
 
   const handleUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -38,6 +58,46 @@ export function DocumentsDropzone() {
 
   const handleTranscribe = () => {
     toast.info('Funcionalidade de transcrição será implementada em breve');
+  };
+
+  const handleExportClick = () => {
+    if (!documents.length) {
+      toast.error('Nenhum documento disponível para exportar.');
+      return;
+    }
+    setExportDialogOpen(true);
+  };
+
+  const handleExportDocument = async (doc: any) => {
+    setExportingId(doc.id);
+    try {
+      const fullDoc = await apiClient.getDocument(doc.id);
+      const text = String(fullDoc?.extracted_text || fullDoc?.content || '').trim();
+      if (!text) {
+        toast.error('Documento sem texto para exportar. Rode o OCR se necessário.');
+        return;
+      }
+
+      setContent(text);
+      setMetadata(
+        {
+          title: fullDoc?.name || doc.name,
+          source: 'documents',
+          source_document_id: doc.id,
+          exported_at: new Date().toISOString(),
+        },
+        null
+      );
+      showCanvas();
+      setActiveTab('editor');
+      setExportDialogOpen(false);
+      router.push('/minuta');
+      toast.success('Documento enviado para a Minuta.');
+    } catch (error) {
+      toast.error('Não foi possível exportar para a Minuta.');
+    } finally {
+      setExportingId(null);
+    }
   };
 
   const handleUrlSubmit = async () => {
@@ -125,18 +185,18 @@ export function DocumentsDropzone() {
         <p className="text-sm font-semibold text-primary">
           {isUploading ? 'Processando...' : 'Clique ou arraste arquivos'}
         </p>
-        <p className="text-xs text-muted-foreground">PDF, DOCX, ODT, ZIP, HTML, imagens, áudio, vídeo até 500MB</p>
+        <p className="text-xs text-muted-foreground">PDF, DOCX, ODT, ZIP, HTML, imagens, áudio, vídeo até {maxUploadLabel}</p>
         <p className="text-[10px] text-muted-foreground mt-2">
           OCR, áudio e vídeo são processados em segundo plano. Acompanhe o status no card do documento.
         </p>
       </label>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
-          <Button variant="outline" className="rounded-full">
+          <Button variant="outline" className="rounded-full" onClick={handleScrollToList}>
             <Download className="mr-2 h-4 w-4" />
             Ver documentos salvos ({total})
           </Button>
-          <Button variant="ghost" className="rounded-full text-primary">
+          <Button variant="ghost" className="rounded-full text-primary" onClick={handleExportClick}>
             <FolderDown className="mr-2 h-4 w-4" />
             Exportar direto para Minuta
           </Button>
@@ -159,7 +219,12 @@ export function DocumentsDropzone() {
                   </p>
                 </div>
               </div>
-              <Button variant="ghost" size="sm" className="rounded-full text-primary">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="rounded-full text-primary"
+                onClick={() => onOpenDocument?.(doc)}
+              >
                 Detalhes
               </Button>
             </div>
@@ -232,6 +297,49 @@ export function DocumentsDropzone() {
               Cancelar
             </Button>
             <Button onClick={handleTextSubmit}>Adicionar</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Export Dialog */}
+      <Dialog open={exportDialogOpen} onOpenChange={setExportDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Exportar para Minuta</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 py-2 max-h-[60vh] overflow-y-auto">
+            {documents.map((doc) => (
+              <div
+                key={doc.id}
+                className="flex items-center justify-between rounded-2xl border border-outline/40 bg-white/80 px-4 py-3"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="rounded-2xl bg-primary/10 p-2 text-primary">
+                    <FileText className="h-4 w-4" />
+                  </span>
+                  <div>
+                    <p className="text-sm font-semibold text-foreground">{doc.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {formatFileSize(doc.file_size ?? doc.size ?? 0)} • {doc.status}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  className="rounded-full gap-2 text-xs"
+                  onClick={() => handleExportDocument(doc)}
+                  disabled={exportingId === doc.id}
+                >
+                  {exportingId === doc.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                  Exportar
+                </Button>
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setExportDialogOpen(false)}>
+              Fechar
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

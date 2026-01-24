@@ -14,6 +14,7 @@ from app.services.legal_prompts import LegalPrompts
 from app.services.web_search_service import web_search_service, is_breadth_first
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.ai.model_registry import get_api_model_name
+from app.services.ai.perplexity_config import normalize_perplexity_search_mode
 
 
 @dataclass
@@ -91,23 +92,28 @@ class MultiAgentOrchestrator:
         effort_level: int = 3,
         use_multi_agent: bool = True,
         # IDs canônicos (mapeados para api_model dentro de agent_clients)
-        model: str = "gemini-3-pro",
+        model: str = "gemini-3-flash",
         model_gpt: str = "gpt-5.2",
         model_claude: str = "claude-4.5-sonnet",
         drafter_models: Optional[List[str]] = None,
         reviewer_models: Optional[List[str]] = None,
         reasoning_level: str = "medium",
+        temperature: float = 0.3,
+        num_committee_rounds: int = 1,
         web_search: bool = False,
         search_mode: str = "hybrid",
+        perplexity_search_mode: Optional[str] = None,
         multi_query: bool = True,
         breadth_first: bool = False,
         thesis: Optional[str] = None,
         formatting_options: Dict[str, bool] = None,
         run_audit: bool = True,
-        dense_research: bool = False
+        dense_research: bool = False,
+        deep_research_effort: Optional[str] = None,
+        deep_research_points_multiplier: Optional[float] = None,
     ) -> MultiAgentResult:
         """
-        Gera documento usando o modo Agente (Debate + Juiz) x 4 Rodadas
+        Gera documento usando o modo Agente (Debate + Juiz) com rodadas configuráveis
         """
         import time
         from app.services.ai.agent_clients import (
@@ -118,6 +124,18 @@ class MultiAgentOrchestrator:
         
         start_time = time.time()
         logger.info(f"🚀 Iniciando geração AGENT MODE (Async)...")
+
+        try:
+            temperature = float(temperature)
+        except (TypeError, ValueError):
+            temperature = 0.3
+        temperature = max(0.0, min(1.0, temperature))
+        try:
+            num_committee_rounds = int(num_committee_rounds)
+        except (TypeError, ValueError):
+            num_committee_rounds = 1
+        num_committee_rounds = max(1, min(6, num_committee_rounds))
+        normalized_perplexity_search_mode = normalize_perplexity_search_mode(perplexity_search_mode)
         
         # 1. Preparar CaseBundle
         # O bundle deve vir no context ou ser criado aqui
@@ -150,8 +168,11 @@ class MultiAgentOrchestrator:
                     reviewer_models=reviewer_models or [],
                     judge_model=model,
                     reasoning_level=reasoning_level,
+                    temperature=temperature,
+                    num_committee_rounds=num_committee_rounds,
                     web_search=web_search,
                     search_mode=search_mode,
+                    perplexity_search_mode=normalized_perplexity_search_mode,
                     multi_query=multi_query,
                     breadth_first=breadth_first,
                     thesis=thesis,
@@ -237,7 +258,14 @@ class MultiAgentOrchestrator:
                        logger.info(f"🧠 [Simple Mode] Iniciando DEEP RESEARCH para: {search_term[:50]}...")
                        
                        # Call Autonomous Agent
-                       dr_result = await deep_research_service.run_research_task(search_term)
+                       deep_config: Optional[Dict[str, Any]] = None
+                       if deep_research_effort or deep_research_points_multiplier is not None:
+                           deep_config = {}
+                           if deep_research_effort:
+                               deep_config["effort"] = deep_research_effort
+                           if deep_research_points_multiplier is not None:
+                               deep_config["points_multiplier"] = deep_research_points_multiplier
+                       dr_result = await deep_research_service.run_research_task(search_term, config=deep_config)
                        
                        if dr_result.success:
                            web_context = f"\n\n## RELATÓRIO DE PESQUISA PROFUNDA (Deep Research Agent - 12-2025):\n{dr_result.text}\n"
@@ -257,7 +285,7 @@ class MultiAgentOrchestrator:
 
                 if web_search and not web_search_instruction: # Only run if Deep Research didn't already populate
                     search_mode = (search_mode or "hybrid").lower()
-                    if search_mode not in ("shared", "native", "hybrid"):
+                    if search_mode not in ("shared", "native", "hybrid", "perplexity"):
                         search_mode = "hybrid"
                     if search_mode != "native":
                         web_search_instruction = "\n\n[INFO]: Pesquisa na Web ativada. Considere fatos recentes."
@@ -268,9 +296,17 @@ class MultiAgentOrchestrator:
                             breadth_first = bool(breadth_first) or is_breadth_first(search_term)
                             use_multi_query = bool(multi_query) or breadth_first
                             if use_multi_query:
-                                results = await web_search_service.search_multi(search_term, num_results=10)
+                                results = await web_search_service.search_multi(
+                                    search_term,
+                                    num_results=10,
+                                    search_mode=normalized_perplexity_search_mode,
+                                )
                             else:
-                                results = await web_search_service.search(search_term, num_results=10)
+                                results = await web_search_service.search(
+                                    search_term,
+                                    num_results=10,
+                                    search_mode=normalized_perplexity_search_mode,
+                                )
                             if results.get('success') and results.get('results'):
                                 web_context = "\n\n## PESQUISA WEB RECENTE (Contexto Adicional):\n"
                                 for res in results['results']:
@@ -300,36 +336,61 @@ class MultiAgentOrchestrator:
                 # 1. Roteamento CLAUDE (Sonnet 4.5)
                 if "claude" in model.lower():
                     from app.services.ai.agent_clients import call_anthropic_async
+                    # Determine if extended thinking should be enabled
+                    # Claude Sonnet 4.5 supports thinking_budget 0-63999
+                    extended_thinking = reasoning_level in ("medium", "high", "xhigh")
+                    if reasoning_level == "xhigh":
+                        thinking_budget = 48000  # ~75% of max for complex analysis
+                    elif reasoning_level == "high":
+                        thinking_budget = 24000  # ~37% of max for deep reasoning
+                    else:
+                        thinking_budget = 10000  # ~15% of max for medium reasoning
                     final_text = await call_anthropic_async(
                         self.claude_client,
                         enhanced_prompt,
                         model=get_api_model_name(model_claude),
+                        temperature=temperature,
                         web_search=web_search,
-                        system_instruction=system_instruction
+                        system_instruction=system_instruction,
+                        extended_thinking=extended_thinking,
+                        thinking_budget=thinking_budget if extended_thinking else None,
                     )
                 
                 # 2. Roteamento GEMINI (3 Flash / 3 Pro)
                 elif "gemini" in model.lower():
                     from app.services.ai.agent_clients import call_vertex_gemini_async
-                        
+                    # Map reasoning_level to thinking_mode
+                    thinking_mode = None
+                    if reasoning_level == "none":
+                        thinking_mode = None
+                    elif reasoning_level in ("minimal", "low"):
+                        thinking_mode = reasoning_level
+                    elif reasoning_level in ("medium", "high", "xhigh"):
+                        thinking_mode = "high"
+                    
                     final_text = await call_vertex_gemini_async(
                         None, 
                         enhanced_prompt,
                         model=get_api_model_name(model),
-                        temperature=0.3,
+                        temperature=temperature,
                         web_search=web_search,
-                        system_instruction=system_instruction
+                        system_instruction=system_instruction,
+                        thinking_mode=thinking_mode,
                     )
                 
                 # 3. Roteamento GPT (5.2)
                 elif "gpt" in model.lower():
                     from app.services.ai.agent_clients import call_openai_async
+                    # Map reasoning_level to reasoning_effort
+                    reasoning_effort = reasoning_level if reasoning_level != "xhigh" else "high"
                     final_text = await call_openai_async(
                         self.gpt_client,
                         enhanced_prompt,
                         model=get_api_model_name(model_gpt),
+                        temperature=temperature,
                         web_search=web_search,
-                        system_instruction=system_instruction
+                        system_instruction=system_instruction,
+                        reasoning_effort=reasoning_effort,
                     )
                 
                 # Fallback Padrão (Gemini Flash)
@@ -340,6 +401,7 @@ class MultiAgentOrchestrator:
                         None,
                         enhanced_prompt,
                         model=get_api_model_name("gemini-3-flash"),
+                        temperature=temperature,
                         system_instruction=system_instruction
                     ) or "Erro na geração."
                 
@@ -501,7 +563,14 @@ class MultiAgentOrchestrator:
         history_block = _format_history_block(conversation_history, summary_text)
         enhanced_message = f"{history_block}\n\n### MENSAGEM ATUAL\n{message}" if history_block else message
         max_tokens = 700 if chat_personality == "geral" else 1800
-        temperature = 0.6 if chat_personality == "geral" else 0.3
+        raw_temperature = context.get("temperature")
+        try:
+            temperature = float(raw_temperature) if raw_temperature is not None else (
+                0.6 if chat_personality == "geral" else 0.3
+            )
+        except (TypeError, ValueError):
+            temperature = 0.6 if chat_personality == "geral" else 0.3
+        temperature = max(0.0, min(1.0, temperature))
         
         # 3. Executar chamadas (Sequencial para simplificar, idealmente Paralelo)
         responses = []
@@ -557,5 +626,24 @@ class MultiAgentOrchestrator:
                 responses.append(f"⚠️ Erro com {model_key}")
 
         final_response = "\n\n---\n\n".join(responses)
+
+        # Gemini failsafe: if no useful response was generated, try Gemini directly
+        if not final_response or all(r.startswith("⚠️") for r in responses):
+            logger.warning("⚠️ Todos os modelos falharam, tentando Gemini como fallback final...")
+            try:
+                fallback_text = await call_vertex_gemini_async(
+                    None,
+                    enhanced_message,
+                    model=get_api_model_name("gemini-3-flash"),
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system_instruction=system_instruction
+                )
+                if fallback_text:
+                    final_response = fallback_text
+                    logger.info("✅ Gemini fallback successful")
+            except Exception as e:
+                logger.error(f"❌ Gemini fallback also failed: {e}")
+                final_response = "Desculpe, não foi possível processar sua mensagem no momento. Todos os modelos estão indisponíveis."
         
         return AgentResponse(content=final_response, metadata={"models": target_models})

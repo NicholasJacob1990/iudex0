@@ -1,0 +1,149 @@
+version: '3.8'
+
+# RAG Infrastructure - OpenSearch + Qdrant
+# Usage: docker-compose -f docker-compose.rag.yml up -d
+
+services:
+  # ==========================================================================
+  # OpenSearch - Lexical Search (BM25)
+  # ==========================================================================
+  opensearch:
+    image: opensearchproject/opensearch:2.11.0
+    container_name: iudex-opensearch
+    environment:
+      - cluster.name=iudex-cluster
+      - node.name=iudex-node
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-IudexAdmin123!}
+      - plugins.security.disabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - opensearch-data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    networks:
+      - iudex-rag
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sku admin:${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-IudexAdmin123!} https://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # OpenSearch Dashboards (optional, for debugging)
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.11.0
+    container_name: iudex-opensearch-dashboards
+    ports:
+      - "5601:5601"
+    environment:
+      - OPENSEARCH_HOSTS=["https://opensearch:9200"]
+      - OPENSEARCH_USERNAME=admin
+      - OPENSEARCH_PASSWORD=${OPENSEARCH_INITIAL_ADMIN_PASSWORD:-IudexAdmin123!}
+    networks:
+      - iudex-rag
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    profiles:
+      - debug
+
+  # ==========================================================================
+  # Qdrant - Vector Search
+  # ==========================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.7.4
+    container_name: iudex-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    networks:
+      - iudex-rag
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ==========================================================================
+  # Redis - Caching (optional, for embedding cache)
+  # ==========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: iudex-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - iudex-rag
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    profiles:
+      - cache
+
+  # ==========================================================================
+  # Neo4j - Graph Database for GraphRAG
+  # ==========================================================================
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: iudex-neo4j
+    ports:
+      - "7474:7474"  # HTTP (Browser)
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-IudexGraph123!}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+      - NEO4J_dbms_memory_heap_initial__size=512m
+      - NEO4J_dbms_memory_heap_max__size=1G
+      - NEO4J_dbms_memory_pagecache_size=256m
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+      - neo4j-import:/var/lib/neo4j/import
+      - neo4j-plugins:/plugins
+    networks:
+      - iudex-rag
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  opensearch-data:
+    driver: local
+  qdrant-data:
+    driver: local
+  redis-data:
+    driver: local
+  neo4j-data:
+    driver: local
+  neo4j-logs:
+    driver: local
+  neo4j-import:
+    driver: local
+  neo4j-plugins:
+    driver: local
+
+networks:
+  iudex-rag:
+    driver: bridge

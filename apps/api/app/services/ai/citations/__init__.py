@@ -4,6 +4,17 @@ from .gemini import gemini_extract_perplexity
 from .claude import claude_extract_perplexity
 
 
+def extract_perplexity(provider: str, resp):
+    provider = (provider or "").lower()
+    if provider in ("openai", "gpt"):
+        return openai_extract_perplexity(resp)
+    if provider in ("gemini", "google"):
+        return gemini_extract_perplexity(resp)
+    if provider in ("claude", "anthropic", "vertex-claude", "claude-vertex"):
+        return claude_extract_perplexity(resp)
+    raise ValueError(f"Provider desconhecido: {provider}")
+
+
 def to_perplexity(provider: str, resp):
     provider = (provider or "").lower()
     if provider in ("openai", "gpt"):

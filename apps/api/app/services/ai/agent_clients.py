@@ -12,6 +12,7 @@ import logging
 import time
 import random
 import threading
+import contextvars
 from datetime import datetime
 from typing import Optional, Tuple, Dict, List, Any
 from dataclasses import dataclass, field
@@ -29,6 +30,7 @@ _claude_throttle_lock = threading.Lock()
 _claude_last_call_at = 0.0
 
 from app.services.web_search_service import web_search_service, is_breadth_first
+from app.services.api_call_tracker import record_api_call, billing_context
 from app.services.ai.prompts.debate_prompts import (
     PROMPT_JUIZ as V2_PROMPT_JUIZ,
     PROMPT_CRITICA as V2_PROMPT_CRITICA,
@@ -186,21 +188,26 @@ def init_vertex_client():
         return None
         
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    region = os.getenv("VERTEX_AI_LOCATION", "us-east5")
+    region = os.getenv("VERTEX_AI_LOCATION", "global")
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    force_direct = os.getenv("GEMINI_FORCE_DIRECT", "false").lower() == "true"
     
-    # We prioritize Vertex AI (GCP) if project_id is available
-    if project_id:
+    # We prioritize Vertex AI (GCP) if project_id is available AND not forced direct
+    if project_id and not force_direct:
         return genai.Client(vertexai=True, project=project_id, location=region)
     elif api_key:
-        # Fallback to direct Gemini API if no GCP project is set
+        # Fallback to direct Gemini API if no GCP project is set or forced direct
+        if force_direct:
+            logger.info("⚡ GEMINI_FORCE_DIRECT=true: Usando API keys diretas (bypass Vertex)")
         return genai.Client(api_key=api_key)
     return None
 
 def init_openai_client():
     """Initialize Vertex AI client for GPT agent (Model Garden) or fallback to direct OpenAI"""
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
-    if project_id and genai:
+    force_direct = os.getenv("OPENAI_FORCE_DIRECT", "false").lower() == "true"
+
+    if project_id and genai and not force_direct:
         return init_vertex_client()
     
     # Fallback to direct OpenAI
@@ -213,6 +220,10 @@ def init_openai_client():
         logger.warning("⚠️ OPENAI_API_KEY não configurada. Agente GPT desabilitado.")
         return None
     base_url = os.getenv("OPENAI_BASE_URL")
+    
+    if force_direct:
+        logger.info("⚡ OPENAI_FORCE_DIRECT=true: Usando API keys diretas (bypass Vertex)")
+
     if base_url:
         return openai.OpenAI(api_key=api_key, base_url=base_url)
     return openai.OpenAI(api_key=api_key)
@@ -674,6 +685,64 @@ def build_system_instruction(chat_personality: Optional[str]) -> str:
         return DEFAULT_GENERAL_SYSTEM_INSTRUCTION
     return DEFAULT_LEGAL_SYSTEM_INSTRUCTION
 
+
+def _usage_meta(
+    *,
+    tokens_in: Optional[int] = None,
+    tokens_out: Optional[int] = None,
+    cached_tokens_in: Optional[int] = None,
+    context_tokens: Optional[int] = None,
+    seconds_audio: Optional[float] = None,
+    seconds_video: Optional[float] = None,
+    **extra: Any,
+) -> Dict[str, Any]:
+    meta: Dict[str, Any] = {}
+    if tokens_in is not None:
+        try:
+            meta["tokens_in"] = int(tokens_in)
+        except (TypeError, ValueError):
+            pass
+    if tokens_out is not None:
+        try:
+            meta["tokens_out"] = int(tokens_out)
+        except (TypeError, ValueError):
+            pass
+    if cached_tokens_in is not None:
+        try:
+            meta["cached_tokens_in"] = int(cached_tokens_in)
+        except (TypeError, ValueError):
+            pass
+    if context_tokens is not None:
+        try:
+            meta["context_tokens"] = int(context_tokens)
+        except (TypeError, ValueError):
+            pass
+    if seconds_audio is not None:
+        try:
+            meta["seconds_audio"] = float(seconds_audio)
+        except (TypeError, ValueError):
+            pass
+    if seconds_video is not None:
+        try:
+            meta["seconds_video"] = float(seconds_video)
+        except (TypeError, ValueError):
+            pass
+    for key, value in extra.items():
+        if value is not None:
+            meta[key] = value
+    return meta
+
+
+def _get_usage_value(obj: Any, *keys: str) -> Optional[Any]:
+    for key in keys:
+        if isinstance(obj, dict):
+            if key in obj:
+                return obj.get(key)
+        if hasattr(obj, key):
+            return getattr(obj, key)
+    return None
+
+
 def call_openai(
     client,
     prompt: str,
@@ -691,11 +760,11 @@ def call_openai(
     
     start_time = time.time()
     input_tokens = len(prompt) // 4
+    output_tokens = 0
+    is_vertex = genai and isinstance(client, genai.Client)
+    provider_name = "vertex-openai" if is_vertex else "openai"
     
     try:
-        # Check if client is Vertex (genai.Client) or direct OpenAI
-        is_vertex = genai and isinstance(client, genai.Client)
-        
         if is_vertex:
             system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
             
@@ -709,9 +778,25 @@ def call_openai(
                 )
             )
             output_text = response.text
-            input_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else input_tokens
-            output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
-            provider_name = "vertex-openai"
+            usage = getattr(response, "usage_metadata", None)
+            prompt_tokens = _get_usage_value(usage, "prompt_token_count", "input_tokens")
+            if prompt_tokens is not None:
+                input_tokens = prompt_tokens
+            completion_tokens = _get_usage_value(usage, "candidates_token_count", "output_tokens")
+            if completion_tokens is not None:
+                output_tokens = completion_tokens
+            cached_tokens = _get_usage_value(
+                usage,
+                "cached_content_token_count",
+                "cached_token_count",
+                "cached_tokens",
+            )
+            usage_meta = _usage_meta(
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                cached_tokens_in=cached_tokens,
+                context_tokens=input_tokens,
+            )
         else:
             # Direct OpenAI call
             response = client.chat.completions.create(
@@ -726,9 +811,21 @@ def call_openai(
             )
             output_text = response.choices[0].message.content
             # Use usage if available from SDK
-            input_tokens = response.usage.prompt_tokens if hasattr(response, 'usage') else input_tokens
-            output_tokens = response.usage.completion_tokens if hasattr(response, 'usage') else 0
-            provider_name = "openai"
+            usage = getattr(response, "usage", None)
+            prompt_tokens = _get_usage_value(usage, "prompt_tokens", "input_tokens")
+            if prompt_tokens is not None:
+                input_tokens = prompt_tokens
+            completion_tokens = _get_usage_value(usage, "completion_tokens", "output_tokens")
+            if completion_tokens is not None:
+                output_tokens = completion_tokens
+            details = _get_usage_value(usage, "prompt_tokens_details", "input_tokens_details")
+            cached_tokens = _get_usage_value(details, "cached_tokens", "cached")
+            usage_meta = _usage_meta(
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                cached_tokens_in=cached_tokens,
+                context_tokens=input_tokens,
+            )
         
         agent_metrics.record(
             provider=provider_name, model=model,
@@ -736,14 +833,27 @@ def call_openai(
             latency_ms=int((time.time() - start_time) * 1000),
             success=True
         )
+        record_api_call(
+            kind="llm",
+            provider=provider_name,
+            model=model,
+            success=True,
+            meta=usage_meta,
+        )
         return output_text
     except Exception as e:
         logger.error(f"❌ Erro ao chamar GPT via Vertex: {e}")
         agent_metrics.record(
-            provider="vertex-openai", model=model,
+            provider=provider_name, model=model,
             input_tokens=input_tokens, output_tokens=0,
             latency_ms=int((time.time() - start_time) * 1000),
             success=False
+        )
+        record_api_call(
+            kind="llm",
+            provider=provider_name,
+            model=model,
+            success=False,
         )
         return None
 
@@ -801,9 +911,11 @@ def call_anthropic(
     
     start_time = time.time()
     input_tokens = len(prompt) // 4
+    output_tokens = 0
     
     last_error = None
     is_vertex = _is_anthropic_vertex_client(client)
+    provider_name = "vertex-anthropic" if is_vertex else "anthropic"
     used_direct_fallback = False
     for attempt in range(CLAUDE_MAX_RETRIES + 1):
         _throttle_claude()
@@ -827,9 +939,26 @@ def call_anthropic(
                     output_text = "".join([getattr(b, "text", "") for b in response.content]).strip()
                 else:
                     output_text = ""
-                input_tokens = response.usage.input_tokens if hasattr(response, "usage") else input_tokens
-                output_tokens = response.usage.output_tokens if hasattr(response, "usage") else 0
-                provider_name = "vertex-anthropic"
+                usage = getattr(response, "usage", None)
+                prompt_tokens = _get_usage_value(usage, "input_tokens", "prompt_tokens")
+                if prompt_tokens is not None:
+                    input_tokens = prompt_tokens
+                completion_tokens = _get_usage_value(usage, "output_tokens", "completion_tokens")
+                if completion_tokens is not None:
+                    output_tokens = completion_tokens
+                cached_tokens = _get_usage_value(usage, "cache_read_input_tokens", "cached_input_tokens")
+                cache_write_tokens = _get_usage_value(
+                    usage,
+                    "cache_creation_input_tokens",
+                    "cache_write_input_tokens",
+                )
+                usage_meta = _usage_meta(
+                    tokens_in=input_tokens,
+                    tokens_out=output_tokens,
+                    cached_tokens_in=cached_tokens,
+                    context_tokens=input_tokens,
+                    cache_write_tokens_in=cache_write_tokens,
+                )
             else:
                 # Direct Anthropic call
                 response = client.messages.create(
@@ -842,9 +971,26 @@ def call_anthropic(
                     timeout=timeout
                 )
                 output_text = response.content[0].text
-                input_tokens = response.usage.input_tokens if hasattr(response, 'usage') else input_tokens
-                output_tokens = response.usage.output_tokens if hasattr(response, 'usage') else 0
-                provider_name = "anthropic"
+                usage = getattr(response, "usage", None)
+                prompt_tokens = _get_usage_value(usage, "input_tokens", "prompt_tokens")
+                if prompt_tokens is not None:
+                    input_tokens = prompt_tokens
+                completion_tokens = _get_usage_value(usage, "output_tokens", "completion_tokens")
+                if completion_tokens is not None:
+                    output_tokens = completion_tokens
+                cached_tokens = _get_usage_value(usage, "cache_read_input_tokens", "cached_input_tokens")
+                cache_write_tokens = _get_usage_value(
+                    usage,
+                    "cache_creation_input_tokens",
+                    "cache_write_input_tokens",
+                )
+                usage_meta = _usage_meta(
+                    tokens_in=input_tokens,
+                    tokens_out=output_tokens,
+                    cached_tokens_in=cached_tokens,
+                    context_tokens=input_tokens,
+                    cache_write_tokens_in=cache_write_tokens,
+                )
 
             agent_metrics.record(
                 provider=provider_name, model=model,
@@ -852,9 +998,22 @@ def call_anthropic(
                 latency_ms=int((time.time() - start_time) * 1000),
                 success=True
             )
+            record_api_call(
+                kind="llm",
+                provider=provider_name,
+                model=model,
+                success=True,
+                meta=usage_meta,
+            )
             return output_text
         except Exception as e:
             last_error = e
+            record_api_call(
+                kind="llm",
+                provider=provider_name,
+                model=model,
+                success=False,
+            )
             if _is_claude_rate_limit_error(e):
                 if is_vertex and ANTHROPIC_FALLBACK_DIRECT and not used_direct_fallback:
                     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -871,16 +1030,47 @@ def call_anthropic(
                                 timeout=timeout
                             )
                             output_text = response.content[0].text if response.content else ""
-                            input_tokens = response.usage.input_tokens if hasattr(response, 'usage') else input_tokens
-                            output_tokens = response.usage.output_tokens if hasattr(response, 'usage') else 0
+                            usage = getattr(response, "usage", None)
+                            prompt_tokens = _get_usage_value(usage, "input_tokens", "prompt_tokens")
+                            if prompt_tokens is not None:
+                                input_tokens = prompt_tokens
+                            completion_tokens = _get_usage_value(usage, "output_tokens", "completion_tokens")
+                            if completion_tokens is not None:
+                                output_tokens = completion_tokens
+                            cached_tokens = _get_usage_value(usage, "cache_read_input_tokens", "cached_input_tokens")
+                            cache_write_tokens = _get_usage_value(
+                                usage,
+                                "cache_creation_input_tokens",
+                                "cache_write_input_tokens",
+                            )
+                            usage_meta = _usage_meta(
+                                tokens_in=input_tokens,
+                                tokens_out=output_tokens,
+                                cached_tokens_in=cached_tokens,
+                                context_tokens=input_tokens,
+                                cache_write_tokens_in=cache_write_tokens,
+                            )
                             agent_metrics.record(
                                 provider="anthropic", model=direct_model,
                                 input_tokens=input_tokens, output_tokens=output_tokens,
                                 latency_ms=int((time.time() - start_time) * 1000),
                                 success=True
                             )
+                            record_api_call(
+                                kind="llm",
+                                provider="anthropic",
+                                model=direct_model,
+                                success=True,
+                                meta=usage_meta,
+                            )
                             return output_text
                         except Exception as direct_error:
+                            record_api_call(
+                                kind="llm",
+                                provider="anthropic",
+                                model=direct_model,
+                                success=False,
+                            )
                             used_direct_fallback = True
                             last_error = direct_error
                 if attempt < CLAUDE_MAX_RETRIES:
@@ -896,7 +1086,7 @@ def call_anthropic(
 
     logger.error(f"❌ Erro ao chamar Claude via Vertex: {last_error}")
     agent_metrics.record(
-        provider="vertex-anthropic", model=model,
+        provider=provider_name, model=model,
         input_tokens=input_tokens, output_tokens=0,
         latency_ms=int((time.time() - start_time) * 1000),
         success=False
@@ -932,6 +1122,7 @@ def call_vertex_gemini(
 
     start_time = time.time()
     input_tokens = len(prompt) // 4
+    output_tokens = 0
     model_id = model
 
     try:
@@ -962,14 +1153,52 @@ def call_vertex_gemini(
 
         response = client.models.generate_content(**generate_kwargs)
         output_text = extract_genai_text(response)
-        input_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else input_tokens
-        output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+        usage = getattr(response, "usage_metadata", None)
+        prompt_tokens = _get_usage_value(usage, "prompt_token_count", "input_tokens")
+        if prompt_tokens is not None:
+            input_tokens = prompt_tokens
+        completion_tokens = _get_usage_value(usage, "candidates_token_count", "output_tokens")
+        if completion_tokens is not None:
+            output_tokens = completion_tokens
+        cached_tokens = _get_usage_value(
+            usage,
+            "cached_content_token_count",
+            "cached_token_count",
+            "cached_tokens",
+        )
+        audio_seconds = _get_usage_value(
+            usage,
+            "prompt_audio_duration_seconds",
+            "audio_duration_seconds",
+            "audio_seconds",
+        )
+        video_seconds = _get_usage_value(
+            usage,
+            "prompt_video_duration_seconds",
+            "video_duration_seconds",
+            "video_seconds",
+        )
+        usage_meta = _usage_meta(
+            tokens_in=input_tokens,
+            tokens_out=output_tokens,
+            cached_tokens_in=cached_tokens,
+            context_tokens=input_tokens,
+            seconds_audio=audio_seconds,
+            seconds_video=video_seconds,
+        )
 
         agent_metrics.record(
             provider="vertex-gemini", model=model_id,
             input_tokens=input_tokens, output_tokens=output_tokens,
             latency_ms=int((time.time() - start_time) * 1000),
             success=True
+        )
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_id,
+            success=True,
+            meta=usage_meta,
         )
         return output_text
     except Exception as e:
@@ -979,6 +1208,12 @@ def call_vertex_gemini(
             input_tokens=input_tokens, output_tokens=0,
             latency_ms=int((time.time() - start_time) * 1000),
             success=False
+        )
+        record_api_call(
+            kind="llm",
+            provider="vertex-gemini",
+            model=model_id,
+            success=False,
         )
         return None
 
@@ -997,9 +1232,15 @@ async def call_openai_async(
     temperature: float = 0.3,
     timeout: int = API_TIMEOUT_SECONDS,
     web_search: bool = False,
-    system_instruction: Optional[str] = None
+    system_instruction: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,  # NEW: 'none'|'low'|'medium'|'high'|'xhigh'
 ) -> Optional[str]:
-    """Async version using native genai.Client.aio for Vertex or executor for fallback"""
+    """Async version using native genai.Client.aio for Vertex or executor for fallback.
+    
+    Args:
+        reasoning_effort: For o1/o3/GPT-5.2 models. Options: 'none', 'low', 'medium', 'high', 'xhigh'.
+                         When 'none', no reasoning is triggered.
+    """
     if not client:
         return None
         
@@ -1008,6 +1249,7 @@ async def call_openai_async(
     if is_vertex:
         start_time = time.time()
         input_tokens = len(prompt) // 4
+        output_tokens = 0
         try:
             system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
             
@@ -1022,8 +1264,25 @@ async def call_openai_async(
             )
             
             output_text = response.text
-            input_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else input_tokens
-            output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+            usage = getattr(response, "usage_metadata", None)
+            prompt_tokens = _get_usage_value(usage, "prompt_token_count", "input_tokens")
+            if prompt_tokens is not None:
+                input_tokens = prompt_tokens
+            completion_tokens = _get_usage_value(usage, "candidates_token_count", "output_tokens")
+            if completion_tokens is not None:
+                output_tokens = completion_tokens
+            cached_tokens = _get_usage_value(
+                usage,
+                "cached_content_token_count",
+                "cached_token_count",
+                "cached_tokens",
+            )
+            usage_meta = _usage_meta(
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                cached_tokens_in=cached_tokens,
+                context_tokens=input_tokens,
+            )
             
             agent_metrics.record(
                 provider="vertex-openai", model=model,
@@ -1031,16 +1290,83 @@ async def call_openai_async(
                 latency_ms=int((time.time() - start_time) * 1000),
                 success=True
             )
+            record_api_call(
+                kind="llm",
+                provider="vertex-openai",
+                model=model,
+                success=True,
+                meta=usage_meta,
+            )
             return output_text
         except Exception as e:
             logger.error(f"❌ Erro assíncrono GPT via Vertex: {e}")
+            record_api_call(
+                kind="llm",
+                provider="vertex-openai",
+                model=model,
+                success=False,
+            )
             return None
     else:
         # Fallback to executor for direct sync SDK
+        # For reasoning models, use Responses API with reasoning_effort
+        if openai and reasoning_effort and reasoning_effort != "none":
+            is_reasoning_model = model.startswith(("o1-", "o3-")) or "gpt-5.2" in model.lower()
+            if is_reasoning_model and hasattr(client, "responses"):
+                try:
+                    # Normalize effort
+                    effort = reasoning_effort.lower()
+                    if effort == "minimal":
+                        effort = "low"
+                    if effort == "xhigh":
+                        effort = "high"
+                    if effort not in ("low", "medium", "high"):
+                        effort = "medium"
+                    
+                    system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
+                    messages = [
+                        {"role": "system", "content": system_instruction},
+                        {"role": "user", "content": prompt},
+                    ]
+                    
+                    response = client.responses.create(
+                        model=model,
+                        input=messages,
+                        max_output_tokens=max_tokens,
+                        reasoning={"effort": effort, "summary": "auto"},
+                    )
+                    record_api_call(
+                        kind="llm",
+                        provider="openai",
+                        model=model,
+                        success=True,
+                        meta={"reasoning_effort": effort},
+                    )
+                    return getattr(response, "output_text", "") or ""
+                except Exception as e:
+                    logger.warning(f"OpenAI Responses API failed, falling back: {e}")
+                    record_api_call(
+                        kind="llm",
+                        provider="openai",
+                        model=model,
+                        success=False,
+                        meta={"reasoning_effort": reasoning_effort},
+                    )
+        
         loop = asyncio.get_event_loop()
+        ctx = contextvars.copy_context()
         return await loop.run_in_executor(
-            None, 
-            lambda: call_openai(client, prompt, model, max_tokens, temperature, timeout, system_instruction)
+            None,
+            lambda: ctx.run(
+                call_openai,
+                client,
+                prompt,
+                model,
+                max_tokens,
+                temperature,
+                timeout,
+                system_instruction,
+            ),
         )
 
 
@@ -1052,17 +1378,209 @@ async def call_anthropic_async(
     temperature: float = 0.3,
     timeout: int = API_TIMEOUT_SECONDS,
     web_search: bool = False,
-    system_instruction: Optional[str] = None
+    system_instruction: Optional[str] = None,
+    extended_thinking: bool = False,  # NEW: Enable extended thinking for Claude Sonnet
+    thinking_budget: Optional[int] = None,  # NEW: Token budget for thinking (e.g. 8000)
 ) -> Optional[str]:
-    """Async version using executor for sync clients."""
+    """Async version using native async client or executor for sync clients.
+    
+    Args:
+        extended_thinking: Enable extended thinking mode for Claude Sonnet.
+        thinking_budget: Token budget for thinking. Default is 8000 if extended_thinking is True.
+    """
     if not client:
         return None
 
+    # If extended_thinking is requested, use native async with thinking support
+    if extended_thinking and anthropic:
+        from app.services.ai.model_registry import get_api_model_name
+        
+        system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
+        model_id = get_api_model_name(model)
+        
+        # Normalize thinking budget (Claude supports 0-63999)
+        # v6.1: Lower budget for minimal/low to speed up response
+        default_budget = 4000 if not extended_thinking else 10000
+        budget_tokens = thinking_budget if thinking_budget is not None else default_budget
+        try:
+            budget_tokens = int(budget_tokens)
+        except (TypeError, ValueError):
+            budget_tokens = 10000
+        if budget_tokens <= 0:
+            budget_tokens = 10000
+        if budget_tokens > 63999:
+            budget_tokens = 63999
+        
+        # Ensure max_tokens > budget_tokens
+        effective_max_tokens = max_tokens
+        if effective_max_tokens <= budget_tokens:
+            effective_max_tokens = budget_tokens + 4000
+        
+        is_vertex = _is_anthropic_vertex_client(client)
+        provider_name = "vertex-anthropic" if is_vertex else "anthropic"
+        
+        try:
+            # Check if client supports async
+            if hasattr(client, "messages") and hasattr(client.messages, "create"):
+                create_kwargs = {
+                    "model": model_id if not is_vertex else model_id,
+                    "max_tokens": effective_max_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "system": system_instruction,
+                    "thinking": {"type": "enabled", "budget_tokens": budget_tokens},
+                    "temperature": 1.0,  # Required for extended thinking
+                }
+                
+                logger.info(f"🧠 [Claude Thinking Async] budget={budget_tokens}, max_tokens={effective_max_tokens}")
+                
+                response = client.messages.create(**create_kwargs)
+                record_api_call(
+                    kind="llm",
+                    provider=provider_name,
+                    model=model_id,
+                    success=True,
+                    meta={"extended_thinking": True, "budget_tokens": budget_tokens},
+                )
+                
+                # Extract text content (skip thinking blocks)
+                output_text = ""
+                if hasattr(response, "content"):
+                    for block in response.content:
+                        if getattr(block, "type", "") == "text":
+                            output_text += getattr(block, "text", "")
+                
+                return output_text
+        except Exception as e:
+            logger.warning(f"Claude extended thinking async failed: {e}")
+            record_api_call(
+                kind="llm",
+                provider=provider_name,
+                model=model_id,
+                success=False,
+                meta={"extended_thinking": True},
+            )
+            # Fall through to standard call
+
     loop = asyncio.get_event_loop()
+    ctx = contextvars.copy_context()
     return await loop.run_in_executor(
         None,
-        lambda: call_anthropic(client, prompt, model, max_tokens, temperature, timeout, system_instruction)
+        lambda: ctx.run(
+            call_anthropic,
+            client,
+            prompt,
+            model,
+            max_tokens,
+            temperature,
+            timeout,
+            system_instruction,
+        ),
     )
+
+
+async def call_perplexity_async(
+    prompt: str,
+    *,
+    model: str = "sonar",
+    max_tokens: int = 4096,
+    temperature: float = 0.3,
+    system_instruction: Optional[str] = None,
+    web_search_enabled: bool = False,
+    search_mode: Optional[str] = None,
+    search_type: Optional[str] = None,
+    search_context_size: Optional[str] = None,
+    enable_search_classifier: bool = False,
+    disable_search: bool = False,
+    stream_mode: Optional[str] = None,
+) -> Optional[str]:
+    api_key = os.getenv("PERPLEXITY_API_KEY")
+    if not api_key:
+        return None
+
+    try:
+        from perplexity import AsyncPerplexity
+    except Exception as exc:
+        logger.warning(f"⚠️ Perplexity SDK indisponível: {exc}")
+        return None
+
+    from app.services.ai.perplexity_config import build_perplexity_chat_kwargs
+
+    messages: List[Dict[str, str]] = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
+
+    perplexity_kwargs = build_perplexity_chat_kwargs(
+        api_model=model,
+        web_search_enabled=web_search_enabled,
+        search_mode=search_mode,
+        search_type=search_type,
+        search_context_size=search_context_size,
+        enable_search_classifier=enable_search_classifier,
+        disable_search=disable_search,
+        stream_mode=stream_mode,
+    )
+
+    def _get(obj: Any, key: str, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
+    client = AsyncPerplexity(api_key=api_key)
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=False,
+            **perplexity_kwargs,
+        )
+        usage = _get(resp, "usage", None) or _get(resp, "usage_metadata", None)
+        tokens_in = _get(usage, "prompt_tokens", None) or _get(usage, "input_tokens", None)
+        tokens_out = _get(usage, "completion_tokens", None) or _get(usage, "output_tokens", None)
+        meta = {
+            "stream": False,
+            "disable_search": bool(perplexity_kwargs.get("disable_search")),
+            "search_mode": perplexity_kwargs.get("search_mode"),
+            "search_type": perplexity_kwargs.get("search_type"),
+            "search_context_size": perplexity_kwargs.get("search_context_size"),
+            "stream_mode": perplexity_kwargs.get("stream_mode"),
+            "has_web_search_options": bool(perplexity_kwargs.get("web_search_options")),
+        }
+        if tokens_in is not None:
+            meta["tokens_in"] = int(tokens_in)
+        if tokens_out is not None:
+            meta["tokens_out"] = int(tokens_out)
+        record_api_call(
+            kind="llm",
+            provider="perplexity",
+            model=model,
+            success=True,
+            meta=meta,
+        )
+    except Exception:
+        record_api_call(
+            kind="llm",
+            provider="perplexity",
+            model=model,
+            success=False,
+            meta={"stream": False},
+        )
+        return None
+
+    choices = _get(resp, "choices", []) or []
+    if choices:
+        message = _get(choices[0], "message", None) or {}
+        content = _get(message, "content", None)
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    output_text = _get(resp, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    return None
 
 
 async def call_vertex_gemini_async(
@@ -1073,9 +1591,16 @@ async def call_vertex_gemini_async(
     temperature: float = 0.3,
     timeout: int = API_TIMEOUT_SECONDS,
     web_search: bool = False,
-    system_instruction: Optional[str] = None
+    system_instruction: Optional[str] = None,
+    thinking_mode: Optional[str] = None,  # NEW: 'none'|'minimal'|'low'|'medium'|'high'
 ) -> Optional[str]:
-    """Async version using native genai.Client.aio or executor fallback."""
+    """Async version using native genai.Client.aio or executor fallback.
+    
+    Args:
+        thinking_mode: Enable thinking for Gemini 2.x/3.x models.
+                      Options: None (disabled), 'minimal', 'low', 'medium', 'high'.
+                      When 'none' or None, thinking is disabled.
+    """
     if not genai:
         return None
 
@@ -1091,30 +1616,129 @@ async def call_vertex_gemini_async(
     if is_vertex:
         start_time = time.time()
         input_tokens = len(prompt) // 4
+        output_tokens = 0
+        api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        force_direct = os.getenv("GEMINI_FORCE_DIRECT", "false").lower() == "true"
+        direct_fallback_used = False
         try:
             from app.services.ai.model_registry import get_api_model_name
             model_id = get_api_model_name(model)
 
             system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
 
-            response = await client.aio.models.generate_content(
-                model=model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
+            # Build config kwargs
+            config_kwargs = {
+                "system_instruction": system_instruction,
+                "max_output_tokens": max_tokens,
+                "temperature": temperature,
+            }
+            
+            # Apply thinking mode if specified and not "none"
+            if thinking_mode and thinking_mode.lower() not in ("none", "off", "disabled"):
+                normalized_thinking = thinking_mode.lower()
+                if normalized_thinking in ("standard",):
+                    normalized_thinking = "medium"
+                elif normalized_thinking in ("extended", "xhigh"):
+                    normalized_thinking = "high"
+                
+                if normalized_thinking in ("minimal", "low"):
+                    # v6.1: Force very low budget for Gemini minimal to ensure speed
+                    if hasattr(thinking_config, "include_thoughts"):
+                         setattr(thinking_config, "include_thoughts", True)
+                
+                logger.info(f"🧠 [Gemini Async] Ativando thinking_mode={normalized_thinking} para {model_id}")
+                thinking_config = types.ThinkingConfig(include_thoughts=True)
+                try:
+                    if hasattr(thinking_config, "thinking_level"):
+                        setattr(thinking_config, "thinking_level", normalized_thinking)
+                    elif hasattr(thinking_config, "thinkingLevel"):
+                        setattr(thinking_config, "thinkingLevel", normalized_thinking)
+                except Exception:
+                    pass
+                config_kwargs["thinking_config"] = thinking_config
+
+            async def _call(active_client):
+                return await active_client.aio.models.generate_content(
+                    model=model_id,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(**config_kwargs),
                 )
-            )
+
+            try:
+                response = await _call(client)
+            except Exception as exc:
+                msg = str(exc).lower()
+                is_not_found = (
+                    ("404" in msg and ("not_found" in msg or "not found" in msg))
+                    or ("publisher model" in msg and "not found" in msg)
+                    or ("was not found" in msg)
+                )
+                # Check for 400 error with thinking (unsupported)
+                if "400" in str(exc) and thinking_mode:
+                    logger.warning(f"⚠️ Erro 400 com Thinking ({exc}). Tentando fallback sem thinking...")
+                    config_kwargs.pop("thinking_config", None)
+                    response = await _call(client)
+                elif is_not_found and api_key and not force_direct:
+                    logger.warning(f"⚠️ Modelo indisponível no Vertex ({model_id}). Tentando Gemini direto via API key...")
+                    record_api_call(
+                        kind="llm",
+                        provider="vertex-gemini",
+                        model=model_id,
+                        success=False,
+                        meta={"fallback": "direct"},
+                    )
+                    direct_fallback_used = True
+                    direct_client = genai.Client(api_key=api_key)
+                    response = await _call(direct_client)
+                else:
+                    raise
             output_text = extract_genai_text(response)
-            input_tokens = response.usage_metadata.prompt_token_count if response.usage_metadata else input_tokens
-            output_tokens = response.usage_metadata.candidates_token_count if response.usage_metadata else 0
+            usage = getattr(response, "usage_metadata", None)
+            prompt_tokens = _get_usage_value(usage, "prompt_token_count", "input_tokens")
+            if prompt_tokens is not None:
+                input_tokens = prompt_tokens
+            completion_tokens = _get_usage_value(usage, "candidates_token_count", "output_tokens")
+            if completion_tokens is not None:
+                output_tokens = completion_tokens
+            cached_tokens = _get_usage_value(
+                usage,
+                "cached_content_token_count",
+                "cached_token_count",
+                "cached_tokens",
+            )
+            audio_seconds = _get_usage_value(
+                usage,
+                "prompt_audio_duration_seconds",
+                "audio_duration_seconds",
+                "audio_seconds",
+            )
+            video_seconds = _get_usage_value(
+                usage,
+                "prompt_video_duration_seconds",
+                "video_duration_seconds",
+                "video_seconds",
+            )
+            usage_meta = _usage_meta(
+                tokens_in=input_tokens,
+                tokens_out=output_tokens,
+                cached_tokens_in=cached_tokens,
+                context_tokens=input_tokens,
+                seconds_audio=audio_seconds,
+                seconds_video=video_seconds,
+            )
 
             agent_metrics.record(
                 provider="vertex-gemini", model=model_id,
                 input_tokens=input_tokens, output_tokens=output_tokens,
                 latency_ms=int((time.time() - start_time) * 1000),
                 success=True
+            )
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=model_id,
+                success=True,
+                meta={**usage_meta, **({"fallback": "direct"} if direct_fallback_used else {}), **({"thinking_mode": thinking_mode} if thinking_mode else {})},
             )
             return output_text
         except Exception as e:
@@ -1124,6 +1748,12 @@ async def call_vertex_gemini_async(
                 input_tokens=input_tokens, output_tokens=0,
                 latency_ms=int((time.time() - start_time) * 1000),
                 success=False
+            )
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=model_id,
+                success=False,
             )
             return None
 
@@ -1135,12 +1765,12 @@ async def stream_openai_async(
     max_tokens: int = 4000,
     temperature: float = 0.3,
     system_instruction: Optional[str] = None,
-    reasoning_effort: Optional[str] = None,  # NEW: For o1/o3 models
+    reasoning_effort: Optional[str] = None,  # For reasoning models (o1/o3, GPT-5.2)
 ):
     """Async streaming for GPT (Vertex or direct) with thinking support.
     
     Args:
-        reasoning_effort: For o1/o3 models. Options: 'low', 'medium', 'high'
+        reasoning_effort: Options: 'none', 'low', 'medium', 'high', 'xhigh'
     
     Yields:
         Tuples of (chunk_type, content) where chunk_type is 'thinking' or 'text'
@@ -1154,15 +1784,32 @@ async def stream_openai_async(
         from app.services.ai.model_registry import get_api_model_name
         model_id = get_api_model_name(model)
         if hasattr(client.aio.models, "generate_content_stream"):
-            stream = client.aio.models.generate_content_stream(
-                model=model_id,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    max_output_tokens=max_tokens,
-                    temperature=temperature,
+            try:
+                stream = client.aio.models.generate_content_stream(
+                    model=model_id,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_instruction,
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
+                    )
                 )
-            )
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-openai",
+                    model=model_id,
+                    success=True,
+                    meta={"stream": True},
+                )
+            except Exception:
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-openai",
+                    model=model_id,
+                    success=False,
+                    meta={"stream": True},
+                )
+                raise
             if asyncio.iscoroutine(stream):
                 stream = await stream
             if hasattr(stream, "__aiter__"):
@@ -1172,15 +1819,30 @@ async def stream_openai_async(
                         yield ('text', text)
                 return
 
-        response = await client.aio.models.generate_content(
-            model=model_id,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_id,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_instruction,
+                    max_output_tokens=max_tokens,
+                    temperature=temperature,
+                )
             )
-        )
+            record_api_call(
+                kind="llm",
+                provider="vertex-openai",
+                model=model_id,
+                success=True,
+            )
+        except Exception:
+            record_api_call(
+                kind="llm",
+                provider="vertex-openai",
+                model=model_id,
+                success=False,
+            )
+            raise
         output_text = getattr(response, "text", "") or ""
         if output_text:
             yield ('text', output_text)
@@ -1200,16 +1862,44 @@ async def stream_openai_async(
             {"role": "system", "content": system_instruction},
             {"role": "user", "content": prompt},
         ],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
         "stream": True,
     }
+
+    # Handle parameters for reasoning models (o1/o3) vs standard models
+    is_reasoning_model = model.startswith(("o1-", "o3-")) or "gpt-5.2" in model
+    if is_reasoning_model:
+        # Reasoning models use max_completion_tokens and often don't support temperature
+        completion_kwargs["max_completion_tokens"] = max_tokens
+        # Only set temperature if it's 1.0 (default for o1) or if we want to risk it
+        if temperature == 1.0:
+             completion_kwargs["temperature"] = temperature
+    else:
+        # Standard models
+        completion_kwargs["max_tokens"] = max_tokens
+        completion_kwargs["temperature"] = temperature
     
     # NEW: Add reasoning_effort for o1/o3 models
-    if reasoning_effort and model.startswith(("o1-", "o3-")):
+    if reasoning_effort and (model.startswith(("o1-", "o3-")) or "gpt-5.2" in model):
         completion_kwargs["reasoning_effort"] = reasoning_effort
     
-    stream = await async_client.chat.completions.create(**completion_kwargs)
+    try:
+        stream = await async_client.chat.completions.create(**completion_kwargs)
+        record_api_call(
+            kind="llm",
+            provider="openai",
+            model=model,
+            success=True,
+            meta={"stream": True},
+        )
+    except Exception:
+        record_api_call(
+            kind="llm",
+            provider="openai",
+            model=model,
+            success=False,
+            meta={"stream": True},
+        )
+        raise
     
     async for chunk in stream:
         if not getattr(chunk, "choices", None):
@@ -1237,6 +1927,7 @@ async def stream_anthropic_async(
     temperature: float = 0.3,
     system_instruction: Optional[str] = None,
     extended_thinking: bool = False,  # NEW: Enable extended thinking
+    thinking_budget: Optional[int] = None,
 ):
     """Async streaming for Claude (Vertex or direct) with thinking support.
     
@@ -1271,29 +1962,64 @@ async def stream_anthropic_async(
         
         # NEW: Add extended thinking for Claude with thinking capability
         # Per Anthropic docs: thinking: {"type": "enabled", "budget_tokens": N}
+        # Claude supports budget_tokens 0-63999
+        # IMPORTANT: max_tokens MUST be greater than budget_tokens
         if extended_thinking:
-            logger.info(f"🧠 [Claude Thinking] Ativando extended_thinking para {model_id}")
-            message_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 8000}
+            budget_tokens = thinking_budget if thinking_budget is not None else 10000
+            try:
+                budget_tokens = int(budget_tokens)
+            except (TypeError, ValueError):
+                budget_tokens = 10000
+            if budget_tokens <= 0:
+                budget_tokens = 10000
+            if budget_tokens > 63999:
+                budget_tokens = 63999
+            # Ensure max_tokens > budget_tokens as required by Anthropic API
+            if max_tokens <= budget_tokens:
+                max_tokens = budget_tokens + 8000  # Give 8k for response after thinking
+            message_kwargs["max_tokens"] = max_tokens
+            logger.info(
+                f"🧠 [Claude Thinking] Ativando extended_thinking para {model_id}, budget={budget_tokens}, max_tokens={max_tokens}"
+            )
+            message_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
         
-        async with client.messages.stream(**message_kwargs) as stream:
-            # Use async for to iterate through SSE events
-            async for event in stream:
-                # Claude SSE event types: content_block_start, content_block_delta, etc.
-                if hasattr(event, 'type'):
-                    if event.type == 'content_block_delta':
-                        delta = getattr(event, 'delta', None)
-                        if delta and hasattr(delta, 'type'):
-                            # thinking_delta: contains thinking text
-                            if delta.type == 'thinking_delta':
-                                thinking_text = getattr(delta, 'thinking', '')
-                                if thinking_text:
-                                    logger.debug(f"🧠 [Claude Thinking] Delta: {thinking_text[:50]}...")
-                                    yield ('thinking', thinking_text)
-                            # text_delta: contains regular response text
-                            elif delta.type == 'text_delta':
-                                text = getattr(delta, 'text', '')
-                                if text:
-                                    yield ('text', text)
+        provider_name = "vertex-anthropic" if is_vertex else "anthropic"
+        try:
+            async with client.messages.stream(**message_kwargs) as stream:
+                record_api_call(
+                    kind="llm",
+                    provider=provider_name,
+                    model=model_id,
+                    success=True,
+                    meta={"stream": True},
+                )
+                # Use async for to iterate through SSE events
+                async for event in stream:
+                    # Claude SSE event types: content_block_start, content_block_delta, etc.
+                    if hasattr(event, 'type'):
+                        if event.type == 'content_block_delta':
+                            delta = getattr(event, 'delta', None)
+                            if delta and hasattr(delta, 'type'):
+                                # thinking_delta: contains thinking text
+                                if delta.type == 'thinking_delta':
+                                    thinking_text = getattr(delta, 'thinking', '')
+                                    if thinking_text:
+                                        logger.debug(f"🧠 [Claude Thinking] Delta: {thinking_text[:50]}...")
+                                        yield ('thinking', thinking_text)
+                                # text_delta: contains regular response text
+                                elif delta.type == 'text_delta':
+                                    text = getattr(delta, 'text', '')
+                                    if text:
+                                        yield ('text', text)
+        except Exception:
+            record_api_call(
+                kind="llm",
+                provider=provider_name,
+                model=model_id,
+                success=False,
+                meta={"stream": True},
+            )
+            raise
         return
 
     response = await call_anthropic_async(
@@ -1315,15 +2041,15 @@ async def stream_vertex_gemini_async(
     max_tokens: int = 8192,
     temperature: float = 0.3,
     system_instruction: Optional[str] = None,
-    thinking_mode: Optional[str] = None,  # NEW: 'extended', 'standard', None
+    thinking_mode: Optional[str] = None,  # 'minimal'|'low'|'medium'|'high' (or legacy 'standard'|'extended')
 ):
     """Async streaming for Gemini via Vertex/Google GenAI with Extended Thinking support.
     
     Args:
         thinking_mode: Enable thinking streaming. Options:
             - None: Normal mode
-            - 'extended': Extended Thinking with HIGH level (streaming)
-            - 'standard': Standard thinking mode
+            - 'minimal'|'low'|'medium'|'high': Thinking level (Gemini Flash/Pro)
+            - legacy: 'standard' -> 'medium', 'extended' -> 'high'
     
     Yields:
         Tuples of (chunk_type, content) where chunk_type is 'thinking' or 'text'
@@ -1338,126 +2064,199 @@ async def stream_vertex_gemini_async(
         return
 
     from app.services.ai.model_registry import get_api_model_name
+
     model_id = get_api_model_name(model)
     system_instruction = system_instruction or DEFAULT_LEGAL_SYSTEM_INSTRUCTION
 
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    force_direct = os.getenv("GEMINI_FORCE_DIRECT", "false").lower() == "true"
+
+    def _is_not_found(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            ("404" in msg and ("not_found" in msg or "not found" in msg))
+            or ("publisher model" in msg and "not found" in msg)
+            or ("was not found" in msg)
+        )
+
+    async def _start_stream(active_client, active_model_id: str, cfg_kwargs: dict) -> Any:
+        cfg = types.GenerateContentConfig(**cfg_kwargs)
+        models = active_client.aio.models
+        if hasattr(models, "generate_content_stream"):
+            stream_obj = models.generate_content_stream(
+                model=active_model_id,
+                contents=prompt,
+                config=cfg,
+            )
+        else:
+            try:
+                stream_obj = models.generate_content(
+                    model=active_model_id,
+                    contents=prompt,
+                    config=cfg,
+                    stream=True,
+                )
+            except TypeError:
+                stream_obj = models.generate_content(
+                    model=active_model_id,
+                    contents=prompt,
+                    config=cfg,
+                )
+        if asyncio.iscoroutine(stream_obj):
+            stream_obj = await stream_obj
+        return stream_obj
+
+    def _yield_parts(obj: Any) -> bool:
+        yielded_any = False
+        candidates = getattr(obj, "candidates", None) or []
+        for candidate in candidates:
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) if content else None
+            if not parts:
+                continue
+            for part in parts:
+                text = getattr(part, "text", None)
+                if not isinstance(text, str) or not text:
+                    continue
+                thought_attr = getattr(part, "thought", None)
+                if isinstance(thought_attr, bool) and thought_attr:
+                    # Gemini "thought summaries" arrive as parts flagged with `thought=True` and a text payload.
+                    # We treat these as *standard thinking* to show full chain-of-thought in UI.
+                    yield ("thinking", text)
+                    yielded_any = True
+                    continue
+                thought_text = getattr(part, "thinking", None)
+                if isinstance(thought_text, str) and thought_text.strip():
+                    yield ("thinking", thought_text)
+                    yielded_any = True
+                    continue
+                if isinstance(thought_attr, str) and thought_attr.strip():
+                    yield ("thinking", thought_attr)
+                    yielded_any = True
+                    continue
+                yield ("text", text)
+                yielded_any = True
+        return yielded_any
+
     # Build config kwargs
-    config_kwargs = {
+    config_kwargs: dict = {
         "system_instruction": system_instruction,
         "max_output_tokens": max_tokens,
         "temperature": temperature,
     }
-    
-    # NEW: Add thinking config if requested
-    if thinking_mode:
-        logger.info(f"🧠 [Gemini Thinking] Ativando thinking_mode={thinking_mode} para modelo {model_id}")
-        try:
-            # Per Google API docs: use include_thoughts=True to get thought summaries
-            # https://ai.google.dev/gemini-api/docs/thinking
-            if thinking_mode == "extended":
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    include_thoughts=True,  # Required to get thought parts
-                    thinking_level="HIGH"
-                )
-            elif thinking_mode == "standard":
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    include_thoughts=True,
-                    thinking_level="MEDIUM"
-                )
-            elif thinking_mode == "low":
-                config_kwargs["thinking_config"] = types.ThinkingConfig(
-                    include_thoughts=True,
-                    thinking_level="LOW"
-                )
-            logger.info(f"🧠 [Gemini Thinking] Config: {config_kwargs.get('thinking_config')}")
-        except Exception as e:
-            logger.warning(f"⚠️ Erro ao configurar thinking mode: {e}")
 
-    if hasattr(client.aio.models, "generate_content_stream"):
-        stream = client.aio.models.generate_content_stream(
-            model=model_id,
-            contents=prompt,
-            config=types.GenerateContentConfig(**config_kwargs)
+    def _normalize_gemini_thinking(level: Optional[str]) -> Optional[str]:
+        if not level:
+            return None
+        raw = str(level).strip().lower()
+        # "none"/"off"/"disabled" -> return None to completely disable thinking
+        if raw in ("none", "off", "disabled"):
+            return None
+        if raw in ("standard", "medium"):
+            return "medium"
+        if raw in ("extended", "high", "xhigh"):
+            return "high"
+        if raw in ("minimal", "low"):
+            return raw
+        return raw
+
+    normalized_thinking = _normalize_gemini_thinking(thinking_mode)
+    if normalized_thinking:
+        logger.info(
+            f"🧠 [Gemini Thinking] Ativando thinking_mode={normalized_thinking} para modelo {model_id}"
         )
-        if asyncio.iscoroutine(stream):
-            stream = await stream
-        if hasattr(stream, "__aiter__"):
-            chunk_count = 0
-            async for chunk in stream:
-                chunk_count += 1
-                yielded = False
-                
-                # DEBUG: Log first few chunks' structure
-                if chunk_count <= 3:
-                    logger.debug(f"🧠 [Gemini Chunk {chunk_count}] Type: {type(chunk).__name__}, Attrs: {dir(chunk)[:10]}")
-                    if hasattr(chunk, 'candidates') and chunk.candidates:
-                        for i, cand in enumerate(chunk.candidates):
-                            if hasattr(cand, 'content') and hasattr(cand.content, 'parts'):
-                                for j, part in enumerate(cand.content.parts):
-                                    logger.debug(f"  📦 Part[{i}][{j}]: thought={getattr(part, 'thought', 'N/A')}, text_len={len(getattr(part, 'text', '') or '')}")
+        thinking_config = types.ThinkingConfig(include_thoughts=True)
+        try:
+            if hasattr(thinking_config, "thinking_level"):
+                setattr(thinking_config, "thinking_level", normalized_thinking)
+            elif hasattr(thinking_config, "thinkingLevel"):
+                setattr(thinking_config, "thinkingLevel", normalized_thinking)
+        except Exception:
+            logger.warning("⚠️ Não foi possível aplicar thinking_level no ThinkingConfig; usando include_thoughts apenas.")
+        config_kwargs["thinking_config"] = thinking_config
 
-                if hasattr(chunk, 'candidates') and chunk.candidates:
-                    for candidate in chunk.candidates:
-                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                            for part in candidate.content.parts:
-                                part_text = getattr(part, 'text', None)
-                                if not isinstance(part_text, str) or not part_text:
-                                    continue
-                                if getattr(part, 'thought', False):
-                                    logger.info(f"🧠 [Thinking] Chunk {chunk_count}: {part_text[:50]}...")
-                                    yield ('thinking', part_text)
-                                else:
-                                    yield ('text', part_text)
-                                yielded = True
+    active_client = client
+    active_model_id = model_id
 
-                if yielded:
-                    continue
+    async def _open_stream_with_thinking_fallback() -> Any:
+        try:
+            return await _start_stream(active_client, active_model_id, config_kwargs)
+        except Exception as exc:
+            if "400" in str(exc) and thinking_mode:
+                logger.warning(f"⚠️ Erro 400 com Thinking ({exc}). Tentando fallback sem thinking...")
+                record_api_call(
+                    kind="llm",
+                    provider="vertex-gemini",
+                    model=active_model_id,
+                    success=False,
+                    meta={"stream": True, "thinking_mode": thinking_mode},
+                )
+                cfg = dict(config_kwargs)
+                cfg.pop("thinking_config", None)
+                return await _start_stream(active_client, active_model_id, cfg)
+            raise
 
-                # Fallback: older SDKs may expose thinking as a top-level field
-                thinking_text = None
-                if hasattr(chunk, 'thinking_text') and chunk.thinking_text:
-                    thinking_text = chunk.thinking_text
-                elif hasattr(chunk, 'metadata') and hasattr(chunk.metadata, 'thinking'):
-                    thinking_text = chunk.metadata.thinking
+    try:
+        stream_obj = await _open_stream_with_thinking_fallback()
+    except Exception as exc:
+        if _is_not_found(exc) and api_key and not force_direct:
+            logger.warning(f"⚠️ Modelo indisponível no Vertex ({active_model_id}). Tentando Gemini direto via API key...")
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=active_model_id,
+                success=False,
+                meta={"stream": True, "fallback": "direct"},
+            )
+            active_client = genai.Client(api_key=api_key)
+            stream_obj = await _open_stream_with_thinking_fallback()
+        else:
+            record_api_call(
+                kind="llm",
+                provider="vertex-gemini",
+                model=active_model_id,
+                success=False,
+                meta={"stream": True},
+            )
+            raise
 
-                if thinking_text:
-                    yield ('thinking', thinking_text)
-
-                text = getattr(chunk, 'text', '') or ''
-                if text:
-                    yield ('text', text)
-            return
-
-    # Fallback: non-streaming
-    response = await client.aio.models.generate_content(
-        model=model_id,
-        contents=prompt,
-        config=types.GenerateContentConfig(**config_kwargs)
+    record_api_call(
+        kind="llm",
+        provider="vertex-gemini",
+        model=active_model_id,
+        success=True,
+        meta={"stream": True, **({"thinking_mode": thinking_mode} if thinking_mode else {})},
     )
-    
-    yielded = False
-    if hasattr(response, 'candidates') and response.candidates:
-        for candidate in response.candidates:
-            if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
-                for part in candidate.content.parts:
-                    part_text = getattr(part, 'text', None)
-                    if not isinstance(part_text, str) or not part_text:
-                        continue
-                    if getattr(part, 'thought', False):
-                        yield ('thinking', part_text)
-                    else:
-                        yield ('text', part_text)
-                    yielded = True
 
-    if yielded:
+    if hasattr(stream_obj, "__aiter__"):
+        async for chunk in stream_obj:
+            yielded = False
+            for kind, delta in _yield_parts(chunk):
+                yielded = True
+                yield (kind, delta)
+            if yielded:
+                continue
+            thinking_text = getattr(chunk, "thinking_text", None)
+            if isinstance(thinking_text, str) and thinking_text.strip():
+                yield ("thinking", thinking_text)
+            text = getattr(chunk, "text", "") or ""
+            if text:
+                yield ("text", text)
         return
 
-    if hasattr(response, 'thinking_text') and response.thinking_text:
-        yield ('thinking', response.thinking_text)
-
-    output_text = getattr(response, "text", "") or ""
+    # Non-streaming response fallback
+    yielded = False
+    for kind, delta in _yield_parts(stream_obj):
+        yielded = True
+        yield (kind, delta)
+    if yielded:
+        return
+    thinking_text = getattr(stream_obj, "thinking_text", None)
+    if isinstance(thinking_text, str) and thinking_text.strip():
+        yield ("thinking", thinking_text)
+    output_text = getattr(stream_obj, "text", "") or ""
     if output_text:
-        yield ('text', output_text)
+        yield ("text", output_text)
 
 
 
@@ -1845,8 +2644,10 @@ async def generate_section_agent_mode_async(
     reviewer_models: Optional[List[str]] = None,
     judge_model: Optional[str] = None,
     reasoning_level: str = "medium",
+    temperature: float = 0.3,
     web_search: bool = False,
     search_mode: str = "hybrid",
+    perplexity_search_mode: Optional[str] = None,
     multi_query: bool = True,
     breadth_first: bool = False,
     thesis: Optional[str] = None,
@@ -1856,7 +2657,8 @@ async def generate_section_agent_mode_async(
     mode: Optional[str] = None,
     previous_sections: Optional[List[str]] = None,
     system_instruction: Optional[str] = None,
-    cached_content: Optional[Any] = None
+    cached_content: Optional[Any] = None,
+    num_committee_rounds: int = 1
 ) -> Tuple[str, str, dict]:
     """
     Async version with parallel execution of GPT and Claude calls.
@@ -1865,10 +2667,19 @@ async def generate_section_agent_mode_async(
     """
     from jinja2 import Template
     from app.services.ai.model_registry import get_api_model_name, DEFAULT_JUDGE_MODEL, get_model_config
+    from app.services.ai.perplexity_config import normalize_perplexity_search_mode
 
     gpt_model_id = gpt_model
     claude_model_id = claude_model
     judge_model_id = judge_model or DEFAULT_JUDGE_MODEL
+
+    try:
+        temperature = float(temperature)
+    except (TypeError, ValueError):
+        temperature = 0.3
+    temperature = max(0.0, min(1.0, temperature))
+    draft_temperature = temperature
+    review_temperature = min(temperature, 0.3)
 
     # Normalize to provider API model names (accepts canonical IDs)
     gpt_model = get_api_model_name(gpt_model_id)
@@ -1913,8 +2724,9 @@ async def generate_section_agent_mode_async(
     # Web Search Context Injection (Unified)
     if web_search:
         search_mode = (search_mode or "hybrid").lower()
-        if search_mode not in ("shared", "native", "hybrid"):
+        if search_mode not in ("shared", "native", "hybrid", "perplexity"):
             search_mode = "hybrid"
+        perplexity_search_mode = normalize_perplexity_search_mode(perplexity_search_mode)
         if search_mode != "native":
             print(f"   🔍 Realizando busca web para: {section_title}")
             search_query = f"{section_title} jurisprudencia tribunal superior novo código processo civil"
@@ -1925,9 +2737,17 @@ async def generate_section_agent_mode_async(
             multi_query = bool(multi_query) or breadth_first
 
             if multi_query:
-                search_results = await web_search_service.search_multi(search_query, num_results=10)
+                search_results = await web_search_service.search_multi(
+                    search_query,
+                    num_results=10,
+                    search_mode=perplexity_search_mode,
+                )
             else:
-                search_results = await web_search_service.search(search_query, num_results=10)
+                search_results = await web_search_service.search(
+                    search_query,
+                    num_results=10,
+                    search_mode=perplexity_search_mode,
+                )
 
             if search_results.get('success') and search_results.get('results'):
                 web_context = "\n## PESQUISA WEB RECENTE (Contexto Adicional):\n"
@@ -2000,7 +2820,11 @@ async def generate_section_agent_mode_async(
         model_id: str,
         prompt: str,
         sys_prompt: str,
-        cached_content: Optional[Any] = None
+        cached_content: Optional[Any] = None,
+        temperature: float = 0.3,
+        *,
+        billing_node: Optional[str] = None,
+        billing_size: Optional[str] = None,
     ) -> str:
         cfg = get_model_config(model_id)
         if not cfg:
@@ -2011,66 +2835,130 @@ async def generate_section_agent_mode_async(
             client = gpt_client or init_openai_client()
             if not client:
                 return ""
-            return await call_openai_async(
-                client,
-                full_prompt,
-                model=api_model,
-                system_instruction=system_instruction
-            )
+            with billing_context(node=billing_node, size=billing_size):
+                return await call_openai_async(
+                    client,
+                    full_prompt,
+                    model=api_model,
+                    temperature=temperature,
+                    system_instruction=system_instruction
+                )
         if cfg.provider == "anthropic":
             client = claude_client or init_anthropic_client()
             if not client:
                 return ""
-            return await call_anthropic_async(
-                client,
-                full_prompt,
-                model=api_model,
-                system_instruction=system_instruction
-            )
+            with billing_context(node=billing_node, size=billing_size):
+                return await call_anthropic_async(
+                    client,
+                    full_prompt,
+                    model=api_model,
+                    temperature=temperature,
+                    system_instruction=system_instruction
+                )
         if cfg.provider == "google":
             client = get_gemini_client()
             if not client:
                 return ""
             if cached_content:
-                return await asyncio.to_thread(
-                    call_vertex_gemini,
+                with billing_context(node=billing_node, size=billing_size):
+                    return await asyncio.to_thread(
+                        call_vertex_gemini,
+                        client,
+                        full_prompt,
+                        model=model_id,
+                        temperature=temperature,
+                        system_instruction=system_instruction,
+                        cached_content=cached_content
+                    ) or ""
+            with billing_context(node=billing_node, size=billing_size):
+                return await call_vertex_gemini_async(
                     client,
                     full_prompt,
                     model=model_id,
-                    system_instruction=system_instruction,
-                    cached_content=cached_content
+                    temperature=temperature,
+                    system_instruction=system_instruction
                 ) or ""
-            return await call_vertex_gemini_async(
-                client,
-                full_prompt,
-                model=model_id,
-                system_instruction=system_instruction
-            ) or ""
+        if cfg.provider == "perplexity":
+            effective_strategy = (search_mode or "hybrid").strip().lower()
+            allow_model_search = bool(web_search) and effective_strategy == "native"
+            with billing_context(node=billing_node, size=billing_size):
+                return (
+                    await call_perplexity_async(
+                        full_prompt,
+                        model=api_model or model_id,
+                        temperature=temperature,
+                        system_instruction=system_instruction,
+                        web_search_enabled=allow_model_search,
+                        search_mode=perplexity_search_mode,
+                        disable_search=not allow_model_search,
+                    )
+                    or ""
+                )
         if cfg.provider == "xai":
             client = init_xai_client()
             if not client:
                 return ""
-            return await call_openai_async(
-                client,
-                full_prompt,
-                model=api_model,
-                system_instruction=system_instruction
-            )
+            with billing_context(node=billing_node, size=billing_size):
+                return await call_openai_async(
+                    client,
+                    full_prompt,
+                    model=api_model,
+                    temperature=temperature,
+                    system_instruction=system_instruction
+                )
         if cfg.provider == "openrouter":
             client = init_openrouter_client()
             if not client:
                 return ""
-            return await call_openai_async(
-                client,
-                full_prompt,
-                model=api_model,
-                system_instruction=system_instruction
-            )
+            with billing_context(node=billing_node, size=billing_size):
+                return await call_openai_async(
+                    client,
+                    full_prompt,
+                    model=api_model,
+                    temperature=temperature,
+                    system_instruction=system_instruction
+                )
         return ""
 
     custom_drafter_models = _dedupe_models(drafter_models or [])
     custom_reviewer_models = _dedupe_models(reviewer_models or [])
     use_custom_lists = bool(custom_drafter_models or custom_reviewer_models)
+
+    async def _call_openai_with_billing(
+        client,
+        prompt: str,
+        *,
+        model: str,
+        temperature: float,
+        billing_node: str,
+        billing_size: str,
+    ) -> Optional[str]:
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_openai_async(
+                client,
+                prompt,
+                model=model,
+                temperature=temperature,
+                system_instruction=system_instruction,
+            )
+
+    async def _call_anthropic_with_billing(
+        client,
+        prompt: str,
+        *,
+        model: str,
+        temperature: float,
+        billing_node: str,
+        billing_size: str,
+    ) -> Optional[str]:
+        with billing_context(node=billing_node, size=billing_size):
+            return await call_anthropic_async(
+                client,
+                prompt,
+                model=model,
+                temperature=temperature,
+                system_instruction=system_instruction,
+            )
 
     if use_custom_lists:
         if not custom_drafter_models:
@@ -2090,7 +2978,14 @@ async def generate_section_agent_mode_async(
             cfg = get_model_config(model_id)
             provider = cfg.provider if cfg else ""
             sys_prompt = sys_by_provider.get(provider, sys_gpt)
-            draft_tasks.append((model_id, _call_model(model_id, agent_prompt, sys_prompt)))
+            draft_tasks.append((model_id, _call_model(
+                model_id,
+                agent_prompt,
+                sys_prompt,
+                temperature=draft_temperature,
+                billing_node="section_draft",
+                billing_size="M",
+            )))
 
         draft_results = await asyncio.gather(*[t[1] for t in draft_tasks]) if draft_tasks else []
         drafts_by_model: Dict[str, str] = {}
@@ -2107,64 +3002,112 @@ async def generate_section_agent_mode_async(
             fallback_text = valid_drafts[0] if valid_drafts else ""
             return fallback_text, "", drafts
 
-        # R2: Reviews (each reviewer critiques all drafts)
+        # =========================================================================
+        # R2-R3 LOOP: Critique -> Revision (repeats num_committee_rounds times)
+        # =========================================================================
         t_critica = Template(V2_PROMPT_CRITICA)
-        drafts_block = "\n\n".join(
-            [f"### { _model_label(mid) } ({mid})\n{drafts_by_model[mid]}" for mid in custom_drafter_models]
-        )
-        critica_prompt = t_critica.render(
-            texto_colega=drafts_block,
-            rag_context=full_rag,
-            tipo_documento=doc_type,
-            tese=thesis or "",
-            instrucoes=instrucoes
-        )
-
-        critique_tasks: List[Tuple[str, Any]] = []
-        for model_id in custom_reviewer_models:
-            cfg = get_model_config(model_id)
-            provider = cfg.provider if cfg else ""
-            sys_prompt = sys_by_provider.get(provider, sys_gpt)
-            critique_tasks.append((model_id, _call_model(model_id, critica_prompt, sys_prompt)))
-
-        critique_results = await asyncio.gather(*[t[1] for t in critique_tasks]) if critique_tasks else []
-        reviews_by_model: Dict[str, str] = {}
-        for idx, (model_id, _) in enumerate(critique_tasks):
-            reviews_by_model[model_id] = critique_results[idx] if idx < len(critique_results) else ""
-
-        drafts["reviews_by_model"] = reviews_by_model
-
-        # R3: Revisions (each drafter uses all critiques)
         t_revisao = Template(V2_PROMPT_REVISAO)
-        critiques_block = "\n\n".join(
-            [
-                f"### CRÍTICA DE {_model_label(mid)} ({mid})\n{reviews_by_model.get(mid) or 'N/A'}"
-                for mid in custom_reviewer_models
-            ]
-        )
-
-        revision_tasks: List[Tuple[str, Any]] = []
-        for model_id in custom_drafter_models:
-            cfg = get_model_config(model_id)
-            provider = cfg.provider if cfg else ""
-            sys_prompt = sys_by_provider.get(provider, sys_gpt)
-            original_text = drafts_by_model.get(model_id, "")
-            rev_prompt = t_revisao.render(
-                texto_original=original_text,
-                critica_recebida=critiques_block,
+        
+        # Track current versions (starts with initial drafts)
+        current_versions_by_model: Dict[str, str] = dict(drafts_by_model)
+        all_reviews_history: List[Dict[str, str]] = []
+        all_revisions_history: List[Dict[str, str]] = []
+        
+        try:
+            effective_rounds = int(num_committee_rounds)
+        except (TypeError, ValueError):
+            effective_rounds = 1
+        effective_rounds = max(1, min(6, effective_rounds))
+        print(f"   🔄 [Committee] Running {effective_rounds} round(s) of R2-R3...")
+        
+        for round_num in range(1, effective_rounds + 1):
+            round_label = f"R{round_num}" if effective_rounds > 1 else ""
+            
+            # R2: Reviews (each reviewer critiques current versions)
+            print(f"   💬 [R2{round_label}] Críticas (rodada {round_num}/{effective_rounds})...")
+            versions_block = "\n\n".join(
+                [f"### {_model_label(mid)} ({mid})\n{current_versions_by_model[mid]}" for mid in custom_drafter_models]
+            )
+            critica_prompt = t_critica.render(
+                texto_colega=versions_block,
                 rag_context=full_rag,
                 tipo_documento=doc_type,
                 tese=thesis or "",
                 instrucoes=instrucoes
             )
-            revision_tasks.append((model_id, _call_model(model_id, rev_prompt, sys_prompt)))
 
-        revision_results = await asyncio.gather(*[t[1] for t in revision_tasks]) if revision_tasks else []
-        revisions_by_model: Dict[str, str] = {}
-        for idx, (model_id, _) in enumerate(revision_tasks):
-            revisions_by_model[model_id] = revision_results[idx] if idx < len(revision_results) else ""
+            critique_tasks: List[Tuple[str, Any]] = []
+            for model_id in custom_reviewer_models:
+                cfg = get_model_config(model_id)
+                provider = cfg.provider if cfg else ""
+                sys_prompt = sys_by_provider.get(provider, sys_gpt)
+                critique_tasks.append((model_id, _call_model(
+                    model_id,
+                    critica_prompt,
+                    sys_prompt,
+                    temperature=review_temperature,
+                    billing_node="section_critique",
+                    billing_size="M",
+                )))
 
-        drafts["revisions_by_model"] = revisions_by_model
+            critique_results = await asyncio.gather(*[t[1] for t in critique_tasks]) if critique_tasks else []
+            reviews_by_model: Dict[str, str] = {}
+            for idx, (model_id, _) in enumerate(critique_tasks):
+                reviews_by_model[model_id] = critique_results[idx] if idx < len(critique_results) else ""
+            
+            all_reviews_history.append(reviews_by_model)
+
+            # R3: Revisions (each drafter uses all critiques)
+            print(f"   ✏️ [R3{round_label}] Revisões (rodada {round_num}/{effective_rounds})...")
+            critiques_block = "\n\n".join(
+                [
+                    f"### CRÍTICA DE {_model_label(mid)} ({mid})\n{reviews_by_model.get(mid) or 'N/A'}"
+                    for mid in custom_reviewer_models
+                ]
+            )
+
+            revision_tasks: List[Tuple[str, Any]] = []
+            for model_id in custom_drafter_models:
+                cfg = get_model_config(model_id)
+                provider = cfg.provider if cfg else ""
+                sys_prompt = sys_by_provider.get(provider, sys_gpt)
+                original_text = current_versions_by_model.get(model_id, "")
+                rev_prompt = t_revisao.render(
+                    texto_original=original_text,
+                    critica_recebida=critiques_block,
+                    rag_context=full_rag,
+                    tipo_documento=doc_type,
+                    tese=thesis or "",
+                    instrucoes=instrucoes
+                )
+                revision_tasks.append((model_id, _call_model(
+                    model_id,
+                    rev_prompt,
+                    sys_prompt,
+                    temperature=draft_temperature,
+                    billing_node="section_revision",
+                    billing_size="M",
+                )))
+
+            revision_results = await asyncio.gather(*[t[1] for t in revision_tasks]) if revision_tasks else []
+            revisions_by_model: Dict[str, str] = {}
+            for idx, (model_id, _) in enumerate(revision_tasks):
+                revisions_by_model[model_id] = revision_results[idx] if idx < len(revision_results) else ""
+            
+            all_revisions_history.append(revisions_by_model)
+            
+            # Update current versions for next round (or for Judge)
+            for mid in custom_drafter_models:
+                if revisions_by_model.get(mid):
+                    current_versions_by_model[mid] = revisions_by_model[mid]
+        
+        # Store final results
+        drafts["reviews_by_model"] = all_reviews_history[-1] if all_reviews_history else {}
+        drafts["revisions_by_model"] = all_revisions_history[-1] if all_revisions_history else {}
+        drafts["committee_rounds_executed"] = effective_rounds
+        if effective_rounds > 1:
+            drafts["all_reviews_history"] = all_reviews_history
+            drafts["all_revisions_history"] = all_revisions_history
 
         def _assign_legacy(provider: str, prefix: str) -> None:
             model_id = None
@@ -2176,19 +3119,20 @@ async def generate_section_agent_mode_async(
             if not model_id:
                 return
             drafts[f"{prefix}_v1"] = drafts_by_model.get(model_id, "")
-            if revisions_by_model:
-                drafts[f"{prefix}_v2"] = revisions_by_model.get(model_id) or drafts_by_model.get(model_id, "")
+            if current_versions_by_model:
+                drafts[f"{prefix}_v2"] = current_versions_by_model.get(model_id) or drafts_by_model.get(model_id, "")
 
         _assign_legacy("openai", "gpt")
         _assign_legacy("anthropic", "claude")
         _assign_legacy("google", "gemini")
 
         # R4: Judge consolidation (dynamic list)
+        print(f"   ⚖️ [R4] Juiz consolidando {effective_rounds} rodada(s) de debate...")
         final_versions = [
             {
                 "id": mid,
                 "label": f"{_model_label(mid)} ({mid})",
-                "text": revisions_by_model.get(mid) or drafts_by_model.get(mid, "")
+                "text": current_versions_by_model.get(mid) or drafts_by_model.get(mid, "")
             }
             for mid in custom_drafter_models
         ]
@@ -2220,7 +3164,10 @@ async def generate_section_agent_mode_async(
             judge_model_id,
             judge_prompt,
             sys_gemini_judge,
-            cached_content=cached_content
+            cached_content=cached_content,
+            temperature=review_temperature,
+            billing_node="section_judge",
+            billing_size="S",
         )
         if not full_response:
             return final_versions[0]["text"], "", drafts
@@ -2240,17 +3187,21 @@ async def generate_section_agent_mode_async(
     # R1: Parallel Draft Generation (GPT, Claude, Gemini)
     print(f"   🤖 [R1] Gerando drafts em paralelo (3 agentes)...")
     versao_gpt_v1, versao_claude_v1 = await asyncio.gather(
-        call_openai_async(
+        _call_openai_with_billing(
             gpt_client,
             f"{sys_gpt}\n\n{agent_prompt}",
             model=gpt_model,
-            system_instruction=system_instruction
+            temperature=draft_temperature,
+            billing_node="section_draft",
+            billing_size="M",
         ),
-        call_anthropic_async(
+        _call_anthropic_with_billing(
             claude_client,
             f"{sys_claude}\n\n{agent_prompt}",
             model=claude_model,
-            system_instruction=system_instruction
+            temperature=draft_temperature,
+            billing_node="section_draft",
+            billing_size="M",
         )
     )
     drafts['gpt_v1'] = versao_gpt_v1 or "[GPT não disponível]"
@@ -2258,7 +3209,14 @@ async def generate_section_agent_mode_async(
     
     # Independent Judge model (Blind Judge Pattern)
     print(f"   🤖 [R1] Agente Juiz (blind) gerando versão independente...")
-    versao_gemini_v1 = await _call_model(judge_model_id, agent_prompt, sys_gemini_blind)
+    versao_gemini_v1 = await _call_model(
+        judge_model_id,
+        agent_prompt,
+        sys_gemini_blind,
+        temperature=draft_temperature,
+        billing_node="section_draft",
+        billing_size="M",
+    )
     drafts['gemini_v1'] = versao_gemini_v1 or "[Juiz não disponível]"
     drafts["judge_model"] = judge_model_id
     
@@ -2305,21 +3263,32 @@ async def generate_section_agent_mode_async(
     # Parallel critique calls
     critique_tasks = []
     if not critica_gpt:
-        critique_tasks.append(("gpt", call_openai_async(
+        critique_tasks.append(("gpt", _call_openai_with_billing(
             gpt_client,
             critica_gpt_prompt,
             model=gpt_model,
-            system_instruction=system_instruction
+            temperature=review_temperature,
+            billing_node="section_critique",
+            billing_size="M",
         )))
     if not critica_claude:
-        critique_tasks.append(("claude", call_anthropic_async(
+        critique_tasks.append(("claude", _call_anthropic_with_billing(
             claude_client,
             critica_claude_prompt,
             model=claude_model,
-            system_instruction=system_instruction
+            temperature=review_temperature,
+            billing_node="section_critique",
+            billing_size="M",
         )))
     if not critica_gemini:
-        critique_tasks.append(("gemini", _call_model(judge_model_id, critica_gemini_prompt, sys_gemini_blind)))
+        critique_tasks.append(("gemini", _call_model(
+            judge_model_id,
+            critica_gemini_prompt,
+            sys_gemini_blind,
+            temperature=review_temperature,
+            billing_node="section_critique",
+            billing_size="M",
+        )))
     
     if critique_tasks:
         results = await asyncio.gather(*[t[1] for t in critique_tasks])
@@ -2376,19 +3345,30 @@ async def generate_section_agent_mode_async(
     
     # Parallel revision calls
     versao_gpt_v2, versao_claude_v2, versao_gemini_v2 = await asyncio.gather(
-        call_openai_async(
+        _call_openai_with_billing(
             gpt_client,
             rev_gpt_prompt,
             model=gpt_model,
-            system_instruction=system_instruction
+            temperature=draft_temperature,
+            billing_node="section_revision",
+            billing_size="M",
         ),
-        call_anthropic_async(
+        _call_anthropic_with_billing(
             claude_client,
             rev_claude_prompt,
             model=claude_model,
-            system_instruction=system_instruction
+            temperature=draft_temperature,
+            billing_node="section_revision",
+            billing_size="M",
         ),
-        _call_model(judge_model_id, rev_gemini_prompt, sys_gemini_blind)
+        _call_model(
+            judge_model_id,
+            rev_gemini_prompt,
+            sys_gemini_blind,
+            temperature=draft_temperature,
+            billing_node="section_revision",
+            billing_size="M",
+        )
     )
     
     drafts['gpt_v2'] = versao_gpt_v2 or versao_gpt_v1
@@ -2431,7 +3411,10 @@ async def generate_section_agent_mode_async(
         judge_model_id,
         judge_prompt,
         sys_gemini_judge,
-        cached_content=cached_content
+        cached_content=cached_content,
+        temperature=review_temperature,
+        billing_node="section_judge",
+        billing_size="S",
     )
     if not full_response:
         return final_gpt, "", drafts

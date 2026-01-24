@@ -13,6 +13,7 @@ from sqlalchemy.pool import StaticPool
 from app.main import app
 from app.core.database import Base, get_db
 from app.models.user import User, UserRole, UserPlan, AccountType
+from app.models.djen import ProcessWatchlist, DjenIntimation
 from app.core.security import get_password_hash
 
 

@@ -12,7 +12,7 @@ if os.path.exists(CREDENTIALS_PATH) and not os.environ.get("GOOGLE_APPLICATION_C
 # Configuração de Logger para o módulo
 logger = logging.getLogger(__name__)
 
-PROMPT_AUDITORIA = """
+PROMPT_AUDITORIA_SOLO = """
 ATUE COMO UM AUDITOR JURÍDICO SÊNIOR (REVISOR DE APOSTILAS DE CONCURSO).
 
 Sua tarefa é ler a apostila fornecida e identificar ERROS GRAVES, ALUCINAÇÕES JURÍDICAS ou PROBLEMAS DE REDAÇÃO.
@@ -38,8 +38,10 @@ Analise o texto procurando por:
     *   Trechos desconexos (que não fazem sentido com o parágrafo anterior).
     *   Duplicidades de parágrafos inteiros.
 
-5.  🔴 **ALUCINAÇÕES DE IA:**
-    *   Trechos que parecem "embromação" (lero-lero) ou que fogem do tom da aula.
+5.  🔴 **ALUCINAÇÃO DE IA (COM CAUTELA EM LEIS RECENTES):**
+    *   Trechos que parecem "embromação" ou fogem do tom.
+    *   **ATENÇÃO:** Para leis datadas de **2024, 2025 ou 2026** (ex: Reforma Tributária, novas Leis Complementares), o seu conhecimento pode estar desatualizado.
+    *   **REGRA DE OURO:** Se encontrar uma lei recente que você "acha" que não existe, **NÃO MARQUE COMO ERRO**. Marque como "⚠️ **VERIFICAR NOVIDADE LEGISLATIVA**" e peça para o aluno conferir, pois pode ser uma lei aprovada após seu treinamento.
 
 ---
 **SAÍDA ESPERADA:**
@@ -69,7 +71,70 @@ Gere um RELATÓRIO DE AUDITORIA em Markdown no seguinte formato:
 </texto_para_auditar>
 """
 
-def auditar_consistencia_legal(client, texto_completo, output_path):
+PROMPT_AUDITORIA_CONTRA_RAW = """
+ATUE COMO UM AUDITOR DE FIDELIDADE PARA APOSTILAS JURÍDICAS.
+
+## FONTE DA VERDADE (REGRA ABSOLUTA)
+A TRANSCRIÇÃO BRUTA (RAW) é a fonte da verdade desta auditoria.
+- NÃO use conhecimento jurídico externo para dizer que a aula está “errada”.
+- Sua função é detectar problemas introduzidos pela formatação (adições, distorções, omissões, troca de números).
+
+## SEU OBJETIVO
+Compare o RAW com a APOSTILA FORMATADA e identifique:
+
+1) 🔴 ADIÇÕES / ALUCINAÇÕES (a apostila traz algo que não existe no RAW)
+   - Conceitos, regras, exceções, exemplos, macetes, “pegadinhas”.
+   - NÚMEROS: leis, artigos, súmulas, temas, REsp/RE/ADI, prazos, percentuais, valores.
+
+2) 🔴 DISTORÇÕES DE SENTIDO (RAW diz X, apostila diz Y)
+   - Ex.: “facultativo” ↔ “obrigatório”, regra ↔ exceção, troca de sujeito, troca de prazo, generalização indevida.
+
+3) 🔴 ALTERAÇÃO DE REFERÊNCIAS (mudou/omitiu número ou identificação)
+   - Ex.: Lei 11.101/2005 virou “Lei de Falências” sem número; Súmula 7 virou Súmula 17; perdeu artigo/inciso.
+
+4) 🔴 OMISSÕES CRÍTICAS (algo relevante do RAW sumiu na apostila)
+   - Especialmente dispositivos/números, passos de procedimento, dicas de prova e pontos enfatizados pelo professor.
+
+5) 🟠 INTEGRIDADE / REDAÇÃO (problema editorial que compromete entendimento)
+   - Frases truncadas, colagens estranhas, repetição integral de parágrafos, trechos sem nexo.
+
+## COMO REPORTAR (CRÍTICO)
+- Priorize itens de maior impacto (números/regras/prazos).
+- Para cada item crítico, inclua:
+  - Trecho curto do RAW que comprova o correto (ou “não encontrado no RAW” se for adição).
+  - Trecho curto da APOSTILA onde aparece o problema.
+  - Sugestão objetiva: “remover”, “corrigir para X”, “reinserir trecho Y”.
+- Limite a lista a no máximo 25 itens (os mais relevantes). Se houver mais, cite “há mais ocorrências”.
+
+---
+SAÍDA ESPERADA (Markdown):
+
+# 🕵️ Relatório de Auditoria (RAW x Apostila)
+
+## 1. Resumo Geral
+- Nota de fidelidade (0–10): X/10
+- Síntese (2 linhas)
+
+## 2. Pontos de Atenção (Críticos)
+(Liste itens. Se não houver, escreva "Nenhum problema crítico detectado.")
+
+## 3. Omissões Relevantes
+(Liste. Se não houver, escreva "Nenhuma omissão relevante detectada.")
+
+## 4. Checklist de Referências Numéricas
+(Liste leis/súmulas/artigos/julgados mencionados na apostila para conferência rápida.)
+
+---
+<transcricao_bruta>
+{raw}
+</transcricao_bruta>
+
+<apostila_formatada>
+{formatted}
+</apostila_formatada>
+"""
+
+def auditar_consistencia_legal(client, texto_completo, output_path, raw_transcript=None):
     """
     Realiza uma auditoria jurídica no texto usando o Gemini Pro/Flash
     e salva o relatório em output_path.
@@ -79,7 +144,12 @@ def auditar_consistencia_legal(client, texto_completo, output_path):
     # Validação de tamanho (Flash aguenta 1M tokens, então geralmente vai caber tudo)
     # Se for MUITO grande, ideal seria chunkar, mas para apostilas de aula (30-50k tokens) é tranquilo.
     
-    prompt = PROMPT_AUDITORIA.format(texto=texto_completo)
+    if raw_transcript:
+        logger.info("🧾 Modo: confronto com RAW (fonte da verdade).")
+        prompt = PROMPT_AUDITORIA_CONTRA_RAW.format(raw=raw_transcript, formatted=texto_completo)
+    else:
+        logger.info("ℹ️  Modo: auditoria apenas do texto formatado (sem RAW).")
+        prompt = PROMPT_AUDITORIA_SOLO.format(texto=texto_completo)
     
     try:
         response = client.models.generate_content(
@@ -128,13 +198,47 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S')
     
     if len(sys.argv) < 2:
-        print("Uso: python audit_module.py <arquivo_markdown_formatado.md>")
+        print("Uso: python audit_module.py <arquivo_markdown_formatado.md> [--raw <arquivo_raw.txt>]")
         sys.exit(1)
         
     md_path = sys.argv[1]
     if not os.path.exists(md_path):
         print(f"Arquivo não encontrado: {md_path}")
         sys.exit(1)
+
+    raw_path = None
+    if "--raw" in sys.argv:
+        try:
+            raw_idx = sys.argv.index("--raw")
+            if raw_idx + 1 < len(sys.argv):
+                raw_path = sys.argv[raw_idx + 1]
+        except ValueError:
+            raw_path = None
+
+    # Auto-detect RAW se não foi informado (padrão: confrontar RAW sempre que existir)
+    if not raw_path:
+        try:
+            base_dir = os.path.dirname(md_path)
+            base_name = os.path.splitext(os.path.basename(md_path))[0]
+
+            # Tenta padrões comuns: *_RAW.txt e variações
+            candidates = [
+                os.path.join(base_dir, f"{base_name}_RAW.txt"),
+                os.path.join(base_dir, f"{base_name}.txt"),
+            ]
+
+            # Fallback: procurar qualquer arquivo "*RAW*.txt" no mesmo diretório
+            if base_dir and os.path.isdir(base_dir):
+                for fname in os.listdir(base_dir):
+                    if fname.lower().endswith(".txt") and "raw" in fname.lower():
+                        candidates.append(os.path.join(base_dir, fname))
+
+            for c in candidates:
+                if c and os.path.exists(c):
+                    raw_path = c
+                    break
+        except Exception:
+            raw_path = raw_path
         
     # Setup Client (Reusa lógica do script principal ou init básico)
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "gen-lang-client-0727883752")
@@ -144,8 +248,23 @@ if __name__ == "__main__":
     
     with open(md_path, 'r', encoding='utf-8') as f:
         content = f.read()
+
+    raw_content = None
+    if raw_path and os.path.exists(raw_path):
+        try:
+            with open(raw_path, 'r', encoding='utf-8', errors='ignore') as rf:
+                raw_content = rf.read()
+            logger.info(f"🧾 RAW detectado para confronto: {raw_path}")
+        except Exception:
+            raw_content = None
+    elif raw_path:
+        if not os.path.exists(raw_path):
+            print(f"Arquivo RAW não encontrado: {raw_path}")
+            sys.exit(1)
+        with open(raw_path, 'r', encoding='utf-8') as f:
+            raw_content = f.read()
         
     base_name = os.path.splitext(md_path)[0]
     report_path = f"{base_name}_RELATORIO_AUDITORIA.md"
-    
-    auditar_consistencia_legal(client, content, report_path)
+
+    auditar_consistencia_legal(client, content, report_path, raw_transcript=raw_content)

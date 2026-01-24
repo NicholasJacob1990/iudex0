@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gerar minuta de teste sobre responsabilidade civil",
+  "total": 5,
+  "results": [
+    {
+      "title": "Canva Docs — Editor de documentos online grátis e fácil de usar",
+      "url": "https://www.canva.com/pt_br/documentos/",
+      "snippet": "OCanvaDocs éoúnico editordedocumentosonline grátisdeque você precisa. Crie, edite, colabore e compartilhe docs com apenas alguns cliques.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Editor online e gratuito de documentos - Crie e edite ... - Canva",
+      "url": "https://www.canva.com/pt_br/criar/documentos/",
+      "snippet": "Crie relatórios, propostas comerciais e outrosdocumentoscom um visual chamativo usandooCanvaDocs, nosso editor online e gratuitodedocumentos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Canva: um Kit de Criação Visual para todo mundo",
+      "url": "https://www.canva.com/pt_br/",
+      "snippet": "OCanvaé uma ferramenta gratuitadedesign gráfico online que você pode usar para criar posts para redes sociais, apresentações, cartazes, vídeos, logotipos e muito mais.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "PDFO uso correto do texto alternativo - gov",
+      "url": "https://www.gov.br/governodigital/pt-br/acessibilidade-e-usuario/acessibilidade-digital/material-de-apoio/uso-correto-texto-alternativo.pdf",
+      "snippet": "Oprimeiro passo para determinarotexto alternativo para uma imagem é ver se a imagem apresentaconteúdoe função. Na maioriadoscasos a imagem só apresenta uma função se contiver um link.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Guia de introdução e visão geral do Canva Docs",
+      "url": "https://www.canva.com/pt_br/help/about-canva-docs/",
+      "snippet": "Este artigo abordaoque você pode fazer comoCanvaDocs e contém links para guias sobre como começar a usar cada recurso. Comece aqui quando estiver configurando seudocumentodoCanvapara escrita, layoutouimpressão.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-01-20T21:33:48.793105"
+}

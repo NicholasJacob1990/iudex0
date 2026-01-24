@@ -2,22 +2,20 @@
 
 import { cn } from '@/lib/utils';
 import { useState } from 'react';
-import { Mic, Share2, Scale, Bot, Users } from 'lucide-react';
+import { Mic, Share2, Newspaper, Users } from 'lucide-react';
 
 const dockIcons: Record<string, React.ComponentType<{ className?: string }>> = {
   Podcasts: Mic,
   Diagramas: Share2,
   Compartilhamentos: Users,
-  'Metadados CNJ': Scale,
-  'Comunicações DJEN': Bot,
+  'Metadados CNJ e Comunicacoes DJEN': Newspaper,
 };
 
 const resourceShortcuts = [
   { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
   { id: 'diagrams', label: 'Diagramas', description: 'Mapas mentais automáticos', icon: 'Share2' },
   { id: 'sharing', label: 'Compartilhamentos', description: 'Pastas e grupos', icon: 'Users' },
-  { id: 'cnj', label: 'Metadados CNJ', description: 'Processos oficiais', icon: 'Scale' },
-  { id: 'djen', label: 'Comunicações DJEN', description: 'Diário de Justiça', icon: 'Newspaper' },
+  { id: 'cnj', label: 'Metadados CNJ e Comunicacoes DJEN', description: 'Processos e publicacoes oficiais', icon: 'Newspaper' },
 ];
 
 export function ResourceDock() {
@@ -26,7 +24,6 @@ export function ResourceDock() {
     diagrams: true,
     sharing: true,
     cnj: true,
-    djen: false,
   });
 
   return (

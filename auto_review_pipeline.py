@@ -67,7 +67,7 @@ def run_validation(subject_file: str) -> dict:
         formatted_text = f.read()
     
     vomo = VomoMLX()
-    result = vomo.validate_completeness_full(raw_text, formatted_text, stem)
+    result = vomo.validate_fidelity_primary(raw_text, formatted_text, stem, modo="APOSTILA", include_sources=False)
     return result
 
 
