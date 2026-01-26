@@ -23,11 +23,13 @@ async def test_corrective_flags_do_not_force_legacy(monkeypatch):
         opensearch_index_lei = "idx_lei"
         opensearch_index_juris = "idx_juris"
         opensearch_index_pecas = "idx_pecas"
+        opensearch_index_doutrina = "idx_doutrina"
         opensearch_index_sei = "idx_sei"
         opensearch_index_local = "idx_local"
         qdrant_collection_lei = "col_lei"
         qdrant_collection_juris = "col_juris"
         qdrant_collection_pecas = "col_pecas"
+        qdrant_collection_doutrina = "col_doutrina"
         qdrant_collection_sei = "col_sei"
         qdrant_collection_local = "col_local"
 
@@ -76,4 +78,3 @@ async def test_corrective_flags_do_not_force_legacy(monkeypatch):
     assert called.get("corrective_use_hyde") is True
     assert called.get("corrective_min_best_score") == 0.2
     assert called.get("corrective_min_avg_score") == 0.2
-

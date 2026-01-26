@@ -18,11 +18,12 @@ class QualityGateResult:
     """Resultado da avaliação do Quality Gate."""
     passed: bool
     compression_ratio: float
+    reference_coverage: float = 1.0
     missing_references: List[str] = field(default_factory=list)
     safe_mode: bool = False
     force_hil: bool = False
     notes: List[str] = field(default_factory=list)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -220,6 +221,7 @@ def quality_gate(
     return QualityGateResult(
         passed=passed,
         compression_ratio=round(compression_ratio, 3),
+        reference_coverage=round(coverage, 3),
         missing_references=missing_refs[:10],  # Limitar a 10
         safe_mode=safe_mode,
         force_hil=force_hil,
@@ -263,6 +265,7 @@ async def quality_gate_node(state: dict) -> dict:
             "section": section.get("section_title", f"Seção {i+1}"),
             "passed": result.passed,
             "compression_ratio": result.compression_ratio,
+            "reference_coverage": result.reference_coverage,
             "missing_references": result.missing_references,
             "notes": result.notes
         })

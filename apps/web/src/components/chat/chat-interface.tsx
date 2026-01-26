@@ -41,6 +41,7 @@ export function ChatInterface({
     currentChat, setCurrentChat, sendMessage, startAgentGeneration, isSending, isLoading,
     currentJobId, jobEvents,
     showMultiModelComparator, chatMode, selectedModel, selectedModels, denseResearch, useMultiAgent,
+    multiModelDeepDebate, setMultiModelDeepDebate,
     billingModal, closeBillingModal, retryWithBudgetOverride
   } = useChatStore();
   const {
@@ -84,10 +85,7 @@ export function ChatInterface({
     return `${latestTokenPercent.toFixed(1)}%`;
   }, [latestTokenPercent]);
 
-  /* 
-   * NEW: Deep Debate Toggle for Committee Mode 
-   */
-  const [useDeepDebate, setUseDeepDebate] = useState(true);
+  const useDeepDebate = multiModelDeepDebate;
 
   const parseCanvasCommand = (raw: string) => {
     const trimmed = raw.trim();
@@ -734,7 +732,7 @@ export function ChatInterface({
                 {/* @ts-ignore */}
                 <Switch
                   checked={useDeepDebate}
-                  onCheckedChange={setUseDeepDebate}
+                  onCheckedChange={setMultiModelDeepDebate}
                   id="deep-debate-toggle"
                   className="scale-75"
                 />

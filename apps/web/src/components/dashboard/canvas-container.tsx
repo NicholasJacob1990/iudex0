@@ -46,6 +46,8 @@ import type { HilIssue } from '@/lib/preventive-hil';
 import { JobQualityPanel, JobQualityPipelinePanel } from '@/components/dashboard/quality';
 import { QualityGatePanel } from './quality-gate-panel';
 import { HilChecklistPanel } from './hil-checklist-panel';
+import { DebateAuditPanel } from './debate-audit-panel';
+import { HilHistoryPanel } from './hil-history-panel';
 
 function injectFootnoteRefsIntoHtml(html: string): string {
     const raw = String(html || '');
@@ -180,6 +182,29 @@ const hasRawForHilFromMetadata = (metadata: any) => {
     return Boolean(raw);
 };
 
+const deriveHilRiskLevel = (metadata: any, jobEvents: any[]) => {
+    const metaCandidate =
+        metadata?.hil_risk_level
+        || metadata?.quality?.hil_risk_level
+        || metadata?.quality_payload?.hil_risk_level
+        || metadata?.qualityPayload?.hil_risk_level
+        || null;
+    if (typeof metaCandidate === 'string' && metaCandidate.trim()) return metaCandidate.trim().toUpperCase();
+
+    for (let i = (jobEvents?.length || 0) - 1; i >= 0; i--) {
+        const e = jobEvents[i];
+        if (e?.type !== 'hil_evaluated') continue;
+        const levelRaw = typeof e?.hil_risk_level === 'string' ? e.hil_risk_level : '';
+        if (levelRaw.trim()) return levelRaw.trim().toUpperCase();
+        const hilLevel = typeof e?.hil_level === 'string' ? e.hil_level : '';
+        if (hilLevel === 'critical') return 'HIGH';
+        if (hilLevel === 'review') return 'MED';
+        const requiresHil = typeof e?.requires_hil === 'boolean' ? e.requires_hil : false;
+        return requiresHil ? 'MED' : 'LOW';
+    }
+    return null;
+};
+
 export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
     const {
         state, activeTab, content, metadata, costInfo, hideCanvas, toggleExpanded, setActiveTab,
@@ -288,28 +313,7 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
     const auditIssuesModelLabel = String(metadata?.model || metadata?.audit?.model_used || 'IA');
     const isAuditOutdated = Boolean(metadata?.audit_outdated || metadata?.audit?.is_outdated || metadata?.audit?.outdated);
     const showAuditIssuesPanel = hasAuditIssuesSource || combinedAuditIssues.length > 0;
-    const hilRiskLevel = useMemo(() => {
-        const metaCandidate =
-            metadata?.hil_risk_level
-            || metadata?.quality?.hil_risk_level
-            || metadata?.quality_payload?.hil_risk_level
-            || metadata?.qualityPayload?.hil_risk_level
-            || null;
-        if (typeof metaCandidate === 'string' && metaCandidate.trim()) return metaCandidate.trim().toUpperCase();
-
-        for (let i = (jobEvents?.length || 0) - 1; i >= 0; i--) {
-            const e = jobEvents[i];
-            if (e?.type !== 'hil_evaluated') continue;
-            const levelRaw = typeof e?.hil_risk_level === 'string' ? e.hil_risk_level : '';
-            if (levelRaw.trim()) return levelRaw.trim().toUpperCase();
-            const hilLevel = typeof e?.hil_level === 'string' ? e.hil_level : '';
-            if (hilLevel === 'critical') return 'HIGH';
-            if (hilLevel === 'review') return 'MED';
-            const requiresHil = typeof e?.requires_hil === 'boolean' ? e.requires_hil : false;
-            return requiresHil ? 'MED' : 'LOW';
-        }
-        return null;
-    }, [metadata, jobEvents]);
+    const hilRiskLevel = deriveHilRiskLevel(metadata, jobEvents);
     const hilRiskVariant = hilRiskLevel === 'HIGH' ? 'destructive' : hilRiskLevel === 'MED' ? 'secondary' : 'outline';
 
     useEffect(() => {
@@ -758,7 +762,7 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
                         )}
                     </div>
 
-                    <TabsContent value="editor" className="flex-1 overflow-auto p-8 bg-white m-0">
+                    <TabsContent value="editor" className="flex-1 min-h-0 overflow-auto p-8 bg-white m-0">
                         {hasDocument && !hideEditBanner && (
                             <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900">
                                 <div className="flex items-start gap-2">
@@ -785,22 +789,22 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
                             highlightedText={highlightedText}
                         />
                     </TabsContent>
-	                    {mode !== 'chat' && (
-	                        <TabsContent value="process" className="flex-1 overflow-y-auto p-6 bg-white space-y-6 m-0">
-	                            <ProcessView
-	                                events={jobEvents}
-	                                outline={jobOutline}
-	                                metadata={metadata}
-	                                costInfo={costInfo}
-	                                reviewData={reviewData}
-	                            />
-	                        </TabsContent>
-	                    )}
+		                    {mode !== 'chat' && (
+		                        <TabsContent value="process" className="flex-1 min-h-0 overflow-y-auto p-6 bg-white space-y-6 m-0">
+		                            <ProcessView
+		                                events={jobEvents}
+		                                outline={jobOutline}
+		                                metadata={metadata}
+		                                costInfo={costInfo}
+		                                reviewData={reviewData}
+		                            />
+		                        </TabsContent>
+		                    )}
 	
-	                    {mode !== 'chat' && (
-	                    <TabsContent value="audit" className="flex-1 overflow-y-auto p-6 bg-white space-y-6 m-0">
-	                        {metadata?.audit ? (
-	                            <>
+		                    {mode !== 'chat' && (
+		                    <TabsContent value="audit" className="flex-1 min-h-0 overflow-y-auto p-6 bg-white space-y-6 m-0">
+		                        {metadata?.audit ? (
+		                            <>
                                 {/* Audit Header */}
                                 <div className="flex items-center gap-2 pb-4 border-b border-outline/10">
                                     <div className="h-10 w-10 rounded-full bg-indigo-50 flex items-center justify-center">
@@ -868,6 +872,19 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
                                     </div>
                                 )}
 
+                                {/* Debate Audit Panel */}
+                                <DebateAuditPanel
+                                    metadata={metadata}
+                                    className="pt-4 border-t border-outline/10"
+                                />
+
+                                {/* HIL History Panel */}
+                                <HilHistoryPanel
+                                    metadata={metadata}
+                                    events={jobEvents}
+                                    className="pt-4 border-t border-outline/10"
+                                />
+
                             </>
                         ) : (
                             <div className="flex flex-col items-center justify-center py-12 text-muted-foreground">
@@ -891,11 +908,11 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
 	                    </TabsContent>
 	                    )}
 	
-	                    {mode !== 'chat' && (
-	                    <TabsContent value="quality" className="flex-1 overflow-y-auto p-6 bg-white space-y-6 m-0">
-	                        <div className="flex items-center gap-2 pb-4 border-b border-outline/10">
-	                            <div className="h-10 w-10 rounded-full bg-emerald-50 flex items-center justify-center">
-	                                <ShieldCheck className="h-5 w-5 text-emerald-600" />
+		                    {mode !== 'chat' && (
+		                    <TabsContent value="quality" className="flex-1 min-h-0 overflow-y-auto p-6 bg-white space-y-6 m-0">
+		                        <div className="flex items-center gap-2 pb-4 border-b border-outline/10">
+		                            <div className="h-10 w-10 rounded-full bg-emerald-50 flex items-center justify-center">
+		                                <ShieldCheck className="h-5 w-5 text-emerald-600" />
                             </div>
                             <div>
                                 <h3 className="text-lg font-bold text-foreground">Qualidade da Minuta</h3>
@@ -903,10 +920,10 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
                             </div>
                         </div>
                         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                            <div>
+                            <div className="min-w-0">
                                 <JobQualityPipelinePanel events={jobEvents} />
                             </div>
-                            <div>
+                            <div className="min-w-0">
                                 <JobQualityPanel events={jobEvents} />
 	                            </div>
 	                        </div>

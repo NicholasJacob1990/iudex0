@@ -11,6 +11,9 @@ const MULTI_MODEL_VIEW_STORAGE_KEY = 'iudex_multi_model_view';
 const CHAT_PERSONALITY_KEY = 'iudex_chat_personality';
 const CHAT_DRAFTS_KEY_PREFIX = 'iudex_chat_drafts_';
 const WEB_SEARCH_STORAGE_KEY = 'iudex_web_search';
+const MCP_TOOL_CALLING_STORAGE_KEY = 'iudex_mcp_tool_calling';
+const MCP_USE_ALL_SERVERS_STORAGE_KEY = 'iudex_mcp_use_all_servers';
+const MCP_SERVER_LABELS_STORAGE_KEY = 'iudex_mcp_server_labels';
 const LANGGRAPH_WEB_SEARCH_MODEL_STORAGE_KEY = 'iudex_langgraph_web_search_model';
 const DENSE_RESEARCH_STORAGE_KEY = 'iudex_dense_research';
 const RESEARCH_POLICY_STORAGE_KEY = 'iudex_research_policy';
@@ -32,6 +35,7 @@ const PERPLEXITY_SEARCH_CONTEXT_SIZE_STORAGE_KEY = 'iudex_perplexity_search_cont
 const PERPLEXITY_SEARCH_CLASSIFIER_STORAGE_KEY = 'iudex_perplexity_search_classifier';
 const PERPLEXITY_DISABLE_SEARCH_STORAGE_KEY = 'iudex_perplexity_disable_search';
 const PERPLEXITY_STREAM_MODE_STORAGE_KEY = 'iudex_perplexity_stream_mode';
+const MULTI_MODEL_DEEP_DEBATE_STORAGE_KEY = 'iudex_multi_model_deep_debate';
 const PERPLEXITY_SEARCH_DOMAIN_FILTER_STORAGE_KEY = 'iudex_perplexity_search_domain_filter';
 const PERPLEXITY_SEARCH_LANGUAGE_FILTER_STORAGE_KEY = 'iudex_perplexity_search_language_filter';
 const PERPLEXITY_SEARCH_RECENCY_FILTER_STORAGE_KEY = 'iudex_perplexity_search_recency_filter';
@@ -705,6 +709,10 @@ function loadMultiModelView(): 'tabs' | 'columns' {
   }
 }
 
+function loadMultiModelDeepDebate(): boolean {
+  return loadBooleanPreference(MULTI_MODEL_DEEP_DEBATE_STORAGE_KEY, true);
+}
+
 function loadBooleanPreference(key: string, fallback: boolean): boolean {
   if (typeof window === 'undefined') return fallback;
   try {
@@ -1089,6 +1097,12 @@ interface ChatState {
       reasoningLevel?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
     }
   >;
+  mcpToolCalling: boolean;
+  setMcpToolCalling: (enabled: boolean) => void;
+  mcpUseAllServers: boolean;
+  setMcpUseAllServers: (enabled: boolean) => void;
+  mcpServerLabels: string[];
+  setMcpServerLabels: (labels: string[]) => void;
   webSearch: boolean;
   webSearchModel: string;
   multiQuery: boolean;
@@ -1140,13 +1154,16 @@ interface ChatState {
   // UI: Consolidado (juiz/merge)
   autoConsolidate: boolean;
   setAutoConsolidate: (enabled: boolean) => void;
+  // UI: Deep debate (4 rounds) vs quick consensus (1 round) for committee-like flows
+  multiModelDeepDebate: boolean;
+  setMultiModelDeepDebate: (enabled: boolean) => void;
   consolidateTurn: (turnId: string) => Promise<void>;
   // UI: Layout do comparador
   multiModelView: 'tabs' | 'columns';
   setMultiModelView: (view: 'tabs' | 'columns') => void;
 
   denseResearch: boolean;
-  deepResearchProvider: 'auto' | 'google' | 'perplexity';
+  deepResearchProvider: 'auto' | 'google' | 'perplexity' | 'openai';
   deepResearchModel: string;
   deepResearchEffort: 'low' | 'medium' | 'high';
   deepResearchSearchFocus: 'web' | 'academic' | 'sec' | '';
@@ -1279,7 +1296,7 @@ interface ChatState {
   resetPageRange: () => void;
   setAttachmentMode: (mode: 'auto' | 'rag_local' | 'prompt_injection') => void;
   setDenseResearch: (enabled: boolean) => void;
-  setDeepResearchProvider: (provider: 'auto' | 'google' | 'perplexity') => void;
+  setDeepResearchProvider: (provider: 'auto' | 'google' | 'perplexity' | 'openai') => void;
   setDeepResearchModel: (model: string) => void;
   setDeepResearchEffort: (effort: 'low' | 'medium' | 'high') => void;
   setDeepResearchSearchFocus: (value: 'web' | 'academic' | 'sec' | '') => void;
@@ -1675,6 +1692,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
   verbosity: 'medium',
   thinkingBudget: '',
   modelOverrides: {},
+  mcpToolCalling: loadBooleanPreference(MCP_TOOL_CALLING_STORAGE_KEY, false),
+  mcpUseAllServers: loadBooleanPreference(MCP_USE_ALL_SERVERS_STORAGE_KEY, true),
+  mcpServerLabels: loadJsonPreference<string[]>(MCP_SERVER_LABELS_STORAGE_KEY, []),
   webSearch: loadBooleanPreference(WEB_SEARCH_STORAGE_KEY, false),
   webSearchModel: loadWebSearchModel(),
   multiQuery: true,
@@ -1770,6 +1790,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   multiModelMessages: {}, // Map threadId -> messages
   showMultiModelComparator: true,
   autoConsolidate: false,
+  multiModelDeepDebate: loadMultiModelDeepDebate(),
   multiModelView: loadMultiModelView(),
 
   tenantId: 'default',
@@ -1935,6 +1956,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
         typeof value === 'number' && Number.isFinite(value) ? clamp01(value) : null,
     }),
   setChatOutlineReviewEnabled: (enabled) => set({ chatOutlineReviewEnabled: enabled }),
+  setMcpToolCalling: (enabled) => {
+    set({ mcpToolCalling: enabled });
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(MCP_TOOL_CALLING_STORAGE_KEY, String(enabled));
+      } catch {
+        // ignore storage errors
+      }
+    }
+  },
+  setMcpUseAllServers: (enabled) => {
+    set({ mcpUseAllServers: enabled });
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(MCP_USE_ALL_SERVERS_STORAGE_KEY, String(enabled));
+      } catch {
+        // ignore storage errors
+      }
+    }
+  },
+  setMcpServerLabels: (labels) => {
+    const next = Array.from(
+      new Set((Array.isArray(labels) ? labels : []).map((x) => String(x || '').trim()).filter(Boolean))
+    );
+    set({ mcpServerLabels: next });
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(MCP_SERVER_LABELS_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore storage errors
+      }
+    }
+  },
   setWebSearch: (enabled) => {
     const state = get();
     const hasSonarSelected = Array.isArray(state.selectedModels)
@@ -2501,6 +2555,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   setShowMultiModelComparator: (enabled) => set({ showMultiModelComparator: enabled }),
   setAutoConsolidate: (enabled) => set({ autoConsolidate: enabled }),
+  setMultiModelDeepDebate: (enabled) => {
+    try {
+      if (typeof window !== 'undefined') {
+        localStorage.setItem(MULTI_MODEL_DEEP_DEBATE_STORAGE_KEY, String(!!enabled));
+      }
+    } catch {
+      // noop
+    }
+    set({ multiModelDeepDebate: !!enabled });
+  },
   setMultiModelView: (view) => {
     try {
       if (typeof window !== 'undefined') {
@@ -2971,12 +3035,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       const perplexityPayload = buildPerplexityPayload(get(), [fastModel]);
       const deepResearchPayload = buildDeepResearchPayload(get());
+      const mcpServerLabels =
+        get().mcpToolCalling && !get().mcpUseAllServers && (get().mcpServerLabels || []).length > 0
+          ? get().mcpServerLabels
+          : undefined;
       const payload: Record<string, any> = {
         content,
         attachments: attachmentDocs,
         chat_personality: chatPersonality,
         model: fastModel,
         temperature,
+        mcp_tool_calling: get().mcpToolCalling,
+        mcp_server_labels: mcpServerLabels,
         reasoning_level: effectiveReasoningLevel,
         verbosity: effectiveVerbosity,
         ...(effectiveThinkingBudget !== null
@@ -3026,61 +3096,79 @@ export const useChatStore = create<ChatState>((set, get) => ({
         payload.outline = outline;
       }
 
-      const response = await apiClient.fetchWithAuth(`/chats/${currentChat.id}/messages/stream`, {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      });
+      let streamRequestId: string | null = null;
+      let lastEventId: string | null = null;
+      let lastAppliedEventId: number | null = null;
+      let retryDelayMs = 2000;
+      let streamCompleted = false;
 
-      if (!response.ok || !response.body) {
-        let detail = '';
-        let parsed: any = null;
-        try {
-          const raw = await response.text();
-          if (raw) {
-            try {
-              parsed = JSON.parse(raw);
-              detail = parsed?.detail ? String(parsed.detail) : raw;
-            } catch {
-              detail = raw;
-            }
-          }
-        } catch {
-          // ignore
-        }
+      const maxReconnects = 1;
+      let attempt = 0;
+      while (true) {
+        const resumeAttempt = attempt > 0 && !!streamRequestId && !!lastEventId;
+        const requestPayload = resumeAttempt && streamRequestId
+          ? { ...payload, stream_request_id: streamRequestId }
+          : payload;
+        const requestHeaders: HeadersInit = resumeAttempt && lastEventId
+          ? { 'Last-Event-ID': lastEventId }
+          : {};
 
-        if (
-          (response.status === 402 || response.status === 409 || response.status === 422) &&
-          parsed?.detail &&
-          typeof parsed.detail === 'object'
-        ) {
-          const quote = parsed.detail as BillingQuote;
-          set((state) => ({
-            currentChat: state.currentChat
-              ? {
-                ...state.currentChat,
-                messages: (state.currentChat.messages || []).filter(
-                  (m) => m.id !== assistantMessageId && m.id !== userMessageId
-                ),
+        const response = await apiClient.fetchWithAuth(`/chats/${currentChat.id}/messages/stream`, {
+          method: 'POST',
+          body: JSON.stringify(requestPayload),
+          headers: requestHeaders,
+        });
+
+        if (!response.ok || !response.body) {
+          let detail = '';
+          let parsed: any = null;
+          try {
+            const raw = await response.text();
+            if (raw) {
+              try {
+                parsed = JSON.parse(raw);
+                detail = parsed?.detail ? String(parsed.detail) : raw;
+              } catch {
+                detail = raw;
               }
-              : null,
-            isSending: false,
-            billingModal: {
-              open: true,
-              quote,
-              retry: { kind: 'chat', content, options: { ...options, outline } },
-            },
-          }));
-          return;
+            }
+          } catch {
+            // ignore
+          }
+
+          if (
+            (response.status === 402 || response.status === 409 || response.status === 422) &&
+            parsed?.detail &&
+            typeof parsed.detail === 'object'
+          ) {
+            const quote = parsed.detail as BillingQuote;
+            set((state) => ({
+              currentChat: state.currentChat
+                ? {
+                  ...state.currentChat,
+                  messages: (state.currentChat.messages || []).filter(
+                    (m) => m.id !== assistantMessageId && m.id !== userMessageId
+                  ),
+                }
+                : null,
+              isSending: false,
+              billingModal: {
+                open: true,
+                quote,
+                retry: { kind: 'chat', content, options: { ...options, outline } },
+              },
+            }));
+            return;
+          }
+
+          throw new Error(
+            `Erro ao iniciar streaming (HTTP ${response.status}): ${detail || response.statusText}`
+          );
         }
 
-        throw new Error(
-          `Erro ao iniciar streaming (HTTP ${response.status}): ${detail || response.statusText}`
-        );
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
       const applyCanvasSnapshot = (text: string | undefined, isFinal = false) => {
         if (!canvasWriteMode) return;
@@ -3182,6 +3270,65 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }));
       };
 
+      // Handler for granular step.* events from streaming (step.start, step.add_query, step.add_source, step.done)
+      const handleStepEvent = (data: any): boolean => {
+        if (data.type === 'step.start') {
+          hasActivityEvents = true;
+          updateAssistant((message) => ({
+            ...message,
+            metadata: upsertActivityStep(message, {
+              id: data.step_id || data.step_name || 'search',
+              title: data.step_name || 'Pesquisando',
+              status: 'running',
+            }, 'add'),
+          }));
+          return true;
+        }
+        if (data.type === 'step.add_query') {
+          hasActivityEvents = true;
+          updateAssistant((message) => ({
+            ...message,
+            metadata: upsertActivityStep(message, {
+              id: data.step_id || 'search',
+              title: 'Pesquisa',
+              tags: data.query ? [String(data.query).slice(0, 100)] : [],
+            }, 'tags'),
+          }));
+          return true;
+        }
+        if (data.type === 'step.add_source') {
+          hasActivityEvents = true;
+          updateAssistant((message) => {
+            const citations = Array.isArray(message.metadata?.citations) ? [...message.metadata.citations] : [];
+            const src = data.source;
+            if (src?.url && !citations.some((c: any) => c.url === src.url)) {
+              citations.push({
+                number: String(citations.length + 1),
+                title: src.title || src.url,
+                url: src.url,
+              });
+            }
+            return {
+              ...message,
+              metadata: { ...(message.metadata || {}), citations },
+            };
+          });
+          return true;
+        }
+        if (data.type === 'step.done') {
+          hasActivityEvents = true;
+          updateAssistant((message) => ({
+            ...message,
+            metadata: upsertActivityStep(message, {
+              id: data.step_id || 'search',
+              title: 'Pesquisa',
+            }, 'done'),
+          }));
+          return true;
+        }
+        return false;
+      };
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
@@ -3192,103 +3339,162 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         for (const part of parts) {
           const lines = part.split(/\r?\n/);
+          let eventId: string | null = null;
+          let retryMs: number | null = null;
+          const dataLines: string[] = [];
           for (const line of lines) {
             const trimmedLine = line.trimStart();
-            if (!trimmedLine.startsWith('data:')) continue;
-            const payload = trimmedLine.slice(5).trim();
-            if (!payload) continue;
-
-            let data: any;
-            try {
-              data = JSON.parse(payload);
-            } catch (err) {
-              console.error('Erro parse SSE', err);
+            if (!trimmedLine) continue;
+            if (trimmedLine.startsWith(':')) continue;
+            if (trimmedLine.startsWith('id:')) {
+              eventId = trimmedLine.slice(3).trim();
               continue;
             }
+            if (trimmedLine.startsWith('retry:')) {
+              const value = Number.parseInt(trimmedLine.slice(6).trim(), 10);
+              if (!Number.isNaN(value)) retryMs = value;
+              continue;
+            }
+            if (trimmedLine.startsWith('data:')) {
+              const payload = trimmedLine.slice(5).trim();
+              if (payload) dataLines.push(payload);
+            }
+          }
+          if (retryMs !== null) retryDelayMs = retryMs;
+          if (!dataLines.length) continue;
+          const payload = dataLines.join('\n');
 
-            // NEW: Handle unified activity events from backend
-            if (data.type === 'activity') {
-              handleActivityEvent(data);
-            } else if (data.type === 'search_started') {
-              const query = data.query ? `: ${data.query}` : '';
-              toast.info(`Buscando na web${query}...`);
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'search',
-                    title: 'Pesquisando na web',
-                    status: 'running',
-                    detail: data.query ? `Consulta: ${String(data.query)}` : '',
-                  }),
-                }));
+          let data: any;
+          try {
+            data = JSON.parse(payload);
+          } catch (err) {
+            console.error('Erro parse SSE', err);
+            continue;
+          }
+
+          if (eventId) {
+            lastEventId = eventId;
+            const numericId = Number.parseInt(eventId, 10);
+            if (!Number.isNaN(numericId)) {
+              if (lastAppliedEventId !== null && numericId <= lastAppliedEventId) {
+                continue;
               }
-            } else if (data.type === 'search_done') {
-              const count = typeof data.count === 'number' ? data.count : 0;
-              const cached = data.cached ? ' (cache)' : '';
-              toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'search',
-                    title: 'Pesquisando na web',
-                    status: 'done',
-                    detail: `Fontes: ${count}${cached}`,
-                  }),
-                }));
-              }
-            } else if (data.type === 'research_start') {
-              toast.info('Pesquisa profunda iniciada...');
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'running',
-                  }),
-                }));
-              }
-            } else if (data.type === 'research_done') {
-              toast.info('Pesquisa profunda concluída.');
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'done',
-                  }),
-                }));
-              }
-            } else if (data.type === 'research_error') {
-              toast.error('Pesquisa profunda falhou', {
-                description: String(data.message || data.error || '').slice(0, 220) || undefined,
-              });
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'error',
-                    detail: String(data.message || data.error || '').slice(0, 220),
-                  }),
-                }));
-              }
-            } else if (data.type === 'cache_hit') {
-              toast.info('Usando cache...');
+              lastAppliedEventId = numericId;
+            }
+          }
+          if (data?.request_id && !streamRequestId) {
+            streamRequestId = String(data.request_id);
+          }
+
+          // Handle unified activity events and granular step.* events
+          if (data.type === 'activity') {
+            handleActivityEvent(data);
+          } else if (data.type?.startsWith('step.') && handleStepEvent(data)) {
+            // Handled by handleStepEvent
+          } else if (data.type === 'tool_call' && data.step_id) {
+            hasActivityEvents = true;
+            const stepId = String(data.step_id || 'mcp_tools');
+            const toolName = String(data.name || '').trim() || 'tool';
+            const previewRaw = data.result_preview != null ? String(data.result_preview) : '';
+            const preview = previewRaw ? previewRaw.slice(0, 220) : '';
+            const line = `\n${toolName}${preview ? `: ${preview}` : ''}`;
+
+            updateAssistant((message) => ({
+              ...message,
+              metadata: upsertActivityStep(message, {
+                id: stepId,
+                title: 'MCP tools',
+                tags: [toolName],
+              }, 'tags'),
+            }));
+            updateAssistant((message) => ({
+              ...message,
+              metadata: upsertActivityStep(message, {
+                id: stepId,
+                title: 'MCP tools',
+                detail: line,
+              }, 'append'),
+            }));
+          } else if (data.type === 'search_started') {
+            const query = data.query ? `: ${data.query}` : '';
+            toast.info(`Buscando na web${query}...`);
+            if (!hasActivityEvents) {
               updateAssistant((message) => ({
                 ...message,
                 metadata: upsertActivityStep(message, {
-                  id: 'cache',
-                  title: 'Cache',
-                  status: 'done',
-                  detail: 'Usando cache',
+                  id: 'search',
+                  title: 'Pesquisando na web',
+                  status: 'running',
+                  detail: data.query ? `Consulta: ${String(data.query)}` : '',
                 }),
               }));
             }
+          } else if (data.type === 'search_done') {
+            const count = typeof data.count === 'number' ? data.count : 0;
+            const cached = data.cached ? ' (cache)' : '';
+            toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
+            if (!hasActivityEvents) {
+              updateAssistant((message) => ({
+                ...message,
+                metadata: upsertActivityStep(message, {
+                  id: 'search',
+                  title: 'Pesquisando na web',
+                  status: 'done',
+                  detail: `Fontes: ${count}${cached}`,
+                }),
+              }));
+            }
+          } else if (data.type === 'research_start') {
+            toast.info('Pesquisa profunda iniciada...');
+            if (!hasActivityEvents) {
+              updateAssistant((message) => ({
+                ...message,
+                metadata: upsertActivityStep(message, {
+                  id: 'deep',
+                  title: 'Pesquisa profunda',
+                  status: 'running',
+                }),
+              }));
+            }
+          } else if (data.type === 'research_done') {
+            toast.info('Pesquisa profunda concluída.');
+            if (!hasActivityEvents) {
+              updateAssistant((message) => ({
+                ...message,
+                metadata: upsertActivityStep(message, {
+                  id: 'deep',
+                  title: 'Pesquisa profunda',
+                  status: 'done',
+                }),
+              }));
+            }
+          } else if (data.type === 'research_error') {
+            toast.error('Pesquisa profunda falhou', {
+              description: String(data.message || data.error || '').slice(0, 220) || undefined,
+            });
+            if (!hasActivityEvents) {
+              updateAssistant((message) => ({
+                ...message,
+                metadata: upsertActivityStep(message, {
+                  id: 'deep',
+                  title: 'Pesquisa profunda',
+                  status: 'error',
+                  detail: String(data.message || data.error || '').slice(0, 220),
+                }),
+              }));
+            }
+          } else if (data.type === 'cache_hit') {
+            toast.info('Usando cache...');
+            updateAssistant((message) => ({
+              ...message,
+              metadata: upsertActivityStep(message, {
+                id: 'cache',
+                title: 'Cache',
+                status: 'done',
+                detail: 'Usando cache',
+              }),
+            }));
+          }
 
             if (data.type === 'outline' && Array.isArray(data.outline)) {
               try {
@@ -3311,6 +3517,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...(data.phase === 'start' ? { stream_t0: data.t } : {}),
                   ...(data.phase === 'answer_start' ? { stream_t_answer_start: data.t } : {}),
                 },
+              }));
+            } else if (data.type === 'error') {
+              streamCompleted = true;
+              const now = Date.now();
+              updateAssistant((message) => ({
+                ...message,
+                content: data.error || 'Erro ao enviar mensagem',
+                isThinking: false,
+                metadata: (() => {
+                  const next: any = { ...(message.metadata || {}) };
+                  if (typeof next.stream_t0 !== 'number') next.stream_t0 = now;
+                  if (typeof next.stream_t_done !== 'number') next.stream_t_done = now;
+                  return next;
+                })(),
+              }));
+              set({ isSending: false });
+              toast.error(data.error || 'Erro ao enviar mensagem');
+              updateAssistant((message) => ({
+                ...message,
+                metadata: upsertActivityStep(message, {
+                  id: 'error',
+                  title: 'Erro',
+                  status: 'error',
+                  detail: String(data.error || '').slice(0, 220),
+                }),
               }));
             } else if (data.type === 'thinking' && data.delta && thinkingEnabled) {
               const now = Date.now();
@@ -3369,6 +3600,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }));
               applyCanvasSnapshot(assistantContentSnapshot);
             } else if (data.type === 'done') {
+              streamCompleted = true;
               const now = Date.now();
               let finalText = String(data.full_text || assistantContentSnapshot || '');
               updateAssistant((message) => {
@@ -3409,6 +3641,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               applyCanvasWrite(finalText);
               set({ isSending: false });
             } else if (data.type === 'error') {
+              streamCompleted = true;
               const now = Date.now();
               updateAssistant((message) => ({
                 ...message,
@@ -3448,99 +3681,138 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
           }
         }
-      }
 
       if (buffer.trim()) {
         const lines = buffer.split(/\r?\n/);
+        let eventId: string | null = null;
+        let retryMs: number | null = null;
+        const dataLines: string[] = [];
         for (const line of lines) {
           const trimmedLine = line.trimStart();
-          if (!trimmedLine.startsWith('data:')) continue;
-          const payload = trimmedLine.slice(5).trim();
-          if (!payload) continue;
+          if (!trimmedLine) continue;
+          if (trimmedLine.startsWith(':')) continue;
+          if (trimmedLine.startsWith('id:')) {
+            eventId = trimmedLine.slice(3).trim();
+            continue;
+          }
+          if (trimmedLine.startsWith('retry:')) {
+            const value = Number.parseInt(trimmedLine.slice(6).trim(), 10);
+            if (!Number.isNaN(value)) retryMs = value;
+            continue;
+          }
+          if (trimmedLine.startsWith('data:')) {
+            const payload = trimmedLine.slice(5).trim();
+            if (payload) dataLines.push(payload);
+          }
+        }
+        if (retryMs !== null) retryDelayMs = retryMs;
+        if (!dataLines.length) {
+          // nothing to flush
+        } else {
+          const payload = dataLines.join('\n');
           try {
             const data = JSON.parse(payload);
-            // NEW: Handle unified activity events from backend (buffer flush)
-            if (data.type === 'activity') {
-              handleActivityEvent(data);
-            } else if (data.type === 'search_started') {
-              const query = data.query ? `: ${data.query}` : '';
-              toast.info(`Buscando na web${query}...`);
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'search',
-                    title: 'Pesquisando na web',
-                    status: 'running',
-                    detail: data.query ? `Consulta: ${String(data.query)}` : '',
-                  }),
-                }));
+            let skipEvent = false;
+            if (eventId) {
+              lastEventId = eventId;
+              const numericId = Number.parseInt(eventId, 10);
+              if (!Number.isNaN(numericId)) {
+                if (lastAppliedEventId !== null && numericId <= lastAppliedEventId) {
+                  skipEvent = true;
+                } else {
+                  lastAppliedEventId = numericId;
+                }
               }
-            } else if (data.type === 'search_done') {
-              const count = typeof data.count === 'number' ? data.count : 0;
-              const cached = data.cached ? ' (cache)' : '';
-              toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
-              if (!hasActivityEvents) {
+            }
+            if (!skipEvent) {
+              if (data?.request_id && !streamRequestId) {
+                streamRequestId = String(data.request_id);
+              }
+              // Handle unified activity events and granular step.* events (buffer flush)
+              if (data.type === 'activity') {
+                handleActivityEvent(data);
+              } else if (data.type?.startsWith('step.') && handleStepEvent(data)) {
+                // Handled by handleStepEvent
+              } else if (data.type === 'search_started') {
+                const query = data.query ? `: ${data.query}` : '';
+                toast.info(`Buscando na web${query}...`);
+                if (!hasActivityEvents) {
+                  updateAssistant((message) => ({
+                    ...message,
+                    metadata: upsertActivityStep(message, {
+                      id: 'search',
+                      title: 'Pesquisando na web',
+                      status: 'running',
+                      detail: data.query ? `Consulta: ${String(data.query)}` : '',
+                    }),
+                  }));
+                }
+              } else if (data.type === 'search_done') {
+                const count = typeof data.count === 'number' ? data.count : 0;
+                const cached = data.cached ? ' (cache)' : '';
+                toast.info(`Pesquisa web concluída (${count} fontes${cached}).`);
+                if (!hasActivityEvents) {
+                  updateAssistant((message) => ({
+                    ...message,
+                    metadata: upsertActivityStep(message, {
+                      id: 'search',
+                      title: 'Pesquisando na web',
+                      status: 'done',
+                      detail: `Fontes: ${count}${cached}`,
+                    }),
+                  }));
+                }
+              } else if (data.type === 'research_start') {
+                toast.info('Pesquisa profunda iniciada...');
+                if (!hasActivityEvents) {
+                  updateAssistant((message) => ({
+                    ...message,
+                    metadata: upsertActivityStep(message, {
+                      id: 'deep',
+                      title: 'Pesquisa profunda',
+                      status: 'running',
+                    }),
+                  }));
+                }
+              } else if (data.type === 'research_done') {
+                toast.info('Pesquisa profunda concluída.');
+                if (!hasActivityEvents) {
+                  updateAssistant((message) => ({
+                    ...message,
+                    metadata: upsertActivityStep(message, {
+                      id: 'deep',
+                      title: 'Pesquisa profunda',
+                      status: 'done',
+                    }),
+                  }));
+                }
+              } else if (data.type === 'research_error') {
+                toast.error('Pesquisa profunda falhou', {
+                  description: String(data.message || data.error || '').slice(0, 220) || undefined,
+                });
+                if (!hasActivityEvents) {
+                  updateAssistant((message) => ({
+                    ...message,
+                    metadata: upsertActivityStep(message, {
+                      id: 'deep',
+                      title: 'Pesquisa profunda',
+                      status: 'error',
+                      detail: String(data.message || data.error || '').slice(0, 220),
+                    }),
+                  }));
+                }
+              } else if (data.type === 'cache_hit') {
+                toast.info('Usando cache...');
                 updateAssistant((message) => ({
                   ...message,
                   metadata: upsertActivityStep(message, {
-                    id: 'search',
-                    title: 'Pesquisando na web',
+                    id: 'cache',
+                    title: 'Cache',
                     status: 'done',
-                    detail: `Fontes: ${count}${cached}`,
+                    detail: 'Usando cache',
                   }),
                 }));
               }
-            } else if (data.type === 'research_start') {
-              toast.info('Pesquisa profunda iniciada...');
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'running',
-                  }),
-                }));
-              }
-            } else if (data.type === 'research_done') {
-              toast.info('Pesquisa profunda concluída.');
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'done',
-                  }),
-                }));
-              }
-            } else if (data.type === 'research_error') {
-              toast.error('Pesquisa profunda falhou', {
-                description: String(data.message || data.error || '').slice(0, 220) || undefined,
-              });
-              if (!hasActivityEvents) {
-                updateAssistant((message) => ({
-                  ...message,
-                  metadata: upsertActivityStep(message, {
-                    id: 'deep',
-                    title: 'Pesquisa profunda',
-                    status: 'error',
-                    detail: String(data.message || data.error || '').slice(0, 220),
-                  }),
-                }));
-              }
-            } else if (data.type === 'cache_hit') {
-              toast.info('Usando cache...');
-              updateAssistant((message) => ({
-                ...message,
-                metadata: upsertActivityStep(message, {
-                  id: 'cache',
-                  title: 'Cache',
-                  status: 'done',
-                  detail: 'Usando cache',
-                }),
-              }));
             }
             if (data.type === 'outline' && Array.isArray(data.outline)) {
               try {
@@ -3581,6 +3853,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 }),
               }));
             } else if (data.type === 'done') {
+              streamCompleted = true;
               const now = Date.now();
               let finalText = String(data.full_text || assistantContentSnapshot || '');
               updateAssistant((message) => {
@@ -3663,7 +3936,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
       }
 
-      set({ isSending: false });
+        if (streamCompleted || !streamRequestId || !lastEventId || attempt >= maxReconnects) {
+          break;
+        }
+        attempt += 1;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+
     } catch (error) {
       console.error('[ChatStore] sendMessage error:', error);
       set((state) => {
@@ -4420,10 +4699,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    toast.info('Gerando Consolidado (consome tokens adicionais)...');
+    const mode: 'merge' | 'debate' = get().multiModelDeepDebate ? 'debate' : 'merge';
+    toast.info(
+      mode === 'debate'
+        ? 'Gerando Consolidado (Debate Profundo, consome tokens adicionais)...'
+        : 'Gerando Consolidado (consome tokens adicionais)...'
+    );
     const res = await apiClient.consolidateMultiChatTurn(currentChat.id, {
       message: userText,
       candidates,
+      mode,
     });
 
     const consolidatedMsg: Message = {
@@ -4431,7 +4716,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: 'assistant',
       content: res.content || '',
       timestamp: new Date().toISOString(),
-      metadata: { model: 'Consolidado', turn_id: turnId, is_consolidated: true },
+      metadata: {
+        model: mode === 'debate' ? 'Consolidado (Debate)' : 'Consolidado',
+        turn_id: turnId,
+        is_consolidated: true,
+      },
     };
 
     set((state) => ({
@@ -4550,6 +4839,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     const effectiveWebSearch = overrideWebSearch ?? get().webSearch;
     const effectiveDenseResearch = overrideDenseResearch ?? get().denseResearch;
+    const mcpServerLabels =
+      get().mcpToolCalling && !get().mcpUseAllServers && (get().mcpServerLabels || []).length > 0
+        ? get().mcpServerLabels
+        : undefined;
     const perModelOverrides = buildModelOverridesPayload(get().modelOverrides);
     const defaultThinkingBudget = parseThinkingBudget(get().thinkingBudget);
     const thinkingEnabledByModel: Record<string, boolean> = {};
@@ -4571,81 +4864,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
     });
 
     try {
-      // 2. Fetch SSE Stream (use targetModels which may be overridden, and actualContent which has shortcut stripped)
-      const response = await apiClient.fetchWithAuth(
-        `/multi-chat/threads/${currentChat.id}/messages`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            message: actualContent,
-            models: targetModels,
-            attachments: attachmentDocs,
-            attachment_mode: attachmentMode,
-            chat_personality: chatPersonality,
-            reasoning_level: get().reasoningLevel,
-            verbosity: get().verbosity,
-            ...(defaultThinkingBudget !== null ? { thinking_budget: defaultThinkingBudget } : {}),
-            temperature,
-            web_search: effectiveWebSearch,
-            multi_query: get().multiQuery,
-            breadth_first: get().breadthFirst,
-            search_mode: get().searchMode,
-            ...perplexityPayload,
-            ...deepResearchPayload,
-            dense_research: effectiveDenseResearch,
-            research_policy: get().researchPolicy,
-            ...(perModelOverrides ? { per_model_overrides: perModelOverrides } : {}),
-            ...(options.budgetOverridePoints
-              ? { budget_override_points: options.budgetOverridePoints }
-              : {}),
-          }),
-        }
-      );
+      const streamPayload = {
+        message: actualContent,
+        models: targetModels,
+        attachments: attachmentDocs,
+        attachment_mode: attachmentMode,
+        chat_personality: chatPersonality,
+        reasoning_level: get().reasoningLevel,
+        verbosity: get().verbosity,
+        ...(defaultThinkingBudget !== null ? { thinking_budget: defaultThinkingBudget } : {}),
+        temperature,
+        mcp_tool_calling: get().mcpToolCalling,
+        mcp_server_labels: mcpServerLabels,
+        web_search: effectiveWebSearch,
+        multi_query: get().multiQuery,
+        breadth_first: get().breadthFirst,
+        search_mode: get().searchMode,
+        ...perplexityPayload,
+        ...deepResearchPayload,
+        dense_research: effectiveDenseResearch,
+        research_policy: get().researchPolicy,
+        ...(perModelOverrides ? { per_model_overrides: perModelOverrides } : {}),
+        ...(options.budgetOverridePoints
+          ? { budget_override_points: options.budgetOverridePoints }
+          : {}),
+      };
 
-      if (!response.ok || !response.body) {
-        let detail = '';
-        let parsed: any = null;
-        try {
-          const raw = await response.text();
-          if (raw) {
-            try {
-              parsed = JSON.parse(raw);
-              detail = parsed?.detail ? String(parsed.detail) : raw;
-            } catch {
-              detail = raw;
-            }
-          }
-        } catch {
-          // ignore
-        }
-        const quote = parsed?.detail;
-        if (
-          (response.status === 402 || response.status === 409 || response.status === 422) &&
-          quote &&
-          typeof quote === 'object'
-        ) {
-          set({
-            isSending: false,
-            billingModal: {
-              open: true,
-              quote: quote as BillingQuote,
-              retry: {
-                kind: 'chat',
-                content,
-                options: { skipUserMessage: true, existingTurnId: turnId },
-              },
-            },
-          });
-          return;
-        }
-        throw new Error(
-          `Erro no stream multi-modelo (HTTP ${response.status}): ${detail || response.statusText}`
-        );
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      let streamRequestId: string | null = null;
+      let lastEventId: string | null = null;
+      let lastAppliedEventId: number | null = null;
+      let retryDelayMs = 2000;
+      let streamCompleted = false;
+      const doneByModel = new Set<string>();
 
       // Captura do texto completo por modelo para gerar "Consolidado" ao final (opcional)
       const fullTextByModel: Record<string, string> = {};
@@ -4700,26 +4950,172 @@ export const useChatStore = create<ChatState>((set, get) => ({
         });
       };
 
-      // 3. Read Loop
+      const upsertModelActivityStep = (
+        metadata: any,
+        step: {
+          id: string;
+          title: string;
+          status?: 'running' | 'done' | 'error';
+          detail?: string;
+          tags?: string[];
+        },
+        op?: 'add' | 'update' | 'append' | 'done' | 'error' | 'tags'
+      ) => {
+        const meta: any = { ...(metadata || {}) };
+        const activity: any = { ...(meta.activity || {}) };
+        const steps: any[] = Array.isArray(activity.steps) ? [...activity.steps] : [];
+        const idx = steps.findIndex((s) => s?.id === step.id);
+        const prev = idx >= 0 ? steps[idx] : null;
+
+        let nextDetail = typeof step.detail === 'string' ? step.detail : prev?.detail ?? '';
+        let nextTags = step.tags ?? prev?.tags ?? [];
+
+        if (op === 'append' && prev?.detail && step.detail) {
+          nextDetail = `${prev.detail}${step.detail}`;
+        } else if (op === 'tags' && step.tags) {
+          const existing = new Set(prev?.tags ?? []);
+          step.tags.forEach((t) => existing.add(t));
+          nextTags = Array.from(existing);
+        }
+
+        const next = {
+          id: step.id,
+          title: step.title ?? prev?.title ?? step.id,
+          status:
+            op === 'done'
+              ? 'done'
+              : op === 'error'
+                ? 'error'
+                : (step.status ?? prev?.status ?? 'running'),
+          detail: nextDetail,
+          tags: nextTags,
+        };
+
+        if (idx >= 0) steps[idx] = next;
+        else steps.push(next);
+        activity.steps = steps;
+        meta.activity = activity;
+        return meta;
+      };
+
+      const maxReconnects = 1;
+      let attempt = 0;
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+        // 2. Fetch SSE Stream (use targetModels which may be overridden, and actualContent which has shortcut stripped)
+        const resumeAttempt = attempt > 0 && !!streamRequestId && !!lastEventId;
+        const requestPayload = resumeAttempt && streamRequestId
+          ? { ...streamPayload, stream_request_id: streamRequestId }
+          : streamPayload;
+        const requestHeaders: HeadersInit = resumeAttempt && lastEventId
+          ? { 'Last-Event-ID': lastEventId }
+          : {};
 
-        buffer += decoder.decode(value, { stream: true });
-        // SSE frames can arrive with LF or CRLF depending on proxy/runtime
-        const lines = buffer.split(/\r?\n\r?\n/);
-        buffer = lines.pop() || '';
+        const response = await apiClient.fetchWithAuth(
+          `/multi-chat/threads/${currentChat.id}/messages`,
+          {
+            method: 'POST',
+            body: JSON.stringify(requestPayload),
+            headers: requestHeaders,
+          }
+        );
 
-        for (const frame of lines) {
-          const frameLines = frame.split(/\r?\n/);
-          for (const frameLine of frameLines) {
-            const trimmedLine = frameLine.trimStart();
-            if (!trimmedLine.startsWith('data:')) continue;
-            const jsonStr = trimmedLine.replace(/^data:\s*/, '');
-            if (!jsonStr || jsonStr === '[DONE]') continue;
+        if (!response.ok || !response.body) {
+          let detail = '';
+          let parsed: any = null;
+          try {
+            const raw = await response.text();
+            if (raw) {
+              try {
+                parsed = JSON.parse(raw);
+                detail = parsed?.detail ? String(parsed.detail) : raw;
+              } catch {
+                detail = raw;
+              }
+            }
+          } catch {
+            // ignore
+          }
+          const quote = parsed?.detail;
+          if (
+            (response.status === 402 || response.status === 409 || response.status === 422) &&
+            quote &&
+            typeof quote === 'object'
+          ) {
+            set({
+              isSending: false,
+              billingModal: {
+                open: true,
+                quote: quote as BillingQuote,
+                retry: {
+                  kind: 'chat',
+                  content,
+                  options: { skipUserMessage: true, existingTurnId: turnId },
+                },
+              },
+            });
+            return;
+          }
+          throw new Error(
+            `Erro no stream multi-modelo (HTTP ${response.status}): ${detail || response.statusText}`
+          );
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        // 3. Read Loop
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          // SSE frames can arrive with LF or CRLF depending on proxy/runtime
+          const frames = buffer.split(/\r?\n\r?\n/);
+          buffer = frames.pop() || '';
+
+          for (const frame of frames) {
+            const frameLines = frame.split(/\r?\n/);
+            let eventId: string | null = null;
+            let retryMs: number | null = null;
+            const dataLines: string[] = [];
+            for (const frameLine of frameLines) {
+              const trimmedLine = frameLine.trimStart();
+              if (!trimmedLine) continue;
+              if (trimmedLine.startsWith(':')) continue;
+              if (trimmedLine.startsWith('id:')) {
+                eventId = trimmedLine.slice(3).trim();
+                continue;
+              }
+              if (trimmedLine.startsWith('retry:')) {
+                const value = Number.parseInt(trimmedLine.slice(6).trim(), 10);
+                if (!Number.isNaN(value)) retryMs = value;
+                continue;
+              }
+              if (trimmedLine.startsWith('data:')) {
+                const payload = trimmedLine.slice(5).trim();
+                if (payload) dataLines.push(payload);
+              }
+            }
+            if (retryMs !== null) retryDelayMs = retryMs;
+            if (!dataLines.length) continue;
+            const payload = dataLines.join('\n');
 
             try {
-              const data = JSON.parse(jsonStr);
+              const data = JSON.parse(payload);
+              if (eventId) {
+                lastEventId = eventId;
+                const numericId = Number.parseInt(eventId, 10);
+                if (!Number.isNaN(numericId)) {
+                  if (lastAppliedEventId !== null && numericId <= lastAppliedEventId) {
+                    continue;
+                  }
+                  lastAppliedEventId = numericId;
+                }
+              }
+              if (data?.request_id && !streamRequestId) {
+                streamRequestId = String(data.request_id);
+              }
 
               if (data.type === 'search_started') {
                 const query = data.query ? `: ${data.query}` : '';
@@ -4741,6 +5137,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     ...(data.phase === 'start' ? { stream_t0: data.t } : {}),
                     ...(data.phase === 'answer_start' ? { stream_t_answer_start: data.t } : {}),
                   },
+                }));
+                continue;
+              }
+
+              if (data.type === 'step.start' && data.model) {
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(m.metadata, {
+                    id: data.step_id || data.step_name || 'step',
+                    title: data.step_name || 'Processando',
+                    status: 'running',
+                  }, 'add'),
+                }));
+                continue;
+              }
+              if (data.type === 'step.done' && data.model) {
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(m.metadata, {
+                    id: data.step_id || 'step',
+                    title: data.step_name || 'Processando',
+                    status: 'done',
+                  }, 'done'),
+                }));
+                continue;
+              }
+              if (data.type === 'tool_call' && data.model && data.step_id) {
+                const stepId = String(data.step_id || 'mcp_tools');
+                const toolName = String(data.name || '').trim() || 'tool';
+                const previewRaw = data.result_preview != null ? String(data.result_preview) : '';
+                const preview = previewRaw ? previewRaw.slice(0, 220) : '';
+                const line = `\n${toolName}${preview ? `: ${preview}` : ''}`;
+
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(
+                    m.metadata,
+                    { id: stepId, title: 'MCP tools', tags: [toolName] },
+                    'tags'
+                  ),
+                }));
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(
+                    m.metadata,
+                    { id: stepId, title: 'MCP tools', detail: line },
+                    'append'
+                  ),
                 }));
                 continue;
               }
@@ -4798,6 +5242,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               if (data.type === 'done' && data.model && data.full_text) {
                 const now = Date.now();
                 fullTextByModel[data.model] = data.full_text;
+                doneByModel.add(data.model);
+                if (doneByModel.size >= targetModels.length) {
+                  streamCompleted = true;
+                }
                 updateModelMessage(data.model, (m) => ({
                   ...m,
                   content: data.full_text,
@@ -4828,6 +5276,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
               if (data.type === 'error') {
                 toast.error(`Erro no modelo ${data.model}: ${data.error}`);
                 if (data.model) {
+                  doneByModel.add(data.model);
+                  if (doneByModel.size >= targetModels.length) {
+                    streamCompleted = true;
+                  }
                   const now = Date.now();
                   updateModelMessage(data.model, (m) => ({
                     ...m,
@@ -4847,6 +5299,57 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }
           }
         }
+        if (buffer.trim()) {
+          const frameLines = buffer.split(/\r?\n/);
+          let eventId: string | null = null;
+          let retryMs: number | null = null;
+          const dataLines: string[] = [];
+          for (const frameLine of frameLines) {
+            const trimmedLine = frameLine.trimStart();
+            if (!trimmedLine) continue;
+            if (trimmedLine.startsWith(':')) continue;
+            if (trimmedLine.startsWith('id:')) {
+              eventId = trimmedLine.slice(3).trim();
+              continue;
+            }
+            if (trimmedLine.startsWith('retry:')) {
+              const value = Number.parseInt(trimmedLine.slice(6).trim(), 10);
+              if (!Number.isNaN(value)) retryMs = value;
+              continue;
+            }
+            if (trimmedLine.startsWith('data:')) {
+              const payload = trimmedLine.slice(5).trim();
+              if (payload) dataLines.push(payload);
+            }
+          }
+          if (retryMs !== null) retryDelayMs = retryMs;
+          if (dataLines.length) {
+            try {
+              const data = JSON.parse(dataLines.join('\n'));
+              if (eventId) {
+                lastEventId = eventId;
+                const numericId = Number.parseInt(eventId, 10);
+                if (!Number.isNaN(numericId)) {
+                  if (lastAppliedEventId !== null && numericId <= lastAppliedEventId) {
+                    // skip duplicate
+                  } else {
+                    lastAppliedEventId = numericId;
+                  }
+                }
+              }
+              if (data?.request_id && !streamRequestId) {
+                streamRequestId = String(data.request_id);
+              }
+            } catch (err) {
+              console.error('JSON parse error (final)', err);
+            }
+          }
+        }
+
+        if (streamCompleted) break;
+        if (!streamRequestId || !lastEventId || attempt >= maxReconnects) break;
+        attempt += 1;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       }
 
       // Gerar resposta consolidada (juiz) — somente se comparador estiver ligado e houver 2+ respostas
@@ -4857,16 +5360,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           .filter((c) => c.text.length > 0);
 
         if (showMultiModelComparator && autoConsolidate && candidates.length >= 2) {
+          const mode: 'merge' | 'debate' = get().multiModelDeepDebate ? 'debate' : 'merge';
           const res = await apiClient.consolidateMultiChatTurn(currentChat.id, {
             message: content,
             candidates,
+            mode,
           });
           const consolidatedMsg: Message = {
             id: nanoid(),
             role: 'assistant',
             content: res.content || '',
             timestamp: new Date().toISOString(),
-            metadata: { model: 'Consolidado', turn_id: turnId, is_consolidated: true },
+            metadata: {
+              model: mode === 'debate' ? 'Consolidado (Debate)' : 'Consolidado',
+              turn_id: turnId,
+              is_consolidated: true,
+            },
           };
 
           set((state) => ({

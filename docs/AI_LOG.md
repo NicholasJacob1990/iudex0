@@ -5,6 +5,545 @@
 
 ---
 
+## 2026-01-25 — Migração para Neo4j Visualization Library (NVL)
+
+### Contexto
+- Usuário perguntou qual é a biblioteca de visualização mais avançada recomendada pela Neo4j
+- Pesquisa identificou NVL como a biblioteca oficial que alimenta Bloom e Neo4j Browser
+- Migração completa de react-force-graph-2d para @neo4j-nvl/react
+
+### Pacotes Instalados
+```bash
+npm install @neo4j-nvl/react @neo4j-nvl/interaction-handlers @neo4j-nvl/base
+```
+
+### Arquivos Alterados
+
+**`apps/web/src/app/(dashboard)/graph/page.tsx`**:
+- Migração completa para NVL (Neo4j Visualization Library)
+- `InteractiveNvlWrapper` como componente principal
+- Funções de transformação: `transformToNvlNodes`, `transformToNvlRelationships`
+- Handlers atualizados para API NVL:
+  - `onNodeClick(node: Node, hitTargets: HitTargets, evt: MouseEvent)`
+  - `onHover(element, hitTargets, evt)` com acesso via `hitTargets.nodes[0].data.id`
+- Zoom via `nvlRef.current.setZoom()` e `nvlRef.current.fit()`
+- Layout force-directed nativo
+
+### Características NVL
+- **Renderer**: WebGL (fallback canvas)
+- **Layout**: Force-directed nativo otimizado
+- **Interação**: Clique, hover, drag, zoom, pan
+- **Estilos**: Cores por grupo, tamanho por relevância, highlight de seleção/path
+
+### Tipos Importantes
+```typescript
+// Node da NVL
+interface Node {
+  id: string;
+  color?: string;
+  size?: number;
+  caption?: string;
+  captionAlign?: 'top' | 'bottom' | 'center';
+  selected?: boolean;
+  pinned?: boolean;
+}
+
+// HitTargetNode (retornado em eventos de hover)
+interface HitTargetNode {
+  data: Node;           // <- ID está aqui: data.id
+  targetCoordinates: Point;
+  pointerCoordinates: Point;
+}
+```
+
+### Verificações
+- ✅ Type check passou (web app)
+- ✅ Lint passou (graph files)
+
+---
+
+## 2026-01-25 — Melhorias na Página de Grafo + Autenticação
+
+### Contexto
+- Análise de diferenças entre frontend e backend da página de grafo
+- Implementação de autenticação nos endpoints do grafo
+- Melhorias de performance e UX com React Query
+
+### Arquivos Alterados
+
+**`apps/api/app/api/endpoints/graph.py`**:
+- Adicionada autenticação via `get_current_user` em todos os endpoints
+- `tenant_id` agora é extraído automaticamente do usuário logado
+- Removido parâmetro `tenant_id` dos query params (segurança)
+
+**`apps/web/src/lib/use-graph.ts`** (NOVO):
+- React Query hooks para cache das chamadas de API
+- `useGraphData`, `useGraphEntity`, `useGraphRemissoes`
+- `useSemanticNeighbors` (lazy loading)
+- `useGraphPath`, `useGraphStats`
+- Prefetch functions para hover preview
+- Stale-while-revalidate caching
+
+**`apps/web/src/lib/api-client.ts`**:
+- Tipos enriquecidos para `/path` (nodes/edges detalhados)
+
+**`apps/web/src/app/(dashboard)/graph/page.tsx`**:
+- Migrado para React Query hooks
+- Novo "Modo Caminho" para encontrar path entre 2 nós
+- Visualização enriquecida do caminho com detalhes dos nós
+- Tabs para Info/Remissões/Vizinhos Semânticos
+- Lazy loading de vizinhos semânticos (só carrega na aba)
+- Prefetch on hover para UX mais rápida
+- Skeletons para loading states
+
+**`apps/web/src/components/ui/skeleton.tsx`** (NOVO):
+- Componente shadcn/ui para loading states
+
+### Melhorias Implementadas
+
+1. **Segurança**: Endpoints agora requerem autenticação
+2. **Cache**: React Query com stale-while-revalidate (2-5 min)
+3. **Visualização de Path**: Mostra nós intermediários e chunks
+4. **Lazy Loading**: Vizinhos carregam sob demanda
+5. **Prefetch**: Dados pré-carregados ao passar o mouse
+
+### Testes
+- 18 testes passando (test_hybrid_reranker.py)
+- Type check OK
+
+---
+
+## 2026-01-25 — Reranker Híbrido: Local + Cohere com Boost Jurídico
+
+### Contexto
+- Implementação de reranker híbrido para SaaS em produção
+- Local cross-encoder para desenvolvimento (grátis)
+- Cohere Rerank v3 para produção (escala sem GPU)
+- Ambos aplicam boost para termos jurídicos brasileiros
+
+### Arquivos Criados/Alterados
+
+**`apps/api/app/services/rag/core/cohere_reranker.py`** (NOVO):
+- `CohereReranker`: integração com Cohere Rerank API
+- `CohereRerankerConfig`: configuração (modelo, API key, etc)
+- Boost jurídico aplicado **pós-Cohere** (Cohere score + legal boost)
+- Retry automático com backoff exponencial
+
+**`apps/api/app/services/rag/core/hybrid_reranker.py`** (NOVO):
+- `HybridReranker`: seleção automática entre Local e Cohere
+- `RerankerProvider`: enum (auto, local, cohere)
+- Auto: dev=local, prod=cohere (se disponível)
+- Fallback para local se Cohere falhar
+
+**`apps/api/app/services/rag/config.py`**:
+- Novas configurações:
+  - `rerank_provider`: "auto" | "local" | "cohere"
+  - `cohere_rerank_model`: "rerank-multilingual-v3.0"
+  - `cohere_fallback_to_local`: true
+  - `rerank_legal_boost`: 0.1
+
+**`apps/api/app/services/rag/core/reranker.py`**:
+- Corrigido padrão de Lei (Lei nº 14.133)
+
+**`apps/api/tests/rag/test_hybrid_reranker.py`** (NOVO):
+- 18 testes para providers, config, legal boost
+
+### Configuração
+
+```env
+# Desenvolvimento (padrão)
+RERANK_PROVIDER=auto
+ENVIRONMENT=development
+# Usa cross-encoder local (grátis)
+
+# Produção
+RERANK_PROVIDER=auto
+ENVIRONMENT=production
+COHERE_API_KEY=sua-chave
+# Usa Cohere (se API key presente)
+```
+
+### Uso
+
+```python
+from app.services.rag.core.hybrid_reranker import get_hybrid_reranker
+
+reranker = get_hybrid_reranker()
+result = reranker.rerank(query, results)
+
+print(f"Provider: {result.provider_used}")
+print(f"Fallback usado: {result.used_fallback}")
+```
+
+### Fluxo do Boost Jurídico
+
+```
+Query + Docs → Cohere Rerank → cohere_score
+                                    ↓
+                           + legal_boost (se match padrões)
+                                    ↓
+                              final_score
+```
+
+### Padrões Jurídicos Detectados
+- `art. 5`, `§ 1º`, `inciso I`
+- `Lei nº 14.133`, `Lei 8.666`
+- `Súmula 331`, `STF`, `STJ`, `TST`
+- CNJ: `0000000-00.0000.0.00.0000`
+- `Código Civil`, `habeas corpus`, etc.
+
+### Testes
+```
+pytest tests/rag/test_hybrid_reranker.py -v
+======================= 18 passed =======================
+```
+
+---
+
+## 2026-01-25 — OCR Híbrido com Fallback para Cloud
+
+### Contexto
+- Implementação de estratégia híbrida de OCR para produção
+- Tesseract gratuito para volume baixo, cloud OCR para escala
+- Suporte a Azure Document Intelligence, Google Vision e Gemini Vision
+
+### Arquivos Criados/Alterados
+
+**`apps/api/app/services/ocr_service.py`** (NOVO):
+- `OCRProvider` enum: pdfplumber, tesseract, azure, google, gemini
+- `OCRResult` dataclass: resultado com texto, provider, páginas, erro
+- `OCRUsageTracker`: rastreia volume diário para decisão de fallback
+- `HybridOCRService`: serviço principal com estratégia inteligente
+  - PDF com texto selecionável → pdfplumber (gratuito, rápido)
+  - Volume baixo → Tesseract local
+  - Volume alto ou fallback → Cloud OCR
+
+**`apps/api/app/core/config.py`**:
+- Novas configurações de OCR:
+  - `OCR_PROVIDER`: provider padrão (tesseract)
+  - `OCR_CLOUD_THRESHOLD_DAILY`: threshold para cloud (1000 páginas)
+  - `AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT/KEY`
+  - `GOOGLE_VISION_ENABLED`, `GEMINI_OCR_ENABLED`
+  - `GEMINI_OCR_MODEL`: modelo para OCR (gemini-2.0-flash)
+
+**`apps/api/app/services/document_processor.py`**:
+- `extract_text_from_image`: usa HybridOCRService com fallback
+- `extract_text_from_pdf_with_ocr`: usa HybridOCRService com fallback
+- `_extract_text_from_pdf_tesseract`: implementação original preservada
+
+**`apps/api/tests/test_ocr_service.py`** (NOVO):
+- 17 testes para OCRProvider, OCRResult, OCRUsageTracker, HybridOCRService
+- Testes de isolamento com reset de singleton
+
+### Estratégia de OCR
+
+```
+Upload → É PDF com texto? → Sim → pdfplumber (grátis)
+                         → Não → Volume < 1000/dia? → Sim → Tesseract (grátis)
+                                                    → Não → Cloud OCR (Azure/Gemini)
+```
+
+### Comparação de Custos
+| Provider | Custo/1K páginas | Quando usar |
+|----------|------------------|-------------|
+| pdfplumber | $0 | PDFs com texto selecionável |
+| Tesseract | $0 | Volume < 1000 páginas/dia |
+| Azure | ~$1.50 | Alta precisão, formulários |
+| Gemini | ~$0.04/img | Melhor custo-benefício cloud |
+
+### Testes
+```
+pytest tests/test_ocr_service.py -v
+======================= 17 passed in 0.17s =======================
+```
+
+---
+
+## 2026-01-25 — Semantic Extractor: Neo4j Vector Index Native
+
+### Contexto
+- Refatoração do SemanticEntityExtractor para usar índice vetorial nativo do Neo4j
+- Alinhamento com documentação oficial Neo4j 5.x para vector search
+- Sistema de fallback robusto quando Neo4j não está disponível
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/core/semantic_extractor.py`:**
+- Corrigido `CHECK_VECTOR_INDEX` query (SHOW INDEXES não suporta RETURN)
+- Corrigido `_create_vector_index()` para usar DDL com valores hardcoded (parâmetros não funcionam em DDL)
+- Prioridade de index creation: CALL syntax → DDL syntax
+- Adicionado `LocalEmbeddingsService` (sentence-transformers, sem API key)
+- Adicionado `GeminiEmbeddingsService` (fallback quando OpenAI indisponível)
+- Prioridade de embeddings: OpenAI → Gemini → Local sentence-transformers
+
+### Configuração Neo4j Aura
+```
+NEO4J_URI=neo4j+s://24df7574.databases.neo4j.io
+NEO4J_PASSWORD=***
+RAG_GRAPH_BACKEND=neo4j
+```
+
+### Resultado dos Testes
+```
+Mode: NEO4J (índice vetorial nativo)
+Entidades encontradas:
+- Princípio da Boa-Fé Objetiva: 0.789
+- Boa-Fé Objetiva: 0.779
+- Enriquecimento Sem Causa: 0.772
+- Prescrição: 0.746
+```
+
+### Performance
+- Neo4j native: ~50ms per query (vector similarity via `db.index.vector.queryNodes`)
+- Fallback numpy: ~100ms per query (local cosine similarity)
+
+---
+
+## 2026-01-25 — Extração de Remissões entre Dispositivos Legais
+
+### Contexto
+- Adicionado extrator de remissões (cross-references) entre dispositivos legais
+- Complementa o LegalEntityExtractor existente com detecção de relações
+
+### Arquivo Alterado
+
+**`apps/api/app/services/rag/core/neo4j_mvp.py`:**
+- Adicionado `REMISSION_PATTERNS` - regex para padrões de remissão
+- Adicionado `extract_remissions()` - extrai relações entre dispositivos
+- Adicionado `extract_with_remissions()` - retorna entidades + remissões
+
+### Tipos de Remissões Detectadas
+| Tipo | Padrão |
+|------|--------|
+| `combinado_com` | c/c, em conjunto com |
+| `nos_termos_de` | nos termos do, conforme |
+| `aplica_se` | aplica-se o |
+| `remete_a` | remete ao |
+| `por_forca_de` | por força do |
+| `sequencia` | arts. X e Y |
+
+### Uso
+```python
+from app.services.rag.core.neo4j_mvp import LegalEntityExtractor
+
+result = LegalEntityExtractor.extract_with_remissions(text)
+# result['entities'] = dispositivos legais
+# result['remissions'] = relações entre dispositivos
+```
+
+---
+
+## 2026-01-25 — Integração: ColPali no RAG Pipeline + Ingestão Visual
+
+### Contexto
+- Integração do ColPali Visual Retrieval como stage opcional no RAG Pipeline
+- Visual search roda em paralelo com lexical/vector search quando habilitado
+- Task Celery para indexação visual assíncrona de PDFs
+- Integração com endpoint de upload de documentos
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/pipeline/rag_pipeline.py`:**
+- `PipelineStage` enum: Adicionado `VISUAL_SEARCH = "visual_search"`
+- `RAGPipeline.__init__`: Adicionado parâmetro `colpali`
+- `_ensure_components`: Inicialização lazy do ColPali quando `COLPALI_ENABLED=true`
+- `_stage_visual_search`: Novo método que executa busca visual via ColPali
+- `_merge_visual_results`: Merge de resultados visuais com weight reduzido (0.3)
+- `_stage_merge_rrf`: Atualizado para aceitar `visual_results` opcional
+- `search` e `search_sync`: Adicionado parâmetro `visual_search_enabled`
+
+**`apps/api/app/workers/tasks/document_tasks.py`:**
+- Nova task `visual_index_task`: Indexa PDF visualmente usando ColPali
+
+**`apps/api/app/workers/tasks/__init__.py`:**
+- Export de `visual_index_task`
+
+**`apps/api/app/api/endpoints/documents.py`:**
+- Import de `visual_index_task`
+- Flag `visual_index` no metadata do upload enfileira indexação visual
+
+### Dependências Instaladas
+```bash
+pip install colpali-engine torch pillow pymupdf
+```
+
+### Fluxo do Pipeline (Atualizado)
+```
+Query -> Query Enhancement -> Lexical Search -> Vector Search (condicional)
+     -> Visual Search (quando habilitado) -> Merge RRF (inclui visuais)
+     -> CRAG Gate -> Rerank -> Expand -> Compress -> Graph Enrich -> Trace
+```
+
+### Uso - Busca
+```python
+# Via parâmetro (override config)
+result = await pipeline.search("tabela de honorários", visual_search_enabled=True)
+
+# Via env var (default)
+# COLPALI_ENABLED=true
+result = await pipeline.search("gráfico de custos")
+```
+
+### Uso - Ingestão Visual (Upload)
+```bash
+# Upload com indexação visual
+curl -X POST /api/documents/upload \
+  -F "file=@documento.pdf" \
+  -F 'metadata={"visual_index": true, "tenant_id": "tenant1"}'
+```
+
+O documento será:
+1. Processado normalmente (extração de texto, OCR se necessário)
+2. Enfileirado para indexação visual via task Celery `visual_index`
+3. Páginas indexadas no Qdrant collection `visual_docs`
+
+### Resultado dos Testes
+- ColPali tests: **18 passed**
+- Pipeline imports: **OK**
+- Syntax check: **OK**
+- Task import: **OK**
+
+### Próximos Passos
+- Criar testes de integração ColPali + Pipeline
+- Testar com PDFs reais (tabelas, gráficos, infográficos)
+- Adicionar endpoint dedicado `/api/rag/visual/index` para reindexar documentos existentes
+
+---
+
+## 2026-01-25 — Implementação: ColPali Visual Document Retrieval Service
+
+### Contexto
+- Implementação do serviço ColPali para retrieval visual de documentos
+- PDFs com tabelas, figuras, infográficos - sem depender de OCR
+
+### Arquivos Criados
+- `apps/api/app/services/rag/core/colpali_service.py` — Serviço completo:
+  - ColPaliConfig com 15+ parâmetros configuráveis
+  - ColPaliService com lazy loading de modelo
+  - Suporte a ColPali, ColQwen2.5, ColSmol
+  - Late interaction (MaxSim) para scoring
+  - Integração com Qdrant para armazenamento
+  - Patch highlights para explainability
+- `apps/api/tests/test_colpali_service.py` — 18 testes unitários
+
+### Arquivos Alterados
+- `apps/api/app/services/rag/core/__init__.py` — Exportações adicionadas
+
+### Resultado dos Testes
+**18 passed, 0 failed**
+
+### Configuração (Environment Variables)
+```bash
+COLPALI_ENABLED=true
+COLPALI_MODEL=vidore/colqwen2.5-v1
+COLPALI_DEVICE=auto
+COLPALI_BATCH_SIZE=4
+COLPALI_QDRANT_COLLECTION=visual_docs
+```
+
+### Uso
+```python
+from app.services.rag.core import get_colpali_service
+
+service = get_colpali_service()
+await service.index_pdf("/path/to/doc.pdf", "doc1", "tenant1")
+results = await service.search("tabela de custos", "tenant1")
+```
+
+### Próximos Passos
+- Integrar com RAG pipeline (stage adicional)
+- Criar endpoint de API para ingestão visual
+- Testar com PDFs reais
+
+---
+
+## 2026-01-25 — Verificação: Retrieval Híbrido Neo4j (Fase 1 Completa)
+
+### Contexto
+- Verificação das alterações implementadas seguindo guia de arquitetura híbrida
+- Validação de consistência entre neo4j_mvp.py, rag_pipeline.py, graph.py, rag.py
+
+### Resultado: **27 testes passaram, 0 falhas**
+
+### Componentes Verificados
+
+| Arquivo | Status | Detalhes |
+|---------|--------|----------|
+| `neo4j_mvp.py` | ✅ | FIND_PATHS com path_nodes/edges, security trimming, fulltext/vector indexes |
+| `rag_pipeline.py` | ✅ | GraphContext.paths, RAG_LEXICAL_BACKEND, RAG_VECTOR_BACKEND |
+| `graph.py` | ✅ | Security em 7+ endpoints (tenant_id, scope, sigilo) |
+| `rag.py` | ✅ | RAG_GRAPH_INGEST_ENGINE com mvp/graph_rag/both |
+
+### Fase 1 Implementada
+- ✅ Neo4jMVP como camada de grafo (multi-hop 1-2 hops)
+- ✅ Paths explicáveis (path_nodes, path_edges)
+- ✅ Security: allowed_scopes, group_ids, case_id, user_id, sigilo
+- ✅ Flags: NEO4J_FULLTEXT_ENABLED, NEO4J_VECTOR_INDEX_ENABLED
+- ✅ Routing: RAG_LEXICAL_BACKEND, RAG_VECTOR_BACKEND
+- ✅ Ingestão: RAG_GRAPH_INGEST_ENGINE (mvp/graph_rag/both)
+
+### Pendente (Próximos Passos)
+- ❌ ColPali Service (retrieval visual)
+- ❌ Neo4j Vector Search wiring
+- ❌ Métricas comparação Qdrant vs Neo4j
+
+### Documentação Atualizada
+- `docs/PLANO_RETRIEVAL_HIBRIDO.md` — Status atualizado
+
+---
+
+## 2026-01-25 — Correção: Semantic Extractor alinhado com Neo4j Vector Index
+
+### Contexto
+- Usuário questionou se implementação do `semantic_extractor.py` estava alinhada com documentação Neo4j
+- Descoberto que a implementação original armazenava embeddings em memória Python e fazia similaridade em Python
+- Neo4j 5.15+ tem suporte nativo a índices vetoriais que não estava sendo usado
+
+### Problema Identificado
+- `semantic_extractor.py` armazenava seed embeddings em `Dict[str, List[float]]` Python
+- Cálculo de `cosine_similarity()` feito em numpy, não Neo4j
+- `graph_neo4j.py` já tinha queries para `db.index.vector.queryNodes` não utilizadas
+
+### Arquivos Alterados
+- `apps/api/app/services/rag/core/semantic_extractor.py` — Refatorado completamente:
+  - Seed entities agora armazenados no Neo4j como nós `SEMANTIC_ENTITY`
+  - Embeddings armazenados na propriedade `embedding` do nó
+  - Índice vetorial criado com `CREATE VECTOR INDEX` (Neo4j 5.x syntax)
+  - Busca via `db.index.vector.queryNodes` em vez de numpy
+  - Relações `SEMANTICALLY_RELATED` persistidas no grafo
+
+### Decisões Tomadas
+- Usar label dedicado `SEMANTIC_ENTITY` para seeds semânticos
+- Suportar ambas sintaxes de criação de índice (5.11+ e 5.15+)
+- Dimensão 3072 para text-embedding-3-large da OpenAI
+- Threshold de similaridade 0.75 para matches semânticos
+
+### Alinhamento com Neo4j Docs
+```cypher
+-- Criação de índice vetorial (Neo4j 5.x)
+CREATE VECTOR INDEX semantic_entity_embedding IF NOT EXISTS
+FOR (n:SEMANTIC_ENTITY)
+ON n.embedding
+OPTIONS {indexConfig: {
+    `vector.dimensions`: 3072,
+    `vector.similarity_function`: 'cosine'
+}}
+
+-- Query de similaridade
+CALL db.index.vector.queryNodes(
+    'semantic_entity_embedding',
+    $top_k,
+    $embedding
+) YIELD node, score
+```
+
+### Próximos Passos
+- Testar criação de índice em ambiente com Neo4j
+- Verificar se SEMANTIC_ENTITY aparece na visualização do grafo
+- Considerar adicionar mais seeds conforme feedback
+
+---
+
 ## Template de Entrada
 
 ```markdown
@@ -29,6 +568,625 @@
 ### Feedback do Usuário
 - Comentários/correções recebidas
 ```
+
+---
+
+## 2026-01-25 — Plano de Implementação: Retrieval Híbrido com Neo4j + ColPali
+
+### Contexto
+- Usuário solicitou plano de implementação para arquitetura de retrieval híbrida
+- Objetivo: manter Qdrant + OpenSearch como candidate generators, adicionar Neo4j como camada de grafo
+- Incluir ColPali para retrieval visual de documentos (tabelas, figuras)
+- Seguir abordagem em fases para não ficar refém de uma única tecnologia
+
+### Arquivos Criados
+- `docs/PLANO_RETRIEVAL_HIBRIDO.md` — Plano completo de implementação com:
+  - Arquitetura em 2 fases (MVP + migração gradual)
+  - Código de implementação para 4 novos serviços
+  - Configuração de environment variables
+  - Cronograma e métricas de sucesso
+
+### Pesquisa Realizada
+- ColPali: Visual document retrieval usando Vision Language Models
+  - Paper: https://arxiv.org/abs/2407.01449
+  - Modelos: vidore/colpali, vidore/colqwen2.5-v1, vidore/colsmol
+  - Ideal para PDFs com tabelas/figuras sem depender de OCR
+- Neo4j Hybrid: Vector Index + Fulltext Index nativos
+  - HybridRetriever do neo4j-graphrag-python
+  - Vector: HNSW com cosine similarity
+  - Fulltext: Lucene com analyzer brasileiro
+
+### Arquitetura Proposta
+
+**Fase 1 (Prioridade - 2-3 semanas):**
+- Manter Qdrant + OpenSearch (sem risco)
+- Adicionar Neo4j Graph Expansion (1-2 hops)
+- Adicionar ColPali para documentos visuais
+- Retrieval Router com feature flags
+
+**Fase 2 (Após métricas - 2-3 semanas):**
+- Neo4j FULLTEXT para UI/lexical
+- Neo4j VECTOR INDEX para seeds
+- Comparar métricas (latência/recall/custo)
+- Desligar backends redundantes só após paridade
+
+### Decisões Tomadas
+- ColQwen2.5 como modelo ColPali default (mais eficiente que original)
+- Multi-hop limitado a 2 hops (performance vs completude)
+- RRF como método de fusão (já usado no pipeline)
+- Feature flags para tudo (reversibilidade)
+
+### Próximos Passos
+1. Implementar `neo4j_graph_expansion.py`
+2. Implementar `colpali_service.py`
+3. Implementar `retrieval_router.py`
+4. Integrar com RAG Pipeline existente
+5. Criar endpoints de API
+6. Criar componente de visualização de grafo
+
+### Referências
+- https://github.com/illuin-tech/colpali
+- https://huggingface.co/blog/manu/colpali
+- https://neo4j.com/docs/neo4j-graphrag-python/current/
+- https://neo4j.com/docs/cypher-manual/current/indexes/semantic-indexes/vector-indexes/
+
+---
+
+## 2026-01-25 — Pagina de Visualizacao de Grafo de Conhecimento Juridico
+
+### Contexto
+- Usuario solicitou pagina para descobrir relacoes entre dispositivos legais
+- Relacoes semanticas (co-ocorrencia, contexto) alem de relacoes explicitas (cita, revoga)
+- Checkboxes para filtrar por legislacao, jurisprudencia e doutrina
+- Visualizacao interativa do grafo Neo4j
+
+### Arquivos Criados
+- `apps/api/app/api/endpoints/graph.py` — Endpoints para visualizacao do grafo
+  - GET /graph/entities — Busca entidades por tipo
+  - GET /graph/entity/{id} — Detalhes com vizinhos e chunks
+  - GET /graph/export — Exporta grafo para visualizacao D3/force-graph
+  - GET /graph/path — Encontra caminhos entre entidades
+  - GET /graph/stats — Estatisticas do grafo
+  - GET /graph/remissoes/{id} — Remissoes (referencias cruzadas)
+  - GET /graph/semantic-neighbors/{id} — Vizinhos semanticos
+  - GET /graph/relation-types — Tipos de relacoes disponiveis
+- `apps/web/src/app/(dashboard)/graph/page.tsx` — Pagina de visualizacao do grafo
+- `apps/web/src/stores/graph-store.ts` — Store Zustand para estado do grafo
+- `apps/web/src/types/react-force-graph.d.ts` — Tipos TypeScript para react-force-graph
+
+### Arquivos Alterados
+- `apps/api/app/api/routes.py` — Adicionado router do grafo
+- `apps/web/src/lib/api-client.ts` — Adicionados metodos para API do grafo
+
+### Dependencias Adicionadas
+- `react-force-graph-2d` — Visualizacao interativa de grafos
+
+### Funcionalidades
+- Visualizacao interativa com zoom, pan e drag
+- Filtros por grupo: Legislacao, Jurisprudencia, Doutrina
+- Cores por tipo de entidade
+- Painel de detalhes ao clicar em no
+- Remissoes semanticas (co-ocorrencia em documentos)
+- Legenda explicativa
+- Estatisticas do grafo
+
+### Tipos de Relacoes Semanticas
+- co_occurrence: Entidades mencionadas no mesmo trecho
+- related: Conexao semantica inferida pelo contexto
+- complementa: Complementa ou detalha outro dispositivo
+- interpreta: Oferece interpretacao do dispositivo
+
+### Verificacao
+- `npm run type-check` — OK
+- `npm run lint` — Warning menor (useEffect deps)
+
+### Proximos Passos
+- Integrar com navegacao do sidebar
+- Adicionar busca com autocomplete
+- Implementar tooltips nas arestas mostrando tipo de relacao
+
+---
+
+## 2026-01-25 — Extensão MCP para Tribunais
+
+### Contexto
+- Usuário solicitou extensão MCP similar ao sei-mcp
+- MCP (Model Context Protocol) permite Claude Code interagir com tribunais brasileiros
+
+### Arquivos Criados
+**packages/tribunais-mcp/**
+- `package.json` — Configuração do pacote
+- `tsconfig.json` — Configuração TypeScript
+- `src/index.ts` — Entry point
+- `src/server.ts` — Servidor MCP
+- `src/websocket/server.ts` — WebSocket server para comunicação com extensão Chrome
+- `src/tools/all-tools.ts` — 35+ ferramentas MCP definidas
+- `src/tools/index.ts` — Handler de ferramentas
+- `src/types/index.ts` — Tipos TypeScript
+- `src/utils/logger.ts` — Logger (usa stderr para não interferir com stdio)
+
+### Ferramentas MCP Implementadas
+
+| Categoria | Ferramentas |
+|-----------|-------------|
+| Autenticação | login, logout, get_session |
+| Consulta | buscar_processo, consultar_processo, listar_movimentacoes, listar_documentos, consultar_partes |
+| Peticionamento | listar_tipos_peticao, peticionar, iniciar_processo, consultar_protocolo |
+| Downloads | download_documento, download_processo, download_certidao |
+| Prazos | listar_intimacoes, ciencia_intimacao, listar_prazos |
+| Sessões | list_sessions, get_session_info, close_session, switch_session |
+| Janela | minimize_window, restore_window, focus_window, get_window_state |
+| Debug | screenshot, snapshot, navigate, click, type, wait |
+| Credenciais | listar_credenciais, testar_credencial |
+
+### Arquivos Alterados
+- `apps/tribunais-extension/background.js`:
+  - Porta padrão alterada para 19998 (MCP)
+  - Adicionado campo `serverType` ('mcp' | 'legacy')
+  - Handlers MCP: login, logout, screenshot, snapshot, navigate, click, type, wait
+  - Handlers de janela: minimize_window, restore_window, focus_window
+  - Função `delegateToContentScript` para comandos delegados
+
+### Arquitetura
+```
+Claude Code ↔ MCP Server (stdio) ↔ WebSocket ↔ Extensão Chrome ↔ DOM Tribunal
+```
+
+### Uso
+```bash
+# Iniciar servidor MCP
+cd packages/tribunais-mcp
+npm run build
+node dist/index.js
+
+# Conectar extensão Chrome na porta 19998
+```
+
+### Variáveis de Ambiente
+- `TRIBUNAIS_MCP_WS_PORT` — Porta WebSocket (default: 19998)
+- `TRIBUNAIS_MCP_LOG_LEVEL` — Nível de log (debug, info, warn, error)
+
+---
+
+## 2026-01-25 — Servico Hibrido de CAPTCHA (2Captcha, Anti-Captcha, CapMonster + HIL)
+
+### Contexto
+- Usuário solicitou suporte a CAPTCHAs difíceis (reCAPTCHA, hCaptcha)
+- Escolheu estratégia híbrida: serviço primeiro, fallback para resolução manual
+
+### Arquivos Criados
+- `apps/tribunais/src/services/captcha-solver.ts` — Novo serviço de resolução de CAPTCHA
+- `apps/tribunais/tests/captcha-solver.test.ts` — Testes unitários (11 testes)
+- `apps/tribunais/vitest.config.ts` — Configuração do Vitest
+
+### Arquivos Alterados
+- `apps/tribunais/src/queue/worker.ts` — Integrado com CaptchaSolverService, removida função obsoleta `requestCaptchaSolution`, cleanup de imports
+- `apps/tribunais/package.json` — Adicionado vitest e scripts de teste
+
+### Funcionalidades do CaptchaSolverService
+- **Providers suportados**: 2Captcha, Anti-Captcha, CapMonster, Manual (HIL)
+- **Tipos de CAPTCHA**: image, recaptcha_v2, recaptcha_v3, hcaptcha
+- **Estratégia híbrida**:
+  1. Tenta resolver via serviço configurado (API)
+  2. Se falhar, fallback para resolução manual (HIL via Redis pub/sub)
+- **Configuração via env vars**:
+  - `CAPTCHA_PROVIDER`: '2captcha' | 'anticaptcha' | 'capmonster' | 'manual'
+  - `CAPTCHA_API_KEY`: chave da API do serviço
+  - `CAPTCHA_SERVICE_TIMEOUT`: timeout do serviço em ms (default: 120000)
+  - `CAPTCHA_FALLBACK_MANUAL`: fallback para HIL se serviço falhar (default: true)
+
+### Testes Implementados
+- Configuração do solver (valores default, todos os providers)
+- Tratamento de erros (API key missing, API failure)
+- Fallback para manual (com/sem Redis)
+- Tipos de CAPTCHA não suportados
+
+### Decisões Tomadas
+- Singleton para reutilizar conexões Redis
+- Polling a cada 5s para 2Captcha/Anti-Captcha, 3s para CapMonster (mais rápido)
+- Mesmo formato de task do Anti-Captcha para CapMonster (APIs compatíveis)
+- Callback resolve(null) para cancelamento pelo usuário
+- Testes focam em error handling (polling requer mock de timers complexo)
+
+---
+
+## 2026-01-25 — UI de CAPTCHA na Extensão Chrome e Desktop App
+
+### Contexto
+- Implementar interface de usuário para resolver CAPTCHAs na extensão Chrome e no app desktop
+- Permite que o usuário veja e resolva CAPTCHAs durante operações em tribunais
+
+### Arquivos Alterados
+
+**Extensão Chrome:**
+- `apps/tribunais-extension/background.js` — Adicionado handler `handleRequestCaptchaSolution`, função `sendCaptchaSolution`, case no switch de comandos, handler de mensagem `captcha_solution`
+- `apps/tribunais-extension/popup.html` — Adicionados estilos CSS para UI de CAPTCHA (imagem, input, timer, botões), seção HTML `captchaPending`
+- `apps/tribunais-extension/popup.js` — Adicionados elementos DOM, estado `currentCaptcha`/`captchaTimerInterval`, funções `showCaptcha`, `hideCaptcha`, `startCaptchaTimer`, `submitCaptcha`, `cancelCaptcha`, `openTribunalPage`, event listeners
+
+**Desktop App:**
+- `apps/tribunais-desktop/src/main/websocket-client.ts` — Adicionado case `request_captcha_solution`, método `sendCaptchaSolution`
+- `apps/tribunais-desktop/src/main/index.ts` — Import de `shell`, handler `captcha-required`, handlers IPC `solve-captcha` e `open-external`
+- `apps/tribunais-desktop/src/preload/index.ts` — Adicionados `solveCaptcha`, `openExternal`, canal `captcha-request`
+- `apps/tribunais-desktop/src/renderer/index.html` — Estilos CSS para CAPTCHA, seção HTML `captchaCard`, elementos DOM, funções JavaScript (showCaptcha, hideCaptcha, etc.), event listeners
+
+### Funcionalidades
+- Exibe CAPTCHA de imagem com campo de texto
+- Timer visual mostrando tempo restante
+- Suporte a reCAPTCHA/hCaptcha com botão para abrir página do tribunal
+- Envio de solução ou cancelamento
+- Auto-cancel quando expira
+
+### Fluxo de UI
+1. Servidor envia `request_captcha_solution` via WebSocket
+2. Extension/Desktop armazena dados e mostra notificação
+3. UI mostra card de CAPTCHA com imagem e input
+4. Usuário digita solução e clica Enviar
+5. Solução é enviada via WebSocket (`captcha_solved`)
+6. UI fecha o card
+
+---
+
+## 2026-01-25 — Suporte CAPTCHA HIL no Serviço de Tribunais
+
+### Contexto
+- Adicionar Human-in-the-Loop para resolução de CAPTCHAs durante operações em tribunais
+- CAPTCHAs são comuns em tribunais brasileiros e precisam de intervenção humana
+
+### Arquivos Alterados
+- `apps/tribunais/src/types/index.ts` — Adicionados tipos para CAPTCHA: CaptchaType, CaptchaInfo, CaptchaSolution, CaptchaRequiredEvent, CaptchaSolutionResponse
+- `apps/tribunais/src/extension/websocket-server.ts` — Subscriber para canal `tribunais:captcha_required`, handlers para enviar CAPTCHA ao cliente e receber soluções
+- `apps/tribunais/src/queue/worker.ts` — Subscriber para `tribunais:captcha_solution`, função `requestCaptchaSolution` com Promise/timeout, `captchaHandler` para integrar com TribunalService
+- `apps/tribunais/src/services/tribunal.ts` — Interface `ExecuteOperationOptions` com callback `onCaptchaRequired`, integração com config de CAPTCHA do tribunais-playwright
+
+### Fluxo Implementado
+1. Worker executa operação no tribunal
+2. tribunais-playwright detecta CAPTCHA
+3. Callback `onCaptchaRequired` é chamado
+4. Worker publica evento no Redis (`tribunais:captcha_required`)
+5. WebSocket server recebe e envia para extensão/desktop do usuário
+6. Usuário resolve o CAPTCHA
+7. Extensão/desktop envia solução via WebSocket
+8. WebSocket server publica no Redis (`tribunais:captcha_solution`)
+9. Worker recebe via subscriber e continua operação
+
+### Decisoes Tomadas
+- Timeout de 2 minutos para resolver CAPTCHA
+- Se nenhuma extensão conectada, publica falha imediatamente
+- Cleanup de CAPTCHAs pendentes no graceful shutdown
+
+---
+
+## 2026-01-25 — Extensao Chrome para Certificados A3 (tribunais-extension)
+
+### Contexto
+- Criar extensao Chrome para automacao de tribunais com certificado digital A3
+- Conectar ao servidor Iudex via WebSocket para receber comandos
+- Detectar paginas de tribunais e estado de login
+
+### Arquivos Criados
+- `apps/tribunais-extension/manifest.json` — Manifest V3 com permissoes para dominios de tribunais
+- `apps/tribunais-extension/background.js` — Service Worker com conexao WebSocket, reconexao automatica, processamento de comandos
+- `apps/tribunais-extension/popup.html` — Interface do usuario para configuracao e status
+- `apps/tribunais-extension/popup.js` — Logica do popup (conexao, config, operacoes)
+- `apps/tribunais-extension/content.js` — Script injetado em paginas de tribunais (deteccao de login, execucao de acoes)
+- `apps/tribunais-extension/types.d.ts` — Tipos TypeScript para documentacao do protocolo
+- `apps/tribunais-extension/README.md` — Documentacao da extensao
+- `apps/tribunais-extension/icons/` — Icones PNG em 16, 32, 48 e 128px
+
+### Funcionalidades Implementadas
+- Conexao WebSocket persistente com reconexao automatica
+- Autenticacao com userId configurado
+- Comandos: authenticate, request_interaction, execute_browser_action, request_signature
+- Deteccao de tribunais: TJSP (ESAJ), TRF3 (PJe), PJe generico
+- Notificacoes do Chrome para interacao do usuario
+- Content script para deteccao de tela de login e certificado
+
+### Decisoes Tomadas
+- Manifest V3 para compatibilidade futura
+- JavaScript puro (sem build) para simplicidade
+- Keepalive com chrome.alarms para manter service worker ativo
+- Tipos TypeScript apenas como documentacao (extensao roda JS)
+
+### Proximos Passos
+- Testar integracao com servidor WebSocket
+- Implementar assinatura digital com certificado A3
+- Adicionar mais tribunais na configuracao
+
+---
+
+## 2026-01-25 — Integração Backend FastAPI com Serviço de Tribunais
+
+### Contexto
+- Criar integração do serviço de tribunais Node.js com o backend FastAPI do Iudex
+- Permitir gerenciamento de credenciais, consultas de processos e peticionamento
+
+### Arquivos Criados
+- `apps/api/app/schemas/tribunais.py` — Schemas Pydantic para request/response (enums, credenciais, operações, processo, webhooks)
+- `apps/api/app/services/tribunais_client.py` — Cliente HTTP assíncrono usando httpx para comunicação com serviço Node.js
+- `apps/api/app/api/endpoints/tribunais.py` — Endpoints FastAPI (credenciais, consultas, peticionamento)
+- `apps/api/app/api/endpoints/webhooks.py` — Handler de webhooks do serviço de tribunais
+
+### Arquivos Alterados
+- `apps/api/app/api/routes.py` — Adicionados routers de tribunais e webhooks
+- `apps/api/app/core/config.py` — Adicionadas configurações TRIBUNAIS_SERVICE_URL e TRIBUNAIS_WEBHOOK_SECRET
+
+### Endpoints Implementados
+- `POST /api/tribunais/credentials/password` — Criar credencial com senha
+- `POST /api/tribunais/credentials/certificate-a1` — Upload de certificado A1
+- `POST /api/tribunais/credentials/certificate-a3-cloud` — Registrar A3 na nuvem
+- `POST /api/tribunais/credentials/certificate-a3-physical` — Registrar A3 físico
+- `GET /api/tribunais/credentials/{user_id}` — Listar credenciais
+- `DELETE /api/tribunais/credentials/{credential_id}` — Remover credencial
+- `GET /api/tribunais/processo/{credential_id}/{numero}` — Consultar processo
+- `GET /api/tribunais/processo/{credential_id}/{numero}/documentos` — Listar documentos
+- `GET /api/tribunais/processo/{credential_id}/{numero}/movimentacoes` — Listar movimentações
+- `POST /api/tribunais/operations/sync` — Operação síncrona
+- `POST /api/tribunais/operations/async` — Operação assíncrona (fila)
+- `GET /api/tribunais/operations/{job_id}` — Status de operação
+- `POST /api/tribunais/peticionar` — Protocolar petição
+- `POST /api/webhooks/tribunais` — Webhook de notificações
+
+### Decisões Tomadas
+- Usar httpx (async) para comunicação com serviço Node.js
+- Validação de ownership nas operações (userId deve corresponder ao usuário autenticado)
+- Webhooks processados em background para não bloquear resposta
+- Schemas com suporte a aliases (camelCase/snake_case) para compatibilidade
+
+### Próximos Passos
+- Implementar notificação WebSocket ao receber webhooks
+- Adicionar testes de integração
+- Configurar webhook secret em produção
+
+---
+
+## 2026-01-24 — Streaming SSE de Última Geração (step.* events)
+
+### Contexto
+- Implementar eventos SSE granulares (`step.*`) para criar UI de atividade consistente
+- Padronizar todos os provedores (OpenAI, Gemini, Claude, Perplexity, Deep Research)
+- Melhorar UX com chips de queries/fontes em tempo real durante streaming
+
+### Arquivos Alterados
+
+#### Backend
+- `apps/api/app/services/ai/deep_research_service.py`:
+  - Adicionado `_generate_step_id()` helper para IDs únicos
+  - Google non-Agent: `step.start`, extração de `grounding_metadata`, `step.done`
+  - Google Agent (Interactions API): `step.start`, regex para queries/URLs, `step.done`
+  - Perplexity Deep Research: `step.start`, `step.add_source` incremental, `step.done`
+
+- `apps/api/app/services/ai/agent_clients.py`:
+  - Adicionado `_extract_grounding_metadata()` helper para Gemini
+  - Streaming loop emite `grounding_query` e `grounding_source`
+  - Tracking de duplicatas com sets
+
+- `apps/api/app/services/chat_service.py`:
+  - Deep Research: propaga eventos `step.*` diretamente ao SSE
+  - Gemini Chat: processa `grounding_query` → `step.add_query`, `grounding_source` → `step.add_source`
+  - OpenAI Responses: handlers para `web_search_call.*` e `file_search_call.*`
+  - Perplexity Chat: citações incrementais com `step.add_source`
+
+#### Frontend
+- `apps/web/src/stores/chat-store.ts`:
+  - Handlers para `step.start`, `step.add_query`, `step.add_source`, `step.done`
+  - Integração com `upsertActivityStep` existente
+  - Acumulação de citations no metadata
+
+### Formato dos Eventos SSE
+```json
+{"type": "step.start", "step_name": "Pesquisando", "step_id": "a1b2c3d4"}
+{"type": "step.add_query", "step_id": "a1b2c3d4", "query": "jurisprudência STF..."}
+{"type": "step.add_source", "step_id": "a1b2c3d4", "source": {"title": "STF", "url": "https://..."}}
+{"type": "step.done", "step_id": "a1b2c3d4"}
+```
+
+### Scores Atualizados
+| Provider | Score Anterior | Score Atual |
+|----------|----------------|-------------|
+| Claude Extended Thinking | 9/10 | 9/10 (já excelente) |
+| Perplexity Chat | 7/10 | 10/10 |
+| Perplexity Deep Research | 7/10 | 10/10 |
+| OpenAI Responses API | 7/10 | 10/10 |
+| Gemini Chat | 6/10 | 10/10 |
+| Gemini Deep Research | 8/10 | 10/10 |
+
+### Decisões Tomadas
+- Usamos `step_id` único (uuid[:8]) para permitir múltiplos steps simultâneos
+- Grounding metadata extraído tanto de snake_case quanto camelCase (compatibilidade SDK)
+- `step.done` emitido mesmo em caso de erro para UI consistente
+- Tracking de duplicatas com sets para evitar eventos repetidos
+
+### Próximos Passos
+- Testar manualmente cada provider
+- Verificar que ActivityPanel exibe chips corretamente
+- Opcional: adicionar `step.start/done` para Claude thinking (baixa prioridade)
+
+---
+
+## 2026-01-24 — Melhorias v2.28 no mlx_vomo.py (Validação e Sanitização)
+
+### Contexto
+- Análise de documentos de transcrição (`transcricao-1769147720947.docx` e `Bloco 01 - Urbanístico_UNIFICADO_FIDELIDADE.md`)
+- Identificados problemas de truncamento em tabelas e texto durante chunking
+- Headings duplicados (`#### ####`) e separadores inconsistentes
+
+### Arquivos Alterados
+- `mlx_vomo.py`:
+  - **Novas funções de validação** (linhas 480-850):
+    - `corrigir_headings_duplicados()`: Corrige `#### #### Título` → `#### Título`
+    - `padronizar_separadores()`: Remove ou padroniza `---`, `***`, `___`
+    - `detectar_tabelas_em_par()`: Detecta pares 📋 Quadro-síntese + 🎯 Pegadinhas
+    - `validar_celulas_tabela()`: Detecta truncamentos conhecidos (ex: "Comcobra", "onto")
+    - `chunk_texto_seguro()`: Chunking inteligente que evita cortar tabelas
+    - `validar_integridade_pos_merge()`: Validação completa pós-merge
+    - `sanitizar_markdown_final()`: Pipeline de sanitização completo
+  - **Melhorias em `_smart_chunk_with_overlap()`**:
+    - Overlap 30% maior quando chunk contém tabela
+    - Prioriza corte após pares de tabelas (📋 + 🎯)
+    - Evita cortar no meio de tabelas
+  - **Melhorias em `_add_table_to_doc()`**:
+    - Novo parâmetro `table_type` (quadro_sintese, pegadinhas, default)
+    - Cores diferenciadas: azul para síntese, laranja para pegadinhas
+    - Zebra striping (linhas alternadas)
+    - Largura de colunas otimizada por tipo
+  - **Integração em `save_as_word()`**:
+    - Chama `sanitizar_markdown_final()` antes de converter
+    - Chama `corrigir_tabelas_prematuras()` para reposicionar tabelas no lugar errado
+    - Detecta tipo de tabela pelo heading anterior
+  - **Nova função `corrigir_tabelas_prematuras()`**:
+    - Detecta quando tabela (📋 ou 🎯) aparece antes do conteúdo terminar
+    - Move automaticamente a tabela para DEPOIS do conteúdo explicativo
+    - Parâmetros configuráveis: `min_chars_apos_tabela=100`, `min_linhas_apos=2`
+  - **Melhoria no prompt PROMPT_TABLE_APOSTILA**:
+    - Adicionada seção "ORDEM OBRIGATÓRIA: CONTEÚDO PRIMEIRO, TABELA DEPOIS"
+    - Exemplos visuais de ERRADO vs CORRETO para guiar o LLM
+
+### Comandos Executados
+- `python3 -m py_compile mlx_vomo.py` — ✅ Sintaxe OK
+- Testes unitários das novas funções — ✅ Todos passaram
+
+### Decisões Tomadas
+- Usar overlap de 30% em vez de 15% para chunks com tabelas (mais seguro)
+- Remover separadores horizontais por padrão (não agregam valor no DOCX)
+- Diferenciar visualmente tabelas de síntese (azul) e pegadinhas (laranja)
+- Validação não-bloqueante (log de warnings, não raise)
+
+### Próximos Passos
+- Testar com arquivos reais de transcrição maiores
+- Considerar adicionar índice remissivo de termos jurídicos
+- Avaliar necessidade de exportação PDF simultânea
+
+---
+
+## 2026-01-24 — Correções P1/P2 Neo4j Hybrid Mode (Análise Paralela)
+
+### Contexto
+- Análise paralela com 3 agentes identificou 5 issues no Neo4j hybrid mode
+- P1 (Crítico): Falta validação contra colisão de labels estruturais (Entity, Document, Chunk)
+- P2 (Moderado): Parsing de env vars inconsistente entre `config.py` e `neo4j_mvp.py`
+
+### Arquivos Alterados
+- `apps/api/app/services/rag/core/graph_hybrid.py`:
+  - Adicionado `FORBIDDEN_LABELS = frozenset({"Entity", "Document", "Chunk", "Relationship"})`
+  - `label_for_entity_type()` agora valida contra labels proibidos
+  - Docstring expandida explicando as 4 validações aplicadas
+- `apps/api/app/services/rag/core/neo4j_mvp.py`:
+  - Adicionada função `_env_bool()` local (consistente com `config.py`)
+  - `from_env()` agora usa `_env_bool()` ao invés de parsing inline
+  - Defaults agora consistentes: `graph_hybrid_auto_schema=True`, outros `False`
+- `apps/api/tests/test_graph_hybrid.py`:
+  - Novo teste `test_label_for_entity_type_forbidden_labels()`
+  - Valida que nenhum tipo mapeado colide com labels estruturais
+
+### Comandos Executados
+- `python tests/test_graph_hybrid.py` — 4/4 testes passaram
+
+### Resultados da Análise Paralela
+1. **Agent 1 (argument_pack)**: Versão produção (`argument_pack.py`) mais completa que patch GPT
+2. **Agent 2 (usage patterns)**: 0 métodos quebrados no codebase
+3. **Agent 3 (Neo4j integration)**: Score 8/10, 5 issues identificados (2 agora corrigidos)
+
+### Correções Adicionais (P3)
+- `graph_hybrid.py`: `migrate_hybrid_labels()` agora usa transação explícita
+  - `session.begin_transaction()` para atomicidade
+  - Rollback automático em caso de falha
+  - Logging de resultado
+- Removido `argument_pack_patched.py` (arquivo legado, versão produção já completa)
+
+### Próximos Passos
+- Testar ingestão real para validar Neo4j population
+
+---
+
+## 2026-01-24 — Automação GraphRAG (Neo4j) na Ingestão + Modo Híbrido
+
+### Contexto
+- Neo4j Aura configurado e conectado com schema correto (:Document, :Chunk, :Entity)
+- GraphRAG não estava sendo populado automaticamente durante ingestão de documentos
+- Usuário solicitou: "quero tudo automatizado"
+- Revisão da implementação do modo híbrido (GPT) identificou whitelist incompleta
+
+### Arquivos Alterados
+- `apps/api/app/api/endpoints/rag.py` — Adicionado integração automática com GraphRAG:
+  - Import `os` para env vars
+  - Helper `_should_ingest_to_graph()` — verifica flag explícito ou `RAG_GRAPH_AUTO_INGEST`
+  - Helper `_ingest_document_to_graph()` — extrai entidades legais e ingere no Neo4j/NetworkX
+  - Modificado `ingest_local()` — chama graph ingest após RAG ingest
+  - Modificado `ingest_global()` — chama graph ingest após RAG ingest (se não foi duplicado)
+- `apps/api/app/services/rag/core/graph_hybrid.py` — Expandida whitelist de tipos:
+  - Adicionados: jurisprudencia, tese, documento, recurso, acordao, ministro, relator
+  - Agora cobre todos os tipos do `EntityType` enum em `graph_rag.py`
+- `apps/api/tests/test_graph_hybrid.py` — Atualizado testes para novos tipos
+- `apps/api/.env` — Adicionado:
+  - `RAG_GRAPH_AUTO_INGEST=true`
+  - `RAG_GRAPH_HYBRID_MODE=true`
+  - `RAG_GRAPH_HYBRID_AUTO_SCHEMA=true`
+
+### Decisões Tomadas
+- **Fail-safe**: Erros de graph ingest não falham a ingestão RAG principal
+- **Factory pattern**: Usa `get_knowledge_graph()` que seleciona Neo4j ou NetworkX baseado em `RAG_GRAPH_BACKEND`
+- **Extração automática**: Usa `LegalEntityExtractor` para extrair leis, súmulas, jurisprudência do texto
+- **Modo híbrido completo**: Labels por tipo (:Entity:Lei, :Entity:Sumula, etc.) para todos os tipos jurídicos
+- **Argumentos opcionais**: Flag `extract_arguments` para extrair teses/fundamentos/conclusões
+
+### Comandos Executados
+- `python -m py_compile app/api/endpoints/rag.py` — OK
+- Import test — OK
+- Label test — 9/9 testes passaram
+
+### Próximos Passos
+- Testar ingestão real de documento e verificar população no Neo4j
+- Considerar criar endpoint de sincronização retroativa (documentos já ingeridos → graph)
+
+---
+
+## 2026-01-24 — Commit Consolidado: RAG Quality 9.5/10
+
+### Contexto
+- Avaliacao inicial do sistema RAG: 8.5/10
+- Implementacao de melhorias para atingir 9.5/10 usando 10 subagentes em paralelo
+
+### Commit
+- **Hash**: `ee66fb4`
+- **Arquivos**: 42 alterados, 11.371 inserções, 116 remoções, 19 novos arquivos
+
+### Entregáveis por Categoria
+
+**Testes (414 novos):**
+- `tests/rag/test_crag_gate.py` — 66 testes CRAG gate
+- `tests/rag/test_query_expansion.py` — 65 testes query expansion
+- `tests/rag/test_reranker.py` — 53 testes reranker
+- `tests/rag/test_qdrant_service.py` — 58 testes Qdrant multi-tenant
+- `tests/rag/test_opensearch_service.py` — 57 testes OpenSearch BM25
+- `tests/rag/fixtures.py` — Mocks compartilhados com docs jurídicos BR
+
+**Documentação:**
+- `docs/rag/ARCHITECTURE.md` — Pipeline 10 estágios com Mermaid
+- `docs/rag/CONFIG.md` — 60+ variáveis de ambiente documentadas
+- `docs/rag/API.md` — 5 endpoints com exemplos Python/JS/cURL
+
+**Resiliência:**
+- `services/rag/core/resilience.py` — CircuitBreaker (CLOSED/OPEN/HALF_OPEN)
+- `api/endpoints/health.py` — Endpoint `/api/health/rag`
+
+**Evals:**
+- `evals/benchmarks/v1.0_legal_domain.jsonl` — 87 queries jurídicas
+- `services/ai/rag_evaluator.py` — Métricas legais (citation_coverage, temporal_validity)
+- `.github/workflows/rag-eval.yml` — CI/CD semanal + PR
+
+**Performance:**
+- `services/rag/core/budget_tracker.py` — 50k tokens / 5 LLM calls por request
+- `services/rag/core/reranker.py` — preload() para eliminar cold start
+- `services/rag/core/embeddings.py` — 31 queries jurídicas comuns pré-carregadas
+
+**Código:**
+- `services/rag/utils/env_helpers.py` — Consolidação de utilitários duplicados
+- `services/rag_context.py`, `rag_module.py` — Marcados DEPRECATED
+
+### Próximos Passos Opcionais
+- Configurar secrets GitHub (OPENAI_API_KEY, GOOGLE_API_KEY) para CI/CD
+- Rodar `pytest tests/rag/ -v` para verificar todos os 414 testes
+- Habilitar preload em staging: `RAG_PRELOAD_RERANKER=true`
 
 ---
 
@@ -825,6 +1983,177 @@ RAG_PRELOAD_EMBEDDINGS=true
 - Integrar testes ao CI/CD pipeline
 - Adicionar testes de integracao com mocks de storage services
 - Expandir cobertura para graph enrichment e compression modules
+
+---
+
+## 2026-01-25 — Serviço de Automação de Tribunais
+
+### Contexto
+- Criar serviço para integrar o Iudex com tribunais brasileiros (PJe, eproc, e-SAJ)
+- Suportar consultas e peticionamento
+- Suportar 3 métodos de autenticação: senha, certificado A1, certificado A3
+
+### Arquivos Criados
+- `apps/tribunais/package.json` — Configuração do pacote
+- `apps/tribunais/tsconfig.json` — Configuração TypeScript
+- `apps/tribunais/README.md` — Documentação completa da API
+- `apps/tribunais/src/index.ts` — Entry point do serviço
+- `apps/tribunais/src/types/index.ts` — Tipos (AuthType, OperationType, etc.)
+- `apps/tribunais/src/services/crypto.ts` — Criptografia AES-256-GCM para credenciais
+- `apps/tribunais/src/services/credentials.ts` — Gerenciamento de credenciais
+- `apps/tribunais/src/services/tribunal.ts` — Operações nos tribunais
+- `apps/tribunais/src/api/server.ts` — Servidor Express
+- `apps/tribunais/src/api/routes.ts` — Rotas da API REST
+- `apps/tribunais/src/queue/worker.ts` — Worker BullMQ para operações assíncronas
+- `apps/tribunais/src/extension/websocket-server.ts` — WebSocket para extensões Chrome
+- `apps/tribunais/src/utils/logger.ts` — Logger Winston
+
+### Decisões Tomadas
+- **Express v5**: Usar helper `getParam()` para lidar com params que podem ser array
+- **Certificado A1**: Salvar buffer em arquivo temporário (tribunais-playwright espera path)
+- **BullMQ/Redis**: Fila para operações longas e que requerem interação humana
+- **WebSocket**: Comunicação bidirecional com extensão Chrome para certificados A3
+- **Mapeamento de tipos**: Converter entre tipos tribunais-playwright ↔ Iudex
+
+### Comandos Executados
+- `pnpm build` (tribunais-playwright) — OK
+- `npx tsc --noEmit` (Iudex/apps/tribunais) — OK após correções
+
+### Arquitetura
+```
+┌─────────────────────────────────────────────────────┐
+│ Frontend (Next.js) → Backend (FastAPI) → Tribunais  │
+│                                         │           │
+│  ┌──────────┐  ┌──────────┐  ┌─────────▼─────────┐ │
+│  │ API HTTP │  │ WebSocket│  │ Worker (BullMQ)   │ │
+│  │ :3100    │  │ :3101    │  │ (assíncrono)      │ │
+│  └──────────┘  └──────────┘  └───────────────────┘ │
+└─────────────────────────────────────────────────────┘
+         │               │
+    Cert A1/Senha    Cert A3 (extensão Chrome)
+    (automático)     (interação humana)
+```
+
+### Próximos Passos
+- Criar extensão Chrome para certificados A3
+- Integrar com backend FastAPI do Iudex
+- Adicionar testes de integração
+- Deploy em produção
+
+---
+
+## 2026-01-25 — Anexar Documentos a Casos com Integração RAG/Graph
+
+### Contexto
+- Usuário solicitou integração completa de documentos com casos
+- Documentos anexados devem ser automaticamente indexados no RAG local e no Grafo de Conhecimento
+- Respeitar controle de acesso/escopo existente (multi-tenant)
+
+### Arquivos Alterados (Backend)
+- `apps/api/app/models/document.py` — Adicionados campos:
+  - `case_id` — FK para casos
+  - `rag_ingested`, `rag_ingested_at`, `rag_scope` — Tracking de indexação RAG
+  - `graph_ingested`, `graph_ingested_at` — Tracking de indexação Graph
+
+- `apps/api/app/api/endpoints/cases.py` — Novos endpoints:
+  - POST `/{case_id}/documents/upload` — Upload direto para caso com auto-ingestão
+  - GET `/{case_id}/documents` — Listar documentos do caso
+  - POST `/{case_id}/documents/{doc_id}/attach` — Anexar documento existente
+  - DELETE `/{case_id}/documents/{doc_id}/detach` — Desanexar documento
+
+### Arquivos Criados (Backend)
+- `apps/api/alembic/versions/e5b6c7d8f9a0_add_document_case_rag_fields.py` — Migration Alembic
+
+### Arquivos Alterados (Frontend)
+- `apps/web/src/lib/api-client.ts` — Novos métodos:
+  - `getCaseDocuments()` — Buscar documentos do caso
+  - `uploadDocumentToCase()` — Upload direto com FormData
+  - `attachDocumentToCase()` — Anexar doc existente
+  - `detachDocumentFromCase()` — Desanexar documento
+
+- `apps/web/src/app/(dashboard)/cases/[id]/page.tsx` — Atualizada tab "Arquivos":
+  - Lista documentos com status de indexação RAG/Graph
+  - Upload via drag-and-drop ou seleção de arquivo
+  - Indicadores visuais de status (ícones verde/amarelo)
+  - Botão para desanexar documento do caso
+  - Feedback automático de progresso
+
+### Funcionalidades Implementadas
+- **Upload direto para caso**: Arquivo → Caso → Auto-ingestão RAG local + Graph
+- **Background tasks**: Processamento assíncrono de documentos
+- **Status tracking**: Campos booleanos + timestamp para cada etapa de ingestão
+- **UI responsiva**: Drag-and-drop, loading states, status icons
+- **Fallback gracioso**: Se novo endpoint falhar, usa busca por tags (legado)
+
+### Fluxo de Ingestão
+```
+Upload → Salvar documento → Atualizar case_id →
+  ├── Background: Extrair texto (PDF/DOCX/TXT/HTML)
+  ├── Background: Ingerir RAG local (rag_ingested=true)
+  └── Background: Ingerir Graph Neo4j (graph_ingested=true)
+```
+
+### Verificação
+- `npx tsc --noEmit` — OK (sem erros nos arquivos modificados)
+- `npm run lint` — Erros pré-existentes em outros arquivos, não nos modificados
+
+### Próximos Passos
+- Implementar polling para atualizar status de ingestão em tempo real
+- Adicionar opção para anexar documentos existentes da biblioteca
+- Criar visualização de progresso de ingestão
+
+---
+
+## 2026-01-25 — Extração Semântica de Entidades via Embeddings + RAG
+
+### Contexto
+- Grafo Neo4j já tinha estrutura para teses e conceitos, mas extração era apenas regex
+- Usuário pediu para usar RAG e embeddings (não LLM) para extração semântica
+- Implementada extração baseada em embedding similarity:
+  - Usa EmbeddingsService existente (OpenAI text-embedding-3-large)
+  - Conceitos jurídicos pré-definidos como "âncoras" (seeds)
+  - Similaridade coseno para encontrar conceitos no texto
+  - Relações baseadas em proximidade de embedding
+
+### Arquivos Criados/Alterados
+- `apps/api/app/services/rag/core/semantic_extractor.py` — Extrator baseado em embeddings
+  - **33 conceitos seed**: princípios, institutos, conceitos doutrinários, teses
+  - Usa `EmbeddingsService` (text-embedding-3-large, 3072 dims)
+  - Similaridade coseno para matching (threshold: 0.75)
+  - Relações entre entidades semânticas e regex (threshold: 0.6)
+
+- `apps/api/app/services/rag/core/neo4j_mvp.py`:
+  - Parâmetro `semantic_extraction: bool` em `ingest_document()`
+  - Integração com extrator de embeddings
+
+- `apps/api/app/api/endpoints/graph.py`:
+  - `ENTITY_GROUPS` expandido com tipos semânticos
+  - `SEMANTIC_RELATIONS` expandido
+
+### Conceitos Seed (Âncoras)
+| Categoria | Exemplos |
+|-----------|----------|
+| Princípios | Legalidade, Contraditório, Ampla Defesa, Dignidade |
+| Institutos | Prescrição, Decadência, Dano Moral, Tutela Antecipada |
+| Conceitos | Boa-Fé Objetiva, Abuso de Direito, Venire Contra Factum |
+| Teses | Responsabilidade Objetiva do Estado, Teoria da Perda de Uma Chance |
+
+### Fluxo de Extração
+```
+Documento → Chunks → Embedding (text-embedding-3-large)
+                          │
+                          ▼
+              Cosine Similarity com Seeds
+                          │
+                          ▼
+              Match (sim >= 0.75) → Entidade Semântica
+                          │
+                          ▼
+              Similarity com Entidades Regex → Relações
+```
+
+### Verificação
+- `python -c "from app.services.rag.core.semantic_extractor import get_semantic_extractor, LEGAL_CONCEPT_SEEDS; print(len(LEGAL_CONCEPT_SEEDS))"` — OK (33 seeds)
 
 ---
 

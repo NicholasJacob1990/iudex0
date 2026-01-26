@@ -63,9 +63,17 @@ _RE_GRAPH_RELATION = re.compile(
     r"(rela[cç][aã]o|conex[aã]o|vincul|hierarq|correla[cç][aã]o|compatibil|entendimento|precedente)",
     flags=re.IGNORECASE,
 )
-_RE_ARGUMENT = re.compile(
+# NOTE: Keep ArgumentRAG auto-routing conservative to avoid unnecessary cost/noise.
+# We split "argument" signals into:
+# - strong: evidence/dispute/compliance terms that usually benefit from a pro/contra evidence graph
+# - weak: generic WH-questions that appear in most queries (should not auto-enable ArgumentRAG alone)
+_RE_ARGUMENT_STRONG = re.compile(
     r"(prova|evid[eê]ncia|documento|anexo|impugna|contesta|nega|refuta|contradit[oó]r|"
-    r"houve|ocorreu|quando|quem|onde|como|por\s+qu[eê]|incidente|fraude|n[aã]o\s+conformidade|auditoria)",
+    r"incidente|fraude|n[aã]o\s+conformidade|auditoria|per[ií]cia|laudo|testemunh|diverg[eê]nci|inconsist[eê]nci)",
+    flags=re.IGNORECASE,
+)
+_RE_ARGUMENT_WEAK = re.compile(
+    r"(houve|ocorreu|quando|quem|onde|como|por\s+qu[eê])",
     flags=re.IGNORECASE,
 )
 
@@ -87,8 +95,10 @@ def score_signals(query: str) -> dict:
         legal_hits += 2.0
     if _RE_GRAPH_RELATION.search(text):
         legal_hits += 1.0
-    if _RE_ARGUMENT.search(text):
+    if _RE_ARGUMENT_STRONG.search(text):
         arg_hits += 2.0
+    elif _RE_ARGUMENT_WEAK.search(text):
+        arg_hits += 0.5
 
     if re.search(r"\b(stf|stj|tst|trf|tj|cnj)\b", text, flags=re.IGNORECASE):
         legal_hits += 1.0
@@ -406,7 +416,7 @@ def decide_rag_route(
 
     reasons: List[str] = []
     enable_graph = bool(allow_graph and (_RE_GRAPH.search(cleaned) or _RE_GRAPH_RELATION.search(cleaned)))
-    enable_argument = bool(allow_argument and _RE_ARGUMENT.search(cleaned))
+    enable_argument = bool(allow_argument and _RE_ARGUMENT_STRONG.search(cleaned))
 
     if enable_graph:
         reasons.append("graph_signals")

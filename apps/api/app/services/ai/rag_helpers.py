@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import re
@@ -11,6 +10,7 @@ from app.services.ai.agent_clients import (
     get_gemini_client,
 )
 from app.services.ai.genai_utils import extract_genai_text
+from app.services.ai.json_utils import extract_first_json_object
 from app.services.ai.model_registry import get_api_model_name
 
 logger = logging.getLogger("RAGHelpers")
@@ -172,15 +172,7 @@ async def generate_hypothetical_document(
 
 
 def _extract_json(text: str) -> dict:
-    if not text:
-        return {}
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-    if not match:
-        return {}
-    try:
-        return json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return {}
+    return extract_first_json_object(text)
 
 
 def _heuristic_multi_queries(query: str, max_queries: int) -> List[str]:
@@ -292,6 +284,8 @@ def _heuristic_sources(query: str, available_sources: List[str]) -> List[str]:
         selected.append("lei")
     if any(term in q for term in ("modelo", "peticao", "contestacao", "recurso", "contrato", "clausula")):
         selected.append("pecas_modelo")
+    if any(term in q for term in ("doutrina", "autor", "autores", "livro", "manual", "obra", "comentario", "comentários", "artigo academico", "artigo acadêmico")):
+        selected.append("doutrina")
     if any(term in q for term in ("sei", "processo interno", "nota tecnica")):
         selected.append("sei")
     if not selected:

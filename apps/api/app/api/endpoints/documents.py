@@ -53,6 +53,7 @@ from app.workers.tasks.document_tasks import (
     generate_podcast_task,
     generate_diagram_task,
     process_document_task,
+    visual_index_task,
 )
 
 router = APIRouter()
@@ -255,6 +256,7 @@ async def upload_document(
         queued_task = False
         ocr_flag = parsed_metadata.get("ocr")
         transcribe_flag = parsed_metadata.get("transcribe")
+        visual_index_flag = parsed_metadata.get("visual_index")
         try:
             if doc_type == DocumentType.PDF:
                 extracted_text = await extract_text_from_pdf(file_path)
@@ -270,6 +272,21 @@ async def upload_document(
                         "ocr_status": "queued",
                         "ocr_task_id": task.id,
                         "ocr_requested": bool(ocr_flag),
+                    }
+                    queued_task = True
+
+                # Indexação visual (ColPali) para PDFs com tabelas/figuras
+                if visual_index_flag:
+                    logger.info(f"Enfileirando indexação visual (ColPali): {file_path}")
+                    tenant_id = parsed_metadata.get("tenant_id", str(current_user.id))
+                    case_id = parsed_metadata.get("case_id")
+                    visual_task = visual_index_task.delay(
+                        document.id, file_path, tenant_id, case_id
+                    )
+                    document.doc_metadata = {
+                        **document.doc_metadata,
+                        "visual_index_status": "queued",
+                        "visual_index_task_id": visual_task.id,
                     }
                     queued_task = True
 

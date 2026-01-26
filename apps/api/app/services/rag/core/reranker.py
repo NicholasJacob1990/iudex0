@@ -35,7 +35,7 @@ PORTUGUESE_LEGAL_PATTERNS = [
     r"\bart\.?\s*\d+",  # Art. 5, artigo 10
     r"\b§\s*\d+",  # Paragraphs
     r"\binciso\s+[IVXLCDM]+",  # Inciso I, II, etc.
-    r"\blei\s+n?\.?\s*[\d\.]+",  # Lei 8.666, Lei n. 14.133
+    r"\blei\s+n?[º°\.]?\s*[\d\.]+",  # Lei 8.666, Lei n. 14.133, Lei nº 14.133
     r"\bsúmula\s+n?\.?\s*\d+",  # Sumula 331
     r"\bstf\b|\bstj\b|\btst\b|\btrf\b|\btjsp\b",  # Court names
     r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}",  # CNJ case number

@@ -11,7 +11,9 @@ Provides:
 
 from __future__ import annotations
 
+import os
 import uuid
+import hashlib
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -120,6 +122,14 @@ class LocalIngestRequest(BaseModel):
     documents: List[DocumentInput] = Field(..., min_length=1, max_length=1000)
     chunk_size: Optional[int] = Field(512, ge=100, le=2000, description="Chunk size in tokens")
     chunk_overlap: Optional[int] = Field(50, ge=0, le=500, description="Overlap between chunks")
+    ingest_to_graph: Optional[bool] = Field(
+        None,
+        description="Also ingest to GraphRAG (Neo4j). If None, uses RAG_GRAPH_AUTO_INGEST env var."
+    )
+    extract_arguments: Optional[bool] = Field(
+        False,
+        description="Extract legal arguments when ingesting to graph"
+    )
 
     class Config:
         json_schema_extra = {
@@ -144,6 +154,14 @@ class GlobalIngestRequest(BaseModel):
     chunk_size: Optional[int] = Field(512, ge=100, le=2000, description="Chunk size in tokens")
     chunk_overlap: Optional[int] = Field(50, ge=0, le=500, description="Overlap between chunks")
     deduplicate: Optional[bool] = Field(True, description="Skip documents that already exist")
+    ingest_to_graph: Optional[bool] = Field(
+        None,
+        description="Also ingest to GraphRAG (Neo4j). If None, uses RAG_GRAPH_AUTO_INGEST env var."
+    )
+    extract_arguments: Optional[bool] = Field(
+        False,
+        description="Extract legal arguments when ingesting to graph"
+    )
 
     class Config:
         json_schema_extra = {
@@ -517,6 +535,25 @@ async def ingest_local(
                 else:
                     indexed_count += 1
 
+                # Ingest to knowledge graph if enabled
+                if _should_ingest_to_graph(request.ingest_to_graph):
+                    try:
+                        await _ingest_document_to_graph(
+                            text=doc.text,
+                            doc_id=doc_id,
+                            metadata=metadata,
+                            tenant_id=request.tenant_id,
+                            scope="local",
+                            scope_id=request.case_id,
+                            case_id=request.case_id,
+                            chunk_size=int(request.chunk_size or 512),
+                            chunk_overlap=int(request.chunk_overlap or 0),
+                            extract_arguments=request.extract_arguments or False,
+                        )
+                    except Exception as graph_err:
+                        logger.warning(f"Graph ingest failed for doc {idx}: {graph_err}")
+                        # Don't fail the whole request for graph errors
+
             except Exception as e:
                 logger.warning(f"Failed to ingest document {idx}: {e}")
                 errors.append({
@@ -633,6 +670,25 @@ async def ingest_global(
                     indexed_count += 1
                 else:
                     indexed_count += 1
+
+                # Ingest to knowledge graph if enabled (and not skipped)
+                if not (isinstance(result, dict) and result.get("skipped")):
+                    if _should_ingest_to_graph(request.ingest_to_graph):
+                        try:
+                            await _ingest_document_to_graph(
+                                text=doc.text,
+                                doc_id=doc_id,
+                                metadata=metadata,
+                                tenant_id="global",
+                                scope="global",
+                                scope_id=request.dataset.value,
+                                chunk_size=int(request.chunk_size or 512),
+                                chunk_overlap=int(request.chunk_overlap or 0),
+                                extract_arguments=request.extract_arguments or False,
+                            )
+                        except Exception as graph_err:
+                            logger.warning(f"Graph ingest failed for global doc {idx}: {graph_err}")
+                            # Don't fail the whole request for graph errors
 
             except Exception as e:
                 logger.warning(f"Failed to ingest global document {idx}: {e}")
@@ -817,3 +873,193 @@ def _dataset_to_collection(dataset: GlobalDataset) -> str:
         GlobalDataset.SEI: "sei",
     }
     return mapping.get(dataset, dataset.value)
+
+
+def _should_ingest_to_graph(explicit_flag: Optional[bool]) -> bool:
+    """
+    Determine if graph ingestion should occur.
+
+    Priority:
+    1. Explicit request flag (if provided)
+    2. Environment variable RAG_GRAPH_AUTO_INGEST
+    3. Default: False
+    """
+    if explicit_flag is not None:
+        return explicit_flag
+    return os.getenv("RAG_GRAPH_AUTO_INGEST", "false").lower() in ("true", "1", "yes")
+
+
+async def _ingest_document_to_graph(
+    text: str,
+    doc_id: str,
+    metadata: Dict[str, Any],
+    tenant_id: str,
+    scope: str = "global",
+    scope_id: str = "global",
+    case_id: Optional[str] = None,
+    chunk_size: int = 512,
+    chunk_overlap: int = 50,
+    extract_arguments: bool = False,
+) -> Dict[str, Any]:
+    """
+    Ingest a document into the knowledge graph.
+
+    This project has two graph layers:
+    - Neo4jMVP (Document->Chunk->Entity) for explainable multi-hop and visualization.
+    - GraphRAG factory (networkx/neo4j) for entity-centric graphs.
+
+    We support ingesting into either or both via `RAG_GRAPH_INGEST_ENGINE`:
+      - mvp (default): ingest into Neo4jMVP
+      - graph_rag: ingest into GraphRAG factory
+      - both: ingest into both backends
+
+    Returns:
+        Dict with ingestion results (entities_added, relationships_added)
+    """
+    engine = os.getenv("RAG_GRAPH_INGEST_ENGINE", "mvp").strip().lower()
+    results: Dict[str, Any] = {"engine": engine}
+
+    def _chunk_for_mvp(raw: str) -> List[Dict[str, Any]]:
+        # Chunk size/overlap in requests are expressed in tokens; approximate with ~4 chars/token.
+        chars_per_token = 4
+        size_chars = max(200, int(chunk_size or 512) * chars_per_token)
+        overlap_chars = max(0, int(chunk_overlap or 0) * chars_per_token)
+        step = max(1, size_chars - overlap_chars)
+
+        chunks_out: List[Dict[str, Any]] = []
+        chunk_index = 0
+        pos = 0
+        raw = raw or ""
+        while pos < len(raw):
+            chunk_text = raw[pos:pos + size_chars]
+            if chunk_text.strip():
+                # Deterministic per-doc chunk id (good enough for MVP paths/UI).
+                chunk_uid = hashlib.md5(f"{doc_id}:{chunk_index}".encode()).hexdigest()
+                chunks_out.append(
+                    {
+                        "chunk_uid": chunk_uid,
+                        "text": chunk_text,
+                        "chunk_index": chunk_index,
+                        "token_count": max(1, len(chunk_text) // chars_per_token),
+                    }
+                )
+                chunk_index += 1
+            pos += step
+        return chunks_out
+
+    # ------------------------------------------------------------------
+    # Neo4jMVP ingest (preferred for explainable paths + graph visualization)
+    # ------------------------------------------------------------------
+    if engine in ("mvp", "neo4j_mvp", "both"):
+        try:
+            from app.services.rag.core.neo4j_mvp import get_neo4j_mvp
+
+            neo4j = get_neo4j_mvp()
+            mvp_stats = neo4j.ingest_document(
+                doc_hash=doc_id,
+                chunks=_chunk_for_mvp(text),
+                metadata=metadata or {},
+                tenant_id=str(tenant_id),
+                scope=str(scope),
+                case_id=str(case_id or scope_id) if str(scope) == "local" and (case_id or scope_id) else None,
+                extract_entities=True,
+                semantic_extraction=os.getenv("RAG_GRAPH_SEMANTIC_EXTRACTION", "false").lower()
+                in ("true", "1", "yes", "on"),
+            )
+            results["neo4j_mvp"] = mvp_stats
+        except Exception as e:
+            logger.warning(f"Neo4jMVP ingest failed: {e}")
+            results["neo4j_mvp_error"] = str(e)
+
+    # ------------------------------------------------------------------
+    # GraphRAG factory ingest (entity-centric; optional/legacy)
+    # ------------------------------------------------------------------
+    if engine in ("graph_rag", "factory", "both"):
+        try:
+            from app.services.rag.core.graph_factory import get_knowledge_graph, GraphBackend
+            from app.services.rag.core.graph_rag import LegalEntityExtractor, ArgumentExtractor
+
+            # Get the knowledge graph (factory handles Neo4j vs NetworkX)
+            graph = get_knowledge_graph(scope=scope, scope_id=scope_id)
+            backend_type = getattr(graph, "backend", GraphBackend.NETWORKX)
+
+            # Extract legal entities from text
+            candidates = LegalEntityExtractor.extract_candidates(text)
+            entities_added = 0
+            relationships_added = 0
+
+            # Add document as entity
+            doc_entity_id = f"doc_{doc_id}"
+            doc_name = metadata.get("title") or metadata.get("filename") or f"Documento {doc_id[:8]}"
+            if graph.add_entity(
+                entity_id=doc_entity_id,
+                entity_type="documento",
+                name=doc_name,
+                properties=metadata,
+            ):
+                entities_added += 1
+
+            # Add extracted entities and create relationships
+            for entity_type, entity_id, name, entity_meta in candidates:
+                entity_type_str = entity_type.value if hasattr(entity_type, "value") else str(entity_type)
+
+                if graph.add_entity(
+                    entity_id=entity_id,
+                    entity_type=entity_type_str,
+                    name=name,
+                    properties=entity_meta,
+                ):
+                    entities_added += 1
+
+                # Create CITA relationship from document to entity
+                if graph.add_relationship(
+                    from_entity=doc_entity_id,
+                    to_entity=entity_id,
+                    relationship_type="CITA",
+                ):
+                    relationships_added += 1
+
+            # Extract arguments if requested
+            arguments_extracted = 0
+            if extract_arguments:
+                arguments = ArgumentExtractor.extract_arguments(text, source_chunk_id=doc_id)
+                for arg in arguments:
+                    arg_entity_id = f"arg_{arg.arg_id}"
+                    if graph.add_entity(
+                        entity_id=arg_entity_id,
+                        entity_type=arg.arg_type.value,
+                        name=arg.text[:100],
+                        properties={"full_text": arg.text, "confidence": arg.confidence},
+                    ):
+                        arguments_extracted += 1
+
+                    # Link argument to document
+                    graph.add_relationship(
+                        from_entity=doc_entity_id,
+                        to_entity=arg_entity_id,
+                        relationship_type="CONTEM_ARGUMENTO",
+                    )
+
+            # Persist if using NetworkX
+            if hasattr(graph, "persist"):
+                graph.persist()
+
+            logger.info(
+                f"GraphRAG ingest complete: backend={backend_type.value if hasattr(backend_type, 'value') else backend_type}, "
+                f"entities={entities_added}, relationships={relationships_added}, arguments={arguments_extracted}"
+            )
+
+            results["graph_rag"] = {
+                "backend": backend_type.value if hasattr(backend_type, "value") else str(backend_type),
+                "entities_added": entities_added,
+                "relationships_added": relationships_added,
+                "arguments_extracted": arguments_extracted,
+            }
+        except ImportError as e:
+            logger.warning(f"GraphRAG module not available: {e}")
+            results["graph_rag_error"] = str(e)
+        except Exception as e:
+            logger.error(f"GraphRAG ingest error: {e}")
+            results["graph_rag_error"] = str(e)
+
+    return results

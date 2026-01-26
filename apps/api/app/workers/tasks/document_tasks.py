@@ -232,6 +232,103 @@ def generate_podcast_task(document_id: str):
         return {"success": False, "document_id": document_id, "error": str(e)}
 
 
+@celery_app.task(name="visual_index")
+def visual_index_task(
+    document_id: str,
+    file_path: str,
+    tenant_id: str,
+    case_id: str | None = None,
+):
+    """
+    Task para indexação visual de PDF usando ColPali.
+
+    Processa o PDF como imagens e cria embeddings visuais para
+    retrieval de documentos com tabelas, figuras e infográficos.
+    """
+    logger.info(f"[TASK] Indexando visualmente documento {document_id}")
+
+    try:
+        # Importa ColPali só quando necessário (modelo grande)
+        from app.services.rag.core.colpali_service import get_colpali_service
+
+        colpali = get_colpali_service()
+
+        # Verifica se está habilitado
+        if not colpali.config.enabled:
+            logger.info(f"[TASK] ColPali desabilitado, pulando indexação visual")
+            asyncio.run(
+                _update_document(
+                    document_id,
+                    metadata_updates={
+                        "visual_index_status": "skipped",
+                        "visual_index_reason": "ColPali disabled",
+                    },
+                )
+            )
+            return {
+                "success": True,
+                "document_id": document_id,
+                "status": "skipped",
+                "reason": "ColPali disabled",
+            }
+
+        # Carrega modelo se necessário
+        if not colpali._model_loaded:
+            loaded = asyncio.run(colpali.load_model())
+            if not loaded:
+                raise RuntimeError("Failed to load ColPali model")
+
+        # Indexa o PDF
+        result = asyncio.run(
+            colpali.index_pdf(
+                pdf_path=file_path,
+                doc_id=document_id,
+                tenant_id=tenant_id,
+                case_id=case_id,
+            )
+        )
+
+        pages_indexed = result.get("pages_indexed", 0)
+
+        asyncio.run(
+            _update_document(
+                document_id,
+                metadata_updates={
+                    "visual_index_status": "completed",
+                    "visual_pages_indexed": pages_indexed,
+                    "visual_index_collection": colpali.config.qdrant_collection,
+                },
+            )
+        )
+
+        logger.info(
+            f"[TASK] Indexação visual concluída - Documento {document_id}, "
+            f"{pages_indexed} páginas indexadas"
+        )
+        return {
+            "success": True,
+            "document_id": document_id,
+            "pages_indexed": pages_indexed,
+        }
+
+    except Exception as e:
+        logger.error(f"[TASK] Erro na indexação visual do documento {document_id}: {e}")
+        asyncio.run(
+            _update_document(
+                document_id,
+                metadata_updates={
+                    "visual_index_status": "error",
+                    "visual_index_error": str(e),
+                },
+            )
+        )
+        return {
+            "success": False,
+            "document_id": document_id,
+            "error": str(e),
+        }
+
+
 @celery_app.task(name="generate_diagram")
 def generate_diagram_task(document_id: str, diagram_type: str = "flowchart"):
     """

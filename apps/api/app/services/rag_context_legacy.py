@@ -372,20 +372,33 @@ async def build_rag_context(
         if argument_graph_enabled and (allow_argument_all_scopes or scope == "private"):
             try:
                 from app.services.argument_pack import ARGUMENT_PACK
-                arg_ctx = ARGUMENT_PACK.build_debate_context_from_query(
-                    graph,
-                    retrieval_query,
-                    hops=hop_count,
-                )
+                try:
+                    arg_ctx, arg_stats = ARGUMENT_PACK.build_debate_context_from_query_with_stats(
+                        graph,
+                        retrieval_query,
+                        hops=hop_count,
+                    )
+                except Exception:
+                    arg_stats = {}
+                    arg_ctx = ARGUMENT_PACK.build_debate_context_from_query(
+                        graph,
+                        retrieval_query,
+                        hops=hop_count,
+                    )
                 if arg_ctx:
                     argument_context_parts.append(arg_ctx)
                     trace_event(
                         "argument_context",
                         {
+                            "mode": "query",
                             "length": len(arg_ctx),
                             "hops": hop_count,
                             "scope": scope,
                             "scope_id": scope_id,
+                            "seed_nodes": (arg_stats or {}).get("seed_nodes"),
+                            "expanded_nodes": (arg_stats or {}).get("expanded_nodes"),
+                            "claim_nodes": (arg_stats or {}).get("claim_nodes"),
+                            "max_seeds": (arg_stats or {}).get("max_seeds"),
                         },
                         request_id=request_id,
                         user_id=user_id,
@@ -610,6 +623,10 @@ async def build_rag_context(
             grouped_results.setdefault((scope, scope_id), []).append(item)
 
         enrich_parts = []
+        argument_context_parts_from_results: List[str] = []
+        if argument_graph_enabled is None:
+            argument_graph_enabled = os.getenv("ARGUMENT_RAG_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+        allow_argument_all_scopes = os.getenv("RAG_ARGUMENT_ALL_SCOPES", "true").lower() in ("1", "true", "yes", "on")
         for (scope, scope_id), scoped_results in grouped_results.items():
             graph = graph_by_scope.get((scope, scope_id))
             if not graph:
@@ -651,8 +668,47 @@ async def build_rag_context(
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                 )
+
+            if argument_graph_enabled and (allow_argument_all_scopes or scope == "private"):
+                try:
+                    from app.services.argument_pack import ARGUMENT_PACK
+                    arg_ctx, arg_stats = ARGUMENT_PACK.build_debate_context_from_results_with_stats(
+                        graph,
+                        scoped_results,
+                        hops=hop_count,
+                    )
+                    if arg_ctx:
+                        argument_context_parts_from_results.append(arg_ctx)
+                        trace_event(
+                            "argument_context",
+                            {
+                                "mode": "results",
+                                "length": len(arg_ctx),
+                                "hops": hop_count,
+                                "scope": scope,
+                                "scope_id": scope_id,
+                                "results_seen": (arg_stats or {}).get("results_seen"),
+                                "evidence_nodes": (arg_stats or {}).get("evidence_nodes"),
+                                "seed_nodes": (arg_stats or {}).get("seed_nodes"),
+                                "expanded_nodes": (arg_stats or {}).get("expanded_nodes"),
+                                "claim_nodes": (arg_stats or {}).get("claim_nodes"),
+                                "max_results": (arg_stats or {}).get("max_results"),
+                                "max_seeds": (arg_stats or {}).get("max_seeds"),
+                            },
+                            request_id=request_id,
+                            user_id=user_id,
+                            tenant_id=tenant_id,
+                            conversation_id=conversation_id,
+                        )
+                except ImportError as exc:
+                    logger.warning(f"ArgumentGraph pack unavailable: {exc}")
+                except Exception as exc:
+                    logger.warning(f"ArgumentGraph context failed (results-based): {exc}")
         if enrich_parts:
             graph_context = "\n\n".join(enrich_parts)
+        if argument_context_parts_from_results:
+            # Prefer results-based ArgumentRAG when we have retrieval evidence.
+            argument_context = "\n\n".join(argument_context_parts_from_results)
     if argument_context:
         # Token packing (chars) to avoid overflowing the main prompt context.
         # Keep argument context smaller than graph context by default.

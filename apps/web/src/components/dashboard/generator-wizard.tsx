@@ -50,6 +50,10 @@ import { useCanvasStore } from '@/stores/canvas-store';
 import { DeepResearchViewer } from '@/components/chat/deep-research-viewer';
 import { JobQualityPanel } from '@/components/chat/job-quality-panel';
 import { JobQualityPipelinePanel } from '@/components/chat/job-quality-pipeline-panel';
+import { QualityGatePanel } from '@/components/dashboard/quality-gate-panel';
+import { HilChecklistPanel } from '@/components/dashboard/hil-checklist-panel';
+import { DebateAuditPanel } from '@/components/dashboard/debate-audit-panel';
+import { HilHistoryPanel } from '@/components/dashboard/hil-history-panel';
 import { useUploadLimits } from '@/lib/use-upload-limits';
 import { listModels } from '@/config/models';
 import { toast } from 'sonner';
@@ -2101,16 +2105,17 @@ export function GeneratorWizard({
 			                                                                                                        <HelpCircle className="h-3 w-3 text-muted-foreground cursor-help" />
 			                                                                                                    </TooltipTrigger>
 			                                                                                                    <TooltipContent side="right" className="max-w-xs text-xs">
-			                                                                                                        <p>
-			                                                                                                            Backend: <span className="font-mono">deep_research_provider</span>. “Google” tende a
-			                                                                                                            funcionar melhor como agente no LangGraph; “Perplexity” é útil quando você quer o
-			                                                                                                            stack Sonar.
-			                                                                                                        </p>
-			                                                                                                    </TooltipContent>
-			                                                                                                </Tooltip>
-			                                                                                            </TooltipProvider>
-			                                                                                        </div>
-			                                                                                        <div className="flex gap-2">
+                                                                                                        <p>
+                                                                                                            Backend: <span className="font-mono">deep_research_provider</span>. “Google” tende a
+                                                                                                            funcionar melhor como agente no LangGraph; “Perplexity” e “OpenAI” s&atilde;o boas
+                                                                                                            op&ccedil;&otilde;es quando voc&ecirc; quer stacks de pesquisa dedicados (dependem de
+                                                                                                            credenciais).
+                                                                                                        </p>
+                                                                                                    </TooltipContent>
+                                                                                                </Tooltip>
+                                                                                            </TooltipProvider>
+                                                                                        </div>
+                                                                                        <div className="flex gap-2">
 			                                                                                            <Button
 			                                                                                                type="button"
 			                                                                                                variant={store.deepResearchProvider === 'auto' ? 'default' : 'outline'}
@@ -2127,19 +2132,27 @@ export function GeneratorWizard({
 			                                                                                            >
 			                                                                                                Google
 			                                                                                            </Button>
-			                                                                                            <Button
-			                                                                                                type="button"
-			                                                                                                variant={store.deepResearchProvider === 'perplexity' ? 'default' : 'outline'}
-			                                                                                                className="h-7 text-[10px] px-2 flex-1"
-			                                                                                                onClick={() => store.setDeepResearchProvider('perplexity')}
-			                                                                                            >
-			                                                                                                Perplexity
-			                                                                                            </Button>
-			                                                                                        </div>
-			                                                                                    </div>
+                                                                                            <Button
+                                                                                                type="button"
+                                                                                                variant={store.deepResearchProvider === 'perplexity' ? 'default' : 'outline'}
+                                                                                                className="h-7 text-[10px] px-2 flex-1"
+                                                                                                onClick={() => store.setDeepResearchProvider('perplexity')}
+                                                                                            >
+                                                                                                Perplexity
+                                                                                            </Button>
+                                                                                            <Button
+                                                                                                type="button"
+                                                                                                variant={store.deepResearchProvider === 'openai' ? 'default' : 'outline'}
+                                                                                                className="h-7 text-[10px] px-2 flex-1"
+                                                                                                onClick={() => store.setDeepResearchProvider('openai')}
+                                                                                            >
+                                                                                                OpenAI
+                                                                                            </Button>
+                                                                                        </div>
+                                                                                    </div>
 
-			                                                                                    {store.deepResearchProvider === 'perplexity' && (
-			                                                                                        <div className="space-y-1">
+                                                                                    {store.deepResearchProvider === 'perplexity' && (
+                                                                                        <div className="space-y-1">
 			                                                                                            <Label className="text-[10px] uppercase text-muted-foreground font-bold">Modelo (Perplexity Deep Research)</Label>
 			                                                                                            <div className="flex gap-2">
 			                                                                                                <Button
@@ -2154,10 +2167,37 @@ export function GeneratorWizard({
 			                                                                                            <div className="text-[10px] text-muted-foreground">
 			                                                                                                Dica: para atuar como agente, prefira <span className="font-semibold">Google</span>.
 			                                                                                            </div>
-			                                                                                        </div>
-			                                                                                    )}
-			                                                                                </div>
-			                                                                            </div>
+                                                                                        </div>
+                                                                                    )}
+
+                                                                                    {store.deepResearchProvider === 'openai' && (
+                                                                                        <div className="space-y-1">
+                                                                                            <Label className="text-[10px] uppercase text-muted-foreground font-bold">Modelo (OpenAI Deep Research)</Label>
+                                                                                            <div className="flex gap-2">
+                                                                                                <Button
+                                                                                                    type="button"
+                                                                                                    variant="outline"
+                                                                                                    className="h-7 text-[10px] px-2"
+                                                                                                    onClick={() => store.setDeepResearchModel('o4-mini-deep-research')}
+                                                                                                >
+                                                                                                    o4-mini
+                                                                                                </Button>
+                                                                                                <Button
+                                                                                                    type="button"
+                                                                                                    variant="outline"
+                                                                                                    className="h-7 text-[10px] px-2"
+                                                                                                    onClick={() => store.setDeepResearchModel('o3-deep-research')}
+                                                                                                >
+                                                                                                    o3
+                                                                                                </Button>
+                                                                                            </div>
+                                                                                            <div className="text-[10px] text-muted-foreground">
+                                                                                                Dica: se sua conta exigir vers&otilde;es datadas, cole o ID completo no campo de modelo.
+                                                                                            </div>
+                                                                                        </div>
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
 
 			                                                                            <div className="space-y-2 pt-2 border-t">
 			                                                                                <Label className="text-xs uppercase text-muted-foreground font-bold">Checklist complementar</Label>
@@ -2513,6 +2553,63 @@ export function GeneratorWizard({
                                     <DeepResearchViewer jobId={store.currentJobId || ''} isVisible={!!store.currentJobId} events={store.jobEvents} />
                                     <JobQualityPanel isVisible={!!store.currentJobId} events={store.jobEvents} />
                                     <JobQualityPipelinePanel isVisible={!!store.currentJobId} events={store.jobEvents} />
+
+                                    {/* Auditoria Detalhada - Expandable section with full audit panels */}
+                                    {store.currentJobId && (
+                                        <Accordion type="single" collapsible className="w-full">
+                                            <AccordionItem value="audit-details" className="border rounded-xl bg-card">
+                                                <AccordionTrigger className="px-4 py-3 hover:no-underline">
+                                                    <div className="flex items-center gap-2">
+                                                        <Scale className="h-4 w-4 text-indigo-600" />
+                                                        <span className="text-sm font-semibold">Auditoria Detalhada</span>
+                                                        <Badge variant="outline" className="text-[10px] h-5 ml-2">
+                                                            Compliance & HIL
+                                                        </Badge>
+                                                    </div>
+                                                </AccordionTrigger>
+                                                <AccordionContent className="px-4 pb-4 space-y-4">
+                                                    {(() => {
+                                                        const events = store.jobEvents || [];
+                                                        const doneEvent = [...events].reverse().find((e: any) => e?.type === 'done');
+
+                                                        const metadata = {
+                                                            processed_sections: doneEvent?.processed_sections || [],
+                                                            hil_history: doneEvent?.hil_history || [],
+                                                            has_any_divergence: doneEvent?.has_any_divergence,
+                                                            divergence_summary: doneEvent?.divergence_summary,
+                                                        };
+
+                                                        return (
+                                                            <>
+                                                                {/* Quality Gate Panel */}
+                                                                <div className="border-t border-outline/10 pt-4">
+                                                                    <QualityGatePanel events={events} />
+                                                                </div>
+
+                                                                {/* HIL Checklist Panel */}
+                                                                <div className="border-t border-outline/10 pt-4">
+                                                                    <HilChecklistPanel events={events} metadata={metadata} />
+                                                                </div>
+
+                                                                {/* Debate Audit Panel */}
+                                                                <DebateAuditPanel
+                                                                    metadata={metadata}
+                                                                    className="border-t border-outline/10 pt-4"
+                                                                />
+
+                                                                {/* HIL History Panel */}
+                                                                <HilHistoryPanel
+                                                                    metadata={metadata}
+                                                                    events={events}
+                                                                    className="border-t border-outline/10 pt-4"
+                                                                />
+                                                            </>
+                                                        );
+                                                    })()}
+                                                </AccordionContent>
+                                            </AccordionItem>
+                                        </Accordion>
+                                    )}
                                 </div>
                             </div>
 

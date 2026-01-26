@@ -88,8 +88,12 @@ class RAGConfig:
     multiquery_model: str = "gemini-2.0-flash"
 
     # ==========================================================================
-    # Reranking
+    # Reranking (Hybrid: Local or Cohere)
     # ==========================================================================
+    # Provider: "auto" (dev=local, prod=cohere), "local", "cohere"
+    rerank_provider: str = "auto"
+
+    # Local cross-encoder settings
     rerank_model: str = "cross-encoder/ms-marco-multilingual-MiniLM-L6-H384-v1"
     rerank_model_fallback: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
     rerank_batch_size: int = 32
@@ -97,6 +101,14 @@ class RAGConfig:
     rerank_cache_model: bool = True
     rerank_top_k: int = 10
     rerank_max_chars: int = 1800
+
+    # Cohere Rerank settings
+    cohere_rerank_model: str = "rerank-multilingual-v3.0"
+    cohere_rerank_max_candidates: int = 100
+    cohere_fallback_to_local: bool = True
+
+    # Legal domain boost (applied by both providers)
+    rerank_legal_boost: float = 0.1
 
     # ==========================================================================
     # Compression
@@ -129,6 +141,9 @@ class RAGConfig:
     neo4j_database: str = "iudex"
     neo4j_max_connection_pool_size: int = 50
     neo4j_connection_timeout: int = 30
+    graph_hybrid_mode: bool = False
+    graph_hybrid_auto_schema: bool = True
+    graph_hybrid_migrate_on_startup: bool = False
 
     # ==========================================================================
     # Storage - OpenSearch
@@ -257,7 +272,8 @@ class RAGConfig:
             multiquery_max=_env_int("RAG_MULTIQUERY_MAX", 3),
             multiquery_model=os.getenv("RAG_MULTIQUERY_MODEL", "gemini-2.0-flash"),
 
-            # Reranking
+            # Reranking (Hybrid)
+            rerank_provider=os.getenv("RERANK_PROVIDER", "auto"),
             rerank_model=os.getenv("RAG_RERANK_MODEL", "cross-encoder/ms-marco-multilingual-MiniLM-L6-H384-v1"),
             rerank_model_fallback=os.getenv("RAG_RERANK_MODEL_FALLBACK", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
             rerank_batch_size=_env_int("RAG_RERANK_BATCH_SIZE", 32),
@@ -265,6 +281,10 @@ class RAGConfig:
             rerank_cache_model=_env_bool("RAG_RERANK_CACHE_MODEL", True),
             rerank_top_k=_env_int("RAG_RERANK_TOP_K", 10),
             rerank_max_chars=_env_int("RAG_RERANK_MAX_CHARS", 1800),
+            cohere_rerank_model=os.getenv("COHERE_RERANK_MODEL", "rerank-multilingual-v3.0"),
+            cohere_rerank_max_candidates=_env_int("COHERE_RERANK_MAX_CANDIDATES", 100),
+            cohere_fallback_to_local=_env_bool("RERANK_FALLBACK_LOCAL", True),
+            rerank_legal_boost=_env_float("RERANK_LEGAL_BOOST", 0.1),
 
             # Compression
             compression_max_chars=_env_int("RAG_COMPRESSION_MAX_CHARS", 900),
@@ -284,11 +304,15 @@ class RAGConfig:
             # Graph Backend
             graph_backend=os.getenv("RAG_GRAPH_BACKEND", "networkx"),
             neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
+            # Aura typically provides NEO4J_USERNAME; accept it as an alias.
+            neo4j_user=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j")),
             neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
             neo4j_database=os.getenv("NEO4J_DATABASE", "iudex"),
             neo4j_max_connection_pool_size=_env_int("NEO4J_MAX_POOL_SIZE", 50),
             neo4j_connection_timeout=_env_int("NEO4J_CONNECTION_TIMEOUT", 30),
+            graph_hybrid_mode=_env_bool("RAG_GRAPH_HYBRID_MODE", False),
+            graph_hybrid_auto_schema=_env_bool("RAG_GRAPH_HYBRID_AUTO_SCHEMA", True),
+            graph_hybrid_migrate_on_startup=_env_bool("RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP", False),
 
             # OpenSearch
             opensearch_url=os.getenv("OPENSEARCH_URL", "https://localhost:9200"),

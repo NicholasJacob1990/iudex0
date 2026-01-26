@@ -502,50 +502,118 @@ async def extract_text_from_docx(file_path: str) -> str:
         logger.error(f"Erro ao extrair texto do DOCX {file_path}: {e}")
         raise
 
-async def extract_text_from_image(file_path: str) -> str:
-    """Extrai texto de imagem usando OCR (Tesseract)"""
+async def extract_text_from_image(file_path: str, use_hybrid: bool = True) -> str:
+    """
+    Extrai texto de imagem usando OCR
+
+    Args:
+        file_path: Caminho da imagem
+        use_hybrid: Se True, usa serviço híbrido com fallback para cloud
+    """
     logger.info(f"Extraindo texto de imagem: {file_path}")
+
+    if use_hybrid:
+        try:
+            from app.services.ocr_service import get_ocr_service
+
+            ocr_service = get_ocr_service()
+            result = await ocr_service.extract_text_from_image(file_path)
+
+            if result.error:
+                logger.warning(f"OCR híbrido falhou, usando Tesseract direto: {result.error}")
+                # Fallback para Tesseract direto
+                image = Image.open(file_path)
+                return pytesseract.image_to_string(image, lang='por')
+
+            logger.info(f"OCR concluído via {result.provider.value}")
+            return result.text
+        except ImportError:
+            logger.warning("Serviço OCR híbrido não disponível, usando Tesseract")
+
+    # Fallback: Tesseract direto
     try:
         image = Image.open(file_path)
-        text = pytesseract.image_to_string(image, lang='por') # Assumindo português
+        text = pytesseract.image_to_string(image, lang='por')
         return text
     except Exception as e:
         logger.error(f"Erro ao extrair texto da imagem {file_path}: {e}")
         return f"[Erro no OCR: {str(e)}]"
 
 
-async def extract_text_from_pdf_with_ocr(file_path: str) -> str:
+async def extract_text_from_pdf_with_ocr(
+    file_path: str,
+    use_hybrid: bool = True,
+    force_ocr: bool = False,
+) -> str:
     """
-    Aplica OCR completo em PDF digitalizado (imagens)
-    Converte cada página em imagem e aplica Tesseract OCR
+    Extrai texto de PDF usando estratégia híbrida de OCR
+
+    Estratégia:
+    1. Se PDF tem texto selecionável e force_ocr=False → pdfplumber
+    2. Se volume baixo → Tesseract local (gratuito)
+    3. Se volume alto ou Tesseract falha → Cloud OCR (Azure/Google/Gemini)
+
+    Args:
+        file_path: Caminho do PDF
+        use_hybrid: Se True, usa serviço híbrido inteligente
+        force_ocr: Se True, força OCR mesmo em PDFs com texto selecionável
     """
-    logger.info(f"Aplicando OCR completo em PDF: {file_path}")
+    logger.info(f"Extraindo texto de PDF: {file_path} (hybrid={use_hybrid}, force_ocr={force_ocr})")
+
+    if use_hybrid:
+        try:
+            from app.services.ocr_service import get_ocr_service
+
+            ocr_service = get_ocr_service()
+            result = await ocr_service.extract_text_from_pdf(
+                file_path,
+                force_ocr=force_ocr,
+            )
+
+            if result.error:
+                logger.warning(f"OCR híbrido falhou: {result.error}")
+                # Fallback para implementação original
+                return await _extract_text_from_pdf_tesseract(file_path)
+
+            logger.info(
+                f"Extração concluída via {result.provider.value}: "
+                f"{result.pages_processed} páginas, {len(result.text)} chars"
+            )
+            return result.text
+        except ImportError as e:
+            logger.warning(f"Serviço OCR híbrido não disponível: {e}")
+
+    # Fallback: implementação original com Tesseract
+    return await _extract_text_from_pdf_tesseract(file_path)
+
+
+async def _extract_text_from_pdf_tesseract(file_path: str) -> str:
+    """
+    Implementação original de OCR com Tesseract (fallback)
+    """
+    logger.info(f"Aplicando OCR Tesseract em PDF: {file_path}")
     try:
         from pdf2image import convert_from_path
-        
-        # Converter PDF para imagens (uma por página)
-        # DPI maior = melhor qualidade mas mais lento (300 é um bom balanço)
+
         logger.info("Convertendo PDF para imagens...")
         images = convert_from_path(file_path, dpi=300)
-        
+
         logger.info(f"PDF convertido em {len(images)} imagens")
-        
+
         ocr_texts = []
         for i, image in enumerate(images, 1):
             logger.info(f"Aplicando OCR na página {i}/{len(images)}")
-            
-            # Aplicar OCR em português
             page_text = pytesseract.image_to_string(image, lang='por')
-            
+
             if page_text.strip():
                 ocr_texts.append(f"--- Página {i} ---\n{page_text}")
             else:
                 ocr_texts.append(f"--- Página {i} ---\n[Página sem texto detectado]")
-        
+
         result = "\n\n".join(ocr_texts)
         logger.info(f"OCR concluído: {len(result)} caracteres extraídos")
         return result
-        
+
     except ImportError as e:
         logger.error("Bibliotecas necessárias não instaladas")
         logger.error("Instale com: pip install pdf2image")

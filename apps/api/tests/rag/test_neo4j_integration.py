@@ -30,10 +30,11 @@ from neo4j.exceptions import ServiceUnavailable
 # Configuration
 # =============================================================================
 
-NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "testpassword")
-NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
+# Use dedicated env vars for integration tests so local dev/prod config doesn't interfere.
+NEO4J_URI = os.getenv("NEO4J_TEST_URI", "bolt://localhost:7687")
+NEO4J_USER = os.getenv("NEO4J_TEST_USER", "neo4j")
+NEO4J_PASSWORD = os.getenv("NEO4J_TEST_PASSWORD", "testpassword")
+NEO4J_DATABASE = os.getenv("NEO4J_TEST_DATABASE", "neo4j")
 TEST_PREFIX = f"test_{uuid.uuid4().hex[:8]}"
 
 
@@ -93,6 +94,9 @@ def graph_adapter(neo4j_driver):
     os.environ["NEO4J_USER"] = NEO4J_USER
     os.environ["NEO4J_PASSWORD"] = NEO4J_PASSWORD
     os.environ["NEO4J_DATABASE"] = NEO4J_DATABASE
+    os.environ["RAG_GRAPH_HYBRID_MODE"] = "true"
+    os.environ["RAG_GRAPH_HYBRID_AUTO_SCHEMA"] = "true"
+    os.environ["RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP"] = "false"
 
     from app.services.rag.core.graph_factory import Neo4jAdapter, reset_knowledge_graph
 
@@ -225,6 +229,68 @@ class TestNeo4jEntities:
                 properties=entity["properties"],
             )
             assert result is True
+
+    def test_hybrid_labels_applied_for_whitelisted_types(self, graph_adapter, sample_entities):
+        """When hybrid mode is enabled, whitelisted entity types receive an additional label."""
+        targets = {
+            "artigo": "Artigo",
+            "lei": "Lei",
+            "sumula": "Sumula",
+        }
+
+        for entity in sample_entities:
+            graph_adapter.add_entity(
+                entity_id=entity["entity_id"],
+                entity_type=entity["entity_type"],
+                name=entity["name"],
+                properties=entity["properties"],
+            )
+
+        with graph_adapter.driver.session(database=NEO4J_DATABASE) as session:
+            for entity in sample_entities:
+                expected = targets.get(entity["entity_type"])
+                record = session.run(
+                    "MATCH (e:Entity {entity_id: $entity_id}) RETURN labels(e) as labels",
+                    entity_id=entity["entity_id"],
+                ).single()
+                assert record is not None
+                labels = record["labels"]
+                assert "Entity" in labels
+                if expected:
+                    assert expected in labels
+
+    def test_hybrid_migration_backfills_labels(self, graph_adapter):
+        """Migration should backfill labels for existing nodes based on entity_type."""
+        entity_id = f"{TEST_PREFIX}_legacy_lei_9999"
+        with graph_adapter.driver.session(database=NEO4J_DATABASE) as session:
+            session.run(
+                "CREATE (e:Entity {entity_id: $id, entity_type: 'lei', name: 'Lei 9.999', normalized: 'lei:9999'})",
+                id=entity_id,
+            )
+            before = session.run(
+                "MATCH (e:Entity {entity_id: $id}) RETURN labels(e) as labels",
+                id=entity_id,
+            ).single()["labels"]
+            assert "Lei" not in before
+
+        result = graph_adapter.migrate_hybrid_labels()
+        assert isinstance(result, dict)
+
+        with graph_adapter.driver.session(database=NEO4J_DATABASE) as session:
+            after = session.run(
+                "MATCH (e:Entity {entity_id: $id}) RETURN labels(e) as labels",
+                id=entity_id,
+            ).single()["labels"]
+            assert "Lei" in after
+
+    def test_hybrid_schema_indexes_created(self, graph_adapter):
+        """Schema auto-creation should create at least one hybrid index (best-effort)."""
+        with graph_adapter.driver.session(database=NEO4J_DATABASE) as session:
+            record = session.run(
+                "SHOW INDEXES YIELD name WHERE name STARTS WITH 'rag_lei_' RETURN count(name) as n"
+            ).single()
+            assert record is not None
+            assert record["n"] >= 1
 
     def test_get_entity(self, graph_adapter, sample_entities):
         """Test retrieving an entity."""

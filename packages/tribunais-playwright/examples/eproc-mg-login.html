@@ -1,0 +1,65 @@
+
+                        
+                        
+                        
+                        
+                                                    <div>
+                                <div class="form-group mb-2" id="frmUsuario"><label class="d-flex" for="txtUsuario">Usuário</label>
+<input aria-autocomplete="none" autocomplete="false" class="form-control form-control-sm" id="txtUsuario" maxlength="30" name="txtUsuario" oninput="usuarioJaDigitou=true;" type="text" style="">
+</div>
+
+
+                                <div id="frmSenha" class="form-group mb-4">
+                                    <label for="pwdSenha">Senha</label>
+                                    <div class="d-flex">
+                                        <span class="input-group"><input type="password" style="display: none;" name="pwdSenha" autocomplete="one-time-code"><input id="pwdSenha" class="form-control form-control-sm masked" maxlength="40" oninput="usuarioJaDigitou=true;" autocomplete="off" inputmode="none" onfocus="this.setAttribute('inputmode', 'text');" value="" type="text" style=""></span> <span id="showHidePwd" style="cursor: pointer;height: calc(1.5em + 0.5rem);" class="input-group-text form-control-sm">
+                                            <i class="material-icons m-0">visibility</i>
+                                        </span>
+                                </div>
+                                </div>
+
+                                                                    
+                                
+                                <div class="md-form">
+                                    <button type="button" id="sbmEntrar" name="sbmEntrar" class="btn btn-sm btn-primary w-100" accesskey="n" onclick="Submit('login');">
+                                        Entrar
+                                    </button>
+                                </div>
+                                <div class="text-center">
+                                    <div class="my-3 border-bottom d-flex">
+                                        <div class="w-100 text-left font-weight-light">Outras opções de acesso</div>
+                                        <div class="flex-shrink-1">
+                                            <a href="#" id="dropdownMenuButton" data-toggle="dropdown" aria-label="Ajuda"><i class="material-icons">help_outline</i></a>
+
+                                            <div class="dropdown-menu">
+                                                
+                                                <a class="dropdown-item" href="javascript:exibirSubFrm('externo_controlador.php?acao=obter_certificado_subfrm&amp;acao_origem=',700,480);" id="obterCertificado">Como obter certificado digital</a>
+
+                                                <a class="dropdown-item" href="javascript:exibirSubFrm('externo_controlador.php?acao=problema_acesso_certificado&amp;acao_origem=',800, 600);" id="problemasCertificado">Problemas de acesso com certificado?</a>
+
+                                                <div class="dropdown-divider"></div>
+                                                <a class="dropdown-item" href="externo_controlador.php?acao=fale" title="Fale Conosco">Fale conosco</a>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="row px-3 mt-2 d-flex justify-content-center">
+                                        <input class="w-100 btn btn-sm btn-secondary" data-content="Acople o token do certificado digital ao seu computador antes de acessar esta opção." data-toggle="popover" onclick="SubmitCert()" title="" type="button" value="Certificado Digital" data-original-title="Atenção" style="">
+
+                                    </div>
+                                                                    </div>
+
+                                <div>
+                                                                    </div>
+
+                                <div class="text-right">
+                                    <div>
+    <a href="externo_controlador.php?acao=esqueci_senha_solicitar_redefinicao" title="Clique aqui se você esqueceu sua senha e quer receber um e-mail para redefini-la"> <small>Esqueci minha senha</small> </a>
+</div>                                        <div>
+        <a href="#" id="lnk2fa" onclick="Submit('2fa_configurar');" data-toggle="popover" data-trigger="hover" data-html="true" title="" data-content="Adicione maior segurança no seu acesso ao sistema. Clique para configurar." data-original-title="Autenticação em dois fatores"> <small>Autenticação em dois fatores</small> </a>
+    </div>
+                                </div>
+                            </div>
+
+                                                <input type="hidden" id="hdnAcao" name="hdnAcao" value="login" style=""> <input type="hidden" id="hdnDebug" name="hdnDebug" value="" style="">
+                    

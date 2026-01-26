@@ -1,0 +1,906 @@
+--- argument_pack.py
++++ argument_pack.py
+@@ -37,7 +37,7 @@
+ import unicodedata
+
+ from dataclasses import dataclass, field
+
+ from enum import Enum
+
+-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
++from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+
+ 
+
+ 
+
+ # =============================================================================
+
+@@ -576,20 +576,79 @@
+     # Contexto “pró/contra”
+
+     # -------------------------
+
+ 
+
+-    def build_debate_context(self, graph, seed_nodes: Set[str], hops: int = 2) -> str:
+
+-        """
+
+-        Constrói um contexto orientado a contraditório:
+
+-        - Para cada claim seed, lista:
+
+-          * quem afirma/quem contesta (ASSERTS/DISPUTES)
+
+-          * evidências que sustentam/contradizem (SUPPORTS/CONTRADICTS)
+
++    
+
++    # ----------------------------
+
++    # Debate builder (produção)
+
++    # ----------------------------
+
++
+
++    def _status_from_counts(self, supports_n: int, contradicts_n: int) -> str:
+
++        """
+
++        Classificação simples do status probatório de uma CLAIM:
+
++          - no_evidence: não há evidências a favor nem contra (acima do limiar)
+
++          - supported: há evidências a favor e nenhuma contra (acima do limiar)
+
++          - not_confirmed: há evidências contra e nenhuma a favor (acima do limiar)
+
++          - inconclusive: há evidências a favor e contra (acima do limiar)
+
++        """
+
++        if supports_n <= 0 and contradicts_n <= 0:
+
++            return "no_evidence"
+
++        if supports_n > 0 and contradicts_n <= 0:
+
++            return "supported"
+
++        if supports_n <= 0 and contradicts_n > 0:
+
++            return "not_confirmed"
+
++        return "inconclusive"
+
++
+
++    def build_debate_bundle(
+
++        self,
+
++        graph,
+
++        seed_nodes: Set[str],
+
++        hops: int = 2,
+
++        *,
+
++        max_claims: int = 3,
+
++        max_support: int = 3,
+
++        max_contra: int = 3,
+
++        max_actors: int = 2,
+
++        max_issues: int = 2,
+
++        max_chars: Optional[int] = 8000,
+
++        evidence_weight_threshold: float = 0.6,
+
++        risk_mode: str = "high",
+
++    ) -> Dict[str, Any]:
+
++        """
+
++        Retorna um bundle estruturado do debate (pró/contra), ideal para auditoria/logs.
+
++
+
++        Importante:
+
++        - Este método assume um grafo no estilo do rag_graph.py (NetworkX) onde
+
++          atributos de nós/arestas são "flat" (ex.: node['doc_id'], edge['weight']).
+
++        - Para Neo4j: você pode manter o ArgumentGraph em um grafo separado (ou em Neo4j com labels),
+
++          desde que exponha uma API equivalente (query_related/find_entities + acesso aos atributos).
+
++
+
++        Saída (shape):
+
++        {
+
++          "params": {...},
+
++          "claims": [
+
++            {
+
++              "claim_id": "...",
+
++              "text": "...",
+
++              "issues": [{"issue_id": "...", "text": "..."}],
+
++              "asserters": [{"actor_id": "...", "name": "..."}],
+
++              "disputers": [{"actor_id": "...", "name": "..."}],
+
++              "supports": [{"evidence_id": "...", "doc_id": "...", "chunk_id": "...", "title": "...", "url": "...", "weight": 0.9}],
+
++              "contradicts": [...],
+
++              "counts": {"supports": 2, "contradicts": 1},
+
++              "status": "supported|not_confirmed|inconclusive|no_evidence",
+
++              "score": 3.14
+
++            }
+
++          ],
+
++          "overall": {"abstained": true/false, "status": "...", "reason": "..."}
+
++        }
+
+         """
+
+         if not seed_nodes:
+
+-            return ""
+
+-
+
+-        lines: List[str] = []
+
+-        lines.append("### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n")
+
+-
+
+-        # Só arestas relevantes para debate
+
++            return {
+
++                "params": {"hops": hops},
+
++                "claims": [],
+
++                "overall": {"abstained": True, "status": "no_seeds", "reason": "no_seed_nodes"},
+
++            }
+
++
+
++        # Relações relevantes para debate
+
+         rel_filter = [
+
+             ArgumentRelationType.ASSERTS,
+
+             ArgumentRelationType.DISPUTES,
+
+@@ -600,61 +659,307 @@
+             ArgumentRelationType.DEPENDS_ON,
+
+         ]
+
+ 
+
+-        # expande seeds
+
+         expanded: Set[str] = set()
+
+         for s in seed_nodes:
+
+-            sub = graph.query_related(s, hops=hops, relation_filter=rel_filter)
+
+-            expanded.update(sub.nodes())
+
+-
+
+-        # foca em claims
+
+-        claim_nodes = [n for n in expanded if graph.graph.nodes[n].get("entity_type") == ArgumentEntityType.CLAIM.value]
+
+-        claim_nodes = claim_nodes[:12]
+
+-
+
+-        def _name(n: str) -> str:
+
+-            return graph.graph.nodes[n].get("name") or n
+
+-
+
+-        for cn in claim_nodes:
+
+-            cdata = graph.graph.nodes[cn]
+
+-            lines.append(f"**CLAIM:** {_name(cn)}")
+
+-            if cdata.get("polarity") in (-1, "-1"):
+
+-                lines.append("- Polaridade (heurística): negativa/contesta")
+
+-            elif cdata.get("polarity") in (1, "1"):
+
+-                lines.append("- Polaridade (heurística): positiva/afirma")
+
+-
+
+-            # quem afirma / contesta
+
+-            asserters = []
+
+-            disputers = []
+
+-            supporters = []
+
+-            contradictors = []
+
+-
+
+-            for u, v, ed in graph.graph.in_edges(cn, data=True):
+
++            try:
+
++                sub = graph.query_related(s, hops=hops, relation_filter=rel_filter)
+
++                expanded.update(sub.nodes())
+
++            except Exception:
+
++                # Se o seed não existir no grafo, seguimos sem travar
+
++                continue
+
++
+
++        # Coleta claims
+
++        claim_nodes = [
+
++            n for n in expanded
+
++            if getattr(graph, "graph", None) is not None
+
++            and graph.graph.nodes.get(n, {}).get("entity_type") == ArgumentEntityType.CLAIM.value
+
++        ]
+
++
+
++        def _node(n: str) -> Dict[str, Any]:
+
++            return graph.graph.nodes.get(n, {}) if getattr(graph, "graph", None) is not None else {}
+
++
+
++        def _node_name(n: str) -> str:
+
++            return _node(n).get("name") or n
+
++
+
++        def _claim_text(n: str) -> str:
+
++            nd = _node(n)
+
++            return (nd.get("text") or nd.get("name") or n).strip()
+
++
+
++        def _issue_text(n: str) -> str:
+
++            nd = _node(n)
+
++            return (nd.get("text") or nd.get("name") or n).strip()
+
++
+
++        def _actor_payload(n: str) -> Dict[str, Any]:
+
++            return {"actor_id": n, "name": _clip(_node_name(n), 120)}
+
++
+
++        def _issue_payload(n: str) -> Dict[str, Any]:
+
++            return {"issue_id": n, "text": _clip(_issue_text(n), 220)}
+
++
+
++        def _evidence_payload(n: str, weight: float) -> Dict[str, Any]:
+
++            nd = _node(n)
+
++            return {
+
++                "evidence_id": n,
+
++                "doc_id": nd.get("doc_id"),
+
++                "chunk_id": nd.get("chunk_id"),
+
++                "title": _clip((nd.get("title") or nd.get("name") or n), 220),
+
++                "url": nd.get("url"),
+
++                "weight": float(weight),
+
++            }
+
++
+
++        def _edge_weight(ed: Dict[str, Any]) -> float:
+
++            try:
+
++                return float(ed.get("weight", 1.0))
+
++            except Exception:
+
++                return 1.0
+
++
+
++        # Score de claim = soma de pesos pró+contra + bônus leve por volume
+
++        def _claim_score(cn: str) -> float:
+
++            s_sum = 0.0
+
++            c_sum = 0.0
+
++            s_n = 0
+
++            c_n = 0
+
++            for u, _, ed in graph.graph.in_edges(cn, data=True):
+
+                 r = ed.get("relation")
+
++                w = _edge_weight(ed)
+
++                if r == ArgumentRelationType.SUPPORTS.value:
+
++                    s_sum += w
+
++                    s_n += 1
+
++                elif r == ArgumentRelationType.CONTRADICTS.value:
+
++                    c_sum += w
+
++                    c_n += 1
+
++            return (s_sum + c_sum) + 0.05 * (s_n + c_n)
+
++
+
++        # Ordena e limita claims
+
++        claim_nodes_sorted = sorted(claim_nodes, key=_claim_score, reverse=True)[: max(1, max_claims)]
+
++
+
++        claims_out: List[Dict[str, Any]] = []
+
++
+
++        for cn in claim_nodes_sorted:
+
++            # Coletores
+
++            asserters: List[Tuple[str, float]] = []
+
++            disputers: List[Tuple[str, float]] = []
+
++            supports: List[Tuple[str, float]] = []
+
++            contradicts: List[Tuple[str, float]] = []
+
++            issues: List[str] = []
+
++
+
++            # in_edges(claim): ACTOR->CLAIM (assert/dispute), EVIDENCE->CLAIM (support/contradict), ISSUE->CLAIM (about)
+
++            for u, _, ed in graph.graph.in_edges(cn, data=True):
+
++                r = ed.get("relation")
+
++                w = _edge_weight(ed)
+
+                 if r == ArgumentRelationType.ASSERTS.value:
+
+-                    asserters.append(u)
+
++                    asserters.append((u, w))
+
+                 elif r == ArgumentRelationType.DISPUTES.value:
+
+-                    disputers.append(u)
+
++                    disputers.append((u, w))
+
+                 elif r == ArgumentRelationType.SUPPORTS.value:
+
+-                    supporters.append(u)
+
++                    supports.append((u, w))
+
+                 elif r == ArgumentRelationType.CONTRADICTS.value:
+
+-                    contradictors.append(u)
+
+-
+
++                    contradicts.append((u, w))
+
++                elif r == ArgumentRelationType.ABOUT.value:
+
++                    issues.append(u)
+
++
+
++            # Sort + limit
+
++            asserters = sorted(asserters, key=lambda t: t[1], reverse=True)[: max_actors]
+
++            disputers = sorted(disputers, key=lambda t: t[1], reverse=True)[: max_actors]
+
++            supports = sorted(supports, key=lambda t: t[1], reverse=True)[: max_support]
+
++            contradicts = sorted(contradicts, key=lambda t: t[1], reverse=True)[: max_contra]
+
++            issues = issues[: max_issues]
+
++
+
++            supports_n = sum(1 for _, w in supports if w >= evidence_weight_threshold)
+
++            contradicts_n = sum(1 for _, w in contradicts if w >= evidence_weight_threshold)
+
++            status = self._status_from_counts(supports_n, contradicts_n)
+
++
+
++            claim_payload = {
+
++                "claim_id": cn,
+
++                "text": _clip(_claim_text(cn), 350),
+
++                "issues": [_issue_payload(i) for i in issues],
+
++                "asserters": [_actor_payload(a) for a, _ in asserters],
+
++                "disputers": [_actor_payload(a) for a, _ in disputers],
+
++                "supports": [_evidence_payload(e, w) for e, w in supports],
+
++                "contradicts": [_evidence_payload(e, w) for e, w in contradicts],
+
++                "counts": {"supports": supports_n, "contradicts": contradicts_n},
+
++                "status": status,
+
++                "score": float(_claim_score(cn)),
+
++            }
+
++            claims_out.append(claim_payload)
+
++
+
++        # Overall decision (conservadora em high-risk)
+
++        overall = {"abstained": True, "status": "no_claims", "reason": "no_claims"}
+
++        if claims_out:
+
++            top = claims_out[0]
+
++            top_status = top.get("status")
+
++            if risk_mode in ("high", "strict"):
+
++                abstained = top_status in ("no_evidence", "inconclusive")
+
++            else:
+
++                abstained = top_status == "no_evidence"
+
++
+
++            reason_map = {
+
++                "no_evidence": "insufficient_evidence",
+
++                "supported": "supported_by_evidence",
+
++                "not_confirmed": "evidence_contradicts",
+
++                "inconclusive": "conflicting_evidence",
+
++            }
+
++            overall = {
+
++                "abstained": bool(abstained),
+
++                "status": top_status,
+
++                "reason": reason_map.get(top_status, "unknown"),
+
++            }
+
++
+
++        return {
+
++            "params": {
+
++                "hops": hops,
+
++                "max_claims": max_claims,
+
++                "max_support": max_support,
+
++                "max_contra": max_contra,
+
++                "max_actors": max_actors,
+
++                "max_issues": max_issues,
+
++                "max_chars": max_chars,
+
++                "evidence_weight_threshold": evidence_weight_threshold,
+
++                "risk_mode": risk_mode,
+
++            },
+
++            "claims": claims_out,
+
++            "overall": overall,
+
++        }
+
++
+
++    def format_debate_bundle(self, bundle: Dict[str, Any], *, max_chars: Optional[int] = 8000) -> str:
+
++        """
+
++        Formata o bundle pró/contra em texto curto e auditável.
+
++        """
+
++        if not bundle or not bundle.get("claims"):
+
++            return "### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n\n- Sem claims relevantes encontradas no grafo.\n"
+
++
+
++        status_pt = {
+
++            "no_evidence": "Sem evidência suficiente (no conjunto recuperado)",
+
++            "supported": "Suportado por evidências (provisório)",
+
++            "not_confirmed": "Não confirmado (evidências contrárias predominam)",
+
++            "inconclusive": "Inconclusivo (evidências conflitantes)",
+
++        }
+
++
+
++        def fmt_ev(ev: Dict[str, Any]) -> str:
+
++            # referência curta: chunk_id > doc_id > evidence_id
+
++            ref = ev.get("chunk_id") or ev.get("doc_id") or ev.get("evidence_id")
+
++            title = ev.get("title") or ""
+
++            w = ev.get("weight", 1.0)
+
++            return f"{ref} — {_clip(title, 120)} (w={w:.2f})"
+
++
+
++        lines: List[str] = []
+
++        lines.append("### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n")
+
++
+
++        for i, c in enumerate(bundle.get("claims", [])[: bundle.get("params", {}).get("max_claims", 3)], start=1):
+
++            c_text = c.get("text", "")
+
++            lines.append(f"**CLAIM {i}:** {c_text}")
+
++
+
++            st = c.get("status", "no_evidence")
+
++            lines.append(f"- **Status:** {status_pt.get(st, st)}")
+
++
+
++            issues = c.get("issues") or []
+
++            if issues:
+
++                lines.append("- **Issue:** " + "; ".join(_clip(x.get("text", ""), 160) for x in issues[:2]))
+
++
+
++            asserters = c.get("asserters") or []
+
++            disputers = c.get("disputers") or []
+
+             if asserters:
+
+-                lines.append("  - **Quem afirma:** " + "; ".join(_clip(_name(a), 80) for a in asserters[:5]))
+
++                lines.append("- **Quem afirma:** " + "; ".join(_clip(a.get("name", ""), 80) for a in asserters))
+
+             if disputers:
+
+-                lines.append("  - **Quem contesta:** " + "; ".join(_clip(_name(a), 80) for a in disputers[:5]))
+
+-
+
+-            if supporters:
+
+-                lines.append("  - **Evidências a favor:** " + "; ".join(_clip(_name(e), 90) for e in supporters[:6]))
+
+-            if contradictors:
+
+-                lines.append("  - **Evidências contra:** " + "; ".join(_clip(_name(e), 90) for e in contradictors[:6]))
+
+-
+
+-            lines.append("")  # espaçamento
+
+-
+
+-        return "\n".join(lines).strip() + "\n"
+
+-
+
+-    def build_debate_context_from_query(self, graph, query: str, hops: int = 2) -> str:
+
++                lines.append("- **Quem contesta:** " + "; ".join(_clip(a.get("name", ""), 80) for a in disputers))
+
++
+
++            sup = c.get("supports") or []
+
++            con = c.get("contradicts") or []
+
++            if sup:
+
++                lines.append("- **Evidências a favor:**")
+
++                for ev in sup:
+
++                    lines.append("  - " + fmt_ev(ev))
+
++            if con:
+
++                lines.append("- **Evidências contra:**")
+
++                for ev in con:
+
++                    lines.append("  - " + fmt_ev(ev))
+
++
+
++            # sugestões genéricas (sem alucinar)
+
++            if st == "no_evidence":
+
++                lines.append("- **Próximo passo sugerido:** localizar documentos/logs primários que confirmem ou refutem a claim.")
+
++            elif st == "inconclusive":
+
++                lines.append("- **Próximo passo sugerido:** buscar evidência decisiva (fonte primária) para resolver o conflito.")
+
++            lines.append("")
+
++
+
++        overall = bundle.get("overall") or {}
+
++        if overall.get("abstained"):
+
++            lines.append(f"⚠️ **Conclusão conservadora:** {status_pt.get(overall.get('status'), overall.get('status'))}.")
+
++            lines.append("⚠️ **Nota:** em modo de risco alto, evite afirmar como fato sem lastro suficiente.\n")
+
++
+
++        txt = "\n".join(lines).strip() + "\n"
+
++        if max_chars is not None and len(txt) > max_chars:
+
++            return txt[: max_chars - 1].rstrip() + "…\n"
+
++        return txt
+
++
+
++    def build_debate_context(
+
++        self,
+
++        graph,
+
++        seed_nodes: Set[str],
+
++        hops: int = 2,
+
++        *,
+
++        max_claims: int = 3,
+
++        max_support: int = 3,
+
++        max_contra: int = 3,
+
++        max_actors: int = 2,
+
++        max_issues: int = 2,
+
++        max_chars: Optional[int] = 8000,
+
++        evidence_weight_threshold: float = 0.6,
+
++        risk_mode: str = "high",
+
++        return_structured: bool = False,
+
++    ) -> Union[str, Tuple[str, Dict[str, Any]]]:
+
++        """
+
++        API principal (produção): monta texto pró/contra e, opcionalmente, retorna o bundle estruturado.
+
++
+
++        Compatibilidade:
+
++        - chamadas antigas continuam funcionando porque hops permanece como 3º arg posicional.
+
++        """
+
++        bundle = self.build_debate_bundle(
+
++            graph,
+
++            seed_nodes,
+
++            hops=hops,
+
++            max_claims=max_claims,
+
++            max_support=max_support,
+
++            max_contra=max_contra,
+
++            max_actors=max_actors,
+
++            max_issues=max_issues,
+
++            max_chars=max_chars,
+
++            evidence_weight_threshold=evidence_weight_threshold,
+
++            risk_mode=risk_mode,
+
++        )
+
++        text = self.format_debate_bundle(bundle, max_chars=max_chars)
+
++        return (text, bundle) if return_structured else text
+
++
+
++    def build_debate_context_from_query(
+
++        self,
+
++        graph,
+
++        query: str,
+
++        hops: int = 2,
+
++        *,
+
++        max_claims: int = 3,
+
++        max_support: int = 3,
+
++        max_contra: int = 3,
+
++        max_actors: int = 2,
+
++        max_issues: int = 2,
+
++        max_chars: Optional[int] = 8000,
+
++        evidence_weight_threshold: float = 0.6,
+
++        risk_mode: str = "high",
+
++        return_structured: bool = False,
+
++    ) -> Union[str, Tuple[str, Dict[str, Any]]]:
+
+         seeds = self.resolve_query_seeds(graph, query)
+
+-        return self.build_debate_context(graph, seeds, hops=hops)
+
++        return self.build_debate_context(
+
++            graph,
+
++            seeds,
+
++            hops=hops,
+
++            max_claims=max_claims,
+
++            max_support=max_support,
+
++            max_contra=max_contra,
+
++            max_actors=max_actors,
+
++            max_issues=max_issues,
+
++            max_chars=max_chars,
+
++            evidence_weight_threshold=evidence_weight_threshold,
+
++            risk_mode=risk_mode,
+
++            return_structured=return_structured,
+
++        )
+
++
+
+ 
+
+ 
+
+ # Singleton padrão

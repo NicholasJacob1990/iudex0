@@ -41,6 +41,9 @@ beautifulsoup4==4.12.3
 requests==2.32.3
 httpx==0.27.2
 
+# OpenSearch (BM25)
+opensearch-py==2.6.0
+
 # Utilidades
 pydantic==2.10.2
 pydantic-settings==2.6.1
@@ -57,7 +60,6 @@ loguru==0.7.2
 # Segurança
 cryptography==43.0.3
 bcrypt==4.2.1
-
 
 
 

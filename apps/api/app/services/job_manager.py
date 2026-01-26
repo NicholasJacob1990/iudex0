@@ -4,9 +4,10 @@ import sqlite3
 import json
 import logging
 import shutil
+import re
 from copy import deepcopy
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Dict, Any, List
@@ -57,8 +58,75 @@ class JobManager:
         except (TypeError, ValueError):
             max_events = 20000
         self._event_max = max(1000, min(max_events, 100000))
+        self._event_persist_enabled = os.getenv("JOB_EVENT_PERSIST", "true").lower() == "true"
+        try:
+            self._event_payload_max_bytes = int(os.getenv("JOB_EVENT_MAX_BYTES", "200000"))
+        except (TypeError, ValueError):
+            self._event_payload_max_bytes = 200000
+        try:
+            self._event_ttl_days = int(os.getenv("JOB_EVENT_TTL_DAYS", "14"))
+        except (TypeError, ValueError):
+            self._event_ttl_days = 14
+        try:
+            self._event_max_rows = int(os.getenv("JOB_EVENT_MAX_ROWS", "0"))
+        except (TypeError, ValueError):
+            self._event_max_rows = 0
         self._api_counters: Dict[str, Dict[str, Any]] = {}
         self._job_users: Dict[str, str] = {}
+        self._cleanup_job_events_best_effort()
+
+    def _safe_slug(self, value: str, fallback: str = "job") -> str:
+        slug = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "").strip()).strip("_").lower()
+        return slug or fallback
+
+    def _get_job_manager_dir(self) -> Path:
+        return Path(self.db_path).resolve().parent
+
+    def _get_job_event_payload_dir(self, job_id: str) -> Path:
+        base = self._get_job_manager_dir() / "events" / self._safe_slug(job_id or "job", "job")
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    def _cleanup_job_events_best_effort(self) -> None:
+        if not self._event_persist_enabled:
+            return
+        try:
+            ttl_days = int(self._event_ttl_days or 0)
+        except Exception:
+            ttl_days = 0
+        try:
+            max_rows = int(self._event_max_rows or 0)
+        except Exception:
+            max_rows = 0
+        if ttl_days <= 0 and max_rows <= 0:
+            return
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            if ttl_days > 0:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).isoformat().replace("+00:00", "Z")
+                cursor.execute(
+                    "DELETE FROM job_events WHERE ts < ?",
+                    (cutoff,),
+                )
+            if max_rows > 0:
+                cursor.execute("SELECT COUNT(*) FROM job_events")
+                total = int(cursor.fetchone()[0] or 0)
+                if total > max_rows:
+                    extra = total - max_rows
+                    cursor.execute(
+                        """
+                        DELETE FROM job_events
+                        WHERE id IN (
+                            SELECT id FROM job_events ORDER BY id ASC LIMIT ?
+                        )
+                        """,
+                        (extra,),
+                    )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logger.warning(f"⚠️ Falha ao limpar job_events (best-effort): {exc}")
 
     def set_job_user(self, job_id: str, user_id: Optional[str]) -> None:
         job_id = str(job_id or "").strip()
@@ -92,7 +160,7 @@ class JobManager:
             event: Dict[str, Any] = dict(event_type)
             event.setdefault("v", 1)
             event.setdefault("job_id", job_id)
-            event.setdefault("ts", f"{datetime.utcnow().isoformat()}Z")
+            event.setdefault("ts", datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
             if payload is not None and "data" not in event:
                 event["data"] = dict(payload) if isinstance(payload, dict) else {"value": payload}
             return event
@@ -116,14 +184,69 @@ class JobManager:
         return {
             "v": 1,
             "job_id": job_id,
-            "ts": f"{datetime.utcnow().isoformat()}Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "type": str(event_type),
+            "channel": phase or None,
             "phase": phase,
             "node": node,
             "section": section,
             "agent": agent,
             "data": data,
         }
+
+    def _persist_event_best_effort(self, event: Dict[str, Any]) -> Optional[int]:
+        if not self._event_persist_enabled:
+            return None
+        job_id = str(event.get("job_id") or "").strip()
+        if not job_id:
+            return None
+        try:
+            payload = event.get("data") if isinstance(event.get("data"), dict) else {}
+            payload_json = json.dumps(payload, ensure_ascii=False, default=str)
+            payload_preview = payload_json[: min(len(payload_json), 8000)]
+
+            oversized = self._event_payload_max_bytes > 0 and len(payload_json.encode("utf-8")) > self._event_payload_max_bytes
+
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO job_events (job_id, ts, type, channel, phase, node, section, agent, data_json, data_ref, data_preview)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_id,
+                    event.get("ts"),
+                    event.get("type"),
+                    event.get("channel"),
+                    event.get("phase"),
+                    event.get("node"),
+                    event.get("section"),
+                    event.get("agent"),
+                    None if oversized else payload_json,
+                    None,
+                    payload_preview,
+                ),
+            )
+            event_id = int(cursor.lastrowid or 0)
+
+            if oversized and event_id:
+                path = self._get_job_event_payload_dir(job_id) / f"event_{event_id}.json"
+                try:
+                    path.write_text(payload_json, encoding="utf-8")
+                    cursor.execute(
+                        "UPDATE job_events SET data_ref = ? WHERE id = ?",
+                        (str(path), event_id),
+                    )
+                except Exception as exc:
+                    logger.warning(f"⚠️ Falha ao persistir payload grande do evento {event_id}: {exc}")
+
+            conn.commit()
+            conn.close()
+            return event_id or None
+        except Exception as exc:
+            logger.warning(f"⚠️ Falha ao persistir evento (best-effort): {exc}")
+            return None
 
     def emit_event(
         self,
@@ -151,7 +274,8 @@ class JobManager:
         )
 
         with self._event_lock:
-            next_id = self._event_counters.get(job_id, 0) + 1
+            persisted_id = self._persist_event_best_effort(event)
+            next_id = int(persisted_id or (self._event_counters.get(job_id, 0) + 1))
             self._event_counters[job_id] = next_id
             event["id"] = next_id
 
@@ -167,11 +291,73 @@ class JobManager:
         """Return events for a job after a given id."""
         if not job_id:
             return []
+        after_id_int = int(after_id or 0)
+        if self._event_persist_enabled:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT id, ts, type, channel, phase, node, section, agent, data_json, data_ref, data_preview
+                    FROM job_events
+                    WHERE job_id = ? AND id > ?
+                    ORDER BY id ASC
+                    LIMIT 500
+                    """,
+                    (job_id, after_id_int),
+                )
+                rows = cursor.fetchall()
+                conn.close()
+
+                events: List[Dict[str, Any]] = []
+                for (
+                    ev_id,
+                    ts,
+                    ev_type,
+                    channel,
+                    phase,
+                    node,
+                    section,
+                    agent,
+                    data_json,
+                    data_ref,
+                    data_preview,
+                ) in rows:
+                    data: Dict[str, Any] = {}
+                    if data_json:
+                        try:
+                            data = json.loads(data_json)
+                        except Exception:
+                            data = {}
+                    elif data_ref:
+                        data = {
+                            "_ref": data_ref,
+                            "_preview": data_preview or "",
+                            "_note": "payload_too_large_for_sse",
+                        }
+                    event = {
+                        "v": 1,
+                        "id": int(ev_id),
+                        "job_id": job_id,
+                        "ts": ts,
+                        "type": ev_type,
+                        "channel": channel,
+                        "phase": phase,
+                        "node": node,
+                        "section": section,
+                        "agent": agent,
+                        "data": data,
+                    }
+                    events.append(event)
+                return events
+            except Exception as exc:
+                logger.warning(f"⚠️ Falha ao listar eventos do DB (fallback memória): {exc}")
+
         with self._event_lock:
             queue = list(self._event_queues.get(job_id, []))
         if not queue:
             return []
-        return [event for event in queue if int(event.get("id", 0)) > int(after_id)]
+        return [event for event in queue if int(event.get("id", 0)) > after_id_int]
 
     def clear_events(self, job_id: str) -> None:
         """Drop stored events for a job (best-effort cleanup)."""
@@ -182,6 +368,15 @@ class JobManager:
             self._event_counters.pop(job_id, None)
             self._api_counters.pop(job_id, None)
         self._job_users.pop(job_id, None)
+        if self._event_persist_enabled:
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM job_events WHERE job_id = ?", (job_id,))
+                conn.commit()
+                conn.close()
+            except Exception as exc:
+                logger.warning(f"⚠️ Falha ao limpar job_events do DB: {exc}")
 
     def record_api_call(
         self,
@@ -198,7 +393,7 @@ class JobManager:
         if not job_id:
             return
         payload = {
-            "ts": f"{datetime.utcnow().isoformat()}Z",
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "kind": kind,
             "provider": provider,
             "model": model,
@@ -336,6 +531,32 @@ class JobManager:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_transcription_jobs_created
                 ON transcription_jobs(created_at)
+            """)
+
+            # NOVA: Eventos do workflow (SSE + auditoria persistente)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS job_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    job_id TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    type TEXT,
+                    channel TEXT,
+                    phase TEXT,
+                    node TEXT,
+                    section TEXT,
+                    agent TEXT,
+                    data_json TEXT,
+                    data_ref TEXT,
+                    data_preview TEXT
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_job_events_job_id_id
+                ON job_events(job_id, id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_job_events_job_id_ts
+                ON job_events(job_id, ts)
             """)
             
             conn.commit()
@@ -501,7 +722,7 @@ class JobManager:
         result_path: Optional[str] = None,
     ) -> None:
         try:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
             cursor.execute("""
@@ -565,7 +786,7 @@ class JobManager:
                 return
 
             fields.append("updated_at = ?")
-            values.append(datetime.utcnow().isoformat())
+            values.append(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
             values.append(job_id)
 
             conn = sqlite3.connect(self.db_path)

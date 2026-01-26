@@ -8,13 +8,16 @@ Exposes:
 - POST /chat/threads/{id}/consolidate: Consolidate multi-model candidates into a single answer
 """
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
+import asyncio
 
-from fastapi import APIRouter, HTTPException, Body, Depends
+from fastapi import APIRouter, HTTPException, Body, Depends, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
+import os
 import json
 import uuid
+import time
 from typing import List, Dict, Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +30,7 @@ from app.models.user import User
 from app.services.chat_service import chat_service
 from app.services.api_call_tracker import usage_context, billing_context
 from app.services.token_budget_service import TokenBudgetService
+from app.services.rag_policy import resolve_rag_scope
 from app.services.billing_service import (
     get_points_summary,
     get_usd_per_point,
@@ -51,8 +55,106 @@ router = APIRouter()
 token_service = TokenBudgetService()
 
 # --- SSE HELPER ---
-def sse_event(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
+def sse_event(
+    data: dict,
+    event: Optional[str] = None,
+    event_id: Optional[int] = None,
+    retry: Optional[int] = None,
+) -> str:
+    lines = []
+    if event is not None:
+        lines.append(f"event: {event}")
+    if retry is not None:
+        lines.append(f"retry: {retry}")
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"data: {json.dumps(data)}")
+    return "\n".join(lines) + "\n\n"
+
+
+def sse_keepalive() -> str:
+    return ":\n\n"
+
+
+@dataclass
+class ChatStreamSession:
+    request_id: str
+    thread_id: str
+    user_id: str
+    created_at: float = field(default_factory=time.time)
+    events: List[str] = field(default_factory=list)
+    event_counter: int = 0
+    started: bool = False
+    done: bool = False
+    retry_ms: int = 2000
+    _retry_sent: bool = False
+    _cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+    def _decorate_event(self, raw_event: str) -> tuple[str, bool]:
+        stripped = raw_event.lstrip()
+        if stripped.startswith(":"):
+            return raw_event, False
+        if "data:" not in raw_event:
+            return raw_event, False
+        self.event_counter += 1
+        prefix_lines = []
+        if not self._retry_sent:
+            prefix_lines.append(f"retry: {self.retry_ms}")
+            self._retry_sent = True
+        prefix_lines.append(f"id: {self.event_counter}")
+        return "\n".join(prefix_lines) + "\n" + raw_event, True
+
+    async def append(self, raw_event: str) -> str:
+        event_str, should_store = self._decorate_event(raw_event)
+        async with self._cond:
+            if should_store:
+                self.events.append(event_str)
+            self._cond.notify_all()
+        return event_str
+
+
+STREAM_SESSION_TTL_SECONDS = 300
+STREAM_SESSIONS: Dict[str, ChatStreamSession] = {}
+
+
+def _cleanup_stream_sessions() -> None:
+    now = time.time()
+    expired = [
+        key
+        for key, session in STREAM_SESSIONS.items()
+        if session.done and (now - session.created_at) > STREAM_SESSION_TTL_SECONDS
+    ]
+    for key in expired:
+        STREAM_SESSIONS.pop(key, None)
+
+
+async def _stream_from_session(
+    session: ChatStreamSession,
+    last_event_id: Optional[str],
+    heartbeat_interval: float = 15.0,
+):
+    yield sse_keepalive()
+    idx = 0
+    if last_event_id and last_event_id.isdigit():
+        idx = max(int(last_event_id), 0)
+    while True:
+        async with session._cond:
+            while idx >= len(session.events) and not session.done:
+                try:
+                    await asyncio.wait_for(session._cond.wait(), timeout=heartbeat_interval)
+                except asyncio.TimeoutError:
+                    break
+            if idx < len(session.events):
+                event = session.events[idx]
+                idx += 1
+            elif session.done:
+                break
+            else:
+                event = None
+        if event is None:
+            yield sse_keepalive()
+            continue
+        yield event
 
 
 def _collect_attachment_ids(attachments: Optional[List[Any]]) -> List[str]:
@@ -113,6 +215,7 @@ async def get_thread(thread_id: str):
 @router.post("/threads/{thread_id}/messages")
 async def send_message(
     thread_id: str,
+    request: Request,
     message: str = Body(...),
     models: List[str] = Body(...),
     budget_override_points: Optional[int] = Body(default=None, ge=1),
@@ -123,6 +226,9 @@ async def send_message(
     verbosity: Optional[str] = Body(None),
     thinking_budget: Optional[int] = Body(None, ge=0),
     temperature: Optional[float] = Body(None),
+    mcp_tool_calling: Optional[bool] = Body(default=None),
+    mcp_server_labels: Optional[List[str]] = Body(default=None),
+    stream_request_id: Optional[str] = Body(default=None),
     web_search: bool = Body(False),
     multi_query: bool = Body(True),
     breadth_first: bool = Body(False),
@@ -190,6 +296,23 @@ async def send_message(
         graph_rag_enabled,
         argument_graph_enabled,
     )
+
+    # Resume existing SSE stream if requested
+    resume_request_id = (stream_request_id or "").strip() or None
+    if resume_request_id:
+        _cleanup_stream_sessions()
+        session = STREAM_SESSIONS.get(resume_request_id)
+        if not session or session.thread_id != thread_id or session.user_id != str(current_user.id):
+            raise HTTPException(status_code=409, detail="Stream não encontrado ou expirado")
+        return StreamingResponse(
+            _stream_from_session(session, request.headers.get("Last-Event-ID")),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     parsed_flags = parse_prompt_flags(message)
     if parsed_flags.clean_text != message:
@@ -390,8 +513,47 @@ async def send_message(
             status_code = 409
         raise HTTPException(status_code=status_code, detail=asdict(quote))
 
-    async def event_generator():
+    # Unify RAG scope behavior with `/chats` and `/jobs`:
+    # - Prefer DB policy (per tenant/user).
+    # - Fallback to env defaults if no policy exists (keeps prior multichat behavior).
+    raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
+    env_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
+    env_allow_global = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+    env_allow_groups = True if env_groups else False
+    scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
+        db,
+        tenant_id=str(current_user.id),
+        user_id=str(current_user.id),
+        user_role=current_user.role,
+        chat_context={
+            "rag_groups": env_groups,
+            "rag_allow_global": env_allow_global,
+            "rag_allow_groups": env_allow_groups,
+        },
+    )
+
+    request_id = str(uuid.uuid4())
+    _cleanup_stream_sessions()
+    session = ChatStreamSession(
+        request_id=request_id,
+        thread_id=thread_id,
+        user_id=str(current_user.id),
+    )
+    STREAM_SESSIONS[request_id] = session
+
+    async def _produce_session():
         try:
+            await session.append(
+                sse_event(
+                    {
+                        "type": "meta",
+                        "phase": "start",
+                        "t": int(time.time() * 1000),
+                        "turn_id": turn_id,
+                        "request_id": request_id,
+                    }
+                )
+            )
             with usage_context("thread", thread_id, user_id=current_user.id, turn_id=turn_id):
                 with billing_context(
                     graph_rag_enabled=graph_rag_enabled,
@@ -407,6 +569,8 @@ async def send_message(
                         chat_personality=chat_personality,
                         reasoning_level=reasoning_level,
                         temperature=temperature,
+                        mcp_tool_calling=mcp_tool_calling,
+                        mcp_server_labels=mcp_server_labels,
                         web_search=web_search,
                         multi_query=multi_query,
                         breadth_first=breadth_first,
@@ -464,19 +628,47 @@ async def send_message(
                         max_web_search_requests=max_web_search_requests,
                         research_policy=research_policy,
                         per_model_overrides=per_model_overrides_payload,
+                        scope_groups=scope_groups,
+                        allow_global_scope=allow_global_scope,
+                        allow_group_scope=allow_group_scope,
                     ):
-                        yield sse_event(event)
+                        if isinstance(event, dict):
+                            payload = dict(event)
+                            payload.setdefault("turn_id", turn_id)
+                            payload.setdefault("request_id", request_id)
+                        else:
+                            payload = {"type": "token", "delta": str(event)}
+                            payload["turn_id"] = turn_id
+                            payload["request_id"] = request_id
+                        await session.append(sse_event(payload))
         except Exception as e:
-            logger.error(f"Stream error: {e}")
-            yield sse_event({"type": "error", "error": str(e)})
+            await session.append(
+                sse_event(
+                    {
+                        "type": "error",
+                        "error": str(e),
+                        "turn_id": turn_id,
+                        "request_id": request_id,
+                    }
+                )
+            )
+        finally:
+            session.done = True
+            async with session._cond:
+                session._cond.notify_all()
+
+    if not session.started:
+        session.started = True
+        asyncio.create_task(_produce_session())
 
     return StreamingResponse(
-        event_generator(),
+        _stream_from_session(session, request.headers.get("Last-Event-ID")),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
-        }
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -485,12 +677,15 @@ async def consolidate_turn(
     thread_id: str,
     message: str = Body(...),
     candidates: List[Dict[str, Any]] = Body(...),
+    mode: str = Body("merge", description="merge | debate"),
     budget_override_points: Optional[int] = Body(default=None, ge=1),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Consolidate multiple model answers into a single "judge/merge" response.
+    Consolidate multiple model answers into a single response.
+    - mode=merge: fast judge/merge (default)
+    - mode=debate: 4-round deep debate (slower, higher quality)
     candidates: [{ "model": "gpt-4o", "text": "..." }, ...]
     """
     try:
@@ -563,7 +758,7 @@ async def consolidate_turn(
             raise HTTPException(status_code=status_code, detail=asdict(quote))
 
         with usage_context("thread", thread_id, user_id=current_user.id, turn_id=turn_id):
-            merged = await chat_service.consolidate_turn(thread_id, message, candidates)
+            merged = await chat_service.consolidate_turn(thread_id, message, candidates, mode=mode)
         return {"content": merged}
     except Exception as e:
         logger.error(f"Consolidate error: {e}")
@@ -624,7 +819,8 @@ async def edit_document(
         event_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive"
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         }
     )

@@ -726,7 +726,7 @@ class ApiClient {
 
   async consolidateMultiChatTurn(
     threadId: string,
-    data: { message: string; candidates: { model: string; text: string }[] }
+    data: { message: string; candidates: { model: string; text: string }[]; mode?: 'merge' | 'debate' }
   ): Promise<{ content: string }> {
     const response = await this.axios.post<{ content: string }>(`/multi-chat/threads/${threadId}/consolidate`, data);
     return response.data;
@@ -1106,6 +1106,130 @@ class ApiClient {
 
   async deleteCase(caseId: string): Promise<void> {
     await this.axios.delete(`/cases/${caseId}`);
+  }
+
+  // ============= CASE DOCUMENTS =============
+
+  /**
+   * Get all documents attached to a case
+   */
+  async getCaseDocuments(caseId: string): Promise<{
+    documents: Array<{
+      id: string;
+      name: string;
+      original_name: string;
+      type: string;
+      status: string;
+      size: number;
+      url: string;
+      case_id: string;
+      rag_ingested: boolean;
+      rag_ingested_at: string | null;
+      rag_scope: string | null;
+      graph_ingested: boolean;
+      graph_ingested_at: string | null;
+      created_at: string;
+      updated_at: string;
+    }>;
+    total: number;
+    case_id: string;
+  }> {
+    const response = await this.axios.get(`/cases/${caseId}/documents`);
+    return response.data;
+  }
+
+  /**
+   * Upload a document directly to a case with auto RAG/Graph ingestion
+   */
+  async uploadDocumentToCase(
+    caseId: string,
+    file: File,
+    options?: {
+      auto_ingest_rag?: boolean;
+      auto_ingest_graph?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    document_id: string;
+    case_id: string;
+    rag_ingestion_triggered: boolean;
+    graph_ingestion_triggered: boolean;
+    message: string;
+  }> {
+    const token = this.getAccessToken();
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const params = new URLSearchParams();
+    if (options?.auto_ingest_rag !== undefined) {
+      params.append('auto_ingest_rag', String(options.auto_ingest_rag));
+    }
+    if (options?.auto_ingest_graph !== undefined) {
+      params.append('auto_ingest_graph', String(options.auto_ingest_graph));
+    }
+
+    const url = `/cases/${caseId}/documents/upload${params.toString() ? '?' + params.toString() : ''}`;
+
+    const response = await this.postFormDataWithFallback(
+      url,
+      () => {
+        const data = new FormData();
+        data.append('file', file);
+        return data;
+      },
+      {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      }
+    );
+    return response.json();
+  }
+
+  /**
+   * Attach an existing document to a case with optional RAG/Graph ingestion
+   */
+  async attachDocumentToCase(
+    caseId: string,
+    documentId: string,
+    options?: {
+      auto_ingest_rag?: boolean;
+      auto_ingest_graph?: boolean;
+    }
+  ): Promise<{
+    success: boolean;
+    document_id: string;
+    case_id: string;
+    rag_ingestion_triggered: boolean;
+    graph_ingestion_triggered: boolean;
+    message: string;
+  }> {
+    const response = await this.axios.post(
+      `/cases/${caseId}/documents/${documentId}/attach`,
+      options || { auto_ingest_rag: true, auto_ingest_graph: true }
+    );
+    return response.data;
+  }
+
+  /**
+   * Detach a document from a case (does not delete the document)
+   */
+  async detachDocumentFromCase(
+    caseId: string,
+    documentId: string
+  ): Promise<{
+    success: boolean;
+    message: string;
+  }> {
+    const response = await this.axios.delete(`/cases/${caseId}/documents/${documentId}/detach`);
+    return response.data;
+  }
+
+  // ============= MCP (Connectors) =============
+
+  async getMcpServers(): Promise<{
+    servers: Array<{ label: string; url: string; allowed_tools?: string[] | null }>;
+  }> {
+    const response = await this.axios.get('/mcp/servers');
+    return response.data;
   }
 
 
@@ -2559,6 +2683,209 @@ class ApiClient {
     const response = await this.axios.post('/quality/apply-unified-hil', data, {
       timeout: 5 * 60 * 1000,
     });
+    return response.data;
+  }
+
+  // =========================================================================
+  // GRAPH VISUALIZATION METHODS
+  // =========================================================================
+
+  /**
+   * Export graph data for visualization
+   */
+  async getGraphData(params: {
+    entity_ids?: string;
+    types?: string;
+    groups?: string;
+    max_nodes?: number;
+    include_relationships?: boolean;
+  }): Promise<{
+    nodes: Array<{
+      id: string;
+      label: string;
+      type: string;
+      group: 'legislacao' | 'jurisprudencia' | 'doutrina' | 'outros';
+      metadata?: Record<string, unknown>;
+      size?: number;
+    }>;
+    links: Array<{
+      source: string;
+      target: string;
+      type: string;
+      label?: string;
+      description?: string;
+      weight?: number;
+      semantic?: boolean;
+    }>;
+  }> {
+    const response = await this.axios.get('/graph/export', { params });
+    return response.data;
+  }
+
+  /**
+   * Get entity details with neighbors and chunks
+   */
+  async getGraphEntity(entityId: string): Promise<{
+    id: string;
+    name: string;
+    type: string;
+    normalized: string;
+    metadata: Record<string, unknown>;
+    neighbors: Array<{
+      id: string;
+      name: string;
+      type: string;
+      relationship: string;
+      weight: number;
+    }>;
+    chunks: Array<{
+      chunk_uid: string;
+      text: string;
+      doc_title: string;
+      source_type: string;
+    }>;
+  }> {
+    const response = await this.axios.get(`/graph/entity/${entityId}`);
+    return response.data;
+  }
+
+  /**
+   * Get remissões (cross-references) for an entity
+   */
+  async getGraphRemissoes(entityId: string): Promise<{
+    entity_id: string;
+    total_remissoes: number;
+    legislacao: Array<{
+      id: string;
+      name: string;
+      type: string;
+      co_occurrences: number;
+      sample_text?: string;
+    }>;
+    jurisprudencia: Array<{
+      id: string;
+      name: string;
+      type: string;
+      co_occurrences: number;
+      sample_text?: string;
+    }>;
+  }> {
+    const response = await this.axios.get(`/graph/remissoes/${entityId}`);
+    return response.data;
+  }
+
+  /**
+   * Get semantic neighbors for an entity
+   */
+  async getGraphSemanticNeighbors(entityId: string, limit = 30): Promise<{
+    entity_id: string;
+    total: number;
+    neighbors: Array<{
+      id: string;
+      name: string;
+      type: string;
+      group: string;
+      strength: number;
+      relation: {
+        type: string;
+        label: string;
+        description: string;
+      };
+      sample_contexts: string[];
+      source_docs: string[];
+    }>;
+  }> {
+    const response = await this.axios.get(`/graph/semantic-neighbors/${entityId}`, {
+      params: { limit }
+    });
+    return response.data;
+  }
+
+  /**
+   * Get graph statistics
+   */
+  async getGraphStats(): Promise<{
+    total_entities: number;
+    total_chunks: number;
+    total_documents: number;
+    entities_by_type: Record<string, number>;
+    relationships_count: number;
+  }> {
+    const response = await this.axios.get('/graph/stats');
+    return response.data;
+  }
+
+  /**
+   * Find path between two entities
+   */
+  async getGraphPath(sourceId: string, targetId: string, maxLength = 4): Promise<{
+    found: boolean;
+    source?: string;
+    target?: string;
+    paths?: Array<{
+      path: string[];
+      path_ids: string[];
+      relationships: string[];
+      length: number;
+      nodes?: Array<{
+        labels: string[];
+        entity_id?: string;
+        chunk_uid?: string;
+        doc_hash?: string;
+        name?: string;
+        entity_type?: string;
+        normalized?: string;
+        chunk_index?: number;
+        text_preview?: string;
+      }>;
+      edges?: Array<{
+        type: string;
+        from_id: string;
+        to_id: string;
+        properties: Record<string, unknown>;
+      }>;
+    }>;
+    message?: string;
+  }> {
+    const response = await this.axios.get('/graph/path', {
+      params: { source_id: sourceId, target_id: targetId, max_length: maxLength }
+    });
+    return response.data;
+  }
+
+  /**
+   * Search entities in the graph
+   */
+  async searchGraphEntities(params: {
+    query?: string;
+    types?: string;
+    group?: string;
+    limit?: number;
+  }): Promise<Array<{
+    id: string;
+    name: string;
+    type: string;
+    group: string;
+    normalized: string;
+    mention_count: number;
+  }>> {
+    const response = await this.axios.get('/graph/entities', { params });
+    return response.data;
+  }
+
+  /**
+   * Get available relation types
+   */
+  async getGraphRelationTypes(): Promise<{
+    relations: Array<{
+      type: string;
+      label: string;
+      description: string;
+      semantic: boolean;
+    }>;
+    entity_groups: Record<string, string>;
+  }> {
+    const response = await this.axios.get('/graph/relation-types');
     return response.data;
   }
 }

@@ -110,6 +110,19 @@ except ImportError:
     BudgetTracker = None  # type: ignore
     BudgetExceededError = None  # type: ignore
 
+try:
+    from app.services.rag.core.colpali_service import (
+        ColPaliService,
+        ColPaliConfig,
+        get_colpali_service,
+        VisualRetrievalResult,
+    )
+except ImportError:
+    ColPaliService = None  # type: ignore
+    ColPaliConfig = None  # type: ignore
+    get_colpali_service = None  # type: ignore
+    VisualRetrievalResult = None  # type: ignore
+
 trace_event = None  # legacy hook removed; use PipelineResult.trace instead
 TraceEventType = None  # type: ignore
 
@@ -148,6 +161,7 @@ class PipelineStage(str, Enum):
     QUERY_ENHANCEMENT = "query_enhancement"
     LEXICAL_SEARCH = "lexical_search"
     VECTOR_SEARCH = "vector_search"
+    VISUAL_SEARCH = "visual_search"  # ColPali visual retrieval
     MERGE_RRF = "merge_rrf"
     CRAG_GATE = "crag_gate"
     RERANK = "rerank"
@@ -423,6 +437,8 @@ class GraphContext:
 
     entities: List[Dict[str, Any]] = field(default_factory=list)
     relationships: List[Dict[str, Any]] = field(default_factory=list)
+    # Raw/structured paths suitable for UI "Por que?" explanations (Neo4jMVP)
+    paths: List[Dict[str, Any]] = field(default_factory=list)
     related_articles: List[str] = field(default_factory=list)
     related_cases: List[str] = field(default_factory=list)
 
@@ -434,6 +450,7 @@ class GraphContext:
         return {
             "entities_count": len(self.entities),
             "relationships_count": len(self.relationships),
+            "paths_count": len(self.paths),
             "related_articles": self.related_articles[:10],
             "related_cases": self.related_cases[:10],
             "summary_length": len(self.summary),
@@ -578,6 +595,7 @@ class RAGPipeline:
         neo4j: Optional[Any] = None,
         crag_gate: Optional[Any] = None,
         query_expander: Optional[Any] = None,
+        colpali: Optional[Any] = None,
     ):
         """
         Initialize the RAG pipeline.
@@ -594,6 +612,7 @@ class RAGPipeline:
             neo4j: Neo4j MVP service instance (or will create default)
             crag_gate: CRAG gate instance (or will create default)
             query_expander: Query expansion service (or will create default)
+            colpali: ColPali visual retrieval service (or will create default if enabled)
         """
         self.config = config or RAGPipelineConfig.from_rag_config()
         self._base_config = self.config.base_config
@@ -609,6 +628,7 @@ class RAGPipeline:
         self._neo4j = neo4j
         self._crag_gate = crag_gate
         self._query_expander = query_expander
+        self._colpali = colpali
 
         # Lazy initialization flags
         self._components_initialized = False
@@ -712,6 +732,19 @@ class RAGPipeline:
                 logger.debug("Query expander initialized")
             except Exception as e:
                 logger.warning(f"Failed to initialize QueryExpander: {e}")
+
+        # ColPali Visual Retrieval (only if enabled in config)
+        if self._colpali is None and get_colpali_service is not None:
+            colpali_enabled = _env_bool("COLPALI_ENABLED", False)
+            if colpali_enabled:
+                try:
+                    self._colpali = get_colpali_service()
+                    logger.debug("ColPali visual retrieval service initialized")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize ColPali: {e}")
+                    self._colpali = None
+            else:
+                logger.debug("ColPali disabled by config (COLPALI_ENABLED=false)")
 
         self._components_initialized = True
 
@@ -842,6 +875,70 @@ class RAGPipeline:
         )
 
         return sorted_results
+
+    def _merge_visual_results(
+        self,
+        merged_results: List[Dict[str, Any]],
+        visual_results: List[Dict[str, Any]],
+        visual_weight: float = 0.3,
+    ) -> List[Dict[str, Any]]:
+        """
+        Merge visual results into the main results using weighted scoring.
+
+        Visual results are treated as supplementary - they don't replace
+        text results but add visual context for documents with tables/figures.
+
+        Args:
+            merged_results: Results from RRF merge of lexical/vector
+            visual_results: Results from ColPali visual search
+            visual_weight: Weight for visual scores (0-1)
+
+        Returns:
+            Combined results with visual results integrated
+        """
+        if not visual_results:
+            return merged_results
+
+        # Track existing results by uid
+        result_map: Dict[str, Dict[str, Any]] = {}
+        for result in merged_results:
+            uid = str(result.get("chunk_uid") or result.get("id") or "")
+            if uid:
+                result_map[uid] = result
+
+        # Add visual results
+        for rank, vr in enumerate(visual_results, start=1):
+            uid = str(vr.get("chunk_uid") or vr.get("id") or "")
+            if not uid:
+                continue
+
+            visual_score = vr.get("score", 0.0) * visual_weight
+
+            if uid in result_map:
+                # Boost existing result with visual score
+                existing = result_map[uid]
+                existing["visual_score"] = vr.get("score", 0.0)
+                existing["final_score"] = existing.get("final_score", 0.0) + visual_score
+                existing["score"] = existing["final_score"]
+                if "metadata" not in existing:
+                    existing["metadata"] = {}
+                existing["metadata"]["has_visual"] = True
+                existing["metadata"]["visual_highlights"] = vr.get("metadata", {}).get("highlights", [])
+            else:
+                # Add as new result
+                new_result = vr.copy()
+                new_result["visual_score"] = vr.get("score", 0.0)
+                new_result["final_score"] = visual_score
+                new_result["score"] = visual_score
+                new_result["_source_type"] = "visual"
+                result_map[uid] = new_result
+
+        # Sort by final score descending
+        return sorted(
+            result_map.values(),
+            key=lambda x: x.get("final_score", 0.0),
+            reverse=True,
+        )
 
     def _should_skip_vector_search(
         self,
@@ -1012,18 +1109,23 @@ class RAGPipeline:
         results: List[Dict[str, Any]] = []
 
         try:
-            if self._opensearch is None:
-                stage.skip("OpenSearch not available")
+            lexical_backend = os.getenv("RAG_LEXICAL_BACKEND", "opensearch").strip().lower()
+            use_opensearch = self._opensearch is not None and lexical_backend in ("opensearch", "auto")
+            use_neo4j = self._neo4j is not None and lexical_backend in ("neo4j", "neo4j_fulltext", "auto")
+
+            if not use_opensearch and not use_neo4j:
+                stage.skip("No lexical backend available")
                 return results
 
-            trace.indices_searched = indices
+            if use_opensearch:
+                trace.indices_searched = indices
 
             # Search with all queries
             for query in queries:
                 try:
                     query_results: List[Dict[str, Any]] = []
 
-                    if hasattr(self._opensearch, "search_lexical"):
+                    if use_opensearch and hasattr(self._opensearch, "search_lexical"):
                         f = filters or {}
                         tipo_peca = f.get("tipo_peca") or f.get("tipo_peca_filter")
 
@@ -1079,26 +1181,55 @@ class RAGPipeline:
                                 include_global=bool(f.get("include_global", True)),
                                 source_filter=_tipo_filter(str(tipo_peca)) if tipo_peca else None,
                             )
-                    elif hasattr(self._opensearch, "search_async"):
+                    elif use_opensearch and hasattr(self._opensearch, "search_async"):
                         query_results = await self._opensearch.search_async(
                             query=query,
                             indices=indices,
                             top_k=self.config.max_results_per_source,
                             filters=filters,
                         )
-                    elif hasattr(self._opensearch, "search"):
+                    elif use_opensearch and hasattr(self._opensearch, "search"):
                         query_results = self._opensearch.search(
                             query=query,
                             indices=indices,
                             top_k=self.config.max_results_per_source,
                             filters=filters,
                         )
+                    elif use_neo4j and hasattr(self._neo4j, "search_chunks_fulltext"):
+                        f = filters or {}
+                        include_global = bool(f.get("include_global", True))
+                        group_ids = f.get("group_ids") or []
+                        if isinstance(group_ids, str):
+                            group_ids = [group_ids]
+                        group_ids = [str(g) for g in group_ids if g]
+
+                        allowed_scopes: List[str] = []
+                        if include_global:
+                            allowed_scopes.append("global")
+                        if f.get("tenant_id"):
+                            allowed_scopes.append("private")
+                        if group_ids:
+                            allowed_scopes.append("group")
+                        if f.get("case_id"):
+                            allowed_scopes.append("local")
+                        if not allowed_scopes:
+                            allowed_scopes = ["global"]
+
+                        query_results = self._neo4j.search_chunks_fulltext(
+                            query_text=query,
+                            tenant_id=str(f.get("tenant_id") or "default"),
+                            allowed_scopes=allowed_scopes,
+                            group_ids=group_ids,
+                            case_id=str(f.get("case_id")) if f.get("case_id") else None,
+                            user_id=str(f.get("user_id")) if f.get("user_id") else None,
+                            limit=self.config.max_results_per_source,
+                        )
                     else:
                         continue
 
                     # Mark source
                     for r in query_results:
-                        r["_source_type"] = "lexical"
+                        r["_source_type"] = "lexical" if use_opensearch else "lexical_neo4j"
 
                     results.extend(query_results)
 
@@ -1119,7 +1250,8 @@ class RAGPipeline:
             stage.complete(
                 output_count=len(results),
                 data={
-                    "indices": indices,
+                    "backend": "opensearch" if use_opensearch else "neo4j_fulltext",
+                    "indices": indices if use_opensearch else [],
                     "queries_count": len(queries),
                 },
             )
@@ -1160,15 +1292,27 @@ class RAGPipeline:
         results: List[Dict[str, Any]] = []
 
         try:
-            if self._qdrant is None:
-                stage.skip("Qdrant not available")
+            vector_backend = os.getenv("RAG_VECTOR_BACKEND", "qdrant").strip().lower()
+            use_qdrant = self._qdrant is not None and vector_backend in ("qdrant", "auto")
+            use_neo4j = self._neo4j is not None and vector_backend in ("neo4j", "neo4j_vector", "auto")
+
+            if not use_qdrant and not use_neo4j:
+                stage.skip("No vector backend available")
                 return results
 
             if self._embeddings is None:
                 stage.skip("Embeddings service not available")
                 return results
 
-            trace.collections_searched = collections
+            if use_qdrant:
+                trace.collections_searched = collections
+            else:
+                trace.collections_searched = []
+
+            # Phase 2 placeholder: Neo4j vector index search (requires persisted embeddings in Neo4j)
+            if use_neo4j and not use_qdrant:
+                stage.skip("Neo4j vector search not wired (requires embeddings stored in Neo4j)")
+                return results
 
             # Generate embeddings for queries
             for query in queries:
@@ -1277,7 +1421,8 @@ class RAGPipeline:
             stage.complete(
                 output_count=len(results),
                 data={
-                    "collections": collections,
+                    "backend": "qdrant" if use_qdrant else "neo4j_vector",
+                    "collections": collections if use_qdrant else [],
                     "queries_count": len(queries),
                 },
             )
@@ -1292,30 +1437,128 @@ class RAGPipeline:
 
         return results
 
+    async def _stage_visual_search(
+        self,
+        query: str,
+        tenant_id: Optional[str],
+        filters: Optional[Dict[str, Any]],
+        trace: PipelineTrace,
+        top_k: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Stage 3b: Visual Search (ColPali).
+
+        Performs visual document retrieval using ColPali for PDFs with
+        tables, figures, and visual content. This is an optional stage
+        that runs in parallel with vector search when enabled.
+
+        Args:
+            query: Search query
+            tenant_id: Tenant identifier for multi-tenant filtering
+            filters: Optional filters to apply
+            trace: Pipeline trace
+            top_k: Number of results to return
+
+        Returns:
+            List of visual search results converted to standard format
+        """
+        stage = trace.start_stage(PipelineStage.VISUAL_SEARCH, input_count=1)
+        results: List[Dict[str, Any]] = []
+
+        try:
+            # Check if ColPali is available and enabled
+            if self._colpali is None:
+                stage.skip("ColPali not available or disabled")
+                return results
+
+            # Ensure model is loaded
+            if not self._colpali._model_loaded:
+                loaded = await self._colpali.load_model()
+                if not loaded:
+                    stage.skip("ColPali model failed to load")
+                    return results
+
+            # Perform visual search
+            visual_results = await self._colpali.search(
+                query=query,
+                tenant_id=tenant_id,
+                top_k=top_k,
+                min_score=0.3,  # Lower threshold for visual results
+            )
+
+            # Convert VisualRetrievalResult to standard result format
+            for vr in visual_results:
+                result_dict = {
+                    "chunk_uid": f"visual_{vr.doc_id}_p{vr.page_number}",
+                    "doc_id": vr.doc_id,
+                    "content": f"[Visual Document - Page {vr.page_number}]\n{vr.source_path}",
+                    "score": vr.score,
+                    "source": "colpali",
+                    "metadata": {
+                        "page_number": vr.page_number,
+                        "source_path": vr.source_path,
+                        "tenant_id": vr.tenant_id,
+                        "highlights": vr.highlights,
+                        "visual_retrieval": True,
+                    },
+                }
+                results.append(result_dict)
+
+            stage.complete(
+                output_count=len(results),
+                data={
+                    "query": query,
+                    "results_count": len(results),
+                    "top_score": results[0]["score"] if results else 0.0,
+                },
+            )
+
+            logger.debug(f"Visual search returned {len(results)} results")
+
+        except Exception as e:
+            error_msg = f"Visual search failed: {e}"
+            logger.warning(error_msg)
+            stage.fail(error_msg)
+            trace.add_warning(error_msg)
+            # Visual search failure is non-critical, continue pipeline
+
+        return results
+
     async def _stage_merge_rrf(
         self,
         lexical_results: List[Dict[str, Any]],
         vector_results: List[Dict[str, Any]],
         trace: PipelineTrace,
+        visual_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Stage 4: Merge (RRF fusion by chunk_uid).
 
-        Combines lexical and vector results using Reciprocal Rank Fusion.
+        Combines lexical, vector, and visual results using Reciprocal Rank Fusion.
 
         Args:
             lexical_results: Results from lexical search
             vector_results: Results from vector search
             trace: Pipeline trace
+            visual_results: Optional results from visual search (ColPali)
 
         Returns:
             Merged and scored results
         """
-        total_input = len(lexical_results) + len(vector_results)
+        visual_count = len(visual_results) if visual_results else 0
+        total_input = len(lexical_results) + len(vector_results) + visual_count
         stage = trace.start_stage(PipelineStage.MERGE_RRF, input_count=total_input)
 
         try:
+            # First merge lexical and vector results
             merged = self._merge_results_rrf(lexical_results, vector_results)
+
+            # Then merge visual results if present
+            if visual_results:
+                # Use lower weight for visual results (they supplement text results)
+                visual_weight = 0.3
+                merged = self._merge_visual_results(merged, visual_results, visual_weight)
+
             trace.total_candidates = len(merged)
 
             stage.complete(
@@ -1323,6 +1566,7 @@ class RAGPipeline:
                 data={
                     "lexical_count": len(lexical_results),
                     "vector_count": len(vector_results),
+                    "visual_count": visual_count,
                     "merged_count": len(merged),
                 },
             )
@@ -1932,6 +2176,9 @@ class RAGPipeline:
                 stage.skip("Graph enrichment disabled")
                 return graph_context
 
+            prefer_backend = os.getenv("RAG_GRAPH_ENRICH_BACKEND", "neo4j_mvp").strip().lower()
+            prefer_neo4j_mvp = prefer_backend in ("neo4j", "neo4j_mvp", "mvp")
+
             # Preferred: reuse the same persisted GraphRAG store used by legacy `build_rag_context`.
             # This keeps GraphRAG + ArgumentRAG behavior consistent when running the new pipeline.
             try:
@@ -1939,7 +2186,14 @@ class RAGPipeline:
             except Exception:
                 get_scoped_graph = None  # type: ignore
 
-            if get_scoped_graph is not None:
+            has_neo4j = self._neo4j is not None
+            has_networkx = self._graph is not None
+
+            # If Neo4jMVP is preferred and available, skip the legacy GraphRAG context builder.
+            # Legacy remains as fallback when Neo4j is unavailable or explicitly requested.
+            use_legacy_first = (not prefer_neo4j_mvp) or (not has_neo4j)
+
+            if use_legacy_first and get_scoped_graph is not None:
                 effective_filters: Dict[str, Any] = dict(filters or {})
                 include_global = bool(effective_filters.get("include_global", True))
                 group_ids = effective_filters.get("group_ids") or []
@@ -1986,6 +2240,7 @@ class RAGPipeline:
 
                 graph_parts: List[str] = []
                 argument_parts: List[str] = []
+                argument_stats: List[Dict[str, Any]] = []
                 allow_argument_all_scopes = _env_bool("RAG_ARGUMENT_ALL_SCOPES", True)
 
                 for scope_name, scope_id_value, g in graphs:
@@ -2015,13 +2270,47 @@ class RAGPipeline:
                     if argument_graph_enabled and (allow_argument_all_scopes or scope_name == "private"):
                         try:
                             from app.services.argument_pack import ARGUMENT_PACK
-                            arg_ctx = ARGUMENT_PACK.build_debate_context_from_query(
-                                g, query, hops=hop_count
+                            scoped_for_arg = results
+                            try:
+                                if results:
+                                    scoped_hits = [
+                                        r
+                                        for r in results
+                                        if (r.get("scope") or "").strip().lower() == str(scope_name).strip().lower()
+                                        and (
+                                            (r.get("scope_id") == scope_id_value)
+                                            or (r.get("scope_id") is None and scope_id_value is None)
+                                        )
+                                    ]
+                                    if scoped_hits:
+                                        scoped_for_arg = scoped_hits
+                            except Exception:
+                                scoped_for_arg = results
+                            arg_ctx, arg_ctx_stats = ARGUMENT_PACK.build_debate_context_from_results_with_stats(
+                                g,
+                                scoped_for_arg or [],
+                                hops=hop_count,
                             )
                         except Exception:
                             arg_ctx = ""
+                            arg_ctx_stats = {}
                         if arg_ctx:
                             argument_parts.append(f"[ESCOPO {label}]\n{arg_ctx}".strip())
+                        if isinstance(arg_ctx_stats, dict) and arg_ctx_stats:
+                            argument_stats.append(
+                                {
+                                    "scope": scope_name,
+                                    "scope_id": scope_id_value,
+                                    "mode": "results",
+                                    "results_seen": arg_ctx_stats.get("results_seen"),
+                                    "evidence_nodes": arg_ctx_stats.get("evidence_nodes"),
+                                    "seed_nodes": arg_ctx_stats.get("seed_nodes"),
+                                    "expanded_nodes": arg_ctx_stats.get("expanded_nodes"),
+                                    "claim_nodes": arg_ctx_stats.get("claim_nodes"),
+                                    "max_results": arg_ctx_stats.get("max_results"),
+                                    "max_seeds": arg_ctx_stats.get("max_seeds"),
+                                }
+                            )
 
                 if graph_parts or argument_parts:
                     graph_max = _env_int("RAG_GRAPH_CONTEXT_MAX_CHARS", 9000)
@@ -2044,15 +2333,12 @@ class RAGPipeline:
                             "legacy_graph_used": True,
                             "scopes": [s for s, _, _ in graphs],
                             "argument_graph": bool(argument_graph_enabled),
+                            "argument_stats": argument_stats[:8],
                             "graph_chars": len(graph_text),
                             "argument_chars": len(arg_text),
                         },
                     )
                     return graph_context
-
-            # Check if we have any graph backend
-            has_neo4j = self._neo4j is not None
-            has_networkx = self._graph is not None
 
             if not has_neo4j and not has_networkx:
                 stage.skip("No graph backend available")
@@ -2093,25 +2379,63 @@ class RAGPipeline:
             neo4j_paths = []
             if has_neo4j and entity_ids:
                 try:
+                    hop_count = max(1, min(int(graph_hops or self._base_config.graph_hops or 1), 5))
+                    effective_filters: Dict[str, Any] = dict(filters or {})
+                    include_global = bool(effective_filters.get("include_global", True))
+                    group_ids = effective_filters.get("group_ids") or []
+                    if isinstance(group_ids, str):
+                        group_ids = [group_ids]
+                    group_ids = [str(g) for g in group_ids if g]
+                    user_id = effective_filters.get("user_id")
+                    effective_case_id = case_id or effective_filters.get("case_id")
+
+                    normalized_scope = (scope or "").strip().lower()
+                    allowed_scopes: List[str] = []
+                    if normalized_scope in ("global", "private", "group", "local"):
+                        if include_global and normalized_scope != "global":
+                            allowed_scopes.append("global")
+                        allowed_scopes.append(normalized_scope)
+                    else:
+                        # Empty/"all" scope: derive visibility from filters.
+                        if include_global:
+                            allowed_scopes.append("global")
+                        if tenant_id:
+                            allowed_scopes.append("private")
+                        if group_ids:
+                            allowed_scopes.append("group")
+                        if effective_case_id:
+                            allowed_scopes.append("local")
+                    # Always have at least global to keep queries deterministic.
+                    if not allowed_scopes:
+                        allowed_scopes = ["global"]
+
                     # Find paths for explainable context
                     neo4j_paths = self._neo4j.find_paths(
                         entity_ids=entity_ids[:10],  # Limit entities
                         tenant_id=tenant_id or "default",
-                        scope=scope,
-                        max_hops=self._base_config.graph_hops,
+                        allowed_scopes=allowed_scopes,
+                        group_ids=group_ids,
+                        case_id=str(effective_case_id) if effective_case_id else None,
+                        user_id=str(user_id) if user_id else None,
+                        max_hops=hop_count,
                         limit=15,
                     )
+
+                    # Store raw paths for UI inspection ("Por que?")
+                    graph_context.paths = neo4j_paths[:15]
 
                     # Build relationships from paths
                     for path in neo4j_paths:
                         path_names = path.get("path_names", [])
                         path_rels = path.get("path_relations", [])
                         if len(path_names) >= 2 and path_rels:
+                            path_ids = path.get("path_ids", [])
                             graph_context.relationships.append({
-                                "source": path_names[0],
-                                "target": path_names[-1],
+                                "source": path_ids[0] if path_ids else path_names[0],
+                                "target": path_ids[-1] if path_ids else path_names[-1],
                                 "relations": path_rels,
                                 "path_length": path.get("path_length", 1),
+                                "path_ids": path_ids,
                             })
 
                     # Find co-occurring entities (chunks with multiple matches)
@@ -2119,7 +2443,10 @@ class RAGPipeline:
                         cooccur = self._neo4j.find_cooccurrence(
                             entity_ids=entity_ids[:5],
                             tenant_id=tenant_id or "default",
-                            scope=scope,
+                            allowed_scopes=allowed_scopes,
+                            group_ids=group_ids,
+                            case_id=str(effective_case_id) if effective_case_id else None,
+                            user_id=str(user_id) if user_id else None,
                             min_matches=2,
                             limit=5,
                         )
@@ -2296,6 +2623,7 @@ class RAGPipeline:
         tenant_id: Optional[str] = None,
         scope: str = "global",
         case_id: Optional[str] = None,
+        visual_search_enabled: Optional[bool] = None,
     ) -> PipelineResult:
         """
         Main search entry point - executes the full RAG pipeline.
@@ -2394,9 +2722,21 @@ class RAGPipeline:
                     else "Citation-heavy query"
                 )
 
+            # Stage 3b: Visual Search (ColPali) - optional, runs when enabled
+            visual_results: List[Dict[str, Any]] = []
+            effective_visual_enabled = (
+                visual_search_enabled
+                if visual_search_enabled is not None
+                else _env_bool("COLPALI_ENABLED", False)
+            )
+            if effective_visual_enabled and self._colpali is not None:
+                visual_results = await self._stage_visual_search(
+                    query, tenant_id, filters, trace, top_k=5
+                )
+
             # Stage 4: Merge (RRF)
             merged_results = await self._stage_merge_rrf(
-                lexical_results, vector_results, trace
+                lexical_results, vector_results, trace, visual_results=visual_results
             )
 
             # Stage 5: CRAG Gate / Corrective RAG
@@ -2557,6 +2897,7 @@ class RAGPipeline:
         tenant_id: Optional[str] = None,
         scope: str = "global",
         case_id: Optional[str] = None,
+        visual_search_enabled: Optional[bool] = None,
     ) -> PipelineResult:
         """
         Synchronous wrapper for the search method.
@@ -2573,6 +2914,7 @@ class RAGPipeline:
             tenant_id: Tenant identifier for multi-tenant access control
             scope: Access scope (global, private, group, local)
             case_id: Case identifier for local scope filtering
+            visual_search_enabled: Enable ColPali visual search (default: from config)
 
         Returns:
             PipelineResult with results, trace, and metadata
@@ -2615,6 +2957,7 @@ class RAGPipeline:
                         tenant_id=tenant_id,
                         scope=scope,
                         case_id=case_id,
+                        visual_search_enabled=visual_search_enabled,
                     )
                 )
                 return future.result()
@@ -2648,6 +2991,7 @@ class RAGPipeline:
                     tenant_id=tenant_id,
                     scope=scope,
                     case_id=case_id,
+                    visual_search_enabled=visual_search_enabled,
                 )
             )
 
@@ -2710,6 +3054,7 @@ async def search(
     tenant_id: Optional[str] = None,
     scope: str = "global",
     case_id: Optional[str] = None,
+    visual_search_enabled: Optional[bool] = None,
 ) -> PipelineResult:
     """
     Convenience function to search using the default pipeline.
@@ -2723,6 +3068,7 @@ async def search(
         tenant_id: Tenant identifier for multi-tenant access control
         scope: Access scope (global, private, group, local)
         case_id: Case identifier for local scope filtering
+        visual_search_enabled: Enable ColPali visual search (default: from config)
 
     Returns:
         PipelineResult with results, trace, and metadata
@@ -2755,6 +3101,7 @@ async def search(
         tenant_id=tenant_id,
         scope=scope,
         case_id=case_id,
+        visual_search_enabled=visual_search_enabled,
     )
 
 
@@ -2785,6 +3132,7 @@ def search_sync(
     tenant_id: Optional[str] = None,
     scope: str = "global",
     case_id: Optional[str] = None,
+    visual_search_enabled: Optional[bool] = None,
 ) -> PipelineResult:
     """
     Convenience function for synchronous search.
@@ -2798,6 +3146,7 @@ def search_sync(
         tenant_id: Tenant identifier for multi-tenant access control
         scope: Access scope (global, private, group, local)
         case_id: Case identifier for local scope filtering
+        visual_search_enabled: Enable ColPali visual search (default: from config)
 
     Returns:
         PipelineResult with results, trace, and metadata
@@ -2830,6 +3179,7 @@ def search_sync(
         tenant_id=tenant_id,
         scope=scope,
         case_id=case_id,
+        visual_search_enabled=visual_search_enabled,
     )
 
 

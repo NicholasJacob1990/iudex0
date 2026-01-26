@@ -39,6 +39,9 @@ pinecone-client==5.0.1
 qdrant-client==1.12.1
 chromadb==0.5.20
 
+# OpenSearch (BM25)
+opensearch-py==2.6.0
+
 # Embeddings e NLP
 sentence-transformers==3.3.1
 transformers==4.46.3

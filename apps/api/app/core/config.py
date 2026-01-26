@@ -9,35 +9,66 @@ from dotenv import load_dotenv
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-def _resolve_env_file() -> Path:
-    """
-    Resolve which .env file to load.
+def _split_env_list(value: str | None) -> list[Path]:
+    if not value:
+        return []
+    parts = [p.strip() for p in str(value).split(",") if p.strip()]
+    paths: list[Path] = []
+    for p in parts:
+        try:
+            paths.append(Path(p).expanduser())
+        except Exception:
+            continue
+    return paths
 
-    Prefer an explicit IUDEX_ENV_FILE, otherwise try common monorepo locations:
+
+def _resolve_env_files() -> list[Path]:
+    """
+    Resolve which .env files to load.
+
+    Precedence order (first wins; later only fill missing keys):
+    1) IUDEX_ENV_FILES (comma-separated) or IUDEX_ENV_FILE (single)
+    2) apps/api/.env (monorepo API env)
+    3) apps/api/app/.env (legacy)
     - apps/api/app/.env (legacy)
     - apps/api/.env
     - repo root .env
     """
-    override_path = os.getenv("IUDEX_ENV_FILE")
-    if override_path:
-        candidate = Path(override_path).expanduser()
-        if candidate.exists():
-            return candidate
+    overrides: list[Path] = []
+    overrides.extend(_split_env_list(os.getenv("IUDEX_ENV_FILES")))
+    if not overrides:
+        overrides.extend(_split_env_list(os.getenv("IUDEX_ENV_FILE")))
 
     candidates = [
+        # apps/api/app/.env (legacy)
+        Path(__file__).resolve().parents[1] / ".env",
+        # apps/api/.env
         Path(__file__).resolve().parents[2] / ".env",
-        Path(__file__).resolve().parents[3] / ".env",
-        Path(__file__).resolve().parents[5] / ".env",
+        # repo root .env
+        Path(__file__).resolve().parents[4] / ".env",
     ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
+
+    ordered: list[Path] = []
+    for p in overrides + candidates:
+        if not p:
+            continue
+        try:
+            rp = p.resolve()
+        except Exception:
+            rp = p
+        if rp in ordered:
+            continue
+        ordered.append(rp)
+    return ordered
 
 
-ENV_FILE = _resolve_env_file()
-if ENV_FILE.exists():
-    load_dotenv(ENV_FILE, override=False)
+ENV_FILES = _resolve_env_files()
+ENV_FILE = next((p for p in ENV_FILES if p.exists()), ENV_FILES[0] if ENV_FILES else Path(".env"))
+
+# Load all env files (first wins; later fill only missing keys) so settings sees a unified env.
+for env_path in ENV_FILES:
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
 
 
 class Settings(BaseSettings):
@@ -145,10 +176,25 @@ class Settings(BaseSettings):
     
     LOCAL_STORAGE_PATH: str = "./storage"
     
-    # OCR
+    # OCR - Estratégia Híbrida
     TESSERACT_CMD: str = "/usr/bin/tesseract"
     TESSERACT_LANG: str = "por"
     OCR_DPI: int = 300
+
+    # OCR Cloud Providers (fallback quando volume alto ou Tesseract falha)
+    OCR_PROVIDER: str = "tesseract"  # tesseract, azure, google, gemini
+    OCR_CLOUD_THRESHOLD_DAILY: int = 1000  # Páginas/dia antes de usar cloud
+
+    # Azure Document Intelligence
+    AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT: Optional[str] = None
+    AZURE_DOCUMENT_INTELLIGENCE_KEY: Optional[str] = None
+
+    # Google Cloud Vision OCR
+    GOOGLE_VISION_ENABLED: bool = False
+
+    # Gemini Vision OCR (usa GOOGLE_API_KEY existente)
+    GEMINI_OCR_ENABLED: bool = False
+    GEMINI_OCR_MODEL: str = "gemini-2.0-flash"
     
     # Processamento de Áudio
     WHISPER_MODEL: str = "base"
@@ -202,6 +248,10 @@ class Settings(BaseSettings):
     DJEN_API_KEY: Optional[str] = None
     JURISPRUDENCE_API_URL: Optional[str] = None
     JURISPRUDENCE_API_KEY: Optional[str] = None
+
+    # Serviço de Tribunais
+    TRIBUNAIS_SERVICE_URL: str = "http://localhost:3100/api"
+    TRIBUNAIS_WEBHOOK_SECRET: Optional[str] = None
     
     @property
     def max_upload_size_bytes(self) -> int:

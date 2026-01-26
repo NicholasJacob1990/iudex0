@@ -1,0 +1,41 @@
+{
+  "name": "sei-playwright",
+  "version": "0.1.0",
+  "description": "Biblioteca para automação do SEI! usando Playwright - ideal para agentes automatizados",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts",
+    "dev": "tsup src/index.ts --format esm --watch",
+    "test": "vitest",
+    "lint": "eslint src/",
+    "example": "tsx examples/basic.ts"
+  },
+  "keywords": [
+    "sei",
+    "playwright",
+    "automation",
+    "brazil",
+    "government"
+  ],
+  "author": "Nicholas Jacob",
+  "license": "MIT",
+  "dependencies": {
+    "nodemailer": "^7.0.12",
+    "playwright": "^1.48.0",
+    "soap": "^1.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/nodemailer": "^7.0.5",
+    "tsup": "^8.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

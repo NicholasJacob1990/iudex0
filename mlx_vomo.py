@@ -473,8 +473,498 @@ def remover_overlap_duplicado(resultados, mode="APOSTILA"):
             
     texto_limpo = '\n'.join(final_lines)
     print(f"   ✅ Removidas {len(indices_to_remove)} seções duplicadas.")
-    
+
     return texto_limpo
+
+
+# ==================== v2.28: VALIDAÇÃO E SANITIZAÇÃO DE MARKDOWN ====================
+
+class TruncamentoError(Exception):
+    """Exceção levantada quando truncamento crítico é detectado."""
+    pass
+
+
+def corrigir_headings_duplicados(texto: str) -> str:
+    """
+    v2.28: Corrige headings duplicados como '#### #### Título' → '#### Título'
+
+    Também normaliza variações como '## ## #' → '##'
+    """
+    # Padrão: múltiplos grupos de # separados por espaços (ex: "#### #### Título")
+    # Importante: exige pelo menos 1 espaço entre os grupos para não degradar headings normais ("#### Título").
+    pattern = r'^(#{1,6})(?:\s+#{1,6})+\s*(.*)$'
+
+    def fix_heading(match):
+        level = match.group(1)  # Primeiro conjunto de #
+        title = (match.group(2) or "").strip()
+        return f"{level} {title}" if title else level
+
+    linhas = texto.split('\n')
+    linhas_corrigidas = []
+    correcoes = 0
+
+    for linha in linhas:
+        if re.match(r'^#{1,6}\s+#{1,6}', linha):
+            linha_corrigida = re.sub(pattern, fix_heading, linha)
+            if linha_corrigida != linha:
+                correcoes += 1
+                print(f"{Fore.YELLOW}   🔧 Heading corrigido: '{linha[:50]}...' → '{linha_corrigida[:50]}...'")
+            linhas_corrigidas.append(linha_corrigida)
+        else:
+            linhas_corrigidas.append(linha)
+
+    if correcoes > 0:
+        print(f"{Fore.GREEN}   ✅ Corrigidos {correcoes} headings duplicados")
+
+    return '\n'.join(linhas_corrigidas)
+
+
+def padronizar_separadores(texto: str, estilo: str = "remover") -> str:
+    """
+    v2.28: Padroniza separadores horizontais (---, ***, ___).
+
+    Args:
+        texto: Texto markdown
+        estilo: 'remover' (remove todos), 'padronizar' (usa --- apenas), 'manter' (não altera)
+
+    Returns:
+        Texto com separadores padronizados
+    """
+    if estilo == "manter":
+        return texto
+
+    # Padrão: linha contendo apenas hífens, asteriscos ou underscores (3+)
+    pattern = r'^[\s]*[-*_]{3,}[\s]*$'
+
+    linhas = texto.split('\n')
+    linhas_novas = []
+    removidos = 0
+
+    for linha in linhas:
+        if re.match(pattern, linha):
+            if estilo == "remover":
+                removidos += 1
+                continue  # Pula a linha
+            elif estilo == "padronizar":
+                linhas_novas.append("---")
+                continue
+        linhas_novas.append(linha)
+
+    if removidos > 0:
+        print(f"{Fore.CYAN}   🔧 Removidos {removidos} separadores horizontais")
+
+    return '\n'.join(linhas_novas)
+
+
+def detectar_tabelas_em_par(texto: str) -> list:
+    """
+    v2.28: Detecta pares de tabelas (Quadro-síntese + Pegadinhas).
+
+    Padrão esperado:
+    - #### 📋 Quadro-síntese — [Título]
+    - Tabela 5 colunas
+    - #### 🎯 Tabela — Como a banca cobra / pegadinhas
+    - Tabela 3 colunas
+
+    Returns:
+        Lista de dicts com informações sobre cada par de tabelas
+    """
+    pares = []
+    linhas = texto.split('\n')
+
+    i = 0
+    while i < len(linhas):
+        linha = linhas[i].strip()
+
+        # Detectar início de quadro-síntese
+        if re.match(r'^#{3,5}\s*📋.*[Qq]uadro', linha):
+            par = {
+                'quadro_titulo': linha,
+                'quadro_linha': i,
+                'quadro_tabela_inicio': None,
+                'quadro_tabela_linhas': 0,
+                'pegadinha_titulo': None,
+                'pegadinha_linha': None,
+                'pegadinha_tabela_inicio': None,
+                'pegadinha_tabela_linhas': 0,
+                'completo': False
+            }
+
+            # Procurar tabela do quadro
+            j = i + 1
+            while j < len(linhas) and j < i + 20:
+                if linhas[j].strip().startswith('|'):
+                    par['quadro_tabela_inicio'] = j
+                    # Contar linhas da tabela
+                    k = j
+                    while k < len(linhas) and linhas[k].strip().startswith('|'):
+                        par['quadro_tabela_linhas'] += 1
+                        k += 1
+                    break
+                elif re.match(r'^#{1,5}\s', linhas[j]):
+                    break  # Novo heading, tabela ausente
+                j += 1
+
+            # Procurar tabela de pegadinhas
+            j = (
+                par['quadro_tabela_inicio'] + par['quadro_tabela_linhas']
+                if par['quadro_tabela_inicio'] is not None
+                else i + 1
+            )
+            while j < len(linhas) and j < i + 50:
+                if re.match(r'^#{3,5}\s*🎯.*[Tt]abela', linhas[j]):
+                    par['pegadinha_titulo'] = linhas[j].strip()
+                    par['pegadinha_linha'] = j
+
+                    # Procurar tabela de pegadinhas
+                    k = j + 1
+                    while k < len(linhas) and k < j + 15:
+                        if linhas[k].strip().startswith('|'):
+                            par['pegadinha_tabela_inicio'] = k
+                            m = k
+                            while m < len(linhas) and linhas[m].strip().startswith('|'):
+                                par['pegadinha_tabela_linhas'] += 1
+                                m += 1
+                            break
+                        k += 1
+                    break
+                elif re.match(r'^#{1,2}\s', linhas[j]):
+                    break  # Novo bloco temático
+                j += 1
+
+            # Verificar se par está completo
+            par['completo'] = (
+                par['quadro_tabela_linhas'] >= 3 and  # Header + separador + pelo menos 1 dado
+                par['pegadinha_tabela_linhas'] >= 3
+            )
+
+            pares.append(par)
+            i = j if j > i else i + 1
+        else:
+            i += 1
+
+    # Log de diagnóstico
+    completos = sum(1 for p in pares if p['completo'])
+    print(f"{Fore.CYAN}   📊 Pares de tabelas detectados: {len(pares)} ({completos} completos)")
+
+    for p in pares:
+        if not p['completo']:
+            print(f"{Fore.YELLOW}   ⚠️  Par incompleto: {p['quadro_titulo'][:40]}... "
+                  f"(Quadro: {p['quadro_tabela_linhas']} linhas, Pegadinha: {p['pegadinha_tabela_linhas']} linhas)")
+
+    return pares
+
+
+def validar_celulas_tabela(texto: str) -> tuple:
+    """
+    v2.28: Valida integridade das células de tabela.
+
+    Detecta:
+    1. Células truncadas (texto cortado no meio de palavra)
+    2. Headers incompletos (ex: 'Comcobra' em vez de 'Como a banca cobra')
+    3. Linhas de tabela sem fechamento de pipe
+
+    Returns:
+        Tuple (is_valid, list of issues)
+    """
+    issues = []
+    linhas = texto.split('\n')
+
+    # Padrões conhecidos de truncamento
+    TRUNCAMENTOS_CONHECIDOS = [
+        (r'\bonto\b', 'truncamento de "o território" ou similar'),
+        (r'Comcobra', 'header truncado: "Como a banca cobra"'),
+        (r'urbanístamos', 'palavra cortada: "urbanístico. Vamos"'),
+        (r'\bsitua\s+competência', 'frase cortada'),
+        (r'\bEls\s+sobre', 'início de frase cortada'),
+        (r'\bou\s+[a-z]{1,3}\s+[A-Z]', 'possível corte no meio de frase'),
+    ]
+
+    for i, linha in enumerate(linhas):
+        # Verificar padrões de truncamento
+        for pattern, desc in TRUNCAMENTOS_CONHECIDOS:
+            if re.search(pattern, linha):
+                issues.append({
+                    'tipo': 'truncamento',
+                    'linha': i + 1,
+                    'descricao': desc,
+                    'texto': linha[:100] + '...' if len(linha) > 100 else linha
+                })
+
+        # Verificar células de tabela
+        if linha.strip().startswith('|'):
+            # Linha de tabela deve terminar com |
+            if not linha.strip().endswith('|'):
+                issues.append({
+                    'tipo': 'tabela_aberta',
+                    'linha': i + 1,
+                    'descricao': 'Linha de tabela não fechada com |',
+                    'texto': linha[-50:] if len(linha) > 50 else linha
+                })
+
+            # Verificar células muito curtas (possível truncamento)
+            celulas = linha.split('|')[1:-1]  # Remove primeiro e último vazio
+            for j, celula in enumerate(celulas):
+                celula_limpa = celula.strip()
+                # Célula com menos de 3 chars e não é separador pode ser truncamento
+                if len(celula_limpa) < 3 and not re.match(r'^[-:]+$', celula_limpa) and celula_limpa != '—':
+                    issues.append({
+                        'tipo': 'celula_suspeita',
+                        'linha': i + 1,
+                        'descricao': f'Célula {j+1} muito curta: "{celula_limpa}"',
+                        'texto': linha[:80]
+                    })
+
+    is_valid = len(issues) == 0
+
+    if not is_valid:
+        print(f"{Fore.RED}   ⚠️  Encontrados {len(issues)} problemas de integridade:")
+        for issue in issues[:5]:  # Mostrar no máximo 5
+            print(f"{Fore.YELLOW}      L{issue['linha']}: {issue['descricao']}")
+        if len(issues) > 5:
+            print(f"{Fore.YELLOW}      ... e mais {len(issues) - 5} problemas")
+
+    return is_valid, issues
+
+
+def chunk_texto_seguro(texto: str, max_chars: int = 25000, overlap_chars: int = 2000) -> list:
+    """
+    v2.28: Chunking inteligente que respeita limites naturais do texto.
+
+    Prioridades de corte (em ordem):
+    1. Antes de heading ## ou ### (novo bloco temático)
+    2. Após tabela completa (#### 🎯 + tabela)
+    3. Parágrafo duplo (\\n\\n)
+    4. Final de frase (. seguido de espaço ou newline)
+    5. Qualquer newline
+
+    Nunca corta:
+    - No meio de uma tabela
+    - No meio de uma palavra
+    - Imediatamente após heading (deixa pelo menos 500 chars)
+
+    Args:
+        texto: Texto completo
+        max_chars: Tamanho máximo de cada chunk
+        overlap_chars: Caracteres de overlap entre chunks
+
+    Returns:
+        Lista de chunks com integridade preservada
+    """
+    if len(texto) <= max_chars:
+        return [texto]
+
+    chunks = []
+    inicio = 0
+
+    # Pré-processar: identificar zonas "proibidas" para corte
+    zonas_proibidas = []  # Lista de (inicio, fim) onde não cortar
+
+    # Encontrar todas as tabelas
+    linhas = texto.split('\n')
+    pos = 0
+    em_tabela = False
+    tabela_inicio = 0
+
+    for i, linha in enumerate(linhas):
+        if linha.strip().startswith('|') and not em_tabela:
+            em_tabela = True
+            tabela_inicio = pos
+        elif not linha.strip().startswith('|') and em_tabela:
+            em_tabela = False
+            zonas_proibidas.append((tabela_inicio, pos))
+        pos += len(linha) + 1  # +1 pelo \n
+    if em_tabela:
+        zonas_proibidas.append((tabela_inicio, pos))
+
+    def esta_em_zona_proibida(posicao):
+        for inicio_z, fim_z in zonas_proibidas:
+            if inicio_z <= posicao <= fim_z:
+                return True
+        return False
+
+    def encontrar_ponto_corte_seguro(texto_slice, pos_inicio_global):
+        """Encontra o melhor ponto de corte dentro do slice."""
+
+        # Zona de busca: últimos 30% do chunk
+        zona_busca_inicio = int(len(texto_slice) * 0.7)
+        zona_busca = texto_slice[zona_busca_inicio:]
+
+        # Prioridade 1: Antes de heading ## ou ###
+        headings = list(re.finditer(r'(?m)^#{2,3}\s+', zona_busca))
+        if headings:
+            pos = headings[-1].start()
+            pos_global = pos_inicio_global + zona_busca_inicio + pos
+            if not esta_em_zona_proibida(pos_global):
+                return zona_busca_inicio + pos
+
+        # Prioridade 2: Após tabela de pegadinhas (🎯)
+        match = re.search(r'\n(?=####?\s*🎯)', zona_busca)
+        if match:
+            # Encontrar fim da tabela após o heading
+            after_heading = zona_busca[match.end():]
+            # Procurar fim da tabela (linha que não começa com |)
+            lines_after = after_heading.split('\n')
+            pos_apos_tabela = match.end()
+            for j, line in enumerate(lines_after):
+                if j > 2 and not line.strip().startswith('|'):  # Passou da tabela
+                    pos_apos_tabela += sum(len(l) + 1 for l in lines_after[:j])
+                    break
+            pos_global = pos_inicio_global + zona_busca_inicio + pos_apos_tabela
+            if not esta_em_zona_proibida(pos_global) and pos_apos_tabela < len(zona_busca):
+                return zona_busca_inicio + pos_apos_tabela
+
+        # Prioridade 3: Parágrafo duplo
+        pos = zona_busca.rfind('\n\n')
+        if pos != -1:
+            pos_global = pos_inicio_global + zona_busca_inicio + pos
+            if not esta_em_zona_proibida(pos_global):
+                return zona_busca_inicio + pos + 2  # +2 para incluir os \n\n
+
+        # Prioridade 4: Final de frase
+        finais_frase = list(re.finditer(r'[.!?][\s\n]+', zona_busca))
+        if finais_frase:
+            pos = finais_frase[-1].end()
+            pos_global = pos_inicio_global + zona_busca_inicio + pos
+            if not esta_em_zona_proibida(pos_global):
+                return zona_busca_inicio + pos
+
+        # Prioridade 5: Qualquer newline
+        pos = zona_busca.rfind('\n')
+        if pos != -1:
+            pos_global = pos_inicio_global + zona_busca_inicio + pos
+            if not esta_em_zona_proibida(pos_global):
+                return zona_busca_inicio + pos + 1
+
+        # Fallback: cortar no max_chars mesmo
+        return len(texto_slice)
+
+    print(f"{Fore.CYAN}   🔪 Iniciando chunking seguro (max: {max_chars} chars, overlap: {overlap_chars})...")
+
+    while inicio < len(texto):
+        fim_ideal = min(inicio + max_chars, len(texto))
+
+        if fim_ideal >= len(texto):
+            # Último chunk
+            chunks.append(texto[inicio:])
+            break
+
+        texto_slice = texto[inicio:fim_ideal]
+        ponto_corte_relativo = encontrar_ponto_corte_seguro(texto_slice, inicio)
+        fim_real = inicio + ponto_corte_relativo
+
+        chunk = texto[inicio:fim_real].strip()
+        chunks.append(chunk)
+
+        print(f"{Fore.GREEN}   ✂️  Chunk {len(chunks)}: {inicio} → {fim_real} ({len(chunk)} chars)")
+
+        # Próximo início com overlap
+        inicio = fim_real - overlap_chars if fim_real > overlap_chars else fim_real
+
+    print(f"{Fore.GREEN}   ✅ Criados {len(chunks)} chunks com integridade preservada")
+
+    return chunks
+
+
+def validar_integridade_pos_merge(texto: str, raise_on_error: bool = False) -> tuple:
+    """
+    v2.28: Validação completa de integridade após merge de chunks.
+
+    Verifica:
+    1. Palavras cortadas no meio
+    2. Headers incompletos
+    3. Tabelas abertas (sem fechamento)
+    4. Padrões conhecidos de truncamento
+
+    Args:
+        texto: Texto merged
+        raise_on_error: Se True, levanta TruncamentoError em problemas críticos
+
+    Returns:
+        Tuple (is_valid, issues, texto_corrigido)
+    """
+    issues = []
+    texto_corrigido = texto
+
+    # 1. Validar células de tabela
+    is_table_valid, table_issues = validar_celulas_tabela(texto)
+    issues.extend(table_issues)
+
+    # 2. Verificar headings duplicados
+    if re.search(r'^#{1,6}\s*#{1,6}', texto, re.MULTILINE):
+        texto_corrigido = corrigir_headings_duplicados(texto_corrigido)
+        issues.append({
+            'tipo': 'heading_duplicado',
+            'descricao': 'Headings duplicados encontrados e corrigidos',
+            'linha': 0
+        })
+
+    # 3. Detectar pares de tabelas incompletos
+    pares = detectar_tabelas_em_par(texto)
+    incompletos = [p for p in pares if not p['completo']]
+    for p in incompletos:
+        issues.append({
+            'tipo': 'par_tabela_incompleto',
+            'descricao': f"Par incompleto: {p['quadro_titulo'][:40]}",
+            'linha': p['quadro_linha']
+        })
+
+    # 4. Padrões de texto truncado (mais genéricos)
+    pattern_truncado = r'\b([a-záéíóúàâãêîôûç]{2,})\s{2,}([a-záéíóúàâãêîôûç]{2,})\b'
+    matches = list(re.finditer(pattern_truncado, texto, re.IGNORECASE))
+    for match in matches[:5]:  # Limitar a 5
+        # Verificar se parece truncamento (palavras soltas)
+        antes = match.group(1)
+        depois = match.group(2)
+        if len(antes) < 6 and len(depois) < 6:
+            issues.append({
+                'tipo': 'possivel_truncamento',
+                'descricao': f'Possível corte: "{antes} {depois}"',
+                'linha': texto[:match.start()].count('\n') + 1
+            })
+
+    is_valid = len([i for i in issues if i['tipo'] in ['truncamento', 'tabela_aberta']]) == 0
+
+    if raise_on_error and not is_valid:
+        criticos = [i for i in issues if i['tipo'] in ['truncamento', 'tabela_aberta']]
+        raise TruncamentoError(f"Detectados {len(criticos)} problemas críticos de truncamento")
+
+    return is_valid, issues, texto_corrigido
+
+
+def sanitizar_markdown_final(texto: str) -> str:
+    """
+    v2.28: Sanitização final do markdown antes de salvar.
+
+    Aplica todas as correções em sequência:
+    1. Corrige headings duplicados
+    2. Padroniza separadores
+    3. Remove linhas em branco excessivas
+    4. Valida integridade (sem raise)
+
+    Returns:
+        Texto sanitizado
+    """
+    print(f"{Fore.CYAN}🧹 Sanitizando markdown final...")
+
+    # 1. Headings duplicados
+    texto = corrigir_headings_duplicados(texto)
+
+    # 2. Separadores
+    texto = padronizar_separadores(texto, estilo="remover")
+
+    # 3. Linhas em branco excessivas (mais de 2 consecutivas → 2)
+    texto = re.sub(r'\n{4,}', '\n\n\n', texto)
+
+    # 4. Validação (sem raise, apenas log)
+    is_valid, issues, texto = validar_integridade_pos_merge(texto, raise_on_error=False)
+
+    if is_valid:
+        print(f"{Fore.GREEN}   ✅ Markdown validado sem problemas críticos")
+    else:
+        print(f"{Fore.YELLOW}   ⚠️  {len(issues)} issues encontradas (não-críticas mantidas)")
+
+    return texto
 
 
 # ==================== HELPERS PORTED FROM GPT SCRIPT ====================
@@ -1964,6 +2454,150 @@ def verificar_cobertura(texto_original, texto_formatado, arquivo_saida=None):
             f.write('\n'.join(relatorio_txt))
         logger.info(f"📝 Relatório salvo em: {relatorio_path}")
 
+def corrigir_tabelas_prematuras(texto: str, min_chars_apos_tabela: int = 100, min_linhas_apos: int = 2) -> str:
+    """
+    v2.28: Detecta e corrige tabelas que aparecem antes do conteúdo terminar.
+
+    Problema: O LLM às vezes gera a tabela no meio do tópico, antes de
+    terminar de explicar todo o conteúdo.
+
+    Solução: Se houver texto substancial (>min_chars) APÓS uma tabela e ANTES
+    do próximo heading, move a tabela para depois desse texto.
+
+    Args:
+        texto: Markdown com possíveis tabelas prematuras
+        min_chars_apos_tabela: Mínimo de caracteres após tabela para considerar prematura (default: 100)
+        min_linhas_apos: Mínimo de linhas de conteúdo após tabela (default: 2)
+
+    Returns:
+        Texto com tabelas reposicionadas
+    """
+    linhas = texto.split('\n')
+    resultado = []
+    i = 0
+    tabelas_corrigidas = 0
+
+    def is_major_heading(line: str) -> bool:
+        """Heading H1/H2/H3 que indica novo tópico (e NÃO é título de tabela)."""
+        s = (line or "").strip()
+        if not s.startswith('#'):
+            return False
+        level = 0
+        for c in s:
+            if c == '#':
+                level += 1
+            else:
+                break
+        if level <= 3:
+            return not is_table_title(s)
+        return False
+
+    def is_table_line(line: str) -> bool:
+        stripped = line.strip()
+        return stripped.startswith('|') and '|' in stripped[1:]
+
+    def is_table_title(line: str) -> bool:
+        s = (line or "").strip()
+        if not s:
+            return False
+        lower = s.lower()
+        is_heading = bool(re.match(r'^#{3,6}\s+', s))
+        starts_with_emoji = s.startswith('📋') or s.startswith('🎯')
+        has_emoji = ('📋' in s) or ('🎯' in s)
+        has_keyword = (
+            'quadro-síntese' in lower
+            or 'quadro síntese' in lower
+            or 'pegadinha' in lower
+            or 'como a banca' in lower
+        )
+        # Para evitar falsos positivos (texto corrido contendo "quadro"/"pegadinha"),
+        # exigimos estrutura típica de "título": heading ou linha iniciando com emoji.
+        if starts_with_emoji:
+            return True
+        if is_heading and (has_emoji or has_keyword):
+            return True
+        return False
+
+    while i < len(linhas):
+        linha = linhas[i]
+
+        # Detectar título de tabela (📋 ou 🎯)
+        if is_table_title(linha):
+            group_title = linha
+            tabelas_linhas = []
+
+            # Capturar um grupo de tabelas consecutivas (ex.: 📋 + 🎯)
+            while i < len(linhas) and is_table_title(linhas[i]):
+                titulo_tabela = linhas[i]
+                tabelas_linhas.append(titulo_tabela)
+                i += 1
+
+                # Capturar a tabela (linhas com |) + linhas em branco imediatamente ao redor
+                while i < len(linhas) and (is_table_line(linhas[i]) or not linhas[i].strip()):
+                    tabelas_linhas.append(linhas[i])
+                    i += 1
+
+                # Se houver outra tabela logo em seguida (apenas com espaços/linhas vazias entre),
+                # capturamos como parte do mesmo grupo.
+                k = i
+                while k < len(linhas) and not linhas[k].strip():
+                    k += 1
+                if k < len(linhas) and is_table_title(linhas[k]):
+                    # Preservar as linhas em branco entre as tabelas
+                    tabelas_linhas.extend(linhas[i:k])
+                    i = k
+                    continue
+                break
+
+            # Verificar se há conteúdo substancial APÓS o grupo de tabelas e ANTES do próximo major heading
+            j = i
+            bloco_apos = []
+            while j < len(linhas):
+                if is_major_heading(linhas[j]):
+                    break
+                # Se surgir outra tabela não-consecutiva, não atravessar (evita reorder agressivo)
+                if is_table_title(linhas[j]):
+                    break
+                bloco_apos.append(linhas[j])
+                j += 1
+
+            conteudo_apos = [l for l in bloco_apos if l.strip() and not is_table_line(l)]
+            chars_apos = sum(len(l) for l in conteudo_apos)
+            linhas_apos = len([l for l in conteudo_apos if l.strip()])
+
+            # Se há texto substancial após a tabela, é uma tabela prematura
+            if chars_apos >= min_chars_apos_tabela and linhas_apos >= min_linhas_apos:
+                tabelas_corrigidas += 1
+                print(
+                    f"{Fore.YELLOW}   🔄 Tabela prematura detectada: '{group_title[:50]}...' "
+                    f"({chars_apos} chars, {linhas_apos} linhas de conteúdo após)"
+                )
+
+                # Conteúdo primeiro
+                resultado.extend(bloco_apos)
+                # Depois o grupo de tabelas
+                if resultado and resultado[-1].strip():
+                    resultado.append('')
+                resultado.extend(tabelas_linhas)
+                if resultado and resultado[-1].strip():
+                    resultado.append('')
+
+                i = j  # Pular o texto já processado
+                continue
+
+            # Grupo no lugar certo, adicionar normalmente
+            resultado.extend(tabelas_linhas)
+            continue
+
+        resultado.append(linha)
+        i += 1
+
+    if tabelas_corrigidas > 0:
+        print(f"{Fore.GREEN}   ✅ Corrigidas {tabelas_corrigidas} tabelas prematuras")
+
+    return '\n'.join(resultado)
+
+
 def mover_tabelas_para_fim_de_secao(texto):
     """
     v2.11: Reorganiza tabelas movendo-as para o final do BLOCO ATUAL (H2 ou H3).
@@ -2862,7 +3496,33 @@ SEMPRE que houver diferenciação de conceitos, prazos, procedimentos, requisito
 3. **Concisão:** máximo ~35–45 palavras por célula; frases curtas e diretas.
 4. **Compatibilidade:** PROIBIDO usar o caractere `|` dentro de células (isso quebra a tabela). Evite quebras de linha dentro das células.
 5. **Sem código:** PROIBIDO blocos de código em células.
-6. **Posicionamento:** o quadro vem **APENAS AO FINAL** do bloco concluído (fechamento lógico da seção)."""
+6. **Posicionamento:** o quadro vem **APENAS AO FINAL** do bloco concluído (fechamento lógico da seção).
+
+## ⚠️ ORDEM OBRIGATÓRIA: CONTEÚDO PRIMEIRO, TABELA DEPOIS
+**NUNCA** gere a tabela antes de terminar TODO o conteúdo explicativo do tópico.
+A sequência correta é SEMPRE:
+1. TODO o texto explicativo do tópico (parágrafos, exemplos, observações)
+2. DEPOIS (e somente depois) o 📋 Quadro-síntese
+3. DEPOIS (se aplicável) a 🎯 Tabela de pegadinhas
+4. DEPOIS o próximo tópico (## ou ###)
+
+**ERRADO** (tabela no meio do conteúdo):
+```
+## Tópico X
+Explicação inicial...
+📋 Quadro-síntese    ← ERRADO!
+| ... |
+Mais explicação...   ← Deveria estar ANTES da tabela!
+```
+
+**CORRETO**:
+```
+## Tópico X
+Explicação inicial...
+Mais explicação...   ← TODO conteúdo primeiro
+📋 Quadro-síntese    ← Tabela só no final
+| ... |
+```"""
 
     PROMPT_TABLE_APOSTILA += """
 
@@ -4405,22 +5065,174 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         return final_segments
 
     def _smart_chunk_with_overlap(self, text, max_size=None, overlap=None):
+        """
+        v2.28: Chunking inteligente com overlap adaptativo para tabelas.
+
+        Melhorias:
+        - Overlap 30% maior quando chunk contém tabela
+        - Nunca corta no meio de tabela
+        - Prioriza corte após pares de tabelas (📋 + 🎯)
+        """
         max_size = max_size or self.MAX_CHUNK_SIZE
-        overlap = overlap or self.CHUNK_OVERLAP
+        base_overlap = overlap or self.CHUNK_OVERLAP
         if len(text) <= max_size: return [text]
 
         chunks = []
         start = 0
+
+        def _is_table_line(line: str) -> bool:
+            stripped = line.strip()
+            return bool(stripped) and stripped.startswith('|') and '|' in stripped
+
+        def _prev_next_nonempty_lines_around(pos: int, window: int = 5000) -> tuple:
+            s_start = max(0, pos - window)
+            s_end = min(len(text), pos + window)
+            s = text[s_start:s_end]
+            p = pos - s_start
+            before_lines = s[:p].splitlines()
+            after_lines = s[p:].splitlines()
+            prev_line = next((l for l in reversed(before_lines) if l.strip()), "")
+            next_line = next((l for l in after_lines if l.strip()), "")
+            return prev_line, next_line
+
+        def _pos_inside_table_line(pos: int) -> bool:
+            if pos <= 0 or pos >= len(text):
+                return False
+            # `end` (slice stop) é seguro se estiver logo após um '\n'
+            if text[pos - 1] == '\n':
+                return False
+            line_start = text.rfind('\n', 0, pos) + 1
+            line_end = text.find('\n', pos)
+            if line_end == -1:
+                line_end = len(text)
+            return _is_table_line(text[line_start:line_end])
+
+        def _table_block_bounds_around(pos: int, window: int = 15000) -> Optional[tuple]:
+            s_start = max(0, pos - window)
+            s_end = min(len(text), pos + window)
+            s = text[s_start:s_end]
+            p = pos - s_start
+
+            lines = s.splitlines(keepends=True)
+            if not lines:
+                return None
+
+            # Encontrar o índice da linha que contém `p` (ou a anterior se `p` cair no separador)
+            cumulative = 0
+            idx = 0
+            for idx, ln in enumerate(lines):
+                nxt = cumulative + len(ln)
+                if p < nxt:
+                    break
+                cumulative = nxt
+            else:
+                idx = len(lines) - 1
+
+            if not _is_table_line(lines[idx]) and idx > 0 and _is_table_line(lines[idx - 1]):
+                idx -= 1
+            if not _is_table_line(lines[idx]):
+                return None
+
+            start_idx = idx
+            while start_idx > 0 and _is_table_line(lines[start_idx - 1]):
+                start_idx -= 1
+            end_idx = idx
+            while end_idx + 1 < len(lines) and _is_table_line(lines[end_idx + 1]):
+                end_idx += 1
+
+            start_off = sum(len(ln) for ln in lines[:start_idx])
+            end_off = sum(len(ln) for ln in lines[:end_idx + 1])
+            return (s_start + start_off, s_start + end_off)
+
         while start < len(text):
             end = start + max_size
+            chunk_text = text[start:end] if end <= len(text) else text[start:]
+
+            # v2.28: Detectar se chunk contém tabela para overlap maior
+            contem_tabela = '|' in chunk_text and re.search(r'^\s*\|', chunk_text, re.MULTILINE)
+            current_overlap = int(base_overlap * 1.3) if contem_tabela else base_overlap
+
             if end < len(text):
-                search_zone = text[max(0, end-2000):end]
-                last_break = search_zone.rfind('\n\n')
-                if last_break != -1: end = end - 2000 + last_break
-            
+                # Zona de busca para ponto de corte
+                search_start = max(0, end - 3000)
+                search_zone = text[search_start:end]
+                best_break = -1
+
+                # v2.28: Prioridade 1 - Após tabela de pegadinhas completa
+                match_pegadinha = re.search(r'\n(?=####?\s*🎯.*\n)', search_zone)
+                if match_pegadinha:
+                    # Encontrar fim da tabela após o heading
+                    pos_heading = match_pegadinha.end()
+                    remaining = search_zone[pos_heading:]
+                    lines = remaining.split('\n')
+                    pos_after_table = pos_heading
+                    in_table = False
+                    for i, line in enumerate(lines):
+                        if line.strip().startswith('|'):
+                            in_table = True
+                        elif in_table and not line.strip().startswith('|'):
+                            # Fim da tabela
+                            pos_after_table = pos_heading + sum(len(l)+1 for l in lines[:i])
+                            break
+                    if pos_after_table > pos_heading:
+                        best_break = pos_after_table
+
+                # v2.28: Prioridade 2 - Antes de novo heading ## (bloco temático)
+                if best_break == -1:
+                    match_heading = list(re.finditer(r'\n(?=##\s+\d)', search_zone))
+                    if match_heading:
+                        best_break = match_heading[-1].end()  # Último heading encontrado
+
+                # v2.28: Prioridade 3 - Parágrafo duplo (evitando meio de tabela)
+                if best_break == -1:
+                    # Verificar se estamos no meio de uma tabela
+                    last_newlines = list(re.finditer(r'\n\n', search_zone))
+                    for match in reversed(last_newlines):
+                        pos = match.start()
+                        # Verificar se próxima linha não é tabela
+                        next_char_pos = match.end()
+                        if next_char_pos < len(search_zone):
+                            next_line_start = search_zone[next_char_pos:next_char_pos+50]
+                            if not next_line_start.strip().startswith('|'):
+                                best_break = pos + 2
+                                break
+
+                # Fallback: qualquer \n\n
+                if best_break == -1:
+                    last_break = search_zone.rfind('\n\n')
+                    if last_break != -1:
+                        best_break = last_break
+
+                if best_break != -1:
+                    end = search_start + best_break
+
+                # v2.28: Nunca cortar no meio de uma tabela (separação por linha)
+                prev_line, next_line = _prev_next_nonempty_lines_around(end)
+                if (_is_table_line(prev_line) and _is_table_line(next_line)) or _pos_inside_table_line(end):
+                    bounds = _table_block_bounds_around(end)
+                    if bounds:
+                        table_start, table_end = bounds
+                        min_chunk_size = max(800, int(max_size * 0.2))
+                        # Preferir cortar ANTES da tabela; se ficar pequeno demais, cortar APÓS a tabela
+                        candidate = table_start
+                        if candidate <= start + min_chunk_size and table_end > start + min_chunk_size:
+                            candidate = table_end
+                        if candidate > start:
+                            end = candidate
+
+            # Garantir progresso (evitar loop infinito se `end` voltar demais)
+            if end <= start:
+                end = min(start + max_size, len(text))
+                if end <= start:
+                    break
+
             chunks.append(text[start:end].strip())
             if end >= len(text): break
-            start = end - overlap
+            next_start = end - current_overlap
+            if next_start <= start:
+                next_start = end
+            start = next_start
+
         return chunks
 
     def _merge_chunks_deduplicated(self, chunks):
@@ -6658,7 +7470,19 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             return None
 
         print(f"{Fore.CYAN}📄 Gerando documento Word profissional...")
-        
+
+        # v2.28: Sanitização do markdown antes de converter
+        try:
+            formatted_text = sanitizar_markdown_final(formatted_text)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Erro na sanitização: {e}. Continuando com texto original.")
+
+        # v2.28: Corrigir tabelas que aparecem antes do conteúdo terminar
+        try:
+            formatted_text = corrigir_tabelas_prematuras(formatted_text)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Erro ao corrigir tabelas prematuras: {e}.")
+
         # 1. Aplicar Smart Layout (opcional, mantido do Vomo para consistência)
         try:
             formatted_text = mover_tabelas_para_fim_de_secao(formatted_text)
@@ -6727,6 +7551,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         in_table = False
         table_rows = []
         current_table_cols = None
+        current_table_type = "default"  # v2.28: Tipo de tabela atual
 
         def _is_table_separator(line: str) -> bool:
             return bool(re.match(r'^\s*\|[\s:|-]+\|[\s:|-]*$', line))
@@ -6742,14 +7567,22 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             if '|' not in lines[idx]:
                 return False
             return _is_table_separator(lines[idx + 1].strip())
-        
+
+        def _detect_table_type_from_heading(heading_text: str) -> str:
+            """v2.28: Detecta tipo de tabela pelo heading anterior."""
+            if '📋' in heading_text or 'uadro' in heading_text.lower():
+                return "quadro_sintese"
+            elif '🎯' in heading_text or 'pegadinha' in heading_text.lower() or 'banca' in heading_text.lower():
+                return "pegadinhas"
+            return "default"
+
         while i < len(lines):
             line = lines[i].strip()
             
             if in_table:
                 if not line:
                     if table_rows:
-                        self._add_table_to_doc(doc, table_rows)
+                        self._add_table_to_doc(doc, table_rows, current_table_type)
                     in_table = False
                     table_rows = []
                     current_table_cols = None
@@ -6760,7 +7593,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     if _looks_like_table_header(i):
                         candidate_cols = _count_table_cols(line)
                         if current_table_cols and table_rows and candidate_cols != current_table_cols:
-                            self._add_table_to_doc(doc, table_rows)
+                            self._add_table_to_doc(doc, table_rows, current_table_type)
                             table_rows = []
                             current_table_cols = None
 
@@ -6773,7 +7606,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
 
                     if i == len(lines) - 1:
                         if table_rows:
-                            self._add_table_to_doc(doc, table_rows)
+                            self._add_table_to_doc(doc, table_rows, current_table_type)
                         in_table = False
                         table_rows = []
                         current_table_cols = None
@@ -6781,7 +7614,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     continue
 
                 if table_rows:
-                    self._add_table_to_doc(doc, table_rows)
+                    self._add_table_to_doc(doc, table_rows, current_table_type)
                 in_table = False
                 table_rows = []
                 current_table_cols = None
@@ -6796,12 +7629,15 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                 in_table = True
                 table_rows = []
                 current_table_cols = None
+                # v2.28: Tipo já foi definido pelo heading anterior
                 continue
 
             # Headings
             if line.startswith('##### '):
                 h = doc.add_heading('', level=5)
                 self._format_inline_markdown(h.paragraphs[0], line[6:])
+                # v2.28: Detectar tipo de tabela para heading level 5
+                current_table_type = _detect_table_type_from_heading(line[6:])
             elif h_match := re.match(r'^(####|###|##|#)\s+(.*)', line):
                 lvl = len(h_match.group(1))
                 h_text = h_match.group(2)
@@ -6810,6 +7646,9 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     continue
                 h = doc.add_heading('', level=lvl)
                 self._format_inline_markdown(h, h_text)
+                # v2.28: Detectar tipo de tabela para heading level 4
+                if lvl == 4:
+                    current_table_type = _detect_table_type_from_heading(h_text)
             
             # Separadores
             elif line.strip() in ['---', '***', '___']:
@@ -6912,41 +7751,96 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             run = paragraph.add_run(text[last_end:])
             run.font.name = 'Arial'
 
-    def _add_table_to_doc(self, doc, rows):
-        """Adiciona tabela premium ao Word"""
-        from docx.shared import RGBColor
+    def _add_table_to_doc(self, doc, rows, table_type="default"):
+        """
+        v2.28: Adiciona tabela premium ao Word com estilos diferenciados.
+
+        Args:
+            doc: Documento Word
+            rows: Lista de listas com dados das células
+            table_type: Tipo de tabela para estilização diferenciada
+                - "quadro_sintese" (📋): Azul, 5 colunas, didático
+                - "pegadinhas" (🎯): Laranja, 3 colunas, alerta
+                - "default": Azul padrão
+        """
+        from docx.shared import RGBColor, Pt, Cm
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.enum.table import WD_TABLE_ALIGNMENT
         from docx.oxml import OxmlElement
         from docx.oxml.ns import qn
-        
+
         if len(rows) < 2: return
         max_cols = max(len(row) for row in rows)
         if max_cols == 0: return
-        
+
+        # v2.28: Cores por tipo de tabela
+        CORES = {
+            "quadro_sintese": {
+                "header_bg": "0066CC",      # Azul escuro
+                "header_text": RGBColor(255, 255, 255),
+                "alt_row_bg": "E6F2FF",     # Azul claro
+            },
+            "pegadinhas": {
+                "header_bg": "E67E00",      # Laranja
+                "header_text": RGBColor(255, 255, 255),
+                "alt_row_bg": "FFF5E6",     # Laranja claro
+            },
+            "default": {
+                "header_bg": "0066CC",
+                "header_text": RGBColor(255, 255, 255),
+                "alt_row_bg": "F0F0F0",
+            }
+        }
+
+        cores = CORES.get(table_type, CORES["default"])
+
         table = doc.add_table(rows=len(rows), cols=max_cols)
-        table.style = 'Light Grid Accent 1'
+        table.style = 'Table Grid'
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        
+
         for i, row_data in enumerate(rows):
             for j in range(max_cols):
                 cell = table.rows[i].cells[j]
                 cell_text = row_data[j] if j < len(row_data) else ""
-                
+
                 p = cell.paragraphs[0]
                 p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 self._format_inline_markdown(p, cell_text)
-                
-                if i == 0: # Header styling
+
+                # Header styling
+                if i == 0:
                     for para in cell.paragraphs:
                         for run in para.runs:
                             run.font.bold = True
-                            run.font.color.rgb = RGBColor(255, 255, 255)
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                    
+                            run.font.color.rgb = cores["header_text"]
+                            run.font.size = Pt(10)
+                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
                     shading_elm = OxmlElement('w:shd')
-                    shading_elm.set(qn('w:fill'), '0066CC')
+                    shading_elm.set(qn('w:fill'), cores["header_bg"])
                     cell._element.get_or_add_tcPr().append(shading_elm)
+
+                # v2.28: Zebra striping (linhas alternadas)
+                elif i % 2 == 0:
+                    shading_elm = OxmlElement('w:shd')
+                    shading_elm.set(qn('w:fill'), cores["alt_row_bg"])
+                    cell._element.get_or_add_tcPr().append(shading_elm)
+
+        # v2.28: Ajustar largura das colunas baseado no tipo
+        if table_type == "quadro_sintese" and max_cols == 5:
+            # Proporções: Item(15%), Definição(25%), Detalhes(25%), Base legal(15%), Dica(20%)
+            widths = [Cm(2.5), Cm(4.0), Cm(4.0), Cm(2.5), Cm(3.5)]
+            for j, width in enumerate(widths):
+                for row in table.rows:
+                    if j < len(row.cells):
+                        row.cells[j].width = width
+        elif table_type == "pegadinhas" and max_cols == 3:
+            # Proporções: Como cobra(35%), Resposta(30%), Erro comum(35%)
+            widths = [Cm(5.5), Cm(4.5), Cm(5.5)]
+            for j, width in enumerate(widths):
+                for row in table.rows:
+                    if j < len(row.cells):
+                        row.cells[j].width = width
 
     def create_toc(self, doc):
         """Adiciona Sumário nativo do Word"""

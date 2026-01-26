@@ -1,9 +1,8 @@
-import json
-import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from app.services.ai.rag_helpers import _call_llm
+from app.services.ai.json_utils import extract_first_json_object
 
 
 @dataclass(frozen=True)
@@ -34,6 +33,12 @@ class DatasetRegistry:
                 description="Modelos de pecas, estruturas e estilos processuais.",
                 locale="pt-br",
                 sources=["pecas_modelo"],
+            ),
+            DatasetSpec(
+                name="doutrina",
+                description="Doutrina, livros, artigos academicos e comentarios de autores.",
+                locale="pt-br",
+                sources=["doutrina"],
             ),
             DatasetSpec(
                 name="sei",
@@ -88,15 +93,7 @@ class AgenticRAGRouter:
         return data
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
-        if not text:
-            return {}
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            return {}
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return {}
+        return extract_first_json_object(text)
 
     def _compact_history(self, history: List[dict], max_items: int = 6, max_chars: int = 1200) -> str:
         if not history:

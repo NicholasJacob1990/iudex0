@@ -8,7 +8,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { ArrowLeft, Save, Upload, Sparkles, Folder, MessageSquare } from 'lucide-react';
+import { ArrowLeft, Save, Upload, Sparkles, Folder, MessageSquare, FileText, CheckCircle, Clock, X, Plus, Database, Network } from 'lucide-react';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
 import { GeneratorWizard } from '@/components/dashboard/generator-wizard';
@@ -28,6 +28,8 @@ export default function CaseDetailPage() {
     const [loading, setLoading] = useState(true);
     const [caseDocuments, setCaseDocuments] = useState<any[]>([]);
     const [docsLoading, setDocsLoading] = useState(false);
+    const [uploading, setUploading] = useState(false);
+    const [isDragOver, setIsDragOver] = useState(false);
     const [caseChatId, setCaseChatId] = useState<string | null>(null);
     const [caseGeneratorChatId, setCaseGeneratorChatId] = useState<string | null>(null);
     const [didInitCaseContext, setDidInitCaseContext] = useState(false);
@@ -168,10 +170,15 @@ export default function CaseDetailPage() {
         createChat,
     ]);
 
-    useEffect(() => {
-        const loadCaseDocuments = async () => {
+    const loadCaseDocuments = async () => {
+        try {
+            setDocsLoading(true);
+            const data = await apiClient.getCaseDocuments(id);
+            setCaseDocuments(Array.isArray(data?.documents) ? data.documents : []);
+        } catch (error) {
+            console.error(error);
+            // Fallback to legacy tag-based loading
             try {
-                setDocsLoading(true);
                 const data = await apiClient.getDocuments(0, 200);
                 const docs = Array.isArray(data?.documents) ? data.documents : [];
                 const tagKey = `case:${id}`.toLowerCase();
@@ -179,15 +186,79 @@ export default function CaseDetailPage() {
                     Array.isArray(doc?.tags) && doc.tags.some((tag: string) => String(tag).toLowerCase() === tagKey)
                 );
                 setCaseDocuments(filtered);
-            } catch (error) {
-                console.error(error);
-            } finally {
-                setDocsLoading(false);
+            } catch {
+                setCaseDocuments([]);
             }
-        };
+        } finally {
+            setDocsLoading(false);
+        }
+    };
 
+    useEffect(() => {
         if (id) loadCaseDocuments();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [id]);
+
+    const handleFileUpload = async (files: FileList | File[]) => {
+        if (!files || files.length === 0) return;
+
+        setUploading(true);
+        let successCount = 0;
+        let errorCount = 0;
+
+        for (const file of Array.from(files)) {
+            try {
+                await apiClient.uploadDocumentToCase(id, file, {
+                    auto_ingest_rag: true,
+                    auto_ingest_graph: true,
+                });
+                successCount++;
+            } catch (error) {
+                console.error(`Failed to upload ${file.name}:`, error);
+                errorCount++;
+            }
+        }
+
+        setUploading(false);
+
+        if (successCount > 0) {
+            toast.success(`${successCount} arquivo(s) enviado(s) com sucesso`);
+            loadCaseDocuments();
+        }
+        if (errorCount > 0) {
+            toast.error(`${errorCount} arquivo(s) falharam no upload`);
+        }
+    };
+
+    const handleDetachDocument = async (docId: string, docName: string) => {
+        try {
+            await apiClient.detachDocumentFromCase(id, docId);
+            toast.success(`"${docName}" desanexado do caso`);
+            loadCaseDocuments();
+        } catch (error) {
+            console.error(error);
+            toast.error("Erro ao desanexar documento");
+        }
+    };
+
+    const handleDragOver = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragOver(true);
+    };
+
+    const handleDragLeave = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragOver(false);
+    };
+
+    const handleDrop = (e: React.DragEvent) => {
+        e.preventDefault();
+        setIsDragOver(false);
+        const files = e.dataTransfer.files;
+        if (files?.length > 0) {
+            handleFileUpload(files);
+        }
+    };
 
     useEffect(() => {
         if (!id) return;
@@ -343,38 +414,145 @@ export default function CaseDetailPage() {
                 <TabsContent value="documents">
                     <Card>
                         <CardHeader>
-                            <CardTitle>Arquivos do Caso (RAG Local)</CardTitle>
+                            <CardTitle className="flex items-center gap-2">
+                                <Folder className="h-5 w-5" />
+                                Arquivos do Caso (RAG Local)
+                            </CardTitle>
                         </CardHeader>
                         <CardContent>
                             {docsLoading ? (
-                                <div className="text-sm text-muted-foreground">Carregando documentos do caso...</div>
+                                <div className="text-sm text-muted-foreground py-4">Carregando documentos do caso...</div>
                             ) : caseDocuments.length > 0 ? (
                                 <div className="space-y-2 mb-6">
                                     {caseDocuments.map((doc) => (
-                                        <div key={doc.id} className="flex items-center justify-between gap-2 text-sm border rounded-md px-3 py-2">
-                                            <div className="min-w-0">
-                                                <div className="font-medium truncate">{doc.name}</div>
-                                                <div className="text-xs text-muted-foreground">
-                                                    {doc.created_at ? new Date(doc.created_at).toLocaleString() : '—'}
+                                        <div
+                                            key={doc.id}
+                                            className="flex items-center justify-between gap-3 text-sm border rounded-lg px-4 py-3 bg-card hover:bg-muted/50 transition-colors"
+                                        >
+                                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                                                <FileText className="h-5 w-5 text-muted-foreground shrink-0" />
+                                                <div className="min-w-0 flex-1">
+                                                    <div className="font-medium truncate">{doc.name || doc.original_name}</div>
+                                                    <div className="flex items-center gap-3 text-xs text-muted-foreground mt-1">
+                                                        <span>{doc.created_at ? new Date(doc.created_at).toLocaleString('pt-BR') : '—'}</span>
+                                                        <span className="text-muted-foreground/50">•</span>
+                                                        <span>{doc.type || 'DOC'}</span>
+                                                    </div>
                                                 </div>
                                             </div>
-                                            <Button size="sm" variant="outline" onClick={() => router.push('/documents')}>
-                                                Ver em Documentos
-                                            </Button>
+
+                                            {/* RAG/Graph Status */}
+                                            <div className="flex items-center gap-2 shrink-0">
+                                                <div
+                                                    className="flex items-center gap-1 px-2 py-1 rounded-full text-xs"
+                                                    title={doc.rag_ingested
+                                                        ? `RAG indexado em ${doc.rag_ingested_at ? new Date(doc.rag_ingested_at).toLocaleString('pt-BR') : ''}`
+                                                        : 'Aguardando indexação RAG'}
+                                                >
+                                                    {doc.rag_ingested ? (
+                                                        <>
+                                                            <Database className="h-3 w-3 text-green-600" />
+                                                            <span className="text-green-700">RAG</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <Clock className="h-3 w-3 text-amber-500" />
+                                                            <span className="text-amber-600">RAG</span>
+                                                        </>
+                                                    )}
+                                                </div>
+                                                <div
+                                                    className="flex items-center gap-1 px-2 py-1 rounded-full text-xs"
+                                                    title={doc.graph_ingested
+                                                        ? `Grafo indexado em ${doc.graph_ingested_at ? new Date(doc.graph_ingested_at).toLocaleString('pt-BR') : ''}`
+                                                        : 'Aguardando indexação Graph'}
+                                                >
+                                                    {doc.graph_ingested ? (
+                                                        <>
+                                                            <Network className="h-3 w-3 text-green-600" />
+                                                            <span className="text-green-700">Graph</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <Clock className="h-3 w-3 text-amber-500" />
+                                                            <span className="text-amber-600">Graph</span>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            {/* Actions */}
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <Button
+                                                    size="sm"
+                                                    variant="ghost"
+                                                    className="h-8 w-8 p-0 text-muted-foreground hover:text-destructive"
+                                                    title="Desanexar documento"
+                                                    onClick={() => handleDetachDocument(doc.id, doc.name || doc.original_name)}
+                                                >
+                                                    <X className="h-4 w-4" />
+                                                </Button>
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
                             ) : (
-                                <div className="text-sm text-muted-foreground mb-6">
+                                <div className="text-sm text-muted-foreground mb-6 py-4">
                                     Nenhum documento associado a este caso ainda.
                                 </div>
                             )}
-                            <div className="flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-xl border-muted bg-muted/10">
-                                <Upload className="h-8 w-8 text-muted-foreground mb-4" />
-                                <p className="text-sm text-muted-foreground mb-4">
-                                    Arraste arquivos ou pastas (Autos) para indexação local.
-                                </p>
-                                <Button>Carregar Arquivos</Button>
+
+                            {/* Upload Area */}
+                            <div
+                                className={`flex flex-col items-center justify-center p-12 border-2 border-dashed rounded-xl transition-colors ${
+                                    isDragOver
+                                        ? 'border-primary bg-primary/5'
+                                        : 'border-muted bg-muted/10 hover:border-muted-foreground/30'
+                                }`}
+                                onDragOver={handleDragOver}
+                                onDragLeave={handleDragLeave}
+                                onDrop={handleDrop}
+                            >
+                                {uploading ? (
+                                    <>
+                                        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent mb-4" />
+                                        <p className="text-sm text-muted-foreground">Enviando arquivos...</p>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Upload className={`h-8 w-8 mb-4 ${isDragOver ? 'text-primary' : 'text-muted-foreground'}`} />
+                                        <p className="text-sm text-muted-foreground mb-2 text-center">
+                                            Arraste arquivos aqui ou clique para selecionar
+                                        </p>
+                                        <p className="text-xs text-muted-foreground/70 mb-4 text-center">
+                                            Os arquivos serão automaticamente indexados no RAG local e no Grafo de Conhecimento
+                                        </p>
+                                        <label className="cursor-pointer">
+                                            <input
+                                                type="file"
+                                                multiple
+                                                className="hidden"
+                                                onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
+                                                accept=".pdf,.docx,.doc,.txt,.html,.odt,.rtf"
+                                            />
+                                            <Button asChild>
+                                                <span>
+                                                    <Plus className="h-4 w-4 mr-2" />
+                                                    Carregar Arquivos
+                                                </span>
+                                            </Button>
+                                        </label>
+                                    </>
+                                )}
+                            </div>
+
+                            {/* Info */}
+                            <div className="mt-4 flex items-start gap-2 text-xs text-muted-foreground p-3 rounded-lg bg-muted/30">
+                                <CheckCircle className="h-4 w-4 shrink-0 mt-0.5 text-green-600" />
+                                <div>
+                                    <span className="font-medium text-foreground">Indexação automática:</span>{' '}
+                                    Arquivos enviados são automaticamente processados e indexados no RAG (busca semântica) e no Grafo (relações entre entidades legais).
+                                </div>
                             </div>
                         </CardContent>
                     </Card>

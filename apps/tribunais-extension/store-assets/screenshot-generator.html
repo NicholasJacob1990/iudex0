@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Screenshot Generator - Iudex Tribunais</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+      color: #1a237e;
+    }
+
+    .instructions {
+      background: #e3f2fd;
+      padding: 16px;
+      border-radius: 8px;
+      margin-bottom: 30px;
+    }
+
+    .instructions h3 {
+      color: #1565c0;
+      margin-bottom: 8px;
+    }
+
+    .instructions ul {
+      margin-left: 20px;
+    }
+
+    .screenshots {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 30px;
+    }
+
+    .screenshot-frame {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    }
+
+    .screenshot-title {
+      background: #1a237e;
+      color: white;
+      padding: 12px 16px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    .screenshot-content {
+      position: relative;
+    }
+
+    /* Screenshot 1: Extension Popup */
+    .screenshot-1 {
+      width: 1280px;
+      height: 800px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+
+    .popup-preview {
+      width: 400px;
+      background: #f5f5f5;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+
+    .popup-header {
+      background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
+      color: white;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .popup-icon {
+      width: 40px;
+      height: 40px;
+      background: white;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+    }
+
+    .popup-title {
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .popup-status {
+      padding: 12px 16px;
+      background: white;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: #4caf50;
+    }
+
+    .popup-content {
+      padding: 16px;
+    }
+
+    .feature-card {
+      background: white;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .feature-card h4 {
+      color: #1a237e;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    .feature-card p {
+      color: #666;
+      font-size: 13px;
+    }
+
+    .info-text {
+      position: absolute;
+      right: 60px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: white;
+      max-width: 500px;
+    }
+
+    .info-text h2 {
+      font-size: 42px;
+      margin-bottom: 20px;
+      line-height: 1.2;
+    }
+
+    .info-text p {
+      font-size: 20px;
+      opacity: 0.9;
+      line-height: 1.6;
+    }
+
+    /* Screenshot 2: Dashboard */
+    .screenshot-2 {
+      width: 1280px;
+      height: 800px;
+      background: #f5f5f5;
+      padding: 30px;
+    }
+
+    .dashboard {
+      background: white;
+      border-radius: 12px;
+      overflow: hidden;
+      height: 100%;
+    }
+
+    .dashboard-header {
+      background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
+      color: white;
+      padding: 20px 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .dashboard-header h2 {
+      font-size: 24px;
+    }
+
+    .dashboard-stats {
+      display: flex;
+      gap: 15px;
+    }
+
+    .stat-box {
+      background: rgba(255,255,255,0.2);
+      padding: 10px 20px;
+      border-radius: 8px;
+      text-align: center;
+    }
+
+    .stat-number {
+      font-size: 28px;
+      font-weight: bold;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      opacity: 0.8;
+    }
+
+    .dashboard-body {
+      padding: 30px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 30px;
+    }
+
+    .card {
+      background: #f8f9fa;
+      border-radius: 12px;
+      padding: 24px;
+    }
+
+    .card h3 {
+      color: #1a237e;
+      margin-bottom: 16px;
+      font-size: 18px;
+    }
+
+    .tribunal-list {
+      list-style: none;
+    }
+
+    .tribunal-list li {
+      padding: 12px;
+      background: white;
+      border-radius: 8px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .tribunal-name {
+      font-weight: 500;
+    }
+
+    .tribunal-status {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+    }
+
+    .tribunal-status.ok {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    /* Screenshot 3: Features */
+    .screenshot-3 {
+      width: 1280px;
+      height: 800px;
+      background: linear-gradient(135deg, #1a237e 0%, #0d47a1 100%);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+      color: white;
+    }
+
+    .features-title {
+      font-size: 42px;
+      margin-bottom: 50px;
+      text-align: center;
+    }
+
+    .features-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 30px;
+      max-width: 1100px;
+    }
+
+    .feature-box {
+      background: rgba(255,255,255,0.1);
+      border-radius: 16px;
+      padding: 30px;
+      text-align: center;
+      backdrop-filter: blur(10px);
+    }
+
+    .feature-icon {
+      width: 70px;
+      height: 70px;
+      background: rgba(255,255,255,0.2);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 20px;
+      font-size: 32px;
+    }
+
+    .feature-box h4 {
+      font-size: 20px;
+      margin-bottom: 12px;
+    }
+
+    .feature-box p {
+      font-size: 14px;
+      opacity: 0.8;
+      line-height: 1.5;
+    }
+
+    /* Screenshot 4: Pricing */
+    .screenshot-4 {
+      width: 1280px;
+      height: 800px;
+      background: #f8f9fa;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+    }
+
+    .pricing-title {
+      font-size: 36px;
+      color: #1a237e;
+      margin-bottom: 40px;
+      text-align: center;
+    }
+
+    .pricing-cards {
+      display: flex;
+      gap: 30px;
+    }
+
+    .pricing-card {
+      width: 320px;
+      background: white;
+      border-radius: 16px;
+      padding: 30px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+      position: relative;
+    }
+
+    .pricing-card.featured {
+      transform: scale(1.05);
+      border: 3px solid #1a237e;
+    }
+
+    .pricing-card.featured::before {
+      content: 'Mais Popular';
+      position: absolute;
+      top: -14px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: #1a237e;
+      color: white;
+      padding: 6px 20px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .pricing-name {
+      font-size: 24px;
+      font-weight: 600;
+      color: #1a237e;
+      margin-bottom: 8px;
+    }
+
+    .pricing-description {
+      color: #666;
+      font-size: 14px;
+      margin-bottom: 20px;
+    }
+
+    .pricing-price {
+      font-size: 42px;
+      font-weight: bold;
+      color: #333;
+    }
+
+    .pricing-price span {
+      font-size: 16px;
+      font-weight: normal;
+      color: #666;
+    }
+
+    .pricing-features {
+      list-style: none;
+      margin: 20px 0;
+    }
+
+    .pricing-features li {
+      padding: 8px 0;
+      color: #555;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .pricing-features li::before {
+      content: '✓';
+      color: #4caf50;
+      font-weight: bold;
+    }
+
+    .pricing-button {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .pricing-button.primary {
+      background: #1a237e;
+      color: white;
+    }
+
+    .pricing-button.secondary {
+      background: #f5f5f5;
+      color: #333;
+    }
+
+    /* Screenshot 5: AI Integration */
+    .screenshot-5 {
+      width: 1280px;
+      height: 800px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 60px;
+    }
+
+    .ai-demo {
+      display: flex;
+      gap: 60px;
+      align-items: center;
+    }
+
+    .ai-text {
+      color: white;
+      max-width: 450px;
+    }
+
+    .ai-text h2 {
+      font-size: 40px;
+      margin-bottom: 20px;
+      line-height: 1.2;
+    }
+
+    .ai-text p {
+      font-size: 18px;
+      opacity: 0.9;
+      line-height: 1.6;
+      margin-bottom: 30px;
+    }
+
+    .ai-features {
+      list-style: none;
+    }
+
+    .ai-features li {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      font-size: 16px;
+    }
+
+    .ai-features li::before {
+      content: '→';
+      font-size: 20px;
+    }
+
+    .ai-preview {
+      background: white;
+      border-radius: 16px;
+      width: 500px;
+      overflow: hidden;
+      box-shadow: 0 30px 80px rgba(0,0,0,0.3);
+    }
+
+    .ai-preview-header {
+      background: #1a237e;
+      color: white;
+      padding: 16px 20px;
+      font-weight: 600;
+    }
+
+    .ai-preview-content {
+      padding: 20px;
+    }
+
+    .ai-message {
+      margin-bottom: 16px;
+    }
+
+    .ai-message.user {
+      text-align: right;
+    }
+
+    .ai-message .bubble {
+      display: inline-block;
+      padding: 12px 18px;
+      border-radius: 18px;
+      max-width: 80%;
+      font-size: 14px;
+    }
+
+    .ai-message.user .bubble {
+      background: #1a237e;
+      color: white;
+    }
+
+    .ai-message.assistant .bubble {
+      background: #f5f5f5;
+      color: #333;
+    }
+
+    @media print {
+      body {
+        background: white;
+      }
+      .screenshot-frame {
+        page-break-inside: avoid;
+        margin-bottom: 30px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Screenshots para Chrome Web Store - Iudex Tribunais</h1>
+
+    <div class="instructions">
+      <h3>Instrucoes para gerar screenshots:</h3>
+      <ul>
+        <li>Use a ferramenta de screenshot do navegador (DevTools > More tools > Capture screenshot)</li>
+        <li>Cada frame tem 1280x800px (dimensao recomendada pela Chrome Web Store)</li>
+        <li>Salve como PNG para melhor qualidade</li>
+        <li>Nomeie os arquivos como: screenshot-1.png, screenshot-2.png, etc.</li>
+      </ul>
+    </div>
+
+    <div class="screenshots">
+      <!-- Screenshot 1: Popup Preview -->
+      <div class="screenshot-frame">
+        <div class="screenshot-title">Screenshot 1: Interface da Extensao (1280x800)</div>
+        <div class="screenshot-content">
+          <div class="screenshot-1">
+            <div class="popup-preview">
+              <div class="popup-header">
+                <div class="popup-icon">⚖️</div>
+                <div class="popup-title">Iudex Tribunais</div>
+              </div>
+              <div class="popup-status">
+                <div class="status-dot"></div>
+                <span>Conectado ao servidor MCP</span>
+              </div>
+              <div class="popup-content">
+                <div class="feature-card">
+                  <h4>Automacao de Processos</h4>
+                  <p>Acompanhamento automatico em todos os tribunais brasileiros</p>
+                </div>
+                <div class="feature-card">
+                  <h4>Certificado Digital A3</h4>
+                  <p>Assinatura digital integrada com seu certificado</p>
+                </div>
+                <div class="feature-card">
+                  <h4>CAPTCHA Automatico</h4>
+                  <p>Resolucao assistida de CAPTCHAs</p>
+                </div>
+              </div>
+            </div>
+            <div class="info-text">
+              <h2>Automacao Juridica Inteligente</h2>
+              <p>Conecte seu navegador ao poder da IA para automatizar tarefas repetitivas nos tribunais.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Screenshot 2: Dashboard -->
+      <div class="screenshot-frame">
+        <div class="screenshot-title">Screenshot 2: Dashboard de Monitoramento (1280x800)</div>
+        <div class="screenshot-content">
+          <div class="screenshot-2">
+            <div class="dashboard">
+              <div class="dashboard-header">
+                <h2>Painel de Acompanhamento</h2>
+                <div class="dashboard-stats">
+                  <div class="stat-box">
+                    <div class="stat-number">127</div>
+                    <div class="stat-label">Processos</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-number">23</div>
+                    <div class="stat-label">Movimentacoes</div>
+                  </div>
+                  <div class="stat-box">
+                    <div class="stat-number">5</div>
+                    <div class="stat-label">Urgentes</div>
+                  </div>
+                </div>
+              </div>
+              <div class="dashboard-body">
+                <div class="card">
+                  <h3>Tribunais Conectados</h3>
+                  <ul class="tribunal-list">
+                    <li>
+                      <span class="tribunal-name">TJSP - Tribunal de Justica de SP</span>
+                      <span class="tribunal-status ok">Online</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">TRF3 - Tribunal Regional Federal</span>
+                      <span class="tribunal-status ok">Online</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">STJ - Superior Tribunal de Justica</span>
+                      <span class="tribunal-status ok">Online</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">TRT2 - Tribunal Regional do Trabalho</span>
+                      <span class="tribunal-status ok">Online</span>
+                    </li>
+                  </ul>
+                </div>
+                <div class="card">
+                  <h3>Ultimas Operacoes</h3>
+                  <ul class="tribunal-list">
+                    <li>
+                      <span class="tribunal-name">Consulta processual TJSP</span>
+                      <span class="tribunal-status ok">Sucesso</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">Download de intimacao</span>
+                      <span class="tribunal-status ok">Sucesso</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">Protocolo de peticao</span>
+                      <span class="tribunal-status ok">Sucesso</span>
+                    </li>
+                    <li>
+                      <span class="tribunal-name">Assinatura digital</span>
+                      <span class="tribunal-status ok">Sucesso</span>
+                    </li>
+                  </ul>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Screenshot 3: Features -->
+      <div class="screenshot-frame">
+        <div class="screenshot-title">Screenshot 3: Funcionalidades (1280x800)</div>
+        <div class="screenshot-content">
+          <div class="screenshot-3">
+            <h2 class="features-title">Recursos Poderosos para Advogados</h2>
+            <div class="features-grid">
+              <div class="feature-box">
+                <div class="feature-icon">🔍</div>
+                <h4>Busca Unificada</h4>
+                <p>Pesquise processos em todos os tribunais de uma so vez</p>
+              </div>
+              <div class="feature-box">
+                <div class="feature-icon">📋</div>
+                <h4>Acompanhamento</h4>
+                <p>Monitoramento automatico de movimentacoes</p>
+              </div>
+              <div class="feature-box">
+                <div class="feature-icon">✍️</div>
+                <h4>Assinatura Digital</h4>
+                <p>Suporte completo a certificado A3</p>
+              </div>
+              <div class="feature-box">
+                <div class="feature-icon">🤖</div>
+                <h4>Integracao com IA</h4>
+                <p>Claude e ChatGPT para analise de documentos</p>
+              </div>
+              <div class="feature-box">
+                <div class="feature-icon">⚡</div>
+                <h4>Automacao</h4>
+                <p>Protocolo e download automatizado</p>
+              </div>
+              <div class="feature-box">
+                <div class="feature-icon">🔒</div>
+                <h4>Seguranca</h4>
+                <p>Dados processados localmente</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Screenshot 4: Pricing -->
+      <div class="screenshot-frame">
+        <div class="screenshot-title">Screenshot 4: Planos e Precos (1280x800)</div>
+        <div class="screenshot-content">
+          <div class="screenshot-4">
+            <h2 class="pricing-title">Planos que cabem no seu bolso</h2>
+            <div class="pricing-cards">
+              <div class="pricing-card">
+                <div class="pricing-name">Gratuito</div>
+                <div class="pricing-description">Para experimentar</div>
+                <div class="pricing-price">R$ 0<span>/mes</span></div>
+                <ul class="pricing-features">
+                  <li>7 dias de teste</li>
+                  <li>50 operacoes/dia</li>
+                  <li>Todos os tribunais</li>
+                  <li>Suporte via comunidade</li>
+                </ul>
+                <button class="pricing-button secondary">Comecar Gratis</button>
+              </div>
+              <div class="pricing-card featured">
+                <div class="pricing-name">Profissional</div>
+                <div class="pricing-description">Para advogados</div>
+                <div class="pricing-price">R$ 97<span>/mes</span></div>
+                <ul class="pricing-features">
+                  <li>Operacoes ilimitadas</li>
+                  <li>Integracao com IA</li>
+                  <li>Suporte por email</li>
+                  <li>Historico de 90 dias</li>
+                  <li>Atualizacoes automaticas</li>
+                </ul>
+                <button class="pricing-button primary">Assinar Agora</button>
+              </div>
+              <div class="pricing-card">
+                <div class="pricing-name">Escritorio</div>
+                <div class="pricing-description">Para equipes</div>
+                <div class="pricing-price">R$ 297<span>/mes</span></div>
+                <ul class="pricing-features">
+                  <li>Ate 5 usuarios</li>
+                  <li>API dedicada</li>
+                  <li>Suporte prioritario</li>
+                  <li>Dashboard de uso</li>
+                  <li>Relatorios de produtividade</li>
+                </ul>
+                <button class="pricing-button secondary">Falar com Vendas</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Screenshot 5: AI Integration -->
+      <div class="screenshot-frame">
+        <div class="screenshot-title">Screenshot 5: Integracao com IA (1280x800)</div>
+        <div class="screenshot-content">
+          <div class="screenshot-5">
+            <div class="ai-demo">
+              <div class="ai-text">
+                <h2>Potencializado por Inteligencia Artificial</h2>
+                <p>Use Claude ou ChatGPT para automatizar tarefas complexas nos tribunais.</p>
+                <ul class="ai-features">
+                  <li>Analise de documentos juridicos</li>
+                  <li>Geracao de peticoes automatica</li>
+                  <li>Resumo de movimentacoes</li>
+                  <li>Alertas inteligentes</li>
+                </ul>
+              </div>
+              <div class="ai-preview">
+                <div class="ai-preview-header">Assistente Juridico IA</div>
+                <div class="ai-preview-content">
+                  <div class="ai-message user">
+                    <div class="bubble">Busque todas as movimentacoes do processo 1234567-89.2024.8.26.0100</div>
+                  </div>
+                  <div class="ai-message assistant">
+                    <div class="bubble">Encontrei 23 movimentacoes. A mais recente e uma intimacao para manifestacao com prazo de 15 dias (vence em 10/02). Deseja que eu baixe os documentos?</div>
+                  </div>
+                  <div class="ai-message user">
+                    <div class="bubble">Sim, baixe e me envie um resumo</div>
+                  </div>
+                  <div class="ai-message assistant">
+                    <div class="bubble">Documentos baixados! Resumo: O autor apresentou replica a contestacao. Prazo para treplicar em 15 dias. Recomendo atenção ao prazo.</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

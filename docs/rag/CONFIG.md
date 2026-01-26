@@ -180,6 +180,32 @@ Configuracoes do knowledge graph juridico.
 | `graph_hops` | `RAG_GRAPH_HOPS` | `2` | 1-4 | Niveis de relacionamento a explorar |
 | `graph_max_nodes` | `RAG_GRAPH_MAX_NODES` | `50` | 10-200 | Maximo de nos a retornar |
 
+---
+
+## Graph Backend (NetworkX / Neo4j)
+
+Configuracoes para selecionar o backend do grafo e conectar ao Neo4j.
+
+| Parametro | Env Var | Padrao | Descricao |
+|-----------|---------|--------|-----------|
+| `graph_backend` | `RAG_GRAPH_BACKEND` | `networkx` | Backend do grafo: `networkx` (local) ou `neo4j` |
+| `neo4j_uri` | `NEO4J_URI` | `bolt://localhost:7687` | URI de conexao (ex.: `bolt://...`, `neo4j+s://...`) |
+| `neo4j_user` | `NEO4J_USER` (ou `NEO4J_USERNAME`) | `neo4j` | Usuario do banco |
+| `neo4j_password` | `NEO4J_PASSWORD` | `password` | Senha do banco |
+| `neo4j_database` | `NEO4J_DATABASE` | `iudex` | Nome do database |
+| `neo4j_max_connection_pool_size` | `NEO4J_MAX_POOL_SIZE` | `50` | Pool maximo de conexoes |
+| `neo4j_connection_timeout` | `NEO4J_CONNECTION_TIMEOUT` | `30` | Timeout de conexao (s) |
+
+### Modo Hibrido (labels por tipo)
+
+O modo hibrido mantém `(:Entity)` e adiciona labels por tipo (ex.: `(:Entity:Lei)`), usando whitelist para seguranca.
+
+| Parametro | Env Var | Padrao | Descricao |
+|-----------|---------|--------|-----------|
+| `graph_hybrid_mode` | `RAG_GRAPH_HYBRID_MODE` | `false` | Ativa labels por tipo (Lei, Artigo, Sumula, ...) |
+| `graph_hybrid_auto_schema` | `RAG_GRAPH_HYBRID_AUTO_SCHEMA` | `true` | Cria indices/constraints (best-effort) ao conectar |
+| `graph_hybrid_migrate_on_startup` | `RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP` | `false` | Migra labels existentes no startup (opcional) |
+
 ### Graph Embedding Training
 
 | Parametro | Env Var | Padrao | Descricao |

@@ -8,12 +8,12 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import StreamingResponse
 from loguru import logger
@@ -52,6 +52,7 @@ from app.services.ai.agent_clients import (
     get_gpt_client,
     get_gemini_client,
     get_async_claude_client,
+    get_async_openai_client,
     get_xai_client,
     get_openrouter_client,
     get_async_xai_client,
@@ -162,13 +163,97 @@ token_service = TokenBudgetService()
 command_service = CommandService()
 
 
-def sse_event(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
+def sse_event(data: dict, event: Optional[str] = None) -> str:
+    lines = []
+    if event is not None:
+        lines.append(f"event: {event}")
+    lines.append(f"data: {json.dumps(data)}")
+    return "\n".join(lines) + "\n\n"
 
 
 def sse_keepalive() -> str:
     """SSE comment for keepalive (prevents proxy buffering/timeout)."""
     return ":\n\n"
+
+
+@dataclass
+class ChatStreamSession:
+    request_id: str
+    chat_id: str
+    user_id: str
+    created_at: float = field(default_factory=time.time)
+    events: List[str] = field(default_factory=list)
+    event_counter: int = 0
+    started: bool = False
+    done: bool = False
+    retry_ms: int = 2000
+    _retry_sent: bool = False
+    _cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+
+    def _decorate_event(self, raw_event: str) -> Tuple[str, bool]:
+        stripped = raw_event.lstrip()
+        if stripped.startswith(":"):
+            return raw_event, False
+        if "data:" not in raw_event:
+            return raw_event, False
+        self.event_counter += 1
+        prefix_lines = []
+        if not self._retry_sent:
+            prefix_lines.append(f"retry: {self.retry_ms}")
+            self._retry_sent = True
+        prefix_lines.append(f"id: {self.event_counter}")
+        return "\n".join(prefix_lines) + "\n" + raw_event, True
+
+    async def append(self, raw_event: str) -> str:
+        event_str, should_store = self._decorate_event(raw_event)
+        async with self._cond:
+            if should_store:
+                self.events.append(event_str)
+            self._cond.notify_all()
+        return event_str
+
+
+STREAM_SESSION_TTL_SECONDS = 300
+STREAM_SESSIONS: Dict[str, ChatStreamSession] = {}
+
+
+def _cleanup_stream_sessions() -> None:
+    now = time.time()
+    expired = [
+        key for key, session in STREAM_SESSIONS.items()
+        if session.done and (now - session.created_at) > STREAM_SESSION_TTL_SECONDS
+    ]
+    for key in expired:
+        STREAM_SESSIONS.pop(key, None)
+
+
+async def _stream_from_session(
+    session: ChatStreamSession,
+    last_event_id: Optional[str],
+    heartbeat_interval: float = 15.0,
+):
+    yield sse_keepalive()
+    idx = 0
+    if last_event_id and last_event_id.isdigit():
+        idx = max(int(last_event_id), 0)
+    while True:
+        async with session._cond:
+            while idx >= len(session.events) and not session.done:
+                try:
+                    await asyncio.wait_for(session._cond.wait(), timeout=heartbeat_interval)
+                except asyncio.TimeoutError:
+                    break
+            if idx < len(session.events):
+                event = session.events[idx]
+                idx += 1
+            elif session.done:
+                break
+            else:
+                event = None
+        if event is None:
+            yield sse_keepalive()
+            continue
+        yield event
 
 
 def sse_activity_event(
@@ -1670,6 +1755,7 @@ async def send_message(
 async def send_message_stream(
     chat_id: str,
     message_in: MessageCreate,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -1684,6 +1770,24 @@ async def send_message_stream(
 
     if not chat:
         raise HTTPException(status_code=404, detail="Chat não encontrado")
+
+    # Resume existing SSE stream if requested
+    resume_request_id = (getattr(message_in, "stream_request_id", None) or "").strip() or None
+    if resume_request_id:
+        _cleanup_stream_sessions()
+        session = STREAM_SESSIONS.get(resume_request_id)
+        if not session or session.chat_id != chat_id or session.user_id != str(current_user.id):
+            raise HTTPException(status_code=409, detail="Stream não encontrado ou expirado")
+        last_event_id = request.headers.get("Last-Event-ID")
+        return StreamingResponse(
+            _stream_from_session(session, last_event_id),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     parsed_flags = parse_prompt_flags(message_in.content)
     if parsed_flags.clean_text != message_in.content:
@@ -1725,6 +1829,8 @@ async def send_message_stream(
         chat.context.get("conversation_summary")
     )
     turn_id = str(uuid.uuid4())
+    # Server-side stream resume token (also sent to client as request_id).
+    request_id = f"{chat_id}:{turn_id}"
     plan_key = resolve_plan_key(getattr(current_user, "plan", None))
     deep_effort, deep_multiplier = resolve_deep_research_billing(plan_key, message_in.deep_research_effort)
     if bool(getattr(message_in, "dense_research", False)) and deep_effort:
@@ -3136,6 +3242,57 @@ async def send_message_stream(
     xai_async_client = get_async_xai_client()
     openrouter_async_client = get_async_openrouter_client()
 
+    # MCP tool-calling is gated globally by env AND optionally per-message.
+    # - If message_in.mcp_tool_calling is False: disable even if env is enabled.
+    # - If True/None: enable only when env is enabled.
+    try:
+        env_mcp_enabled = os.getenv("IUDEX_MCP_TOOL_CALLING", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    except Exception:
+        env_mcp_enabled = False
+    mcp_allowed_labels: Optional[List[str]] = None
+    mcp_enabled = env_mcp_enabled and (getattr(message_in, "mcp_tool_calling", None) is not False)
+    if mcp_enabled:
+        try:
+            from app.services.mcp_hub import mcp_hub
+
+            configured = mcp_hub.list_servers() or []
+            configured_labels = {
+                str(s.get("label") or "").strip()
+                for s in configured
+                if isinstance(s, dict)
+            }
+            configured_labels = {lbl for lbl in configured_labels if lbl}
+
+            requested = getattr(message_in, "mcp_server_labels", None)
+            requested_labels = [
+                str(x).strip()
+                for x in (requested or [])
+                if str(x).strip()
+            ]
+            if requested_labels:
+                mcp_allowed_labels = [lbl for lbl in requested_labels if lbl in configured_labels]
+                mcp_enabled = bool(mcp_allowed_labels)
+            else:
+                mcp_allowed_labels = sorted(configured_labels) if configured_labels else []
+                mcp_enabled = bool(mcp_allowed_labels)
+        except Exception:
+            mcp_allowed_labels = None
+            mcp_enabled = False
+
+    gpt_mcp_client = None
+    if mcp_enabled:
+        if gpt_override_provider == "xai":
+            gpt_mcp_client = xai_async_client
+        elif gpt_override_provider in ("openrouter", "deepseek", "meta"):
+            gpt_mcp_client = openrouter_async_client
+        else:
+            gpt_mcp_client = get_async_openai_client()
+
     gpt_call_client = gpt_client
     gpt_stream_client = gpt_client
     if gpt_override_provider == "xai":
@@ -3330,10 +3487,12 @@ async def send_message_stream(
         def _merge_citations(items: List[Dict[str, Any]]):
             for item in items or []:
                 url = str(item.get("url") or "").strip()
-                number = item.get("number")
-                key = str(number).strip() if number is not None else ""
+                # Source numbers are not globally unique across providers/streams.
+                # Prefer URL as the merge key to avoid silently dropping citations.
+                key = url
                 if not key:
-                    key = url
+                    number = item.get("number")
+                    key = str(number).strip() if number is not None else ""
                 if not key:
                     continue
                 if key not in citations_by_url:
@@ -3429,6 +3588,10 @@ async def send_message_stream(
                             })
                     elif etype == "content":
                         deep_report += event.get("text") or ""
+                    elif etype in ("step.start", "step.add_query", "step.add_source", "step.done"):
+                        payload = dict(event)
+                        payload["turn_id"] = turn_id
+                        yield sse_event(payload)
                     elif etype == "done":
                         sources_raw = event.get("sources") or []
                         if isinstance(sources_raw, list):
@@ -4060,6 +4223,50 @@ async def send_message_stream(
                 if model_key == "gpt":
                     gpt_api_model = get_api_model_name(gpt_model_id)
                     thinking_cat = get_thinking_category(gpt_model_id)
+
+                    handled_by_mcp = False
+                    if mcp_enabled and gpt_mcp_client:
+                        try:
+                            from app.services.ai.mcp_tools import run_openai_tool_loop
+
+                            tool_step_id = f"mcp_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "MCP tools", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_openai_tool_loop(
+                                client=gpt_mcp_client,
+                                model=gpt_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                allowed_server_labels=mcp_allowed_labels,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            for chunk in chunk_text(text or ""):
+                                full_text_parts.append(chunk)
+                                if not answer_started:
+                                    answer_started = True
+                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                await asyncio.sleep(0)
+                            handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"MCP tool-calling failed for GPT: {exc}")
                     
                     # Determine if we need reasoning_effort (o1/o3) or XML parsing (GPT-5.2)
                     reasoning_effort_param = None
@@ -4083,7 +4290,9 @@ async def send_message_stream(
                         xml_parser = ThinkingStreamParser()
                         logger.info(f"🧠 [GPT XML] model={gpt_api_model}, using XML parsing")
                     
-                    if gpt_stream_client:
+                    if handled_by_mcp:
+                        pass
+                    elif gpt_stream_client:
                         async for chunk_data in stream_openai_async(
                             gpt_stream_client,
                             clean_content,
@@ -4412,6 +4621,50 @@ async def send_message_stream(
                 elif model_key == "claude":
                     claude_api_model = get_api_model_name(claude_model_id)
                     thinking_cat = get_thinking_category(claude_model_id)
+
+                    handled_by_mcp = False
+                    if mcp_enabled and claude_client:
+                        try:
+                            from app.services.ai.mcp_tools import run_anthropic_tool_loop
+
+                            tool_step_id = f"mcp_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "MCP tools", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_anthropic_tool_loop(
+                                client=claude_client,
+                                model=claude_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                allowed_server_labels=mcp_allowed_labels,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            for chunk in chunk_text(text or ""):
+                                full_text_parts.append(chunk)
+                                if not answer_started:
+                                    answer_started = True
+                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                await asyncio.sleep(0)
+                            handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"MCP tool-calling failed for Claude: {exc}")
                     
                     # Determine thinking approach based on category
                     extended_thinking_param = False
@@ -4443,52 +4696,55 @@ async def send_message_stream(
                     
                     # Claude extended_thinking requires temperature=1
                     effective_temperature = 1.0 if extended_thinking_param else temperature
-                    async for chunk_data in stream_anthropic_async(
-                        claude_client,
-                        clean_content,
-                        model=claude_api_model,
-                        max_tokens=max_tokens,
-                        temperature=effective_temperature,
-                        system_instruction=effective_instruction,
-                        extended_thinking=extended_thinking_param,
-                        thinking_budget=claude_thinking_budget if extended_thinking_param else None,
-                    ):
+                    if handled_by_mcp:
+                        pass
+                    else:
+                        async for chunk_data in stream_anthropic_async(
+                            claude_client,
+                            clean_content,
+                            model=claude_api_model,
+                            max_tokens=max_tokens,
+                            temperature=effective_temperature,
+                            system_instruction=effective_instruction,
+                            extended_thinking=extended_thinking_param,
+                            thinking_budget=claude_thinking_budget if extended_thinking_param else None,
+                        ):
                         # Handle tuples from native thinking API
-                        if isinstance(chunk_data, tuple):
-                            chunk_type, delta = chunk_data
-                            if chunk_type in ("thinking", "thinking_summary"):
-                                full_thinking_parts.append(delta)
-                                payload = {"type": "thinking", "delta": delta, "model": model_key}
-                                if chunk_type == "thinking_summary":
-                                    payload["thinking_type"] = "summary"
-                                yield sse_event(payload)
+                            if isinstance(chunk_data, tuple):
+                                chunk_type, delta = chunk_data
+                                if chunk_type in ("thinking", "thinking_summary"):
+                                    full_thinking_parts.append(delta)
+                                    payload = {"type": "thinking", "delta": delta, "model": model_key}
+                                    if chunk_type == "thinking_summary":
+                                        payload["thinking_type"] = "summary"
+                                    yield sse_event(payload)
+                                else:
+                                    full_text_parts.append(delta)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": delta, "model": model_key})
+                            elif xml_parser:
+                                # Use XML parser for Opus
+                                thinking, content = xml_parser.process_token(chunk_data)
+                                if thinking:
+                                    full_thinking_parts.append(thinking)
+                                    yield sse_event({"type": "thinking", "delta": thinking, "model": model_key})
+                                if content:
+                                    full_text_parts.append(content)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": content, "model": model_key})
                             else:
-                                full_text_parts.append(delta)
+                                full_text_parts.append(chunk_data)
                                 if not answer_started:
                                     answer_started = True
                                     yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                                yield sse_event({"type": "token", "delta": delta, "model": model_key})
-                        elif xml_parser:
-                            # Use XML parser for Opus
-                            thinking, content = xml_parser.process_token(chunk_data)
-                            if thinking:
-                                full_thinking_parts.append(thinking)
-                                yield sse_event({"type": "thinking", "delta": thinking, "model": model_key})
-                            if content:
-                                full_text_parts.append(content)
-                                if not answer_started:
-                                    answer_started = True
-                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                                yield sse_event({"type": "token", "delta": content, "model": model_key})
-                        else:
-                            full_text_parts.append(chunk_data)
-                            if not answer_started:
-                                answer_started = True
-                                yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                            yield sse_event({"type": "token", "delta": chunk_data, "model": model_key})
+                                yield sse_event({"type": "token", "delta": chunk_data, "model": model_key})
                     
                     # Flush XML parser if used
-                    if xml_parser:
+                    if xml_parser and not handled_by_mcp:
                         thinking, content = xml_parser.flush()
                         if thinking:
                             full_thinking_parts.append(thinking)
@@ -4502,6 +4758,50 @@ async def send_message_stream(
                 
                 elif model_key == "gemini":
                     gemini_api_model = get_api_model_name(gemini_model_id)
+
+                    handled_by_mcp = False
+                    if mcp_enabled and gemini_client:
+                        try:
+                            from app.services.ai.mcp_tools import run_gemini_tool_loop
+
+                            tool_step_id = f"mcp_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "MCP tools", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_gemini_tool_loop(
+                                client=gemini_client,
+                                model=gemini_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                                allowed_server_labels=mcp_allowed_labels,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            for chunk in chunk_text(text or ""):
+                                full_text_parts.append(chunk)
+                                if not answer_started:
+                                    answer_started = True
+                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                await asyncio.sleep(0)
+                            handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"MCP tool-calling failed for Gemini: {exc}")
                     
                     # NEW: Enable extended thinking for Gemini 2.x Pro/Flash and 3.x models
                     thinking_mode_param = None
@@ -4534,38 +4834,160 @@ async def send_message_stream(
                             thinking_mode_param = "high"
                     
                     logger.info(f"🧠 [Gemini] model={gemini_api_model}, id={gemini_model_id}, supports={supports_thinking}, mode={thinking_mode_param}")
-                    
-                    async for chunk_data in stream_vertex_gemini_async(
-                        gemini_client,
-                        clean_content,
-                        model=gemini_api_model,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                        system_instruction=system_instruction,
-                        thinking_mode=thinking_mode_param,  # NEW
-                    ):
-                        # NEW: Handle tuples (type, content)
-                        if isinstance(chunk_data, tuple):
-                            chunk_type, delta = chunk_data
-                            if chunk_type in ("thinking", "thinking_summary"):
-                                full_thinking_parts.append(delta)
-                                payload = {"type": "thinking", "delta": delta, "model": model_key}
-                                if chunk_type == "thinking_summary":
-                                    payload["thinking_type"] = "summary"
-                                yield sse_event(payload)
-                            else:  # text
-                                full_text_parts.append(delta)
+
+                    gemini_grounding_step_id: Optional[str] = None
+                    gemini_grounding_started: bool = False
+                    gemini_seen_source_urls: set = set()
+
+                    if handled_by_mcp:
+                        pass
+                    else:
+                        async for chunk_data in stream_vertex_gemini_async(
+                            gemini_client,
+                            clean_content,
+                            model=gemini_api_model,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            system_instruction=system_instruction,
+                            thinking_mode=thinking_mode_param,  # NEW
+                        ):
+                            if isinstance(chunk_data, tuple):
+                                chunk_type, delta = chunk_data
+
+                                if chunk_type in ("thinking", "thinking_summary") and delta:
+                                    full_thinking_parts.append(str(delta))
+                                    payload = {"type": "thinking", "delta": str(delta), "model": model_key}
+                                    if chunk_type == "thinking_summary":
+                                        payload["thinking_type"] = "summary"
+                                    yield sse_event(payload)
+                                    continue
+
+                                if chunk_type == "grounding_query" and delta:
+                                    if not gemini_grounding_step_id:
+                                        gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                                    if not gemini_grounding_started:
+                                        gemini_grounding_started = True
+                                        yield sse_event(
+                                            {
+                                                "type": "step.start",
+                                                "step_name": "Pesquisando",
+                                                "step_id": gemini_grounding_step_id,
+                                                "model": model_key,
+                                            }
+                                        )
+                                    yield sse_event(
+                                        {
+                                            "type": "step.add_query",
+                                            "step_id": gemini_grounding_step_id,
+                                            "query": str(delta)[:200],
+                                        }
+                                    )
+                                    continue
+
+                                if chunk_type == "grounding_source" and delta:
+                                    if not gemini_grounding_step_id:
+                                        gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                                    if not gemini_grounding_started:
+                                        gemini_grounding_started = True
+                                        yield sse_event(
+                                            {
+                                                "type": "step.start",
+                                                "step_name": "Pesquisando",
+                                                "step_id": gemini_grounding_step_id,
+                                                "model": model_key,
+                                            }
+                                        )
+                                    source_payload: Dict[str, Any]
+                                    if isinstance(delta, dict):
+                                        source_payload = delta
+                                    else:
+                                        source_payload = {
+                                            "url": getattr(delta, "url", "") or "",
+                                            "title": getattr(delta, "title", "") or "",
+                                        }
+                                    yield sse_event(
+                                        {
+                                            "type": "step.add_source",
+                                            "step_id": gemini_grounding_step_id,
+                                            "source": source_payload,
+                                        }
+                                    )
+                                    try:
+                                        url = str(source_payload.get("url") or "").strip()
+                                        title = str(source_payload.get("title") or url).strip()
+                                        if url and url not in gemini_seen_source_urls:
+                                            gemini_seen_source_urls.add(url)
+                                            _merge_citations([{"title": title or url, "url": url}])
+                                    except Exception:
+                                        pass
+                                    continue
+
+                                if chunk_type == "text" and delta:
+                                    if gemini_grounding_step_id:
+                                        yield sse_event(
+                                            {
+                                                "type": "step.done",
+                                                "step_id": gemini_grounding_step_id,
+                                                "model": model_key,
+                                            }
+                                        )
+                                        gemini_grounding_step_id = None
+                                        gemini_grounding_started = False
+                                    full_text_parts.append(str(delta))
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event(
+                                            {
+                                                "type": "meta",
+                                                "phase": "answer_start",
+                                                "t": int(time.time() * 1000),
+                                                "turn_id": turn_id,
+                                            }
+                                        )
+                                    yield sse_event(
+                                        {"type": "token", "delta": str(delta), "model": model_key}
+                                    )
+                                    continue
+
+                                # Unknown tuple kind -> ignore safely.
+                                continue
+
+                            # Retrocompatibilidade: string simples
+                            if chunk_data:
+                                if gemini_grounding_step_id:
+                                    yield sse_event(
+                                        {
+                                            "type": "step.done",
+                                            "step_id": gemini_grounding_step_id,
+                                            "model": model_key,
+                                        }
+                                    )
+                                    gemini_grounding_step_id = None
+                                    gemini_grounding_started = False
+                                full_text_parts.append(str(chunk_data))
                                 if not answer_started:
                                     answer_started = True
-                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                                yield sse_event({"type": "token", "delta": delta, "model": model_key})
-                        else:
-                            # Retrocompatibilidade: string simples
-                            full_text_parts.append(chunk_data)
-                            if not answer_started:
-                                answer_started = True
-                                yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                            yield sse_event({"type": "token", "delta": chunk_data, "model": model_key})
+                                    yield sse_event(
+                                        {
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "turn_id": turn_id,
+                                        }
+                                    )
+                                yield sse_event(
+                                    {"type": "token", "delta": str(chunk_data), "model": model_key}
+                                )
+
+                        if gemini_grounding_step_id:
+                            yield sse_event(
+                                {
+                                    "type": "step.done",
+                                    "step_id": gemini_grounding_step_id,
+                                    "model": model_key,
+                                }
+                            )
+                            gemini_grounding_step_id = None
 
                 elif model_key == "internal":
                     internal_api_model = get_api_model_name(internal_model_id)
@@ -4596,6 +5018,28 @@ async def send_message_stream(
                         f"supports={supports_thinking}, mode={thinking_mode_param}"
                     )
 
+                    gemini_grounding_step_id: Optional[str] = None
+                    gemini_grounding_started: bool = False
+                    gemini_seen_source_urls: set = set()
+
+                    def _ensure_gemini_grounding_step() -> str:
+                        nonlocal gemini_grounding_step_id
+                        if gemini_grounding_step_id:
+                            return gemini_grounding_step_id
+                        gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                        return gemini_grounding_step_id
+
+                    def _close_gemini_grounding_step() -> None:
+                        nonlocal gemini_grounding_step_id, gemini_grounding_started
+                        if gemini_grounding_step_id:
+                            yield_step = {"type": "step.done", "step_id": gemini_grounding_step_id}
+                            gemini_grounding_step_id = None
+                            gemini_grounding_started = False
+                            # can't yield from nested fn; caller handles
+                            pending_step_events.append(yield_step)
+
+                    pending_step_events: List[Dict[str, Any]] = []
+
                     with billing_context(node="internal_rag_agent", size="M"):
                         async for chunk_data in stream_vertex_gemini_async(
                             gemini_client,
@@ -4609,23 +5053,72 @@ async def send_message_stream(
                             if isinstance(chunk_data, tuple):
                                 chunk_type, delta = chunk_data
                                 if chunk_type in ("thinking", "thinking_summary"):
-                                    full_thinking_parts.append(delta)
-                                    payload = {"type": "thinking", "delta": delta, "model": model_key}
+                                    full_thinking_parts.append(str(delta))
+                                    payload = {"type": "thinking", "delta": str(delta), "model": model_key}
                                     if chunk_type == "thinking_summary":
                                         payload["thinking_type"] = "summary"
                                     yield sse_event(payload)
-                                else:
-                                    full_text_parts.append(delta)
+                                    continue
+
+                                if chunk_type == "grounding_query" and delta:
+                                    step_id = _ensure_gemini_grounding_step()
+                                    if not gemini_grounding_started and step_id:
+                                        # Emit step.start lazily (only once).
+                                        gemini_grounding_started = True
+                                        yield sse_event({"type": "step.start", "step_name": "Pesquisando", "step_id": step_id})
+                                    yield sse_event({"type": "step.add_query", "step_id": step_id, "query": str(delta)[:200]})
+                                    continue
+
+                                if chunk_type == "grounding_source" and delta:
+                                    step_id = _ensure_gemini_grounding_step()
+                                    if not gemini_grounding_started and step_id:
+                                        gemini_grounding_started = True
+                                        yield sse_event({"type": "step.start", "step_name": "Pesquisando", "step_id": step_id})
+                                    # Forward to UI and include in final citations.
+                                    source_payload: Dict[str, Any]
+                                    if isinstance(delta, dict):
+                                        source_payload = delta
+                                    else:
+                                        source_payload = {"url": getattr(delta, "url", ""), "title": getattr(delta, "title", "")}
+                                    yield sse_event({"type": "step.add_source", "step_id": step_id, "source": source_payload})
+                                    try:
+                                        url = str(source_payload.get("url") or "").strip()
+                                        title = str(source_payload.get("title") or url).strip()
+                                        if url and url not in gemini_seen_source_urls:
+                                            gemini_seen_source_urls.add(url)
+                                            _merge_citations([{"title": title or url, "url": url}])
+                                    except Exception:
+                                        pass
+                                    continue
+
+                                # Default: treat as text (Gemini yields ("text", ...)).
+                                if delta:
+                                    _close_gemini_grounding_step()
+                                    for ev in pending_step_events:
+                                        yield sse_event(ev)
+                                    pending_step_events = []
+                                    full_text_parts.append(str(delta))
                                     if not answer_started:
                                         answer_started = True
                                         yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                                    yield sse_event({"type": "token", "delta": delta, "model": model_key})
+                                    yield sse_event({"type": "token", "delta": str(delta), "model": model_key})
+                                    continue
                             else:
-                                full_text_parts.append(chunk_data)
-                                if not answer_started:
-                                    answer_started = True
-                                    yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
-                                yield sse_event({"type": "token", "delta": chunk_data, "model": model_key})
+                                if chunk_data:
+                                    _close_gemini_grounding_step()
+                                    for ev in pending_step_events:
+                                        yield sse_event(ev)
+                                    pending_step_events = []
+                                    full_text_parts.append(str(chunk_data))
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": str(chunk_data), "model": model_key})
+
+                    # Ensure grounding step is closed (if we never got text).
+                    if gemini_grounding_step_id:
+                        yield sse_event({"type": "step.done", "step_id": gemini_grounding_step_id})
+                        gemini_grounding_step_id = None
 
                 if len(target_models) > 1 and idx < len(target_models) - 1:
                     separator = "\n\n---\n\n"
@@ -4876,8 +5369,31 @@ async def send_message_stream(
                                 )
                             last_billing_emit = now
 
+    _cleanup_stream_sessions()
+    session = ChatStreamSession(
+        request_id=request_id,
+        chat_id=chat_id,
+        user_id=str(current_user.id),
+    )
+    STREAM_SESSIONS[request_id] = session
+
+    async def _produce_session():
+        try:
+            async for event in event_generator():
+                await session.append(event)
+        except Exception as e:
+            await session.append(sse_event({"type": "error", "error": str(e)}))
+        finally:
+            session.done = True
+            async with session._cond:
+                session._cond.notify_all()
+
+    if not session.started:
+        session.started = True
+        asyncio.create_task(_produce_session())
+
     return StreamingResponse(
-        event_generator(),
+        _stream_from_session(session, request.headers.get("Last-Event-ID")),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",

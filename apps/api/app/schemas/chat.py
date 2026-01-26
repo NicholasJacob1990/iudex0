@@ -50,6 +50,8 @@ class MessageBase(BaseModel):
 class MessageCreate(MessageBase):
     """Schema para criação de mensagem"""
     attachments: List[Dict[str, Any]] = Field(default_factory=list)
+    # Optional stream resume token for SSE reconnects (server-side replay)
+    stream_request_id: Optional[str] = None
     chat_personality: str = Field(default="juridico", pattern="^(juridico|geral)$")
     model: Optional[str] = None
     # RAG Scope Control - allows user to choose document sources
@@ -110,7 +112,7 @@ class MessageCreate(MessageBase):
     graph_hops: int = Field(default=1, ge=1, le=5)
     dense_research: bool = False
     deep_research_effort: Optional[str] = Field(default=None, pattern="^(low|medium|high|1|2|3)$")
-    deep_research_provider: Optional[str] = Field(default=None, pattern="^(auto|google|perplexity)$")
+    deep_research_provider: Optional[str] = Field(default=None, pattern="^(auto|google|perplexity|openai)$")
     deep_research_model: Optional[str] = None
     deep_research_search_focus: Optional[str] = Field(default=None, pattern="^(web|academic|sec)$")
     deep_research_domain_filter: Optional[str] = None
@@ -133,6 +135,15 @@ class MessageCreate(MessageBase):
     temperature: Optional[float] = Field(default=None, ge=0, le=1, description="Temperatura (criatividade)")
     # Poe-like billing: optional per-message override (UI driven)
     budget_override_points: Optional[int] = Field(default=None, ge=1)
+    # MCP tool-calling (backend must be configured with IUDEX_MCP_SERVERS)
+    mcp_tool_calling: Optional[bool] = Field(
+        default=None,
+        description="Habilita tool-calling via MCP hub (mcp_tool_search/mcp_tool_call).",
+    )
+    mcp_server_labels: Optional[List[str]] = Field(
+        default=None,
+        description="Lista opcional de MCP servers permitidos para esta mensagem (por label).",
+    )
 
 
 class MessageResponse(MessageBase):

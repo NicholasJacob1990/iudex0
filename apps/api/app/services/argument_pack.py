@@ -37,7 +37,7 @@ import hashlib
 import unicodedata
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 
 # =============================================================================
@@ -550,9 +550,25 @@ class ArgumentPack:
         q = _lower(query)
         seeds: Set[str] = set()
 
+        # Evita varrer o grafo inteiro em queries muito curtas/ruidosas.
+        if len(q) < 4:
+            return seeds
+
         # tenta encontrar claims por partes relevantes
         tokens = [t for t in re.split(r"\W+", q) if len(t) >= 4]
         tokens = tokens[:6]  # limita
+
+        # Se não temos tokens relevantes, aplica apenas fallback de substring (sem duplicar varredura).
+        if not tokens:
+            for node_id, data in graph.graph.nodes(data=True):
+                name = _lower(data.get("name", ""))
+                if q and q in name:
+                    seeds.add(node_id)
+                    if len(seeds) >= max_seeds:
+                        break
+            return seeds
+
+        fallback_hits: List[str] = []
 
         # varre nós do grafo (barato o suficiente para grafo médio)
         for node_id, data in graph.graph.nodes(data=True):
@@ -560,36 +576,190 @@ class ArgumentPack:
             et = data.get("entity_type", "")
 
             if et in (ArgumentEntityType.CLAIM.value, ArgumentEntityType.ISSUE.value):
-                if any(tok in name for tok in tokens) or q in name:
+                if any(tok in name for tok in tokens) or (q and q in name):
                     seeds.add(node_id)
-            if len(seeds) >= max_seeds:
-                break
+                    if len(seeds) >= max_seeds:
+                        break
+            elif q and q in name and len(fallback_hits) < max_seeds:
+                # Fallback genérico (qualquer entidade cujo nome contenha a query).
+                # Mantemos como "backup" sem chamar find_entities (evita segunda varredura).
+                fallback_hits.append(node_id)
 
-        # fallback genérico
-        if not seeds:
-            matches = graph.find_entities(name_contains=query)
-            seeds.update(matches[:max_seeds])
+        if not seeds and fallback_hits:
+            seeds.update(fallback_hits[:max_seeds])
 
         return seeds
+
+    def _build_evidence_index(self, graph) -> Tuple[Dict[Tuple[str, str], str], Dict[str, List[str]]]:
+        """
+        Indexa nós de evidência por (doc_id, chunk_id) e por doc_id.
+        Ajuda a resolver resultados do RAG -> nós no grafo sem criar/ingerir dados em query-time.
+        """
+        by_doc_chunk: Dict[Tuple[str, str], str] = {}
+        by_doc: Dict[str, List[str]] = {}
+        for node_id, data in graph.graph.nodes(data=True):
+            if data.get("entity_type") != ArgumentEntityType.EVIDENCE.value:
+                continue
+            doc_id = data.get("doc_id")
+            if doc_id is None:
+                continue
+            doc_key = str(doc_id).strip()
+            if not doc_key:
+                continue
+            chunk_id = data.get("chunk_id")
+            if chunk_id is not None and str(chunk_id).strip():
+                by_doc_chunk[(doc_key, str(chunk_id).strip())] = node_id
+            by_doc.setdefault(doc_key, []).append(node_id)
+        return by_doc_chunk, by_doc
+
+    def _result_meta(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        meta = result.get("metadata") if isinstance(result, dict) else None
+        return meta if isinstance(meta, dict) else {}
+
+    def _resolve_evidence_node_from_result(
+        self,
+        graph,
+        result: Dict[str, Any],
+        *,
+        evidence_by_doc_chunk: Dict[Tuple[str, str], str],
+        evidence_by_doc: Dict[str, List[str]],
+    ) -> Optional[str]:
+        meta = self._result_meta(result)
+        doc_id = meta.get("doc_id") or meta.get("document_id") or meta.get("id") or result.get("doc_id")
+        chunk_id = meta.get("chunk_id") or meta.get("chunk") or meta.get("segment_id") or result.get("chunk_id")
+
+        doc_key = str(doc_id).strip() if doc_id is not None else ""
+        chunk_key = str(chunk_id).strip() if chunk_id is not None else ""
+        if doc_key and chunk_key:
+            hit = evidence_by_doc_chunk.get((doc_key, chunk_key))
+            if hit:
+                return hit
+        if doc_key:
+            candidates = evidence_by_doc.get(doc_key) or []
+            if candidates:
+                # Ambíguo sem chunk_id; escolhe o primeiro (normalmente único).
+                return candidates[0]
+        return None
+
+    def resolve_result_claim_seeds(
+        self,
+        graph,
+        results: List[Dict[str, Any]],
+        *,
+        max_results: int = 12,
+        max_seeds: int = 12,
+    ) -> Tuple[Set[str], Dict[str, Any]]:
+        """
+        Resolve seeds de CLAIM a partir dos resultados recuperados (RAG):
+        - mapeia cada resultado para um nó de evidência (por doc_id/chunk_id)
+        - coleta CLAIMs conectadas via SUPPORTS/CONTRADICTS
+        """
+        results = results or []
+        max_results = int(max_results or 0)
+        max_seeds = int(max_seeds or 0)
+        if max_results <= 0:
+            max_results = 12
+        if max_seeds <= 0:
+            max_seeds = 12
+
+        by_doc_chunk, by_doc = self._build_evidence_index(graph)
+        evidence_nodes: List[str] = []
+        for item in results[:max_results]:
+            ev = self._resolve_evidence_node_from_result(
+                graph,
+                item,
+                evidence_by_doc_chunk=by_doc_chunk,
+                evidence_by_doc=by_doc,
+            )
+            if ev and ev not in evidence_nodes:
+                evidence_nodes.append(ev)
+
+        claim_seeds: Set[str] = set()
+        rels = {
+            ArgumentRelationType.SUPPORTS.value,
+            ArgumentRelationType.CONTRADICTS.value,
+        }
+        for ev in evidence_nodes:
+            for _u, v, ed in graph.graph.out_edges(ev, data=True):
+                if ed.get("relation") not in rels:
+                    continue
+                if graph.graph.nodes[v].get("entity_type") != ArgumentEntityType.CLAIM.value:
+                    continue
+                claim_seeds.add(v)
+                if len(claim_seeds) >= max_seeds:
+                    break
+            if len(claim_seeds) >= max_seeds:
+                break
+
+        stats = {
+            "results_seen": min(len(results), max_results),
+            "evidence_nodes": len(evidence_nodes),
+            "seed_nodes": len(claim_seeds),
+            "max_results": int(max_results),
+            "max_seeds": int(max_seeds),
+        }
+        return claim_seeds, stats
 
     # -------------------------
     # Contexto “pró/contra”
     # -------------------------
 
-    def build_debate_context(self, graph, seed_nodes: Set[str], hops: int = 2) -> str:
+    # ----------------------------
+    # Debate builder (produção)
+    # ----------------------------
+
+    def _status_from_counts(self, supports_n: int, contradicts_n: int) -> str:
         """
-        Constrói um contexto orientado a contraditório:
-        - Para cada claim seed, lista:
-          * quem afirma/quem contesta (ASSERTS/DISPUTES)
-          * evidências que sustentam/contradizem (SUPPORTS/CONTRADICTS)
+        Classificação simples do status probatório de uma CLAIM:
+          - no_evidence: não há evidências a favor nem contra (acima do limiar)
+          - supported: há evidências a favor e nenhuma contra (acima do limiar)
+          - not_confirmed: há evidências contra e nenhuma a favor (acima do limiar)
+          - inconclusive: há evidências a favor e contra (acima do limiar)
         """
+        if supports_n <= 0 and contradicts_n <= 0:
+            return "no_evidence"
+        if supports_n > 0 and contradicts_n <= 0:
+            return "supported"
+        if supports_n <= 0 and contradicts_n > 0:
+            return "not_confirmed"
+        return "inconclusive"
+
+    def build_debate_bundle(
+        self,
+        graph,
+        seed_nodes: Set[str],
+        hops: int = 2,
+        *,
+        max_claims: int = 3,
+        max_support: int = 3,
+        max_contra: int = 3,
+        max_actors: int = 2,
+        max_issues: int = 2,
+        max_chars: Optional[int] = 8000,
+        evidence_weight_threshold: float = 0.6,
+        risk_mode: str = "high",
+    ) -> Dict[str, Any]:
+        """
+        Retorna um bundle estruturado do debate (pró/contra), ideal para auditoria/logs.
+
+        Importante:
+        - Assume o grafo do `rag_graph.py` (NetworkX), onde `query_related` retorna um dict
+          com `nodes: [{node_id,...}]` e `edges: [...]`.
+        """
+        max_claims = int(max_claims or 0) or 3
+        max_support = int(max_support or 0) or 3
+        max_contra = int(max_contra or 0) or 3
+        max_actors = int(max_actors or 0) or 2
+        max_issues = int(max_issues or 0) or 2
+
         if not seed_nodes:
-            return ""
+            return {
+                "params": {"hops": int(hops or 0)},
+                "claims": [],
+                "overall": {"abstained": True, "status": "no_seeds", "reason": "no_seed_nodes"},
+                "stats": {"seed_nodes": 0, "expanded_nodes": 0, "claim_nodes": 0},
+            }
 
-        lines: List[str] = []
-        lines.append("### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n")
-
-        # Só arestas relevantes para debate
         rel_filter = [
             ArgumentRelationType.ASSERTS,
             ArgumentRelationType.DISPUTES,
@@ -600,64 +770,377 @@ class ArgumentPack:
             ArgumentRelationType.DEPENDS_ON,
         ]
 
-        # expande seeds
+        def _node(n: str) -> Dict[str, Any]:
+            if getattr(graph, "graph", None) is None:
+                return {}
+            try:
+                return graph.graph.nodes.get(n, {})  # type: ignore[attr-defined]
+            except Exception:
+                return {}
+
+        def _node_name(n: str) -> str:
+            return _node(n).get("name") or n
+
+        def _claim_text(n: str) -> str:
+            nd = _node(n)
+            return (nd.get("text") or nd.get("name") or n).strip()
+
+        def _issue_text(n: str) -> str:
+            nd = _node(n)
+            return (nd.get("text") or nd.get("name") or n).strip()
+
+        def _edge_weight(ed: Dict[str, Any]) -> float:
+            try:
+                return float(ed.get("weight", 1.0))
+            except Exception:
+                return 1.0
+
+        def _actor_payload(n: str) -> Dict[str, Any]:
+            return {"actor_id": n, "name": _clip(_node_name(n), 120)}
+
+        def _issue_payload(n: str) -> Dict[str, Any]:
+            return {"issue_id": n, "text": _clip(_issue_text(n), 220)}
+
+        def _evidence_payload(n: str, weight: float) -> Dict[str, Any]:
+            nd = _node(n)
+            return {
+                "evidence_id": n,
+                "doc_id": nd.get("doc_id"),
+                "chunk_id": nd.get("chunk_id"),
+                "title": _clip((nd.get("title") or nd.get("name") or n), 220),
+                "url": nd.get("url"),
+                "weight": float(weight),
+            }
+
         expanded: Set[str] = set()
+        edges_seen = 0
         for s in seed_nodes:
-            sub = graph.query_related(s, hops=hops, relation_filter=rel_filter)
-            for node in sub.get("nodes", []):
-                node_id = node.get("node_id")
-                if node_id:
-                    expanded.add(node_id)
+            try:
+                sub = graph.query_related(s, hops=hops, relation_filter=rel_filter)
+            except Exception:
+                continue
+            if isinstance(sub, dict):
+                edges_seen += len(sub.get("edges", []) or [])
+                for node in sub.get("nodes", []) or []:
+                    node_id = node.get("node_id") if isinstance(node, dict) else None
+                    if node_id:
+                        expanded.add(node_id)
 
-        # foca em claims
-        claim_nodes = [n for n in expanded if graph.graph.nodes[n].get("entity_type") == ArgumentEntityType.CLAIM.value]
-        claim_nodes = claim_nodes[:12]
+        claim_nodes = [
+            n
+            for n in expanded
+            if _node(n).get("entity_type") == ArgumentEntityType.CLAIM.value
+        ]
 
-        def _name(n: str) -> str:
-            return graph.graph.nodes[n].get("name") or n
+        def _claim_score(cn: str) -> float:
+            if getattr(graph, "graph", None) is None:
+                return 0.0
+            s_sum = 0.0
+            c_sum = 0.0
+            s_n = 0
+            c_n = 0
+            try:
+                for u, _v, ed in graph.graph.in_edges(cn, data=True):  # type: ignore[attr-defined]
+                    r = ed.get("relation")
+                    w = _edge_weight(ed)
+                    if r == ArgumentRelationType.SUPPORTS.value:
+                        s_sum += w
+                        s_n += 1
+                    elif r == ArgumentRelationType.CONTRADICTS.value:
+                        c_sum += w
+                        c_n += 1
+            except Exception:
+                return 0.0
+            return (s_sum + c_sum) + 0.05 * (s_n + c_n)
 
-        for cn in claim_nodes:
-            cdata = graph.graph.nodes[cn]
-            lines.append(f"**CLAIM:** {_name(cn)}")
-            if cdata.get("polarity") in (-1, "-1"):
-                lines.append("- Polaridade (heurística): negativa/contesta")
-            elif cdata.get("polarity") in (1, "1"):
-                lines.append("- Polaridade (heurística): positiva/afirma")
+        claim_nodes_sorted = sorted(claim_nodes, key=_claim_score, reverse=True)[:max_claims]
 
-            # quem afirma / contesta
-            asserters = []
-            disputers = []
-            supporters = []
-            contradictors = []
+        claims_out: List[Dict[str, Any]] = []
+        for cn in claim_nodes_sorted:
+            asserters: List[Tuple[str, float]] = []
+            disputers: List[Tuple[str, float]] = []
+            supports: List[Tuple[str, float]] = []
+            contradicts: List[Tuple[str, float]] = []
+            issues: List[Tuple[str, float]] = []
 
-            for u, v, ed in graph.graph.in_edges(cn, data=True):
-                r = ed.get("relation")
-                if r == ArgumentRelationType.ASSERTS.value:
-                    asserters.append(u)
-                elif r == ArgumentRelationType.DISPUTES.value:
-                    disputers.append(u)
-                elif r == ArgumentRelationType.SUPPORTS.value:
-                    supporters.append(u)
-                elif r == ArgumentRelationType.CONTRADICTS.value:
-                    contradictors.append(u)
+            if getattr(graph, "graph", None) is None:
+                continue
+            try:
+                for u, _v, ed in graph.graph.in_edges(cn, data=True):  # type: ignore[attr-defined]
+                    r = ed.get("relation")
+                    w = _edge_weight(ed)
+                    if r == ArgumentRelationType.ASSERTS.value:
+                        asserters.append((u, w))
+                    elif r == ArgumentRelationType.DISPUTES.value:
+                        disputers.append((u, w))
+                    elif r == ArgumentRelationType.SUPPORTS.value:
+                        supports.append((u, w))
+                    elif r == ArgumentRelationType.CONTRADICTS.value:
+                        contradicts.append((u, w))
+                    elif r == ArgumentRelationType.ABOUT.value:
+                        issues.append((u, w))
+            except Exception:
+                continue
 
+            asserters = sorted(asserters, key=lambda t: t[1], reverse=True)[:max_actors]
+            disputers = sorted(disputers, key=lambda t: t[1], reverse=True)[:max_actors]
+            supports = sorted(supports, key=lambda t: t[1], reverse=True)[:max_support]
+            contradicts = sorted(contradicts, key=lambda t: t[1], reverse=True)[:max_contra]
+            issues = sorted(issues, key=lambda t: t[1], reverse=True)[:max_issues]
+
+            supports_n = sum(1 for _n, w in supports if w >= evidence_weight_threshold)
+            contradicts_n = sum(1 for _n, w in contradicts if w >= evidence_weight_threshold)
+            status = self._status_from_counts(supports_n, contradicts_n)
+
+            claims_out.append(
+                {
+                    "claim_id": cn,
+                    "text": _clip(_claim_text(cn), 350),
+                    "issues": [_issue_payload(i) for i, _w in issues],
+                    "asserters": [_actor_payload(a) for a, _w in asserters],
+                    "disputers": [_actor_payload(a) for a, _w in disputers],
+                    "supports": [_evidence_payload(e, w) for e, w in supports],
+                    "contradicts": [_evidence_payload(e, w) for e, w in contradicts],
+                    "counts": {"supports": supports_n, "contradicts": contradicts_n},
+                    "status": status,
+                    "score": float(_claim_score(cn)),
+                }
+            )
+
+        claims_out.sort(key=lambda c: float(c.get("score") or 0.0), reverse=True)
+
+        overall = {"abstained": True, "status": "no_claims", "reason": "no_claims"}
+        if claims_out:
+            top_status = claims_out[0].get("status")
+            if risk_mode in ("high", "strict"):
+                abstained = top_status in ("no_evidence", "inconclusive")
+            else:
+                abstained = top_status == "no_evidence"
+
+            reason_map = {
+                "no_evidence": "insufficient_evidence",
+                "supported": "supported_by_evidence",
+                "not_confirmed": "evidence_contradicts",
+                "inconclusive": "conflicting_evidence",
+            }
+            overall = {
+                "abstained": bool(abstained),
+                "status": top_status,
+                "reason": reason_map.get(str(top_status), "unknown"),
+            }
+
+        return {
+            "params": {
+                "hops": int(hops or 0),
+                "max_claims": max_claims,
+                "max_support": max_support,
+                "max_contra": max_contra,
+                "max_actors": max_actors,
+                "max_issues": max_issues,
+                "max_chars": max_chars,
+                "evidence_weight_threshold": float(evidence_weight_threshold),
+                "risk_mode": risk_mode,
+            },
+            "claims": claims_out,
+            "overall": overall,
+            "stats": {
+                "seed_nodes": len(seed_nodes),
+                "expanded_nodes": len(expanded),
+                "edges_seen": int(edges_seen),
+                "claim_nodes": len(claim_nodes_sorted),
+            },
+        }
+
+    def format_debate_bundle(self, bundle: Dict[str, Any], *, max_chars: Optional[int] = 8000) -> str:
+        """
+        Formata o bundle pró/contra em texto curto e auditável.
+        """
+        if not bundle or not bundle.get("claims"):
+            return (
+                "### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n\n"
+                "- Sem claims relevantes encontradas no grafo.\n"
+            )
+
+        status_pt = {
+            "no_evidence": "Sem evidência suficiente (no conjunto recuperado)",
+            "supported": "Suportado por evidências (provisório)",
+            "not_confirmed": "Não confirmado (evidências contrárias predominam)",
+            "inconclusive": "Inconclusivo (evidências conflitantes)",
+        }
+
+        def fmt_ev(ev: Dict[str, Any]) -> str:
+            title = ev.get("title") or ""
+            w = ev.get("weight", 1.0)
+            doc_id = ev.get("doc_id")
+            chunk_id = ev.get("chunk_id")
+            parts = []
+            if doc_id is not None and str(doc_id).strip() != "":
+                parts.append(f"doc_id={doc_id}")
+            if chunk_id is not None and str(chunk_id).strip() != "":
+                parts.append(f"chunk_id={chunk_id}")
+            ref = ", ".join(parts) if parts else (ev.get("evidence_id") or "")
+            return f"{_clip(str(title), 120)} ({ref}) (w={float(w):.2f})"
+
+        lines: List[str] = []
+        lines.append("### 🧩 CONTEXTO DE PROVA E CONTRADITÓRIO (ARGUMENT GRAPH)\n")
+
+        for c in bundle.get("claims", [])[: bundle.get("params", {}).get("max_claims", 3)]:
+            c_text = c.get("text", "")
+            lines.append(f"**CLAIM:** {c_text}")
+
+            st = c.get("status", "no_evidence")
+            lines.append(f"- **Status:** {status_pt.get(st, st)}")
+
+            issues = c.get("issues") or []
+            if issues:
+                lines.append("- **Issue:** " + "; ".join(_clip(x.get("text", ""), 160) for x in issues[:2]))
+
+            asserters = c.get("asserters") or []
+            disputers = c.get("disputers") or []
             if asserters:
-                lines.append("  - **Quem afirma:** " + "; ".join(_clip(_name(a), 80) for a in asserters[:5]))
+                lines.append("- **Quem afirma:** " + "; ".join(_clip(a.get("name", ""), 80) for a in asserters))
             if disputers:
-                lines.append("  - **Quem contesta:** " + "; ".join(_clip(_name(a), 80) for a in disputers[:5]))
+                lines.append("- **Quem contesta:** " + "; ".join(_clip(a.get("name", ""), 80) for a in disputers))
 
-            if supporters:
-                lines.append("  - **Evidências a favor:** " + "; ".join(_clip(_name(e), 90) for e in supporters[:6]))
-            if contradictors:
-                lines.append("  - **Evidências contra:** " + "; ".join(_clip(_name(e), 90) for e in contradictors[:6]))
+            sup = c.get("supports") or []
+            con = c.get("contradicts") or []
+            if sup:
+                lines.append("- **Evidências a favor:** " + "; ".join(fmt_ev(ev) for ev in sup))
+            if con:
+                lines.append("- **Evidências contra:** " + "; ".join(fmt_ev(ev) for ev in con))
 
-            lines.append("")  # espaçamento
+            if st == "no_evidence":
+                lines.append("- **Próximo passo sugerido:** localizar documentos/logs primários que confirmem ou refutem a claim.")
+            elif st == "inconclusive":
+                lines.append("- **Próximo passo sugerido:** buscar evidência decisiva (fonte primária) para resolver o conflito.")
+            lines.append("")
 
-        return "\n".join(lines).strip() + "\n"
+        overall = bundle.get("overall") or {}
+        if overall.get("abstained"):
+            lines.append(f"⚠️ **Conclusão conservadora:** {status_pt.get(overall.get('status'), overall.get('status'))}.")
+            lines.append("⚠️ **Nota:** em modo de risco alto, evite afirmar como fato sem lastro suficiente.\n")
 
-    def build_debate_context_from_query(self, graph, query: str, hops: int = 2) -> str:
+        txt = "\n".join(lines).strip() + "\n"
+        if max_chars is not None and len(txt) > max_chars:
+            return txt[: max_chars - 1].rstrip() + "…\n"
+        return txt
+
+    def _build_debate_context_internal(self, graph, seed_nodes: Set[str], hops: int = 2) -> Tuple[str, Dict[str, Any]]:
+        """
+        Mantém a API usada pelos chamadores atuais (texto + stats),
+        mas implementa o "modo produção" (limites, status, packing).
+        """
+        bundle = self.build_debate_bundle(graph, seed_nodes, hops=hops)
+        text = self.format_debate_bundle(bundle, max_chars=bundle.get("params", {}).get("max_chars"))
+        stats = dict(bundle.get("stats") or {})
+        stats["hops"] = int(hops or 0)
+        return text if seed_nodes else "", stats
+
+    def build_debate_context(
+        self,
+        graph,
+        seed_nodes: Set[str],
+        hops: int = 2,
+        *,
+        max_claims: int = 3,
+        max_support: int = 3,
+        max_contra: int = 3,
+        max_actors: int = 2,
+        max_issues: int = 2,
+        max_chars: Optional[int] = 8000,
+        evidence_weight_threshold: float = 0.6,
+        risk_mode: str = "high",
+        return_structured: bool = False,
+    ) -> Union[str, Tuple[str, Dict[str, Any]]]:
+        bundle = self.build_debate_bundle(
+            graph,
+            seed_nodes,
+            hops=hops,
+            max_claims=max_claims,
+            max_support=max_support,
+            max_contra=max_contra,
+            max_actors=max_actors,
+            max_issues=max_issues,
+            max_chars=max_chars,
+            evidence_weight_threshold=evidence_weight_threshold,
+            risk_mode=risk_mode,
+        )
+        text = self.format_debate_bundle(bundle, max_chars=max_chars)
+        return (text, bundle) if return_structured else text
+
+    def build_debate_context_with_stats(
+        self,
+        graph,
+        seed_nodes: Set[str],
+        hops: int = 2,
+    ) -> Tuple[str, Dict[str, Any]]:
+        return self._build_debate_context_internal(graph, seed_nodes, hops=hops)
+
+    def build_debate_context_from_query(
+        self,
+        graph,
+        query: str,
+        hops: int = 2,
+        *,
+        max_claims: int = 3,
+        max_support: int = 3,
+        max_contra: int = 3,
+        max_actors: int = 2,
+        max_issues: int = 2,
+        max_chars: Optional[int] = 8000,
+        evidence_weight_threshold: float = 0.6,
+        risk_mode: str = "high",
+        return_structured: bool = False,
+    ) -> Union[str, Tuple[str, Dict[str, Any]]]:
         seeds = self.resolve_query_seeds(graph, query)
-        return self.build_debate_context(graph, seeds, hops=hops)
+        return self.build_debate_context(
+            graph,
+            seeds,
+            hops=hops,
+            max_claims=max_claims,
+            max_support=max_support,
+            max_contra=max_contra,
+            max_actors=max_actors,
+            max_issues=max_issues,
+            max_chars=max_chars,
+            evidence_weight_threshold=evidence_weight_threshold,
+            risk_mode=risk_mode,
+            return_structured=return_structured,
+        )
+
+    def build_debate_context_from_query_with_stats(
+        self,
+        graph,
+        query: str,
+        hops: int = 2,
+        max_seeds: int = 10,
+    ) -> Tuple[str, Dict[str, Any]]:
+        seeds = self.resolve_query_seeds(graph, query, max_seeds=max_seeds)
+        ctx, stats = self._build_debate_context_internal(graph, seeds, hops=hops)
+        stats = dict(stats or {})
+        stats["max_seeds"] = int(max_seeds or 0)
+        return ctx, stats
+
+    def build_debate_context_from_results_with_stats(
+        self,
+        graph,
+        results: List[Dict[str, Any]],
+        *,
+        hops: int = 2,
+        max_results: int = 12,
+        max_seeds: int = 12,
+    ) -> Tuple[str, Dict[str, Any]]:
+        claim_seeds, seed_stats = self.resolve_result_claim_seeds(
+            graph,
+            results,
+            max_results=max_results,
+            max_seeds=max_seeds,
+        )
+        ctx, stats = self._build_debate_context_internal(graph, claim_seeds, hops=hops)
+        merged = dict(seed_stats or {})
+        if isinstance(stats, dict):
+            merged.update(stats)
+        return ctx, merged
 
 
 # Singleton padrão

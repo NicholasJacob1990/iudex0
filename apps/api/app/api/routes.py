@@ -4,7 +4,7 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health, mcp, tribunais, webhooks, graph
 
 api_router = APIRouter()
 
@@ -33,3 +33,7 @@ api_router.include_router(rag.router, prefix="/rag", tags=["rag"])
 api_router.include_router(admin_rag.router, tags=["admin-rag"])
 api_router.include_router(advanced.router, prefix="/advanced", tags=["advanced"])
 api_router.include_router(djen.router, prefix="/djen", tags=["djen"])
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
+api_router.include_router(tribunais.router, prefix="/tribunais", tags=["tribunais"])
+api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
+api_router.include_router(graph.router, prefix="/graph", tags=["graph"])

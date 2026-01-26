@@ -9,8 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from pypdf import PdfReader
 import io
+
+try:
+    from pypdf import PdfReader
+except Exception:  # pragma: no cover
+    PdfReader = None  # type: ignore
 
 
 @dataclass
@@ -69,6 +73,8 @@ def extract_pdf_pages(pdf_bytes: bytes) -> List[Tuple[int, str]]:
     Returns:
         List of (page_number, text) tuples
     """
+    if PdfReader is None:
+        raise ImportError("Missing optional dependency 'pypdf'. Install it to enable PDF ingestion.")
     reader = PdfReader(io.BytesIO(pdf_bytes))
     out: List[Tuple[int, str]] = []
 

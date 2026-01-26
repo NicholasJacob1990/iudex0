@@ -20,11 +20,13 @@ async def test_agentic_routing_applies_to_new_pipeline(monkeypatch):
         opensearch_index_lei = "idx_lei"
         opensearch_index_juris = "idx_juris"
         opensearch_index_pecas = "idx_pecas"
+        opensearch_index_doutrina = "idx_doutrina"
         opensearch_index_sei = "idx_sei"
         opensearch_index_local = "idx_local"
         qdrant_collection_lei = "col_lei"
         qdrant_collection_juris = "col_juris"
         qdrant_collection_pecas = "col_pecas"
+        qdrant_collection_doutrina = "col_doutrina"
         qdrant_collection_sei = "col_sei"
         qdrant_collection_local = "col_local"
 
@@ -82,4 +84,3 @@ async def test_agentic_routing_applies_to_new_pipeline(monkeypatch):
     assert rag_ctx
     assert graph_ctx == ""
     assert results and results[0]["text"] == "doc"
-

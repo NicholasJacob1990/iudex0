@@ -152,11 +152,27 @@ class TestNeo4jMVPConfig:
         monkeypatch.setenv("NEO4J_URI", "bolt://custom:7687")
         monkeypatch.setenv("NEO4J_USER", "custom_user")
         monkeypatch.setenv("NEO4J_MAX_HOPS", "3")
+        monkeypatch.setenv("RAG_GRAPH_HYBRID_MODE", "true")
+        monkeypatch.setenv("RAG_GRAPH_HYBRID_AUTO_SCHEMA", "false")
+        monkeypatch.setenv("RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP", "true")
+        monkeypatch.setenv("NEO4J_FULLTEXT_ENABLED", "true")
+        monkeypatch.setenv("NEO4J_VECTOR_INDEX_ENABLED", "true")
+        monkeypatch.setenv("NEO4J_VECTOR_DIM", "1536")
+        monkeypatch.setenv("NEO4J_VECTOR_SIMILARITY", "cosine")
+        monkeypatch.setenv("NEO4J_VECTOR_PROPERTY", "embedding")
 
         config = Neo4jMVPConfig.from_env()
         assert config.uri == "bolt://custom:7687"
         assert config.user == "custom_user"
         assert config.max_hops == 3
+        assert config.graph_hybrid_mode is True
+        assert config.graph_hybrid_auto_schema is False
+        assert config.graph_hybrid_migrate_on_startup is True
+        assert config.enable_fulltext_indexes is True
+        assert config.enable_vector_index is True
+        assert config.vector_dimensions == 1536
+        assert config.vector_similarity == "cosine"
+        assert config.vector_property == "embedding"
 
 
 class TestNeo4jMVPService:
@@ -209,6 +225,10 @@ class TestCypherQueries:
             assert len(query) > 10
             # Should contain Cypher keywords
             assert any(kw in query.upper() for kw in ["MATCH", "MERGE", "CREATE", "RETURN"])
+
+        # Sanity checks for explainable-path query
+        assert "path_nodes" in CypherQueries.FIND_PATHS
+        assert "path_edges" in CypherQueries.FIND_PATHS
 
 
 class TestBuildGraphContext:

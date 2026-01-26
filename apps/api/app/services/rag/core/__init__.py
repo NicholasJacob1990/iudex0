@@ -18,6 +18,25 @@ Contains the core processing components for the RAG pipeline:
 # Import from existing modules
 from .reranker import CrossEncoderReranker, RerankerConfig, RerankerResult
 
+# Cohere Reranker imports
+from .cohere_reranker import (
+    CohereReranker,
+    CohereRerankerConfig,
+    CohereRerankerResult,
+    get_cohere_reranker,
+)
+
+# Hybrid Reranker imports (auto-selects local vs Cohere)
+from .hybrid_reranker import (
+    RerankerProvider,
+    HybridReranker,
+    HybridRerankerConfig,
+    HybridRerankerResult,
+    get_hybrid_reranker,
+    rerank as hybrid_rerank,
+    rerank_with_metadata as hybrid_rerank_with_metadata,
+)
+
 # Budget tracker imports
 from .budget_tracker import (
     BudgetTracker,
@@ -243,10 +262,23 @@ __all__ = [
     "QueryExpansionService",
     "get_query_expansion_service",
     "reset_query_expansion_service",
-    # Reranking
+    # Reranking - Local Cross-Encoder
     "CrossEncoderReranker",
     "RerankerConfig",
     "RerankerResult",
+    # Reranking - Cohere
+    "CohereReranker",
+    "CohereRerankerConfig",
+    "CohereRerankerResult",
+    "get_cohere_reranker",
+    # Reranking - Hybrid (auto-selects)
+    "RerankerProvider",
+    "HybridReranker",
+    "HybridRerankerConfig",
+    "HybridRerankerResult",
+    "get_hybrid_reranker",
+    "hybrid_rerank",
+    "hybrid_rerank_with_metadata",
     # Compression
     "ContextCompressor",
     "CompressionConfig",
@@ -373,4 +405,30 @@ if _embedding_trainer_available:
         "EmbeddingTrainer",
         "Neo4jEmbeddingPipeline",
         "EmbeddingScheduler",
+    ])
+
+# ColPali Visual Retrieval (always available, but may be disabled)
+try:
+    from .colpali_service import (
+        ColPaliConfig,
+        ColPaliService,
+        VisualRetrievalResult,
+        IndexedPage,
+        get_colpali_service,
+    )
+    _colpali_available = True
+except ImportError:
+    _colpali_available = False
+
+if _colpali_available:
+    __all__.extend([
+        # ColPali - Config
+        "ColPaliConfig",
+        # ColPali - Service
+        "ColPaliService",
+        # ColPali - Data classes
+        "VisualRetrievalResult",
+        "IndexedPage",
+        # ColPali - Helpers
+        "get_colpali_service",
     ])

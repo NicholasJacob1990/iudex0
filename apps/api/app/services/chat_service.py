@@ -354,41 +354,53 @@ class ThreadManager:
             raise e
 
     def get_thread(self, thread_id: str) -> Optional[ChatThread]:
+        conn = None
         try:
             conn = sqlite3.connect(self.db_path)
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            
+
             # Get Thread
             cursor.execute("SELECT * FROM threads WHERE id = ?", (thread_id,))
             thread_row = cursor.fetchone()
             if not thread_row:
                 return None
-            
+
             # Get Messages
-            cursor.execute("SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC", (thread_id,))
+            cursor.execute(
+                "SELECT * FROM messages WHERE thread_id = ? ORDER BY created_at ASC",
+                (thread_id,),
+            )
             msg_rows = cursor.fetchall()
-            
+
             messages = []
             for row in msg_rows:
-                messages.append(ChatMessage(
-                    id=row["id"],
-                    role=row["role"],
-                    content=row["content"],
-                    model=row["model"],
-                    created_at=row["created_at"]
-                ))
-            
+                messages.append(
+                    ChatMessage(
+                        id=row["id"],
+                        role=row["role"],
+                        content=row["content"],
+                        model=row["model"],
+                        created_at=row["created_at"],
+                    )
+                )
+
             return ChatThread(
                 id=thread_row["id"],
                 title=thread_row["title"],
                 messages=messages,
                 created_at=thread_row["created_at"],
-                updated_at=thread_row["updated_at"]
+                updated_at=thread_row["updated_at"],
             )
         except Exception as e:
             logger.error(f"❌ Error getting thread {thread_id}: {e}")
             return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def add_message(self, thread_id: str, role: str, content: str, model: Optional[str] = None) -> ChatMessage:
         msg_id = str(uuid.uuid4())
@@ -442,6 +454,7 @@ class ChatOrchestrator:
         thread_id: str,
         user_message: str,
         candidates: List[Dict[str, Any]],
+        mode: str = "merge",
     ) -> str:
         """
         Produz uma resposta única a partir de múltiplas respostas (multi-modelo).
@@ -464,6 +477,47 @@ class ChatOrchestrator:
 
         if not cleaned:
             raise ValueError("No candidates to consolidate")
+
+        mode_norm = (mode or "merge").strip().lower()
+        if mode_norm == "debate":
+            try:
+                gpt_client = get_gpt_client()
+                claude_client = get_claude_client()
+                drafter = GeminiDrafterWrapper()
+
+                candidates_block = "\n\n".join([f"### {c['model']}\n{c['text']}" for c in cleaned])
+                prompt_base = (
+                    "Você é um comitê de juristas. Sua tarefa é produzir UMA resposta final em português, "
+                    "clara e correta, consolidando o melhor conteúdo das respostas candidatas.\n\n"
+                    "Regras:\n"
+                    "- Não invente fatos.\n"
+                    "- Se houver divergência, explique e escolha a opção mais segura.\n"
+                    "- Preserve definições, requisitos e fundamentos, e organize a resposta.\n"
+                    "- Se houver lacunas, sinalize como pendente.\n\n"
+                    f"Pergunta do usuário:\n{user_message}\n\n"
+                    f"Respostas candidatas:\n{candidates_block}\n"
+                )
+
+                result = await run_debate_for_section(
+                    section_title="Consolidação (Chat)",
+                    section_index=0,
+                    prompt_base=prompt_base,
+                    rag_context="",
+                    thesis=user_message,
+                    mode="chat_consolidate",
+                    gpt_client=gpt_client,
+                    claude_client=claude_client,
+                    drafter=drafter,
+                    temperature=0.2,
+                )
+                merged_text = (result or {}).get("merged_content") or (result or {}).get("merged") or ""
+                merged_text = str(merged_text or "").strip()
+                if merged_text:
+                    self.thread_manager.add_message(thread_id, "assistant", merged_text, model="consolidado")
+                    return merged_text
+            except Exception as e:
+                logger.error(f"Deep debate consolidate failed: {e}")
+                # Fall back to standard merge path below.
 
         # Histórico compartilhado (como no dispatch_turn), mas sem tags de modelo
         history = [{"role": m.role, "content": m.content} for m in thread.messages]
@@ -1109,6 +1163,8 @@ Retorne APENAS o texto final, sem explicações.
         verbosity: Optional[str] = None,
         thinking_budget: Optional[int] = None,
         temperature: Optional[float] = None,
+        mcp_tool_calling: Optional[bool] = None,
+        mcp_server_labels: Optional[List[str]] = None,
         web_search: bool = False,
         multi_query: bool = True,
         breadth_first: bool = False,
@@ -1148,7 +1204,12 @@ Retorne APENAS o texto final, sem explicações.
         graph_hops: int = 1,
         dense_research: bool = False,
         rag_scope: str = "case_and_global",  # case_only, case_and_global, global_only
+        scope_groups: Optional[List[str]] = None,
+        allow_global_scope: Optional[bool] = None,
+        allow_group_scope: Optional[bool] = None,
         deep_research_effort: Optional[str] = None,
+        deep_research_provider: Optional[str] = None,
+        deep_research_model: Optional[str] = None,
         deep_research_search_focus: Optional[str] = None,
         deep_research_domain_filter: Optional[object] = None,
         deep_research_search_after_date: Optional[str] = None,
@@ -1170,6 +1231,48 @@ Retorne APENAS o texto final, sem explicações.
         """
         dispatch_t0 = time.perf_counter()
         request_id = f"{thread_id}:{uuid.uuid4().hex}"
+
+        # MCP tool-calling is gated globally by env AND optionally per-request.
+        # - If mcp_tool_calling is False: disable even if env is enabled.
+        # - If mcp_tool_calling is True/None: enable only when env is enabled.
+        try:
+            env_mcp_enabled = os.getenv("IUDEX_MCP_TOOL_CALLING", "false").lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        except Exception:
+            env_mcp_enabled = False
+        mcp_enabled_for_turn = env_mcp_enabled and (mcp_tool_calling is not False)
+        if mcp_enabled_for_turn:
+            try:
+                from app.services.mcp_hub import mcp_hub
+
+                configured = mcp_hub.list_servers() or []
+                configured_labels = {
+                    str(s.get("label") or "").strip()
+                    for s in configured
+                    if isinstance(s, dict)
+                }
+                configured_labels = {lbl for lbl in configured_labels if lbl}
+
+                requested_labels = [
+                    str(x).strip()
+                    for x in (mcp_server_labels or [])
+                    if str(x).strip()
+                ]
+                if requested_labels:
+                    allowed_server_labels = [lbl for lbl in requested_labels if lbl in configured_labels]
+                    mcp_enabled_for_turn = bool(allowed_server_labels)
+                else:
+                    allowed_server_labels = sorted(configured_labels) if configured_labels else []
+                    mcp_enabled_for_turn = bool(allowed_server_labels)
+            except Exception:
+                allowed_server_labels = []
+                mcp_enabled_for_turn = False
+        else:
+            allowed_server_labels = []
         
         # 1. Save User Message
         self.thread_manager.add_message(thread_id, "user", user_message)
@@ -1323,6 +1426,17 @@ Retorne APENAS o texto final, sem explicações.
         effective_web_search = bool(research_decision.get("web_search"))
         effective_dense_research = bool(research_decision.get("deep_research")) and bool(deep_research_effort)
         planned_queries = research_decision.get("planned_queries") or []
+
+        # Normalize deep research web-search controls early (used by the deep research branch below).
+        deep_search_focus = normalize_perplexity_search_mode(deep_research_search_focus)
+        deep_domain_filter = parse_csv_list(deep_research_domain_filter, max_items=20)
+        deep_search_after = normalize_perplexity_date(deep_research_search_after_date)
+        deep_search_before = normalize_perplexity_date(deep_research_search_before_date)
+        deep_updated_after = normalize_perplexity_date(deep_research_last_updated_after)
+        deep_updated_before = normalize_perplexity_date(deep_research_last_updated_before)
+        deep_country = (deep_research_country or "").strip() or None
+        deep_latitude = normalize_float(deep_research_latitude)
+        deep_longitude = normalize_float(deep_research_longitude)
         max_query_cap = None
         if max_web_search_requests is not None:
             try:
@@ -1339,10 +1453,16 @@ Retorne APENAS o texto final, sem explicações.
         rag_context = ""
         graph_context = ""
         if rag_scope != "case_only":
-            raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
-            scope_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
-            allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
-            allow_group_scope = True if scope_groups else False
+            resolved_scope_groups = scope_groups
+            if resolved_scope_groups is None:
+                raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
+                resolved_scope_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
+            resolved_allow_global_scope = allow_global_scope
+            if resolved_allow_global_scope is None:
+                resolved_allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+            resolved_allow_group_scope = allow_group_scope
+            if resolved_allow_group_scope is None:
+                resolved_allow_group_scope = True if resolved_scope_groups else False
             rag_context, graph_context, _ = await build_rag_context(
                 query=user_message,
                 rag_sources=effective_sources,
@@ -1360,9 +1480,9 @@ Retorne APENAS o texto final, sem explicações.
                 dense_research=effective_dense_research,
                 tenant_id=tenant_id,
                 user_id=None,
-                scope_groups=scope_groups,
-                allow_global_scope=allow_global_scope,
-                allow_group_scope=allow_group_scope,
+                scope_groups=resolved_scope_groups,
+                allow_global_scope=bool(resolved_allow_global_scope),
+                allow_group_scope=bool(resolved_allow_group_scope),
                 history=history,
                 summary_text=None,
                 rewrite_query=len(history) > 1,
@@ -1394,10 +1514,30 @@ Retorne APENAS o texto final, sem explicações.
                 conversation_id=thread_id,
             )
 
+        # Collect citations across all research steps/providers for this turn.
+        # NOTE: This must be defined before the deep-research branch, since we merge deep research
+        # sources into the same final citations payload.
+        citations_by_url: Dict[str, Dict[str, Any]] = {}
+
+        def _merge_citations(items: List[Dict[str, Any]]):
+            for item in items or []:
+                url = str(item.get("url") or "").strip()
+                # Use URL as the primary key. Source numbers are not globally unique across providers,
+                # so keying by "number" can silently drop citations when merging streams.
+                key = url
+                if not key:
+                    number = item.get("number")
+                    key = str(number).strip() if number is not None else ""
+                if not key:
+                    continue
+                if key not in citations_by_url:
+                    citations_by_url[key] = item
+
         if effective_dense_research:
             deep_report = ""
             yield {"type": "research_start", "researchmode": "deep"}
             try:
+                deep_sources: List[Dict[str, Any]] = []
                 deep_config: Dict[str, Any] = {"effort": deep_research_effort}
                 if deep_research_points_multiplier is not None:
                     deep_config["points_multiplier"] = deep_research_points_multiplier
@@ -1442,6 +1582,20 @@ Retorne APENAS o texto final, sem explicações.
                             yield {"type": "deepresearch_step", "text": text}
                     elif etype == "content":
                         deep_report += event.get("text") or ""
+                    elif etype in ("step.start", "step.add_query", "step.add_source", "step.done"):
+                        # Propagate granular step events directly to SSE stream
+                        yield event
+                    elif etype == "done":
+                        sources_raw = event.get("sources") or []
+                        if isinstance(sources_raw, list):
+                            deep_sources = [s for s in sources_raw if isinstance(s, dict)]
+                            if deep_sources:
+                                _merge_citations(deep_sources)
+                    elif etype == "error":
+                        message = event.get("message") or event.get("error") or "Deep research falhou."
+                        yield {"type": "research_error", "message": str(message)}
+                        # Stop deep research; continue the chat answer with whatever we have.
+                        break
             except Exception as exc:
                 logger.warning(f"Deep research falhou: {exc}")
                 yield {"type": "research_error", "message": str(exc)}
@@ -1450,20 +1604,6 @@ Retorne APENAS o texto final, sem explicações.
                 trimmed = deep_report.strip()[:5000]
                 system_instruction += "\n\n## PESQUISA PROFUNDA (resumo)\n" + trimmed
             yield {"type": "research_done", "researchmode": "deep"}
-
-        citations_by_url: Dict[str, Dict[str, Any]] = {}
-
-        def _merge_citations(items: List[Dict[str, Any]]):
-            for item in items or []:
-                url = str(item.get("url") or "").strip()
-                number = item.get("number")
-                key = str(number).strip() if number is not None else ""
-                if not key:
-                    key = url
-                if not key:
-                    continue
-                if key not in citations_by_url:
-                    citations_by_url[key] = item
 
         sources = []
         web_search = bool(effective_web_search)
@@ -1865,6 +2005,27 @@ Retorne APENAS o texto final, sem explicações.
                     return text
 
                 if provider == "openai":
+                    # Optional MCP tool-calling (model-driven) via lightweight helper tools.
+                    # Enabled only when IUDEX_MCP_SERVERS is configured and IUDEX_MCP_TOOL_CALLING is truthy.
+                    if mcp_enabled_for_turn:
+                        try:
+                            from app.services.ai.mcp_tools import run_openai_tool_loop
+                            from app.services.ai.agent_clients import get_async_openai_client
+
+                            async_client = get_async_openai_client()
+                            if async_client:
+                                text, _tool_trace = await run_openai_tool_loop(
+                                    client=async_client,
+                                    model=api_model,
+                                    system_instruction=system_instruction,
+                                    user_prompt=prompt,
+                                    max_tokens=tokens,
+                                    temperature=temperature,
+                                    allowed_server_labels=allowed_server_labels,
+                                )
+                                return text
+                        except Exception as e:
+                            logger.warning(f"MCP tool-calling fallback to normal OpenAI call: {e}")
                     return await call_openai_async(
                         gpt_client,
                         prompt,
@@ -1883,6 +2044,22 @@ Retorne APENAS o texto final, sem explicações.
                         system_instruction=system_instruction,
                     )
                 if provider == "google":
+                    if mcp_enabled_for_turn:
+                        try:
+                            from app.services.ai.mcp_tools import run_gemini_tool_loop
+
+                            text, _tool_trace = await run_gemini_tool_loop(
+                                client=gemini_client,
+                                model=api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=prompt,
+                                max_tokens=tokens,
+                                temperature=temperature,
+                                allowed_server_labels=allowed_server_labels,
+                            )
+                            return text
+                        except Exception as e:
+                            logger.warning(f"MCP tool-calling fallback to normal Gemini call: {e}")
                     return await call_vertex_gemini_async(
                         gemini_client,
                         prompt,
@@ -2180,6 +2357,23 @@ Retorne APENAS o texto final, sem explicações.
 
                             search_results: List[Any] = []
                             citation_items: List[Any] = []
+                            seen_citation_keys: set = set()
+                            pplx_step_id: str | None = None
+
+                            def _ensure_pplx_step_started():
+                                nonlocal pplx_step_id
+                                if not pplx_step_id and not disable_search_effective:
+                                    pplx_step_id = str(uuid.uuid4())[:8]
+                                    return {"type": "step.start", "step_name": "Pesquisando", "step_id": pplx_step_id}
+                                return None
+
+                            def _emit_citation(url: str, title: str):
+                                nonlocal pplx_step_id
+                                citation_key = url or title
+                                if citation_key and citation_key not in seen_citation_keys:
+                                    seen_citation_keys.add(citation_key)
+                                    return {"type": "step.add_source", "step_id": pplx_step_id or "pplx_search", "source": {"url": url, "title": title or url}}
+                                return None
 
                             try:
                                 stream_obj = client.chat.completions.create(
@@ -2224,10 +2418,36 @@ Retorne APENAS o texto final, sem explicações.
 
                                     chunk_results = _get(chunk, "search_results", None) or _get(chunk, "searchResults", None)
                                     if isinstance(chunk_results, list) and chunk_results:
+                                        # Emit step.start on first citation
+                                        start_evt = _ensure_pplx_step_started()
+                                        if start_evt:
+                                            yield start_evt
+                                            await asyncio.sleep(0)
+                                        for result in chunk_results:
+                                            url = str(_get(result, "url", "") or _get(result, "uri", "") or "").strip()
+                                            title = str(_get(result, "title", "") or _get(result, "name", "") or "").strip()
+                                            evt = _emit_citation(url, title)
+                                            if evt:
+                                                yield evt
+                                                await asyncio.sleep(0)
                                         search_results.extend(chunk_results)
 
                                     chunk_citations = _get(chunk, "citations", None)
                                     if isinstance(chunk_citations, list) and chunk_citations:
+                                        start_evt = _ensure_pplx_step_started()
+                                        if start_evt:
+                                            yield start_evt
+                                            await asyncio.sleep(0)
+                                        for cit in chunk_citations:
+                                            if isinstance(cit, str):
+                                                evt = _emit_citation(cit.strip(), cit.strip())
+                                            else:
+                                                url = str(_get(cit, "url", "") or _get(cit, "uri", "") or "").strip()
+                                                title = str(_get(cit, "title", "") or _get(cit, "name", "") or "").strip()
+                                                evt = _emit_citation(url, title)
+                                            if evt:
+                                                yield evt
+                                                await asyncio.sleep(0)
                                         citation_items.extend(chunk_citations)
                             else:
                                 for chunk in stream_obj:
@@ -2244,11 +2464,37 @@ Retorne APENAS o texto final, sem explicações.
 
                                     chunk_results = _get(chunk, "search_results", None) or _get(chunk, "searchResults", None)
                                     if isinstance(chunk_results, list) and chunk_results:
+                                        # Emit step.start on first citation
+                                        start_evt = _ensure_pplx_step_started()
+                                        if start_evt:
+                                            yield start_evt
+                                        for result in chunk_results:
+                                            url = str(_get(result, "url", "") or _get(result, "uri", "") or "").strip()
+                                            title = str(_get(result, "title", "") or _get(result, "name", "") or "").strip()
+                                            evt = _emit_citation(url, title)
+                                            if evt:
+                                                yield evt
                                         search_results.extend(chunk_results)
 
                                     chunk_citations = _get(chunk, "citations", None)
                                     if isinstance(chunk_citations, list) and chunk_citations:
+                                        start_evt = _ensure_pplx_step_started()
+                                        if start_evt:
+                                            yield start_evt
+                                        for cit in chunk_citations:
+                                            if isinstance(cit, str):
+                                                evt = _emit_citation(cit.strip(), cit.strip())
+                                            else:
+                                                url = str(_get(cit, "url", "") or _get(cit, "uri", "") or "").strip()
+                                                title = str(_get(cit, "title", "") or _get(cit, "name", "") or "").strip()
+                                                evt = _emit_citation(url, title)
+                                            if evt:
+                                                yield evt
                                         citation_items.extend(chunk_citations)
+
+                            # Emit step.done if we started a search step
+                            if pplx_step_id:
+                                yield {"type": "step.done", "step_id": pplx_step_id}
 
                             def _to_url_title(item: Any) -> tuple[str, str]:
                                 if isinstance(item, str):
@@ -2293,6 +2539,94 @@ Retorne APENAS o texto final, sem explicações.
                         api_model = get_api_model_name(model_id)
                         messages = [{"role": "system", "content": stream_instruction}] + history
 
+                        # Optional MCP tool-calling (OpenAI only for now): execute tool loop (non-stream)
+                        # and stream the final text as SSE tokens.
+                        # This gives *any* OpenAI model access to configured MCP servers via:
+                        #   - mcp_tool_search(query, server_labels?, limit?)
+                        #   - mcp_tool_call(server_label, tool_name, arguments)
+                        if mcp_enabled_for_turn:
+                            try:
+                                from app.services.ai.agent_clients import (
+                                    get_async_openai_client,
+                                    get_async_openrouter_client,
+                                    get_async_xai_client,
+                                )
+                                from app.services.ai.mcp_tools import run_openai_tool_loop
+
+                                async_client = None
+                                if provider == "xai" or "grok" in model_id.lower():
+                                    async_client = get_async_xai_client()
+                                elif provider in ("openrouter", "deepseek", "meta") or "llama" in model_id.lower():
+                                    async_client = get_async_openrouter_client()
+                                else:
+                                    async_client = get_async_openai_client()
+
+                                if async_client:
+                                    tool_step_id = f"mcp_{model_id}"
+                                    yield {
+                                        "type": "step.start",
+                                        "step_name": "MCP tools",
+                                        "step_id": tool_step_id,
+                                        "model": model_id,
+                                    }
+                                    await asyncio.sleep(0)
+                                    text, tool_trace = await run_openai_tool_loop(
+                                        client=async_client,
+                                        model=api_model,
+                                        system_instruction=stream_instruction,
+                                        user_prompt=user_message,
+                                        max_tokens=4096,
+                                        temperature=temperature,
+                                        allowed_server_labels=allowed_server_labels,
+                                    )
+                                    for item in tool_trace:
+                                        yield {
+                                            "type": "tool_call",
+                                            "model": model_id,
+                                            "step_id": tool_step_id,
+                                            "name": item.get("name"),
+                                            "arguments": item.get("arguments"),
+                                            "result_preview": item.get("result_preview"),
+                                        }
+                                        await asyncio.sleep(0)
+                                    yield {
+                                        "type": "step.done",
+                                        "step_id": tool_step_id,
+                                        "model": model_id,
+                                    }
+                                    await asyncio.sleep(0)
+
+                                    if _mark_answer_started():
+                                        yield {
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "model": model_id,
+                                        }
+                                    full_response += text
+                                    chunk_size = 64
+                                    for i in range(0, len(text), chunk_size):
+                                        yield {
+                                            "type": "token",
+                                            "model": model_id,
+                                            "delta": text[i : i + chunk_size],
+                                        }
+                                        await asyncio.sleep(0)
+                                    # Save final message and finish this model stream.
+                                    self.thread_manager.add_message(
+                                        thread_id, "assistant", full_response, model=model_id
+                                    )
+                                    yield {
+                                        "type": "done",
+                                        "model": model_id,
+                                        "full_text": full_response,
+                                        "thinking": full_thinking or None,
+                                        "citations": list(citations_by_url.values()),
+                                    }
+                                    return
+                            except Exception as e:
+                                logger.warning(f"MCP tool-calling disabled for {model_id}: {e}")
+
                         # Prefer Responses API for OpenAI provider so we can stream reasoning summaries when available.
                         used_responses_stream = False
                         if provider == "openai" and hasattr(client, "responses"):
@@ -2325,6 +2659,7 @@ Retorne APENAS o texto final, sem explicações.
                                     meta={"stream": True, "api": "responses"},
                                 )
                                 used_responses_stream = True
+                                openai_search_step_active = False
                                 for ev in stream:
                                     ev_type = getattr(ev, "type", "") or ""
                                     if ev_type == "response.reasoning_summary_text.delta":
@@ -2341,6 +2676,24 @@ Retorne APENAS o texto final, sem explicações.
                                             full_response += str(delta)
                                             yield {"type": "token", "model": model_id, "delta": str(delta)}
                                             await asyncio.sleep(0)
+                                    # Handle web search progress events
+                                    elif ev_type == "response.web_search_call.in_progress":
+                                        if not openai_search_step_active:
+                                            openai_search_step_active = True
+                                            yield {"type": "step.start", "step_name": "Pesquisando na web", "step_id": "openai_web_search"}
+                                            await asyncio.sleep(0)
+                                    elif ev_type == "response.web_search_call.completed":
+                                        if openai_search_step_active:
+                                            yield {"type": "step.done", "step_id": "openai_web_search"}
+                                            openai_search_step_active = False
+                                            await asyncio.sleep(0)
+                                    # Handle file search progress events
+                                    elif ev_type == "response.file_search_call.in_progress":
+                                        yield {"type": "step.start", "step_name": "Buscando em arquivos", "step_id": "openai_file_search"}
+                                        await asyncio.sleep(0)
+                                    elif ev_type == "response.file_search_call.completed":
+                                        yield {"type": "step.done", "step_id": "openai_file_search"}
+                                        await asyncio.sleep(0)
                             except Exception as e:
                                 record_api_call(
                                     kind="llm",
@@ -2424,6 +2777,70 @@ Retorne APENAS o texto final, sem explicações.
                             "stream": True,
                         }
 
+                        # Optional MCP tool-calling (Anthropic): run non-stream tool loop and emit SSE tokens.
+                        if mcp_enabled_for_turn:
+                            try:
+                                from app.services.ai.agent_clients import get_async_claude_client
+                                from app.services.ai.mcp_tools import run_anthropic_tool_loop
+
+                                async_client = get_async_claude_client()
+                                if async_client:
+                                    tool_step_id = f"mcp_{model_id}"
+                                    yield {
+                                        "type": "step.start",
+                                        "step_name": "MCP tools",
+                                        "step_id": tool_step_id,
+                                        "model": model_id,
+                                    }
+                                    await asyncio.sleep(0)
+                                    text, tool_trace = await run_anthropic_tool_loop(
+                                        client=async_client,
+                                        model=api_model,
+                                        system_instruction=stream_instruction,
+                                        user_prompt=user_message,
+                                        max_tokens=4096,
+                                        temperature=temperature,
+                                        allowed_server_labels=allowed_server_labels,
+                                    )
+                                    for item in tool_trace:
+                                        yield {
+                                            "type": "tool_call",
+                                            "model": model_id,
+                                            "step_id": tool_step_id,
+                                            "name": item.get("name"),
+                                            "arguments": item.get("arguments"),
+                                            "result_preview": item.get("result_preview"),
+                                        }
+                                        await asyncio.sleep(0)
+                                    yield {"type": "step.done", "step_id": tool_step_id, "model": model_id}
+                                    await asyncio.sleep(0)
+
+                                    if _mark_answer_started():
+                                        yield {
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "model": model_id,
+                                        }
+                                    full_response += text
+                                    chunk_size = 64
+                                    for i in range(0, len(text), chunk_size):
+                                        yield {"type": "token", "model": model_id, "delta": text[i : i + chunk_size]}
+                                        await asyncio.sleep(0)
+                                    self.thread_manager.add_message(
+                                        thread_id, "assistant", full_response, model=model_id
+                                    )
+                                    yield {
+                                        "type": "done",
+                                        "model": model_id,
+                                        "full_text": full_response,
+                                        "thinking": full_thinking or None,
+                                        "citations": list(citations_by_url.values()),
+                                    }
+                                    return
+                            except Exception as e:
+                                logger.warning(f"MCP tool-calling disabled for {model_id}: {e}")
+
                         # Enable native thinking for Claude Sonnet (extended thinking API)
                         budget_tokens = None
                         if thinking_category == "native":
@@ -2498,6 +2915,66 @@ Retorne APENAS o texto final, sem explicações.
                     client = gemini_client
                     if client:
                         api_model = get_api_model_name(model_id)
+
+                        # Optional MCP tool-calling (Gemini): run non-stream tool loop and emit SSE tokens.
+                        if mcp_enabled_for_turn:
+                            try:
+                                from app.services.ai.mcp_tools import run_gemini_tool_loop
+
+                                tool_step_id = f"mcp_{model_id}"
+                                yield {
+                                    "type": "step.start",
+                                    "step_name": "MCP tools",
+                                    "step_id": tool_step_id,
+                                    "model": model_id,
+                                }
+                                await asyncio.sleep(0)
+                                text, tool_trace = await run_gemini_tool_loop(
+                                    client=client,
+                                    model=api_model,
+                                    system_instruction=stream_instruction,
+                                    user_prompt=user_message,
+                                    max_tokens=4096,
+                                    temperature=temperature,
+                                    allowed_server_labels=allowed_server_labels,
+                                )
+                                for item in tool_trace:
+                                    yield {
+                                        "type": "tool_call",
+                                        "model": model_id,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                    }
+                                    await asyncio.sleep(0)
+                                yield {"type": "step.done", "step_id": tool_step_id, "model": model_id}
+                                await asyncio.sleep(0)
+
+                                if _mark_answer_started():
+                                    yield {
+                                        "type": "meta",
+                                        "phase": "answer_start",
+                                        "t": int(time.time() * 1000),
+                                        "model": model_id,
+                                    }
+                                full_response += text
+                                chunk_size = 64
+                                for i in range(0, len(text), chunk_size):
+                                    yield {"type": "token", "model": model_id, "delta": text[i : i + chunk_size]}
+                                    await asyncio.sleep(0)
+                                self.thread_manager.add_message(thread_id, "assistant", full_response, model=model_id)
+                                yield {
+                                    "type": "done",
+                                    "model": model_id,
+                                    "full_text": full_response,
+                                    "thinking": full_thinking or None,
+                                    "citations": list(citations_by_url.values()),
+                                }
+                                return
+                            except Exception as e:
+                                logger.warning(f"MCP tool-calling disabled for {model_id}: {e}")
+
                         thinking_mode = None
                         if normalized_reasoning in ("high", "xhigh"):
                             thinking_mode = "high"
@@ -2509,6 +2986,8 @@ Retorne APENAS o texto final, sem explicações.
                             thinking_mode = "minimal"
                         # "none" -> thinking_mode stays None (completely disabled)
 
+                        gemini_grounding_step_id = None
+                        gemini_seen_source_urls: set = set()
                         async for chunk_data in stream_vertex_gemini_async(
                             client,
                             user_message,
@@ -2531,7 +3010,40 @@ Retorne APENAS o texto final, sem explicações.
                                         payload["thinking_type"] = "summary"
                                     yield payload
                                     await asyncio.sleep(0)
+                                elif chunk_type == "grounding_query" and delta:
+                                    # Emit step.start on first grounding event
+                                    if not gemini_grounding_step_id:
+                                        import uuid
+                                        gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                                        yield {"type": "step.start", "step_name": "Pesquisando", "step_id": gemini_grounding_step_id}
+                                    yield {"type": "step.add_query", "step_id": gemini_grounding_step_id, "query": str(delta)[:200]}
+                                    await asyncio.sleep(0)
+                                elif chunk_type == "grounding_source" and delta:
+                                    # Emit step.start on first grounding event
+                                    if not gemini_grounding_step_id:
+                                        import uuid
+                                        gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                                        yield {"type": "step.start", "step_name": "Pesquisando", "step_id": gemini_grounding_step_id}
+                                    yield {"type": "step.add_source", "step_id": gemini_grounding_step_id, "source": delta}
+                                    # Also include grounding sources in the final `done.citations`.
+                                    try:
+                                        if isinstance(delta, dict):
+                                            url = str(delta.get("url") or "").strip()
+                                            title = str(delta.get("title") or url).strip()
+                                        else:
+                                            url = str(getattr(delta, "url", "") or "").strip()
+                                            title = str(getattr(delta, "title", "") or url).strip()
+                                        if url and url not in gemini_seen_source_urls:
+                                            gemini_seen_source_urls.add(url)
+                                            _merge_citations([{"title": title or url, "url": url}])
+                                    except Exception:
+                                        pass
+                                    await asyncio.sleep(0)
                                 elif chunk_type == "text" and delta:
+                                    # Close grounding step when text starts
+                                    if gemini_grounding_step_id:
+                                        yield {"type": "step.done", "step_id": gemini_grounding_step_id}
+                                        gemini_grounding_step_id = None
                                     if _mark_answer_started():
                                         yield {
                                             "type": "meta",
@@ -2553,6 +3065,9 @@ Retorne APENAS o texto final, sem explicações.
                                 full_response += str(chunk_data)
                                 yield {"type": "token", "model": model_id, "delta": str(chunk_data)}
                                 await asyncio.sleep(0)
+                        # Ensure grounding step is closed
+                        if gemini_grounding_step_id:
+                            yield {"type": "step.done", "step_id": gemini_grounding_step_id}
                     else:
                         yield {"type": "error", "model": model_id, "error": "Gemini Client unavailable"}
                 

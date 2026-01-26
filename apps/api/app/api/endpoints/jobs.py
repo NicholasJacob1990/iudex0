@@ -16,10 +16,12 @@ import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
-from app.core.database import get_db
+from app.core.database import get_db, AsyncSessionLocal
+from app.core.time_utils import utcnow
 from app.core.security import get_current_user
 from app.models.document import Document, DocumentType
 from app.models.user import User
+from app.models.workflow_state import WorkflowState
 from app.services.rag_policy import resolve_rag_scope
 from app.services.job_manager import job_manager
 from app.services.api_call_tracker import job_context
@@ -433,6 +435,35 @@ async def _build_local_rag_context_from_paths(
             lines.append(f"- {citation}: \"{snippet}...\"")
     return "\n".join(lines)
 
+
+async def persist_workflow_state(
+    job_id: str,
+    state: Dict[str, Any],
+    user_id: str,
+    case_id: Optional[str] = None,
+    chat_id: Optional[str] = None,
+) -> None:
+    """
+    Persiste o estado do workflow para auditabilidade.
+    Executa em background para não bloquear o streaming.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            workflow_state = WorkflowState.from_document_state(
+                state=state,
+                job_id=job_id,
+                user_id=user_id,
+                case_id=case_id,
+                chat_id=chat_id,
+            )
+            workflow_state.completed_at = utcnow()
+            db.add(workflow_state)
+            await db.commit()
+            logger.info(f"✅ WorkflowState persistido para job {job_id}")
+    except Exception as e:
+        logger.error(f"❌ Falha ao persistir WorkflowState para job {job_id}: {e}")
+
+
 @router.get("/{jobid}/stream")
 async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
     """
@@ -520,8 +551,29 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
 
             async def pump_job_events():
                 last_id = 0
+                last_billing_emit = 0.0
+                last_points_total = None
+                loop = asyncio.get_running_loop()
                 try:
                     while not stop_event.is_set():
+                        now = loop.time()
+                        if now - last_billing_emit >= 1.0:
+                            counters = job_manager.get_api_counters(jobid)
+                            points_total = counters.get("points_total") if isinstance(counters, dict) else None
+                            if points_total != last_points_total:
+                                last_points_total = points_total
+                                await combined_queue.put((
+                                    "job",
+                                    job_manager.build_event(
+                                        jobid,
+                                        "billing_update",
+                                        {"api_counters": counters},
+                                        phase="billing",
+                                        node="billing",
+                                    ),
+                                ))
+                            last_billing_emit = now
+
                         events = job_manager.list_events(jobid, after_id=last_id)
                         for ev in events:
                             last_id = max(last_id, int(ev.get("id", 0)))
@@ -1107,6 +1159,16 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                     final_markdown = resolve_full_document(final_snapshot.values or {})
                 final_markdown = append_sources_section(final_markdown or "", final_snapshot.values.get("citations_map"))
                 final_markdown = append_autos_references_section(final_markdown, attachment_docs=None)
+
+                # v5.7: Persist WorkflowState for auditability
+                asyncio.create_task(persist_workflow_state(
+                    job_id=jobid,
+                    state=final_snapshot.values or {},
+                    user_id=job_manager.get_job_user(jobid) or "",
+                    case_id=final_snapshot.values.get("case_id"),
+                    chat_id=final_snapshot.values.get("chat_id") or final_snapshot.values.get("conversation_id"),
+                ))
+
                 yield sse_event({
                     "type": "done",
                     "markdown": final_markdown,
@@ -1116,6 +1178,11 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                     "final_decision_target": final_snapshot.values.get("final_decision_target"),
                     "citations": citations_payload,
                     "api_counters": job_manager.get_api_counters(jobid),
+                    # v5.6: Include audit data
+                    "processed_sections": final_snapshot.values.get("processed_sections", []),
+                    "hil_history": final_snapshot.values.get("hil_history", []),
+                    "has_any_divergence": final_snapshot.values.get("has_any_divergence", False),
+                    "divergence_summary": final_snapshot.values.get("divergence_summary", ""),
                 }, event="done")
                 job_manager.clear_events(jobid)
 
@@ -1295,6 +1362,9 @@ async def start_job(
         elif quote.error == "message_budget_exceeded":
             status_code = 409
         raise HTTPException(status_code=status_code, detail=asdict(quote))
+
+    approved_budget_points = int(message_budget)
+    estimated_budget_points = int(quote.estimated_points)
 
     prompt_text = request.get("prompt", "")
     doc_kind = request.get("doc_kind") or request.get("docKind")
@@ -1778,6 +1848,10 @@ async def start_job(
         "strategist_model": strategist_model,
         "drafter_models": drafter_models,
         "reviewer_models": reviewer_models,
+
+        # Billing / Budget (soft caps, do not abort mid-workflow)
+        "budget_approved_points": approved_budget_points,
+        "budget_estimate_points": estimated_budget_points,
     }
 
     if rag_messages and conversation_id:
@@ -1804,7 +1878,17 @@ async def start_job(
     
     logger.info(f"🚀 Job {jobid} started with mode={initial_state['mode']}, multi_agent={initial_state['use_multi_agent']}")
     
-    return {"job_id": jobid, "status": "started", "request_id": request_id}
+    return {
+        "job_id": jobid,
+        "status": "started",
+        "request_id": request_id,
+        "billing_quote": {
+            "estimated_points": int(quote.estimated_points),
+            "estimated_usd": float(quote.estimated_usd),
+            "approved_points": int(approved_budget_points),
+            "usd_per_point": float(usd_per_point),
+        },
+    }
 
 
 @router.post("/{jobid}/resume")
@@ -1817,21 +1901,74 @@ async def resume_job(
     """
     Retoma job após revisão humana (HIL checkpoint)
     """
+    import uuid
+    from datetime import datetime, timezone
+
     logger.info(f"▶️ Resuming job {jobid} with decision: {decision}")
     config = {"configurable": {"thread_id": jobid}}
+
+    # Get current state to capture original content and hil_history
+    original_content = ""
+    section_title = None
+    hil_history = []
+    hil_iteration = 1
+
     try:
         current_state = legal_workflow_app.get_state(config)
         recursion_limit = int(current_state.values.get("recursion_limit") or 200) if current_state.values else 200
         config["recursion_limit"] = recursion_limit
+
+        if current_state.values:
+            # Get existing hil_history
+            hil_history = list(current_state.values.get("hil_history") or [])
+            hil_iteration = len(hil_history) + 1
+
+            # Capture original content based on checkpoint type
+            checkpoint_type = decision.get("checkpoint", "unknown")
+            if checkpoint_type == "section":
+                payload = current_state.values.get("hil_section_payload") or {}
+                original_content = payload.get("merged_content", "")
+                section_title = payload.get("section_title")
+            elif checkpoint_type == "outline":
+                original_content = "\n".join(current_state.values.get("outline") or [])
+            elif checkpoint_type == "divergence":
+                original_content = current_state.values.get("divergence_summary", "")
+            elif checkpoint_type in ("final", "finalize"):
+                original_content = current_state.values.get("full_document", "")[:5000]
+            elif checkpoint_type == "correction":
+                original_content = current_state.values.get("proposed_corrections", "")
     except Exception:
         config["recursion_limit"] = 200
-    
+
     checkpoint = decision.get("checkpoint", "unknown")
     approved = decision.get("approved", False)
     edits = decision.get("edits")
     instructions = decision.get("instructions")
     proposal = decision.get("proposal")
-    
+
+    # Build HIL history entry
+    user_id = str(getattr(current_user, "id", "") or "anonymous")
+    user_email = str(getattr(current_user, "email", "") or "")
+
+    hil_entry = {
+        "id": str(uuid.uuid4()),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checkpoint": checkpoint,
+        "section_title": section_title,
+        "user_id": user_id,
+        "user_email": user_email,
+        "decision": "edited" if edits else ("approved" if approved else "rejected"),
+        "approved": approved,
+        "original_content": original_content[:3000] if original_content else None,
+        "edited_content": edits[:3000] if edits else None,
+        "instructions": instructions[:1000] if instructions else None,
+        "proposal": proposal[:1000] if proposal else None,
+        "iteration": hil_iteration,
+    }
+
+    # Append to history
+    hil_history.append(hil_entry)
+
     # Resume execution properly by feeding the interrupt() decision back via Command(resume=...)
     resume_payload = {
         "checkpoint": checkpoint,
@@ -1841,11 +1978,14 @@ async def resume_job(
         "hil_target_sections": decision.get("hil_target_sections"),
         # v5.4: allow committee proposal debate when user rejects with a proposal
         "proposal": proposal,
+        # v5.6: include updated hil_history
+        "hil_history": hil_history,
     }
     job_manager.set_job_user(jobid, str(getattr(current_user, "id", "") or ""))
     with job_context(jobid, user_id=job_manager.get_job_user(jobid)):
         await legal_workflow_app.ainvoke(Command(resume=resume_payload), config)
 
+    # Emit detailed hil_response event for frontend
     job_manager.emit_event(
         jobid,
         "hil_response",
@@ -1854,10 +1994,15 @@ async def resume_job(
             "approved": approved,
             "has_edits": bool(edits),
             "has_instructions": bool(instructions),
+            "has_proposal": bool(proposal),
+            "iteration": hil_iteration,
+            "user_id": user_id,
+            "section_title": section_title,
+            "hil_entry": hil_entry,
         },
         phase="hil",
     )
-    
+
     return {"status": "resumed", "checkpoint": checkpoint, "approved": approved}
 
 

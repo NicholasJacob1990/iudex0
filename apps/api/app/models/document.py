@@ -46,10 +46,11 @@ class DocumentCategory(str, enum.Enum):
 
 class Document(Base):
     __tablename__ = "documents"
-    
+
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
-    
+    case_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("cases.id"), nullable=True, index=True)
+
     name: Mapped[str] = mapped_column(String, nullable=False)
     original_name: Mapped[str] = mapped_column(String, nullable=False)
     
@@ -81,6 +82,13 @@ class Document(Base):
     share_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     share_access_level: Mapped[str] = mapped_column(String, default="VIEW", nullable=False) # VIEW, EDIT
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # RAG ingestion tracking
+    rag_ingested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    rag_ingested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    rag_scope: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # global, private, local
+    graph_ingested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    graph_ingested_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

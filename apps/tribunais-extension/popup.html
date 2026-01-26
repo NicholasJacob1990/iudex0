@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=400, initial-scale=1.0">
+  <title>Iudex Tribunais</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      width: 400px;
+      min-height: 300px;
+      background: #f5f5f5;
+      color: #333;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #1a237e 0%, #283593 100%);
+      color: white;
+      padding: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .header img {
+      width: 32px;
+      height: 32px;
+    }
+
+    .header h1 {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .header .version {
+      font-size: 11px;
+      opacity: 0.7;
+      margin-left: auto;
+    }
+
+    /* License Bar */
+    .license-bar {
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: white;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .license-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .license-badge {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .license-badge.trial {
+      background: #fff3e0;
+      color: #e65100;
+    }
+
+    .license-badge.active {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .license-badge.expired {
+      background: #ffebee;
+      color: #c62828;
+    }
+
+    .license-badge.free {
+      background: #e3f2fd;
+      color: #1565c0;
+    }
+
+    .license-text {
+      font-size: 12px;
+      color: #666;
+    }
+
+    .upgrade-btn {
+      padding: 6px 12px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+
+    .upgrade-btn:hover {
+      opacity: 0.9;
+    }
+
+    /* Auth Section */
+    .auth-section {
+      padding: 20px 16px;
+      background: white;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .auth-section.hidden {
+      display: none;
+    }
+
+    .auth-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1a237e;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .auth-tabs {
+      display: flex;
+      margin-bottom: 16px;
+      border-bottom: 2px solid #e0e0e0;
+    }
+
+    .auth-tab {
+      flex: 1;
+      padding: 10px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 500;
+      color: #666;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -2px;
+      transition: all 0.2s;
+    }
+
+    .auth-tab.active {
+      color: #1a237e;
+      border-bottom-color: #1a237e;
+    }
+
+    .auth-form {
+      display: none;
+    }
+
+    .auth-form.active {
+      display: block;
+    }
+
+    .status-bar {
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: white;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .status-indicator {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #9e9e9e;
+    }
+
+    .status-indicator.connected {
+      background: #4caf50;
+      box-shadow: 0 0 8px rgba(76, 175, 80, 0.5);
+    }
+
+    .status-indicator.connecting {
+      background: #ff9800;
+      animation: pulse 1s infinite;
+    }
+
+    .status-indicator.error {
+      background: #f44336;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .status-text {
+      font-size: 13px;
+      flex: 1;
+    }
+
+    .connect-btn {
+      padding: 6px 12px;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .connect-btn.connect {
+      background: #4caf50;
+      color: white;
+    }
+
+    .connect-btn.disconnect {
+      background: #f44336;
+      color: white;
+    }
+
+    .connect-btn:hover {
+      opacity: 0.9;
+    }
+
+    .content {
+      padding: 16px;
+    }
+
+    .section {
+      background: white;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    .section-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #1a237e;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .section-title svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .form-group {
+      margin-bottom: 12px;
+    }
+
+    .form-group:last-child {
+      margin-bottom: 0;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 4px;
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      font-size: 13px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: #1a237e;
+    }
+
+    .form-group input:disabled {
+      background: #f5f5f5;
+      color: #999;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .checkbox-group input[type="checkbox"] {
+      width: auto;
+    }
+
+    .checkbox-group label {
+      margin: 0;
+      font-size: 13px;
+      color: #333;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 10px;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: #1a237e;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #283593;
+    }
+
+    .btn-primary:disabled {
+      background: #9e9e9e;
+      cursor: not-allowed;
+    }
+
+    .btn-secondary {
+      background: #f5f5f5;
+      color: #333;
+      border: 1px solid #ddd;
+    }
+
+    .btn-secondary:hover {
+      background: #e0e0e0;
+    }
+
+    .operations-list {
+      max-height: 150px;
+      overflow-y: auto;
+    }
+
+    .operation-item {
+      padding: 8px;
+      background: #f5f5f5;
+      border-radius: 4px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+
+    .operation-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .operation-item .action {
+      font-weight: 600;
+      color: #1a237e;
+    }
+
+    .operation-item .status {
+      float: right;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+
+    .operation-item .status.processing {
+      background: #fff3e0;
+      color: #e65100;
+    }
+
+    .operation-item .status.completed {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .operation-item .status.failed {
+      background: #ffebee;
+      color: #c62828;
+    }
+
+    .operation-item .time {
+      color: #999;
+      font-size: 11px;
+      margin-top: 4px;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 20px;
+      color: #999;
+      font-size: 13px;
+    }
+
+    .signature-pending {
+      background: #fff3e0;
+      border: 1px solid #ffb74d;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .signature-pending h3 {
+      font-size: 14px;
+      color: #e65100;
+      margin-bottom: 8px;
+    }
+
+    .signature-pending p {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+
+    .signature-pending .btn {
+      background: #ff9800;
+      color: white;
+    }
+
+    .signature-pending .btn:hover {
+      background: #f57c00;
+    }
+
+    /* CAPTCHA Pending */
+    .captcha-pending {
+      background: #e3f2fd;
+      border: 1px solid #64b5f6;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+
+    .captcha-pending h3 {
+      font-size: 14px;
+      color: #1565c0;
+      margin-bottom: 8px;
+    }
+
+    .captcha-pending p {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+
+    .captcha-image {
+      width: 100%;
+      max-height: 120px;
+      object-fit: contain;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-bottom: 12px;
+      background: white;
+    }
+
+    .captcha-input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 2px solid #1565c0;
+      border-radius: 4px;
+      font-size: 16px;
+      text-align: center;
+      letter-spacing: 2px;
+      margin-bottom: 12px;
+    }
+
+    .captcha-input:focus {
+      outline: none;
+      border-color: #0d47a1;
+    }
+
+    .captcha-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .captcha-actions .btn {
+      flex: 1;
+    }
+
+    .captcha-pending .btn-submit {
+      background: #1565c0;
+      color: white;
+    }
+
+    .captcha-pending .btn-submit:hover {
+      background: #0d47a1;
+    }
+
+    .captcha-pending .btn-cancel {
+      background: #f5f5f5;
+      color: #666;
+      border: 1px solid #ddd;
+    }
+
+    .captcha-pending .btn-cancel:hover {
+      background: #e0e0e0;
+    }
+
+    .captcha-timer {
+      font-size: 11px;
+      color: #999;
+      text-align: center;
+      margin-top: 8px;
+    }
+
+    .captcha-recaptcha-info {
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 12px;
+    }
+
+    /* Usage Stats */
+    .usage-stats {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .usage-stat {
+      flex: 1;
+      background: #f8f9fa;
+      border-radius: 8px;
+      padding: 12px;
+      text-align: center;
+    }
+
+    .usage-stat .number {
+      font-size: 24px;
+      font-weight: 700;
+      color: #1a237e;
+    }
+
+    .usage-stat .label {
+      font-size: 11px;
+      color: #666;
+      margin-top: 4px;
+    }
+
+    .usage-stat.warning .number {
+      color: #e65100;
+    }
+
+    .usage-progress {
+      height: 6px;
+      background: #e0e0e0;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+
+    .usage-progress-bar {
+      height: 100%;
+      background: #1a237e;
+      transition: width 0.3s;
+    }
+
+    .usage-progress-bar.warning {
+      background: #ff9800;
+    }
+
+    .usage-progress-bar.danger {
+      background: #f44336;
+    }
+
+    /* Plans Section */
+    .plans-section {
+      display: none;
+    }
+
+    .plans-section.visible {
+      display: block;
+    }
+
+    .plan-card {
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .plan-card:hover {
+      border-color: #1a237e;
+      box-shadow: 0 2px 8px rgba(26, 35, 126, 0.1);
+    }
+
+    .plan-card.featured {
+      border-color: #1a237e;
+      background: linear-gradient(135deg, rgba(26, 35, 126, 0.02) 0%, rgba(40, 53, 147, 0.05) 100%);
+    }
+
+    .plan-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .plan-name {
+      font-weight: 600;
+      color: #1a237e;
+    }
+
+    .plan-price {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .plan-price span {
+      font-size: 12px;
+      font-weight: normal;
+      color: #666;
+    }
+
+    .plan-features {
+      font-size: 12px;
+      color: #666;
+      line-height: 1.6;
+    }
+
+    .footer {
+      padding: 12px 16px;
+      text-align: center;
+      font-size: 11px;
+      color: #999;
+      border-top: 1px solid #e0e0e0;
+    }
+
+    .footer a {
+      color: #1a237e;
+      text-decoration: none;
+    }
+
+    .footer-links {
+      margin-top: 8px;
+    }
+
+    .footer-links a {
+      margin: 0 8px;
+    }
+
+    /* Toast notifications */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+
+    .toast.visible {
+      opacity: 1;
+    }
+
+    .toast.success {
+      background: #4caf50;
+      color: white;
+    }
+
+    .toast.error {
+      background: #f44336;
+      color: white;
+    }
+
+    .toast.info {
+      background: #1a237e;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <img src="icons/icon32.png" alt="Iudex">
+    <h1>Iudex Tribunais</h1>
+    <span class="version" id="version">v1.0.0</span>
+  </div>
+
+  <!-- License Bar -->
+  <div class="license-bar" id="licenseBar">
+    <div class="license-info">
+      <span class="license-badge trial" id="licenseBadge">Trial</span>
+      <span class="license-text" id="licenseText">7 dias restantes</span>
+    </div>
+    <button class="upgrade-btn" id="upgradeBtn">Upgrade</button>
+  </div>
+
+  <!-- Auth Section (Login/Register) -->
+  <div class="auth-section" id="authSection">
+    <div class="auth-title">Faca login para continuar</div>
+
+    <div class="auth-tabs">
+      <div class="auth-tab active" data-tab="login">Entrar</div>
+      <div class="auth-tab" data-tab="register">Criar Conta</div>
+    </div>
+
+    <!-- Login Form -->
+    <div class="auth-form active" id="loginForm">
+      <div class="form-group">
+        <label for="loginEmail">Email</label>
+        <input type="email" id="loginEmail" placeholder="seu@email.com">
+      </div>
+      <button class="btn btn-primary" id="loginBtn">Entrar</button>
+      <p style="text-align: center; margin-top: 12px; font-size: 12px; color: #666;">
+        Ao entrar, voce aceita nossos <a href="#" id="termsLink">Termos de Uso</a>
+      </p>
+    </div>
+
+    <!-- Register Form -->
+    <div class="auth-form" id="registerForm">
+      <div class="form-group">
+        <label for="registerEmail">Email</label>
+        <input type="email" id="registerEmail" placeholder="seu@email.com">
+      </div>
+      <div class="form-group">
+        <label for="registerName">Nome (opcional)</label>
+        <input type="text" id="registerName" placeholder="Seu nome">
+      </div>
+      <button class="btn btn-primary" id="registerBtn">Iniciar Teste Gratuito</button>
+      <p style="text-align: center; margin-top: 12px; font-size: 12px; color: #666;">
+        7 dias gratis, sem cartao de credito
+      </p>
+    </div>
+  </div>
+
+  <!-- Main Content (shown after login) -->
+  <div id="mainContent" style="display: none;">
+    <div class="status-bar">
+      <div class="status-indicator" id="statusIndicator"></div>
+      <span class="status-text" id="statusText">Desconectado</span>
+      <button class="connect-btn connect" id="connectBtn">Conectar</button>
+    </div>
+
+    <div class="content">
+      <!-- Usage Stats -->
+      <div class="usage-stats" id="usageStats">
+        <div class="usage-stat">
+          <div class="number" id="usedToday">0</div>
+          <div class="label">Usadas hoje</div>
+        </div>
+        <div class="usage-stat">
+          <div class="number" id="remainingOps">50</div>
+          <div class="label">Restantes</div>
+        </div>
+      </div>
+      <div class="usage-progress" id="usageProgressContainer">
+        <div class="usage-progress-bar" id="usageProgressBar" style="width: 0%"></div>
+      </div>
+
+      <!-- CAPTCHA Pendente -->
+      <div class="captcha-pending" id="captchaPending" style="display: none;">
+        <h3 id="captchaTitle">CAPTCHA Necessario</h3>
+        <p id="captchaInfo">Resolva o CAPTCHA para continuar a operacao</p>
+
+        <!-- CAPTCHA de Imagem -->
+        <div id="captchaImageContainer" style="display: none;">
+          <img id="captchaImage" class="captcha-image" src="" alt="CAPTCHA">
+          <input type="text" id="captchaText" class="captcha-input" placeholder="Digite o texto da imagem" maxlength="10">
+        </div>
+
+        <!-- reCAPTCHA/hCaptcha Info -->
+        <div id="captchaRecaptchaContainer" style="display: none;">
+          <div class="captcha-recaptcha-info">
+            <strong>reCAPTCHA detectado</strong><br>
+            Clique no botao abaixo para abrir a pagina do tribunal e resolver o CAPTCHA manualmente.
+          </div>
+          <button class="btn btn-primary" id="openTribunalBtn">Abrir Pagina do Tribunal</button>
+        </div>
+
+        <div class="captcha-actions">
+          <button class="btn btn-submit" id="submitCaptchaBtn">Enviar</button>
+          <button class="btn btn-cancel" id="cancelCaptchaBtn">Cancelar</button>
+        </div>
+
+        <div class="captcha-timer" id="captchaTimer">Expira em: --:--</div>
+      </div>
+
+      <!-- Assinatura Pendente -->
+      <div class="signature-pending" id="signaturePending" style="display: none;">
+        <h3>Assinatura Digital Pendente</h3>
+        <p id="signatureInfo">Documento aguardando assinatura</p>
+        <button class="btn" id="signBtn">Assinar com Certificado A3</button>
+      </div>
+
+      <!-- Configuracao -->
+      <div class="section">
+        <div class="section-title">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19.14 12.94c.04-.31.06-.63.06-.94 0-.31-.02-.63-.06-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+          </svg>
+          Configuracao
+        </div>
+
+        <div class="form-group">
+          <label for="serverUrl">URL do Servidor WebSocket</label>
+          <input type="text" id="serverUrl" placeholder="ws://localhost:3101">
+        </div>
+
+        <div class="form-group">
+          <label for="userId">ID do Usuario</label>
+          <input type="text" id="userId" placeholder="seu-user-id">
+        </div>
+
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" id="autoConnect" checked>
+            <label for="autoConnect">Conectar automaticamente</label>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="saveBtn">Salvar Configuracao</button>
+      </div>
+
+      <!-- Operacoes Pendentes -->
+      <div class="section">
+        <div class="section-title">
+          <svg viewBox="0 0 24 24" fill="currentColor">
+            <path d="M19 3h-4.18C14.4 1.84 13.3 1 12 1c-1.3 0-2.4.84-2.82 2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-7 0c.55 0 1 .45 1 1s-.45 1-1 1-1-.45-1-1 .45-1 1-1zm2 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/>
+          </svg>
+          Operacoes Pendentes
+        </div>
+
+        <div class="operations-list" id="operationsList">
+          <div class="empty-state">Nenhuma operacao pendente</div>
+        </div>
+      </div>
+
+      <!-- Plans Section -->
+      <div class="plans-section" id="plansSection">
+        <div class="section">
+          <div class="section-title">Escolha seu Plano</div>
+
+          <div class="plan-card" data-plan="professional" data-interval="month">
+            <div class="plan-header">
+              <span class="plan-name">Profissional</span>
+              <span class="plan-price">R$ 97<span>/mes</span></span>
+            </div>
+            <div class="plan-features">
+              Operacoes ilimitadas, Integracao com IA, Suporte por email
+            </div>
+          </div>
+
+          <div class="plan-card featured" data-plan="professional" data-interval="year">
+            <div class="plan-header">
+              <span class="plan-name">Profissional Anual</span>
+              <span class="plan-price">R$ 970<span>/ano</span></span>
+            </div>
+            <div class="plan-features">
+              Economia de 17% - Todas as funcionalidades do plano mensal
+            </div>
+          </div>
+
+          <div class="plan-card" data-plan="office" data-interval="month">
+            <div class="plan-header">
+              <span class="plan-name">Escritorio (5 usuarios)</span>
+              <span class="plan-price">R$ 297<span>/mes</span></span>
+            </div>
+            <div class="plan-features">
+              Tudo do Profissional + 5 usuarios + Suporte prioritario + Dashboard
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <div>Desenvolvido por <a href="https://iudex.com.br" target="_blank">Iudex</a></div>
+    <div class="footer-links">
+      <a href="#" id="manageSubscription">Gerenciar Assinatura</a>
+      <a href="#" id="logoutLink">Sair</a>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast" id="toast"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

@@ -2106,6 +2106,48 @@ async def stream_vertex_gemini_async(
             stream_obj = await stream_obj
         return stream_obj
 
+    def _extract_grounding_metadata(obj: Any) -> Optional[Dict[str, Any]]:
+        """Extract grounding metadata from Gemini chunk for web search queries and sources."""
+        candidates = getattr(obj, "candidates", None) or []
+        for candidate in candidates:
+            meta = (
+                getattr(candidate, "grounding_metadata", None) or
+                getattr(candidate, "groundingMetadata", None)
+            )
+            if not meta:
+                continue
+
+            result: Dict[str, Any] = {}
+
+            # Extract web search queries
+            queries = (
+                getattr(meta, "web_search_queries", None) or
+                getattr(meta, "webSearchQueries", None) or []
+            )
+            if queries:
+                result["web_search_queries"] = [str(q) for q in queries if q]
+
+            # Extract grounding chunks (sources)
+            chunks = (
+                getattr(meta, "grounding_chunks", None) or
+                getattr(meta, "groundingChunks", None) or []
+            )
+            if chunks:
+                sources = []
+                for gc in chunks:
+                    web = getattr(gc, "web", None)
+                    if web:
+                        url = str(getattr(web, "uri", "") or "").strip()
+                        title = str(getattr(web, "title", "") or url).strip()
+                        if url:
+                            sources.append({"title": title, "url": url})
+                if sources:
+                    result["sources"] = sources
+
+            if result:
+                return result
+        return None
+
     def _yield_parts(obj: Any) -> bool:
         yielded_any = False
         candidates = getattr(obj, "candidates", None) or []
@@ -2228,12 +2270,30 @@ async def stream_vertex_gemini_async(
         meta={"stream": True, **({"thinking_mode": thinking_mode} if thinking_mode else {})},
     )
 
+    # Track seen grounding data to avoid duplicates
+    seen_grounding_queries: set = set()
+    seen_grounding_sources: set = set()
+
     if hasattr(stream_obj, "__aiter__"):
         async for chunk in stream_obj:
             yielded = False
             for kind, delta in _yield_parts(chunk):
                 yielded = True
                 yield (kind, delta)
+
+            # Extract and emit grounding metadata
+            grounding = _extract_grounding_metadata(chunk)
+            if grounding:
+                for query in grounding.get("web_search_queries", []):
+                    if query and query not in seen_grounding_queries:
+                        seen_grounding_queries.add(query)
+                        yield ("grounding_query", query)
+                for src in grounding.get("sources", []):
+                    src_key = src.get("url") or src.get("title", "")
+                    if src_key and src_key not in seen_grounding_sources:
+                        seen_grounding_sources.add(src_key)
+                        yield ("grounding_source", src)
+
             if yielded:
                 continue
             thinking_text = getattr(chunk, "thinking_text", None)
@@ -2249,6 +2309,16 @@ async def stream_vertex_gemini_async(
     for kind, delta in _yield_parts(stream_obj):
         yielded = True
         yield (kind, delta)
+
+    # Extract grounding for non-streaming
+    grounding = _extract_grounding_metadata(stream_obj)
+    if grounding:
+        for query in grounding.get("web_search_queries", []):
+            if query:
+                yield ("grounding_query", query)
+        for src in grounding.get("sources", []):
+            yield ("grounding_source", src)
+
     if yielded:
         return
     thinking_text = getattr(stream_obj, "thinking_text", None)
@@ -2996,6 +3066,8 @@ async def generate_section_agent_mode_async(
 
         drafts["drafts_by_model"] = drafts_by_model
         drafts["drafts_order"] = custom_drafter_models
+        drafts["reviewers_order"] = list(custom_reviewer_models or [])
+        drafts["judge_model"] = judge_model_id
 
         valid_drafts = [text for text in drafts_by_model.values() if text and "não disponível" not in text]
         if len(valid_drafts) < 2:

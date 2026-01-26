@@ -28,6 +28,12 @@ const formatRatio = (value: any) => {
     return n.toFixed(2);
 };
 
+const formatPercent = (value: any) => {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n)) return "—";
+    return `${Math.round(n * 100)}%`;
+};
+
 export function QualityGatePanel({ events }: { events: any[] }) {
     const gate = useMemo(() => lastOfType(events, "quality_gate_done"), [events]);
     if (!gate) return null;
@@ -37,6 +43,7 @@ export function QualityGatePanel({ events }: { events: any[] }) {
     const first = results[0] || {};
     const missing = Array.isArray(first?.missing_references) ? first.missing_references : [];
     const compressionRatio = first?.compression_ratio;
+    const referenceCoverage = first?.reference_coverage;
 
     const statusLabel = passed === true ? "Aprovado" : passed === false ? "Reprovado" : "Pendente";
     const statusVariant = passed === false ? "destructive" : "outline";
@@ -66,10 +73,14 @@ export function QualityGatePanel({ events }: { events: any[] }) {
                 </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div className="rounded-xl border border-outline/20 bg-card p-3">
                     <div className="text-[10px] uppercase text-muted-foreground">Compressão</div>
                     <div className="text-sm font-semibold">{formatRatio(compressionRatio)}</div>
+                </div>
+                <div className="rounded-xl border border-outline/20 bg-card p-3">
+                    <div className="text-[10px] uppercase text-muted-foreground">Cobertura refs</div>
+                    <div className="text-sm font-semibold">{formatPercent(referenceCoverage)}</div>
                 </div>
                 <div className="rounded-xl border border-outline/20 bg-card p-3">
                     <div className="text-[10px] uppercase text-muted-foreground">Refs omitidas</div>
@@ -82,7 +93,7 @@ export function QualityGatePanel({ events }: { events: any[] }) {
             </div>
 
             {(missing.length > 0 || results.length > 0) && (
-                <Accordion type="single" collapsible defaultValue="details" className="w-full">
+                <Accordion type="single" collapsible className="w-full">
                     <AccordionItem value="details" className="border rounded-xl px-0 overflow-hidden bg-card">
                         <AccordionTrigger className="px-3 py-2 hover:bg-muted/50 hover:no-underline font-medium text-xs">
                             <div className="flex items-center gap-2">

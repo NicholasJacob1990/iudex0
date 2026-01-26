@@ -66,6 +66,12 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     chatMode,
     selectedModels,
     selectedModel,
+    mcpToolCalling,
+    setMcpToolCalling,
+    mcpUseAllServers,
+    setMcpUseAllServers,
+    mcpServerLabels,
+    setMcpServerLabels,
     webSearch,
     setWebSearch,
     multiQuery,
@@ -195,6 +201,35 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   const [templateQuery, setTemplateQuery] = useState('');
   const [templates, setTemplates] = useState<any[]>([]);
   const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [mcpServers, setMcpServers] = useState<Array<{ label: string; url: string }>>([]);
+  const [mcpServersLoading, setMcpServersLoading] = useState(false);
+
+  const toggleMcpServerLabel = (label: string, enabled: boolean) => {
+    const next = new Set(Array.isArray(mcpServerLabels) ? mcpServerLabels : []);
+    if (enabled) next.add(label);
+    else next.delete(label);
+    setMcpServerLabels(Array.from(next));
+  };
+
+  const refreshMcpServers = async () => {
+    setMcpServersLoading(true);
+    try {
+      const res = await apiClient.getMcpServers();
+      const list = Array.isArray(res?.servers) ? res.servers : [];
+      setMcpServers(
+        list
+          .map((s: any) => ({
+            label: String(s?.label || '').trim(),
+            url: String(s?.url || '').trim(),
+          }))
+          .filter((s: any) => s.label && s.url)
+      );
+    } catch {
+      setMcpServers([]);
+    } finally {
+      setMcpServersLoading(false);
+    }
+  };
 
   const activeModelIds = useMemo(() => {
     const base =
@@ -233,6 +268,13 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
       .catch(() => setTemplates([]))
       .finally(() => setTemplatesLoading(false));
   }, [templatePopoverOpen, templates.length]);
+
+  useEffect(() => {
+    if (!mcpToolCalling) return;
+    if (mcpServers.length > 0) return;
+    refreshMcpServers();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mcpToolCalling]);
 
   const handleSelectTemplate = (model: any) => {
     if (!model?.id) return;
@@ -634,6 +676,18 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               <Brain className="h-3 w-3" />
               Deep research
             </button>
+            <button
+              type="button"
+              onClick={() => setMcpToolCalling(!mcpToolCalling)}
+              className={cn(
+                contextChipBase,
+                mcpToolCalling ? contextChipActive : contextChipInactive
+              )}
+              title="Permite que o modelo execute ferramentas via conectores MCP"
+            >
+              <Zap className="h-3 w-3" />
+              MCP
+            </button>
           </div>
           <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1">
             <span className="text-[10px] font-semibold uppercase text-muted-foreground">
@@ -954,6 +1008,77 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
                     </div>
                     <Switch checked={webSearch} onCheckedChange={setWebSearch} />
                   </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-0.5">
+                      <Label className="text-sm font-medium">MCP tools</Label>
+                      <span className="text-xs text-muted-foreground">
+                        Conectores para tools externas (estilo ChatGPT/Claude)
+                      </span>
+                    </div>
+                    <Switch checked={mcpToolCalling} onCheckedChange={setMcpToolCalling} />
+                  </div>
+                  {mcpToolCalling && (
+                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold">Conectores</span>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 px-2 text-[11px]"
+                          onClick={refreshMcpServers}
+                          disabled={mcpServersLoading}
+                        >
+                          {mcpServersLoading ? 'Carregando...' : 'Atualizar'}
+                        </Button>
+                      </div>
+                      {mcpServersLoading ? (
+                        <div className="text-muted-foreground">Carregando conectores...</div>
+                      ) : mcpServers.length > 0 ? (
+                        <div className="space-y-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex flex-col">
+                              <span className="font-medium">Usar todos</span>
+                              <span className="text-[11px] text-muted-foreground">
+                                Desative para escolher conectores específicos
+                              </span>
+                            </div>
+                            <Switch checked={mcpUseAllServers} onCheckedChange={setMcpUseAllServers} />
+                          </div>
+
+                          {!mcpUseAllServers && (
+                            <div className="space-y-1">
+                              {mcpServers.map((s) => {
+                                const checked = (mcpServerLabels || []).includes(s.label);
+                                return (
+                                  <div key={s.label} className="flex items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <Checkbox
+                                        checked={checked}
+                                        onCheckedChange={(v) => toggleMcpServerLabel(s.label, Boolean(v))}
+                                      />
+                                      <span className="truncate font-medium">{s.label}</span>
+                                    </div>
+                                    <span className="truncate text-[11px] text-muted-foreground">{s.url}</span>
+                                  </div>
+                                );
+                              })}
+                              {(mcpServerLabels || []).length === 0 && (
+                                <div className="text-[11px] text-amber-700">
+                                  Se nenhum conector for selecionado, o MCP fica desativado para esta mensagem.
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <div className="text-muted-foreground">
+                          Nenhum MCP server configurado no backend.
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div className={cn('space-y-2', !webSearch && 'opacity-50')}>
                     <div className="flex items-center gap-2">

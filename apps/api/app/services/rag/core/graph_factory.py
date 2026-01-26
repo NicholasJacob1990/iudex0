@@ -315,6 +315,9 @@ class Neo4jAdapter:
         self._user = user or config.neo4j_user
         self._password = password or config.neo4j_password
         self._database = database or config.neo4j_database
+        self._hybrid_enabled = bool(getattr(config, "graph_hybrid_mode", False))
+        self._auto_schema = bool(getattr(config, "graph_hybrid_auto_schema", True))
+        self._migrate_on_startup = bool(getattr(config, "graph_hybrid_migrate_on_startup", False))
 
         self._driver = None
         self._connect()
@@ -323,6 +326,7 @@ class Neo4jAdapter:
         """Establish connection to Neo4j."""
         try:
             from neo4j import GraphDatabase
+            from app.services.rag.core.graph_hybrid import ensure_neo4j_schema, migrate_hybrid_labels
 
             self._driver = GraphDatabase.driver(
                 self._uri,
@@ -331,6 +335,10 @@ class Neo4jAdapter:
             # Test connection
             with self._driver.session(database=self._database) as session:
                 session.run("RETURN 1")
+                if self._auto_schema:
+                    ensure_neo4j_schema(session, hybrid=self._hybrid_enabled)
+                if self._hybrid_enabled and self._migrate_on_startup:
+                    migrate_hybrid_labels(session)
             logger.info(f"Neo4j connected: {self._uri}")
         except ImportError:
             raise ImportError("neo4j package required: pip install neo4j")
@@ -355,9 +363,13 @@ class Neo4jAdapter:
         properties: Optional[Dict[str, Any]] = None,
     ) -> bool:
         try:
+            from app.services.rag.core.graph_hybrid import label_for_entity_type
+
             props = properties or {}
-            query = """
-            MERGE (e:Entity {entity_id: $entity_id})
+            label = label_for_entity_type(entity_type) if self._hybrid_enabled else None
+            label_clause = f":{label}" if label else ""
+            query = f"""
+            MERGE (e:Entity{label_clause} {{entity_id: $entity_id}})
             ON CREATE SET
                 e.name = $name,
                 e.entity_type = $entity_type,
@@ -380,6 +392,13 @@ class Neo4jAdapter:
         except Exception as e:
             logger.error(f"Neo4j add_entity error: {e}")
             return False
+
+    def migrate_hybrid_labels(self) -> Dict[str, int]:
+        """Backfill hybrid labels based on Entity.entity_type."""
+        from app.services.rag.core.graph_hybrid import migrate_hybrid_labels
+
+        with self._driver.session(database=self._database) as session:
+            return migrate_hybrid_labels(session)
 
     def add_relationship(
         self,

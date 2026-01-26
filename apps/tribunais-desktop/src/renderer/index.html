@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+  <title>Iudex Tribunais</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    :root {
+      --primary: #3b82f6;
+      --primary-dark: #2563eb;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --bg: #f8fafc;
+      --bg-card: #ffffff;
+      --text: #1e293b;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    .app {
+      max-width: 100%;
+      padding: 16px;
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 24px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .logo-icon {
+      width: 40px;
+      height: 40px;
+      background: var(--primary);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-weight: bold;
+      font-size: 18px;
+    }
+
+    .logo-text {
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--danger);
+    }
+
+    .status-dot.connected {
+      background: var(--success);
+    }
+
+    .card {
+      background: var(--bg-card);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    .card-title {
+      font-size: 16px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 6px;
+      color: var(--text-muted);
+    }
+
+    .form-group input {
+      width: 100%;
+      padding: 10px 14px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+
+    .form-group input:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-dark);
+    }
+
+    .btn-secondary {
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--border);
+    }
+
+    .btn-success {
+      background: var(--success);
+      color: white;
+    }
+
+    .btn-danger {
+      background: var(--danger);
+      color: white;
+    }
+
+    .btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .btn-group {
+      display: flex;
+      gap: 8px;
+    }
+
+    .cert-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .cert-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px;
+      background: var(--bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .cert-info {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .cert-name {
+      font-weight: 500;
+    }
+
+    .cert-details {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .cert-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 4px;
+      background: var(--success);
+      color: white;
+    }
+
+    .cert-badge.expired {
+      background: var(--danger);
+    }
+
+    .operation-card {
+      background: var(--warning);
+      color: white;
+      padding: 16px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+    }
+
+    .operation-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .operation-message {
+      font-size: 14px;
+      margin-bottom: 16px;
+    }
+
+    .pin-input {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .pin-input input {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 16px;
+      letter-spacing: 4px;
+      text-align: center;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 32px;
+      color: var(--text-muted);
+    }
+
+    .empty-state-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    /* CAPTCHA Card */
+    .captcha-card {
+      background: var(--primary);
+      color: white;
+      padding: 16px;
+      border-radius: 12px;
+      margin-bottom: 16px;
+    }
+
+    .captcha-title {
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .captcha-message {
+      font-size: 14px;
+      margin-bottom: 16px;
+      opacity: 0.9;
+    }
+
+    .captcha-image-container {
+      background: white;
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .captcha-image {
+      max-width: 100%;
+      max-height: 100px;
+      border-radius: 4px;
+    }
+
+    .captcha-text-input {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: 8px;
+      font-size: 18px;
+      letter-spacing: 4px;
+      text-align: center;
+      margin-bottom: 16px;
+    }
+
+    .captcha-timer {
+      font-size: 12px;
+      text-align: center;
+      opacity: 0.8;
+      margin-top: 8px;
+    }
+
+    .captcha-recaptcha-info {
+      background: rgba(255,255,255,0.1);
+      padding: 12px;
+      border-radius: 8px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <div class="logo">
+        <div class="logo-icon">iX</div>
+        <span class="logo-text">Iudex Tribunais</span>
+      </div>
+      <div class="status">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="statusText">Desconectado</span>
+      </div>
+    </header>
+
+    <!-- Configuração -->
+    <div class="card" id="configCard">
+      <h2 class="card-title">Configuração</h2>
+      <div class="form-group">
+        <label for="userId">ID do Usuário</label>
+        <input type="text" id="userId" placeholder="Seu ID de usuário no Iudex">
+      </div>
+      <div class="form-group">
+        <label for="serverUrl">Servidor</label>
+        <input type="text" id="serverUrl" placeholder="ws://localhost:3101">
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-primary" id="connectBtn">Conectar</button>
+        <button class="btn btn-secondary hidden" id="disconnectBtn">Desconectar</button>
+      </div>
+    </div>
+
+    <!-- Operação Pendente -->
+    <div class="operation-card hidden" id="operationCard">
+      <div class="operation-title" id="operationTitle">Operação Solicitada</div>
+      <div class="operation-message" id="operationMessage">-</div>
+      <div class="pin-input hidden" id="pinInput">
+        <input type="password" id="pinField" placeholder="Digite o PIN" maxlength="8">
+      </div>
+      <div class="btn-group">
+        <button class="btn btn-success" id="approveBtn">Aprovar</button>
+        <button class="btn btn-danger" id="rejectBtn">Rejeitar</button>
+      </div>
+    </div>
+
+    <!-- CAPTCHA Pendente -->
+    <div class="captcha-card hidden" id="captchaCard">
+      <div class="captcha-title" id="captchaTitle">CAPTCHA Necessário</div>
+      <div class="captcha-message" id="captchaMessage">Resolva o CAPTCHA para continuar</div>
+
+      <!-- CAPTCHA de Imagem -->
+      <div id="captchaImageContainer" class="captcha-image-container hidden">
+        <img id="captchaImage" class="captcha-image" src="" alt="CAPTCHA">
+      </div>
+
+      <!-- reCAPTCHA Info -->
+      <div id="captchaRecaptchaContainer" class="captcha-recaptcha-info hidden">
+        reCAPTCHA detectado. Clique em "Abrir Tribunal" para resolver manualmente.
+      </div>
+
+      <input type="text" id="captchaTextInput" class="captcha-text-input hidden" placeholder="Digite o texto" maxlength="10">
+
+      <div class="btn-group">
+        <button class="btn btn-success" id="submitCaptchaBtn">Enviar</button>
+        <button class="btn btn-secondary" id="openTribunalBtn" style="display: none;">Abrir Tribunal</button>
+        <button class="btn btn-danger" id="cancelCaptchaBtn">Cancelar</button>
+      </div>
+
+      <div class="captcha-timer" id="captchaTimer">Expira em: --:--</div>
+    </div>
+
+    <!-- Certificados -->
+    <div class="card">
+      <h2 class="card-title">Certificados Disponíveis</h2>
+      <div class="cert-list" id="certList">
+        <div class="empty-state">
+          <div class="empty-state-icon">🔐</div>
+          <p>Nenhum certificado encontrado</p>
+          <p style="font-size: 12px; margin-top: 8px;">
+            Conecte seu token USB ou instale um certificado A1
+          </p>
+        </div>
+      </div>
+      <button class="btn btn-secondary" id="refreshCertsBtn" style="margin-top: 12px; width: 100%;">
+        Atualizar Lista
+      </button>
+    </div>
+  </div>
+
+  <script>
+    // Estado
+    let currentOperation = null;
+    let currentCaptcha = null;
+    let captchaTimerInterval = null;
+    let selectedCertId = null;
+    let isConnected = false;
+
+    // Elementos
+    const statusDot = document.getElementById('statusDot');
+    const statusText = document.getElementById('statusText');
+    const userIdInput = document.getElementById('userId');
+    const serverUrlInput = document.getElementById('serverUrl');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const operationCard = document.getElementById('operationCard');
+    const operationTitle = document.getElementById('operationTitle');
+    const operationMessage = document.getElementById('operationMessage');
+    const pinInput = document.getElementById('pinInput');
+    const pinField = document.getElementById('pinField');
+    const approveBtn = document.getElementById('approveBtn');
+    const rejectBtn = document.getElementById('rejectBtn');
+    const certList = document.getElementById('certList');
+    const refreshCertsBtn = document.getElementById('refreshCertsBtn');
+    // CAPTCHA elements
+    const captchaCard = document.getElementById('captchaCard');
+    const captchaTitle = document.getElementById('captchaTitle');
+    const captchaMessage = document.getElementById('captchaMessage');
+    const captchaImageContainer = document.getElementById('captchaImageContainer');
+    const captchaImage = document.getElementById('captchaImage');
+    const captchaRecaptchaContainer = document.getElementById('captchaRecaptchaContainer');
+    const captchaTextInput = document.getElementById('captchaTextInput');
+    const submitCaptchaBtn = document.getElementById('submitCaptchaBtn');
+    const openTribunalBtn = document.getElementById('openTribunalBtn');
+    const cancelCaptchaBtn = document.getElementById('cancelCaptchaBtn');
+    const captchaTimer = document.getElementById('captchaTimer');
+
+    // Carregar configurações
+    async function loadConfig() {
+      const config = await window.api.getConfig();
+      userIdInput.value = config.userId || '';
+      serverUrlInput.value = config.serverUrl || 'ws://localhost:3101';
+    }
+
+    // Atualizar status de conexão
+    function updateConnectionStatus(connected) {
+      isConnected = connected;
+      statusDot.classList.toggle('connected', connected);
+      statusText.textContent = connected ? 'Conectado' : 'Desconectado';
+      connectBtn.classList.toggle('hidden', connected);
+      disconnectBtn.classList.toggle('hidden', !connected);
+    }
+
+    // Listar certificados
+    async function loadCertificates() {
+      const certs = await window.api.listCertificates();
+
+      if (certs.length === 0) {
+        certList.innerHTML = `
+          <div class="empty-state">
+            <div class="empty-state-icon">🔐</div>
+            <p>Nenhum certificado encontrado</p>
+            <p style="font-size: 12px; margin-top: 8px;">
+              Conecte seu token USB ou instale um certificado A1
+            </p>
+          </div>
+        `;
+        return;
+      }
+
+      certList.innerHTML = certs.map(cert => `
+        <div class="cert-item" data-cert-id="${cert.id}">
+          <div class="cert-info">
+            <span class="cert-name">${cert.name}</span>
+            <span class="cert-details">
+              Válido até: ${new Date(cert.validTo).toLocaleDateString('pt-BR')}
+            </span>
+          </div>
+          <span class="cert-badge ${cert.isExpired ? 'expired' : ''}">
+            ${cert.isExpired ? 'Expirado' : cert.provider === 'token' ? 'Token' : 'Sistema'}
+          </span>
+        </div>
+      `).join('');
+
+      // Selecionar certificado ao clicar
+      document.querySelectorAll('.cert-item').forEach(item => {
+        item.addEventListener('click', () => {
+          document.querySelectorAll('.cert-item').forEach(i => i.style.borderColor = '');
+          item.style.borderColor = 'var(--primary)';
+          selectedCertId = item.dataset.certId;
+        });
+      });
+    }
+
+    // Mostrar operação pendente
+    function showOperation(data) {
+      currentOperation = data;
+      operationTitle.textContent = data.operation || 'Operação Solicitada';
+      operationMessage.textContent = data.message || 'Aprove a operação para continuar';
+
+      // Mostrar campo de PIN se for assinatura
+      if (data.operation === 'signature' || data.dataToSign) {
+        pinInput.classList.remove('hidden');
+        approveBtn.textContent = 'Assinar';
+      } else {
+        pinInput.classList.add('hidden');
+        approveBtn.textContent = 'Aprovar';
+      }
+
+      operationCard.classList.remove('hidden');
+    }
+
+    // Ocultar operação
+    function hideOperation() {
+      currentOperation = null;
+      operationCard.classList.add('hidden');
+      pinField.value = '';
+    }
+
+    // Conectar
+    connectBtn.addEventListener('click', async () => {
+      const userId = userIdInput.value.trim();
+      const serverUrl = serverUrlInput.value.trim();
+
+      if (!userId) {
+        alert('Informe o ID do usuário');
+        return;
+      }
+
+      await window.api.setConfig('userId', userId);
+      await window.api.setConfig('serverUrl', serverUrl);
+
+      connectBtn.disabled = true;
+      connectBtn.textContent = 'Conectando...';
+
+      const result = await window.api.connect(serverUrl);
+
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Conectar';
+
+      if (!result.success) {
+        alert('Erro ao conectar: ' + result.error);
+      }
+    });
+
+    // Desconectar
+    disconnectBtn.addEventListener('click', async () => {
+      await window.api.disconnect();
+      updateConnectionStatus(false);
+    });
+
+    // Aprovar operação
+    approveBtn.addEventListener('click', async () => {
+      if (!currentOperation) return;
+
+      if (currentOperation.dataToSign) {
+        // Assinatura
+        const pin = pinField.value;
+        if (!pin) {
+          alert('Digite o PIN');
+          return;
+        }
+
+        if (!selectedCertId) {
+          alert('Selecione um certificado');
+          return;
+        }
+
+        approveBtn.disabled = true;
+        approveBtn.textContent = 'Assinando...';
+
+        const result = await window.api.executeSignature({
+          operationId: currentOperation.operationId,
+          certificateId: selectedCertId,
+          pin,
+          dataToSign: currentOperation.dataToSign,
+        });
+
+        approveBtn.disabled = false;
+        approveBtn.textContent = 'Assinar';
+
+        if (result.success) {
+          hideOperation();
+        } else {
+          alert('Erro na assinatura: ' + result.error);
+        }
+      } else {
+        // Aprovação simples
+        await window.api.approveOperation(currentOperation.operationId, true);
+        hideOperation();
+      }
+    });
+
+    // Rejeitar operação
+    rejectBtn.addEventListener('click', async () => {
+      if (!currentOperation) return;
+      await window.api.approveOperation(currentOperation.operationId, false);
+      hideOperation();
+    });
+
+    // Atualizar lista de certificados
+    refreshCertsBtn.addEventListener('click', loadCertificates);
+
+    // ============================================
+    // CAPTCHA Functions
+    // ============================================
+
+    function showCaptcha(data) {
+      currentCaptcha = data;
+      const { captcha, tribunal, expiresAt } = data;
+
+      // Título baseado no tipo
+      const captchaTypeLabels = {
+        'image': 'CAPTCHA de Imagem',
+        'recaptcha_v2': 'reCAPTCHA v2',
+        'recaptcha_v3': 'reCAPTCHA v3',
+        'hcaptcha': 'hCaptcha',
+        'unknown': 'CAPTCHA'
+      };
+
+      captchaTitle.textContent = captchaTypeLabels[captcha.type] || 'CAPTCHA';
+      captchaMessage.textContent = `${tribunal || 'Tribunal'}: Resolva para continuar`;
+
+      // Mostra container apropriado
+      if (captcha.type === 'image') {
+        captchaImageContainer.classList.remove('hidden');
+        captchaRecaptchaContainer.classList.add('hidden');
+        captchaTextInput.classList.remove('hidden');
+        submitCaptchaBtn.style.display = 'block';
+        openTribunalBtn.style.display = 'none';
+
+        // Carrega imagem
+        if (captcha.imageBase64) {
+          captchaImage.src = `data:image/png;base64,${captcha.imageBase64}`;
+        } else if (captcha.imageUrl) {
+          captchaImage.src = captcha.imageUrl;
+        }
+
+        captchaTextInput.value = '';
+        captchaTextInput.focus();
+      } else {
+        // reCAPTCHA ou hCaptcha - precisa abrir página
+        captchaImageContainer.classList.add('hidden');
+        captchaRecaptchaContainer.classList.remove('hidden');
+        captchaTextInput.classList.add('hidden');
+        submitCaptchaBtn.style.display = 'none';
+        openTribunalBtn.style.display = 'block';
+      }
+
+      // Inicia timer
+      startCaptchaTimer(new Date(expiresAt));
+
+      captchaCard.classList.remove('hidden');
+    }
+
+    function hideCaptcha() {
+      currentCaptcha = null;
+      captchaCard.classList.add('hidden');
+      captchaTextInput.value = '';
+
+      if (captchaTimerInterval) {
+        clearInterval(captchaTimerInterval);
+        captchaTimerInterval = null;
+      }
+    }
+
+    function startCaptchaTimer(expiresAt) {
+      if (captchaTimerInterval) {
+        clearInterval(captchaTimerInterval);
+      }
+
+      function updateTimer() {
+        const now = Date.now();
+        const remaining = expiresAt.getTime() - now;
+
+        if (remaining <= 0) {
+          captchaTimer.textContent = 'Expirado!';
+          clearInterval(captchaTimerInterval);
+          setTimeout(() => cancelCaptcha(), 1000);
+          return;
+        }
+
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        captchaTimer.textContent = `Expira em: ${minutes}:${seconds.toString().padStart(2, '0')}`;
+      }
+
+      updateTimer();
+      captchaTimerInterval = setInterval(updateTimer, 1000);
+    }
+
+    async function submitCaptcha() {
+      if (!currentCaptcha) return;
+
+      const text = captchaTextInput.value.trim();
+
+      if (!text) {
+        alert('Digite o texto do CAPTCHA');
+        return;
+      }
+
+      submitCaptchaBtn.disabled = true;
+      submitCaptchaBtn.textContent = 'Enviando...';
+
+      try {
+        await window.api.solveCaptcha({
+          captchaId: currentCaptcha.captchaId,
+          jobId: currentCaptcha.jobId,
+          success: true,
+          solution: { text }
+        });
+
+        hideCaptcha();
+      } catch (error) {
+        console.error('Erro ao enviar CAPTCHA:', error);
+        alert('Erro ao enviar CAPTCHA');
+      } finally {
+        submitCaptchaBtn.disabled = false;
+        submitCaptchaBtn.textContent = 'Enviar';
+      }
+    }
+
+    async function cancelCaptcha() {
+      if (!currentCaptcha) return;
+
+      try {
+        await window.api.solveCaptcha({
+          captchaId: currentCaptcha.captchaId,
+          jobId: currentCaptcha.jobId,
+          success: false,
+          error: 'Cancelado pelo usuário'
+        });
+
+        hideCaptcha();
+      } catch (error) {
+        console.error('Erro ao cancelar CAPTCHA:', error);
+      }
+    }
+
+    function openTribunalPage() {
+      if (!currentCaptcha) return;
+
+      const { tribunalUrl } = currentCaptcha;
+      if (tribunalUrl) {
+        window.api.openExternal(tribunalUrl);
+      } else {
+        alert('URL do tribunal não disponível');
+      }
+    }
+
+    // CAPTCHA Event Listeners
+    submitCaptchaBtn.addEventListener('click', submitCaptcha);
+    cancelCaptchaBtn.addEventListener('click', cancelCaptcha);
+    openTribunalBtn.addEventListener('click', openTribunalPage);
+
+    captchaTextInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        submitCaptcha();
+      }
+    });
+
+    // Eventos do WebSocket
+    window.api.on('ws-status', (status) => {
+      updateConnectionStatus(status === 'connected');
+    });
+
+    window.api.on('ws-error', (error) => {
+      console.error('WebSocket error:', error);
+    });
+
+    window.api.on('operation-request', (data) => {
+      showOperation(data);
+    });
+
+    window.api.on('signature-request', (data) => {
+      showOperation({ ...data, operation: 'signature' });
+    });
+
+    window.api.on('captcha-request', (data) => {
+      showCaptcha(data);
+    });
+
+    window.api.on('auto-connect', () => {
+      connectBtn.click();
+    });
+
+    // Inicialização
+    loadConfig();
+    loadCertificates();
+
+    // Verificar status de conexão inicial
+    window.api.getConnectionStatus().then(updateConnectionStatus);
+  </script>
+</body>
+</html>

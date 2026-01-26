@@ -1,0 +1,628 @@
+{
+  "name": "sei_tools",
+  "description": "Ferramentas completas para automação do SEI (Sistema Eletrônico de Informações) - 52 funções",
+  "functions": [
+    {
+      "name": "sei_login",
+      "description": "Faz login no SEI e cria uma sessão. Deve ser chamado antes de qualquer outra operação.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "seiUrl": { "type": "string", "description": "URL do SEI (ex: https://sei.mg.gov.br)" },
+          "usuario": { "type": "string", "description": "Nome de usuário" },
+          "senha": { "type": "string", "description": "Senha do usuário" },
+          "orgao": { "type": "string", "description": "Órgão (opcional)" }
+        },
+        "required": ["seiUrl", "usuario", "senha"]
+      }
+    },
+    {
+      "name": "sei_logout",
+      "description": "Encerra a sessão do SEI",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sei_get_session",
+      "description": "Retorna informações da sessão atual (usuário, unidade, etc)",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sei_search_process",
+      "description": "Busca processos no SEI por número, texto, interessado ou assunto",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string", "description": "Termo de busca" },
+          "type": { "type": "string", "enum": ["numero", "texto", "interessado", "assunto", "unidade"], "description": "Tipo de busca" },
+          "unidade": { "type": "string", "description": "Filtrar por unidade" },
+          "tipo_processo": { "type": "string", "description": "Filtrar por tipo" },
+          "data_inicio": { "type": "string", "description": "Data inicial (YYYY-MM-DD)" },
+          "data_fim": { "type": "string", "description": "Data final (YYYY-MM-DD)" },
+          "limit": { "type": "integer", "description": "Máximo de resultados", "default": 20 }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "sei_open_process",
+      "description": "Abre/navega para um processo específico",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_create_process",
+      "description": "Cria um novo processo no SEI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tipoProcedimento": { "type": "string", "description": "Tipo do processo" },
+          "especificacao": { "type": "string", "description": "Especificação/título do processo" },
+          "assuntos": { "type": "array", "items": { "type": "string" }, "description": "Códigos dos assuntos" },
+          "interessados": { "type": "array", "items": { "type": "string" }, "description": "Lista de interessados" },
+          "observacao": { "type": "string", "description": "Observação" },
+          "nivelAcesso": { "type": "string", "enum": ["publico", "restrito", "sigiloso"], "default": "publico" },
+          "hipoteseLegal": { "type": "string", "description": "Hipótese legal (obrigatório se não público)" }
+        },
+        "required": ["tipoProcedimento", "especificacao", "assuntos"]
+      }
+    },
+    {
+      "name": "sei_get_status",
+      "description": "Consulta andamento, histórico e documentos do processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "includeHistory": { "type": "boolean", "default": true, "description": "Incluir histórico" },
+          "includeDocuments": { "type": "boolean", "default": true, "description": "Incluir documentos" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_forward_process",
+      "description": "Tramita processo para outra unidade",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "unidadeDestino": { "type": "string", "description": "Unidade de destino (sigla ou nome)" },
+          "manterAberto": { "type": "boolean", "default": false, "description": "Manter aberto na unidade atual" },
+          "prazo": { "type": "integer", "description": "Prazo em dias" },
+          "urgente": { "type": "boolean", "default": false, "description": "Marcar como urgente" },
+          "observacao": { "type": "string", "description": "Observação/despacho" }
+        },
+        "required": ["numeroProcesso", "unidadeDestino"]
+      }
+    },
+    {
+      "name": "sei_conclude_process",
+      "description": "Conclui processo na unidade atual",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_reopen_process",
+      "description": "Reabre processo concluído",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_relate_processes",
+      "description": "Relaciona, anexa ou apensa processos",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo principal" },
+          "processoRelacionado": { "type": "string", "description": "Número do processo relacionado" },
+          "tipoRelacao": { "type": "string", "enum": ["anexacao", "apensacao", "relacionamento"], "default": "relacionamento" }
+        },
+        "required": ["numeroProcesso", "processoRelacionado"]
+      }
+    },
+    {
+      "name": "sei_list_documents",
+      "description": "Lista todos os documentos de um processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_get_document",
+      "description": "Obtém detalhes de um documento específico",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "includeContent": { "type": "boolean", "default": false, "description": "Incluir conteúdo" }
+        },
+        "required": ["documentoId"]
+      }
+    },
+    {
+      "name": "sei_create_document",
+      "description": "Cria documento interno no SEI (Despacho, Parecer, CI, Nota Técnica, etc.)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "tipoDocumento": { "type": "string", "description": "Tipo do documento" },
+          "textoInicial": { "type": "string", "enum": ["modelo", "padrao", "nenhum"], "default": "nenhum" },
+          "textoPadraoId": { "type": "string", "description": "ID do texto padrão" },
+          "descricao": { "type": "string", "description": "Descrição do documento" },
+          "numero": { "type": "string", "description": "Número do documento" },
+          "nomeArvore": { "type": "string", "description": "Nome na árvore do processo" },
+          "interessados": { "type": "array", "items": { "type": "string" } },
+          "destinatarios": { "type": "array", "items": { "type": "string" } },
+          "assuntos": { "type": "array", "items": { "type": "string" } },
+          "observacoes": { "type": "string" },
+          "nivelAcesso": { "type": "string", "enum": ["publico", "restrito", "sigiloso"], "default": "publico" },
+          "hipoteseLegal": { "type": "string" },
+          "conteudo": { "type": "string", "description": "Conteúdo HTML do documento" }
+        },
+        "required": ["numeroProcesso", "tipoDocumento"]
+      }
+    },
+    {
+      "name": "sei_upload_document",
+      "description": "Envia arquivo externo (PDF, Word, etc) para o processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "filePath": { "type": "string", "description": "Caminho absoluto do arquivo" },
+          "fileName": { "type": "string", "description": "Nome do arquivo" },
+          "tipoDocumento": { "type": "string", "description": "Tipo do documento externo" },
+          "descricao": { "type": "string" },
+          "dataDocumento": { "type": "string", "description": "Data (YYYY-MM-DD)" },
+          "nivelAcesso": { "type": "string", "enum": ["publico", "restrito", "sigiloso"], "default": "publico" },
+          "hipoteseLegal": { "type": "string" },
+          "formato": { "type": "string", "enum": ["nato_digital", "digitalizado"], "default": "nato_digital" }
+        },
+        "required": ["numeroProcesso", "filePath", "tipoDocumento"]
+      }
+    },
+    {
+      "name": "sei_upload_document_base64",
+      "description": "Envia arquivo em Base64 para o processo (para integração com apps)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "conteudoBase64": { "type": "string", "description": "Conteúdo em Base64" },
+          "nomeArquivo": { "type": "string", "description": "Nome do arquivo com extensão" },
+          "mimeType": { "type": "string", "description": "Tipo MIME" },
+          "tipoDocumento": { "type": "string", "description": "Tipo do documento externo" },
+          "descricao": { "type": "string" },
+          "nivelAcesso": { "type": "string", "enum": ["publico", "restrito", "sigiloso"], "default": "publico" }
+        },
+        "required": ["numeroProcesso", "conteudoBase64", "nomeArquivo", "mimeType", "tipoDocumento"]
+      }
+    },
+    {
+      "name": "sei_sign_document",
+      "description": "Assina documento eletronicamente",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "senha": { "type": "string", "description": "Senha para assinatura" },
+          "cargo": { "type": "string", "description": "Cargo (opcional)" }
+        },
+        "required": ["documentoId", "senha"]
+      }
+    },
+    {
+      "name": "sei_sign_multiple",
+      "description": "Assina múltiplos documentos de uma vez",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoIds": { "type": "array", "items": { "type": "string" }, "description": "Lista de IDs" },
+          "senha": { "type": "string", "description": "Senha para assinatura" },
+          "cargo": { "type": "string" }
+        },
+        "required": ["documentoIds", "senha"]
+      }
+    },
+    {
+      "name": "sei_sign_block",
+      "description": "Assina todos documentos de um bloco",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blocoId": { "type": "string", "description": "ID do bloco" },
+          "senha": { "type": "string", "description": "Senha para assinatura" }
+        },
+        "required": ["blocoId", "senha"]
+      }
+    },
+    {
+      "name": "sei_cancel_document",
+      "description": "Cancela documento no processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "motivo": { "type": "string", "description": "Motivo do cancelamento" }
+        },
+        "required": ["documentoId", "motivo"]
+      }
+    },
+    {
+      "name": "sei_download_process",
+      "description": "Baixa processo completo em PDF ou ZIP",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "includeAttachments": { "type": "boolean", "default": true, "description": "Incluir anexos" },
+          "outputPath": { "type": "string", "description": "Caminho para salvar" },
+          "format": { "type": "string", "enum": ["pdf", "zip"], "default": "pdf" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_download_document",
+      "description": "Baixa documento específico",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "outputPath": { "type": "string", "description": "Caminho para salvar" }
+        },
+        "required": ["documentoId"]
+      }
+    },
+    {
+      "name": "sei_add_annotation",
+      "description": "Adiciona anotação ao processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "texto": { "type": "string", "description": "Texto da anotação" },
+          "prioridade": { "type": "string", "enum": ["normal", "alta"], "default": "normal" }
+        },
+        "required": ["numeroProcesso", "texto"]
+      }
+    },
+    {
+      "name": "sei_list_annotations",
+      "description": "Lista anotações do processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" }
+        },
+        "required": ["numeroProcesso"]
+      }
+    },
+    {
+      "name": "sei_list_blocks",
+      "description": "Lista blocos de assinatura/interno/reunião",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tipo": { "type": "string", "enum": ["assinatura", "interno", "reuniao"], "description": "Tipo do bloco" }
+        }
+      }
+    },
+    {
+      "name": "sei_create_block",
+      "description": "Cria novo bloco de assinatura/interno/reunião",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "tipo": { "type": "string", "enum": ["assinatura", "interno", "reuniao"], "description": "Tipo do bloco" },
+          "descricao": { "type": "string", "description": "Descrição do bloco" },
+          "unidadesDisponibilizacao": { "type": "array", "items": { "type": "string" }, "description": "Unidades para disponibilizar" },
+          "documentos": { "type": "array", "items": { "type": "string" }, "description": "IDs de documentos" },
+          "disponibilizar": { "type": "boolean", "default": false, "description": "Disponibilizar imediatamente" }
+        },
+        "required": ["tipo", "descricao"]
+      }
+    },
+    {
+      "name": "sei_get_block",
+      "description": "Consulta detalhes de um bloco",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blocoId": { "type": "string", "description": "ID do bloco" },
+          "includeDocuments": { "type": "boolean", "default": true }
+        },
+        "required": ["blocoId"]
+      }
+    },
+    {
+      "name": "sei_add_to_block",
+      "description": "Adiciona documento a um bloco",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blocoId": { "type": "string", "description": "ID do bloco" },
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "numeroProcesso": { "type": "string", "description": "Número do processo (alternativa)" }
+        },
+        "required": ["blocoId"]
+      }
+    },
+    {
+      "name": "sei_remove_from_block",
+      "description": "Remove documento de um bloco",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blocoId": { "type": "string", "description": "ID do bloco" },
+          "documentoId": { "type": "string", "description": "ID do documento" }
+        },
+        "required": ["blocoId", "documentoId"]
+      }
+    },
+    {
+      "name": "sei_release_block",
+      "description": "Disponibiliza bloco para outras unidades assinarem",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "blocoId": { "type": "string", "description": "ID do bloco" }
+        },
+        "required": ["blocoId"]
+      }
+    },
+    {
+      "name": "sei_add_marker",
+      "description": "Adiciona marcador ao processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "marcador": { "type": "string", "description": "Nome ou ID do marcador" },
+          "texto": { "type": "string", "description": "Texto do marcador" }
+        },
+        "required": ["numeroProcesso", "marcador"]
+      }
+    },
+    {
+      "name": "sei_remove_marker",
+      "description": "Remove marcador do processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "marcador": { "type": "string", "description": "Nome ou ID do marcador" }
+        },
+        "required": ["numeroProcesso", "marcador"]
+      }
+    },
+    {
+      "name": "sei_set_deadline",
+      "description": "Define prazo para o processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "dias": { "type": "integer", "description": "Prazo em dias" },
+          "tipo": { "type": "string", "enum": ["util", "corrido"], "default": "util" }
+        },
+        "required": ["numeroProcesso", "dias"]
+      }
+    },
+    {
+      "name": "sei_register_knowledge",
+      "description": "Registra ciência em documento",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" }
+        },
+        "required": ["documentoId"]
+      }
+    },
+    {
+      "name": "sei_schedule_publication",
+      "description": "Agenda publicação de documento",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "documentoId": { "type": "string", "description": "ID do documento" },
+          "veiculo": { "type": "string", "description": "Veículo de publicação" },
+          "dataPublicacao": { "type": "string", "description": "Data (YYYY-MM-DD)" },
+          "resumo": { "type": "string", "description": "Resumo/ementa" }
+        },
+        "required": ["documentoId", "veiculo"]
+      }
+    },
+    {
+      "name": "sei_list_document_types",
+      "description": "Lista tipos de documentos disponíveis",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": { "type": "string", "description": "Filtrar por nome" }
+        }
+      }
+    },
+    {
+      "name": "sei_list_process_types",
+      "description": "Lista tipos de processos disponíveis",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": { "type": "string", "description": "Filtrar por nome" }
+        }
+      }
+    },
+    {
+      "name": "sei_list_units",
+      "description": "Lista unidades/setores disponíveis",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": { "type": "string", "description": "Filtrar por nome/sigla" }
+        }
+      }
+    },
+    {
+      "name": "sei_list_users",
+      "description": "Lista usuários da unidade atual",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": { "type": "string", "description": "Filtrar por nome" }
+        }
+      }
+    },
+    {
+      "name": "sei_list_hipoteses_legais",
+      "description": "Lista hipóteses legais para documentos restritos/sigilosos",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sei_list_marcadores",
+      "description": "Lista marcadores disponíveis",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sei_list_my_processes",
+      "description": "Lista processos do usuário (recebidos, gerados, abertos)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["recebidos", "gerados", "abertos", "todos"], "default": "abertos" },
+          "limit": { "type": "integer", "default": 50 }
+        }
+      }
+    },
+    {
+      "name": "sei_grant_access",
+      "description": "Concede acesso a processo para usuário/unidade",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "usuario": { "type": "string", "description": "Usuário ou unidade" },
+          "tipo": { "type": "string", "enum": ["consulta", "acompanhamento"], "default": "consulta" }
+        },
+        "required": ["numeroProcesso", "usuario"]
+      }
+    },
+    {
+      "name": "sei_revoke_access",
+      "description": "Revoga acesso a processo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "numeroProcesso": { "type": "string", "description": "Número do processo" },
+          "usuario": { "type": "string", "description": "Usuário ou unidade" }
+        },
+        "required": ["numeroProcesso", "usuario"]
+      }
+    },
+    {
+      "name": "sei_screenshot",
+      "description": "Captura screenshot da página atual do SEI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "fullPage": { "type": "boolean", "default": false, "description": "Capturar página inteira" },
+          "outputPath": { "type": "string", "description": "Caminho para salvar" }
+        }
+      }
+    },
+    {
+      "name": "sei_snapshot",
+      "description": "Captura estado da página (árvore de acessibilidade ARIA)",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "includeHidden": { "type": "boolean", "default": false, "description": "Incluir elementos ocultos" }
+        }
+      }
+    },
+    {
+      "name": "sei_get_current_page",
+      "description": "Retorna URL e informações da página atual",
+      "parameters": { "type": "object", "properties": {} }
+    },
+    {
+      "name": "sei_navigate",
+      "description": "Navega para página específica do SEI",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "target": { "type": "string", "enum": ["home", "search", "new_process", "signature_block", "received", "generated", "inbox", "control"], "description": "Página de destino" }
+        },
+        "required": ["target"]
+      }
+    },
+    {
+      "name": "sei_click",
+      "description": "Clica em elemento na página",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string", "description": "Seletor CSS ou XPath" }
+        },
+        "required": ["selector"]
+      }
+    },
+    {
+      "name": "sei_type",
+      "description": "Digita texto em campo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string", "description": "Seletor do campo" },
+          "text": { "type": "string", "description": "Texto a digitar" },
+          "clear": { "type": "boolean", "default": true, "description": "Limpar campo antes" }
+        },
+        "required": ["selector", "text"]
+      }
+    },
+    {
+      "name": "sei_select",
+      "description": "Seleciona opção em dropdown",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string", "description": "Seletor do select" },
+          "value": { "type": "string", "description": "Valor ou texto da opção" }
+        },
+        "required": ["selector", "value"]
+      }
+    },
+    {
+      "name": "sei_wait",
+      "description": "Aguarda elemento ou tempo",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "selector": { "type": "string", "description": "Seletor do elemento" },
+          "timeout": { "type": "integer", "default": 10000, "description": "Timeout em ms" }
+        }
+      }
+    }
+  ]
+}

@@ -1,7 +1,9 @@
 """
 Neo4j MVP Graph Service for Legal RAG
 
-Simple, deterministic GraphRAG without embedding training:
+GraphRAG with dual extraction:
+- Regex extraction: Articles, Laws, Súmulas, Themes, Courts (deterministic)
+- Semantic extraction: Theses, Concepts, Principles, Institutes (LLM-based via Gemini)
 - Document → Chunk → Entity relationships
 - Path-based queries with Cypher
 - Multi-tenant security trimming
@@ -17,15 +19,15 @@ Schema:
     - (:Document)-[:HAS_CHUNK]->(:Chunk)
     - (:Chunk)-[:MENTIONS]->(:Entity)
     - (:Chunk)-[:NEXT]->(:Chunk)  # sequence for neighbor expansion
-    - (:Entity)-[:RELATED_TO]->(:Entity)  # optional heuristic
+    - (:Entity)-[:RELATED_TO]->(:Entity)  # semantic relations
 
 Usage:
     from app.services.rag.core.neo4j_mvp import get_neo4j_mvp
 
     neo4j = get_neo4j_mvp()
 
-    # Ingest
-    neo4j.ingest_document(doc_hash, chunks, metadata, tenant_id)
+    # Ingest with semantic extraction (uses Gemini Flash)
+    neo4j.ingest_document(doc_hash, chunks, metadata, tenant_id, semantic_extraction=True)
 
     # Query
     results = neo4j.query_related_chunks(
@@ -60,6 +62,19 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# ENV PARSING (matches app.services.rag.config._env_bool)
+# =============================================================================
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse boolean environment variable (consistent with config.py)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in ("1", "true", "yes", "on")
+
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -86,10 +101,26 @@ class Neo4jMVPConfig:
     # Ingest settings
     batch_size: int = 100
     create_indexes: bool = True
+    graph_hybrid_mode: bool = False
+    graph_hybrid_auto_schema: bool = True
+    graph_hybrid_migrate_on_startup: bool = False
+
+    # Phase 2 (optional): Neo4j-based retrieval helpers (no training required)
+    enable_fulltext_indexes: bool = False
+    enable_vector_index: bool = False
+    vector_dimensions: int = 768
+    vector_similarity: str = "cosine"
+    vector_property: str = "embedding"
 
     @classmethod
     def from_env(cls) -> "Neo4jMVPConfig":
         """Load from environment variables."""
+        # Prefer a shared dimension var if present to keep behavior consistent across components.
+        dim_raw = os.getenv("NEO4J_VECTOR_DIM") or os.getenv("NEO4J_EMBEDDING_DIM") or "768"
+        try:
+            dim = int(dim_raw)
+        except (TypeError, ValueError):
+            dim = 768
         return cls(
             uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
             user=os.getenv("NEO4J_USER", "neo4j"),
@@ -97,6 +128,14 @@ class Neo4jMVPConfig:
             database=os.getenv("NEO4J_DATABASE", "iudex"),
             max_hops=int(os.getenv("NEO4J_MAX_HOPS", "2")),
             max_chunks_per_query=int(os.getenv("NEO4J_MAX_CHUNKS", "50")),
+            graph_hybrid_mode=_env_bool("RAG_GRAPH_HYBRID_MODE", False),
+            graph_hybrid_auto_schema=_env_bool("RAG_GRAPH_HYBRID_AUTO_SCHEMA", True),
+            graph_hybrid_migrate_on_startup=_env_bool("RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP", False),
+            enable_fulltext_indexes=_env_bool("NEO4J_FULLTEXT_ENABLED", False),
+            enable_vector_index=_env_bool("NEO4J_VECTOR_INDEX_ENABLED", False),
+            vector_dimensions=dim,
+            vector_similarity=os.getenv("NEO4J_VECTOR_SIMILARITY", "cosine"),
+            vector_property=os.getenv("NEO4J_VECTOR_PROPERTY", "embedding"),
         )
 
 
@@ -303,6 +342,136 @@ class LegalEntityExtractor:
 
         return entities
 
+    # Patterns for detecting cross-references (remissões) between legal provisions
+    REMISSION_PATTERNS = [
+        # Combinado com
+        re.compile(
+            r"(?:c/c|combinado\s+com|em\s+conjunto\s+com|juntamente\s+com)\s+"
+            r"(?:o\s+)?(?:art\.?|artigo)\s*(\d+)",
+            re.IGNORECASE,
+        ),
+        # Nos termos de / Conforme / Segundo
+        re.compile(
+            r"(?:nos\s+termos\s+d[oa]|conforme|segundo|de\s+acordo\s+com)\s+"
+            r"(?:o\s+)?(?:art\.?|artigo)\s*(\d+)",
+            re.IGNORECASE,
+        ),
+        # Aplica-se / Incide
+        re.compile(
+            r"(?:aplica-?se|incide|observ[ae]r?)\s+(?:o\s+)?(?:disposto\s+n[oa]\s+)?"
+            r"(?:art\.?|artigo)\s*(\d+)",
+            re.IGNORECASE,
+        ),
+        # Remete / Refere-se
+        re.compile(
+            r"(?:remete|refere-?se|alude)\s+(?:a[oa]?\s+)?(?:art\.?|artigo)\s*(\d+)",
+            re.IGNORECASE,
+        ),
+        # Por força do / Em razão do
+        re.compile(
+            r"(?:por\s+força\s+d[oa]|em\s+razão\s+d[oa]|com\s+base\s+n[oa])\s+"
+            r"(?:art\.?|artigo)\s*(\d+)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    @classmethod
+    def extract_remissions(cls, text: str) -> List[Dict[str, Any]]:
+        """
+        Extract cross-references (remissões) between legal provisions.
+
+        Identifies patterns like:
+        - "c/c art. 927" (combinado com)
+        - "nos termos do art. 186"
+        - "aplica-se o art. 932"
+        - "remete ao art. 933"
+
+        Returns:
+            List of remission dicts with: source_context, target_article,
+            remission_type, position
+        """
+        remissions: List[Dict[str, Any]] = []
+
+        # First, extract all entities to identify potential sources
+        entities = cls.extract(text)
+        entity_positions = []
+
+        # Find positions of all articles in text
+        for match in cls.PATTERNS[EntityType.ARTIGO].finditer(text):
+            artigo = match.group(1)
+            entity_positions.append({
+                "artigo": artigo,
+                "start": match.start(),
+                "end": match.end(),
+                "match": match.group(0),
+            })
+
+        # Find remission patterns
+        remission_types = [
+            "combinado_com",
+            "nos_termos_de",
+            "aplica_se",
+            "remete_a",
+            "por_forca_de",
+        ]
+
+        for pattern, rem_type in zip(cls.REMISSION_PATTERNS, remission_types):
+            for match in pattern.finditer(text):
+                target_article = match.group(1)
+                position = match.start()
+
+                # Find the nearest preceding article as potential source
+                source_article = None
+                min_distance = float("inf")
+                for ep in entity_positions:
+                    if ep["end"] < position:
+                        distance = position - ep["end"]
+                        if distance < min_distance and distance < 200:  # Max 200 chars
+                            min_distance = distance
+                            source_article = ep["artigo"]
+
+                remissions.append({
+                    "source_article": source_article,
+                    "target_article": target_article,
+                    "remission_type": rem_type,
+                    "context": text[max(0, position - 50):position + len(match.group(0)) + 50].strip(),
+                    "position": position,
+                })
+
+        # Also detect implicit remissions (articles mentioned in sequence)
+        # Pattern: "arts. X e Y" or "arts. X, Y e Z"
+        sequence_pattern = re.compile(
+            r"(?:arts?\.?|artigos?)\s*(\d+)\s*(?:,\s*(\d+))*\s*(?:e|,)\s*(\d+)",
+            re.IGNORECASE,
+        )
+        for match in sequence_pattern.finditer(text):
+            articles = [g for g in match.groups() if g]
+            if len(articles) >= 2:
+                # Create remissions between sequential articles
+                for i in range(len(articles) - 1):
+                    remissions.append({
+                        "source_article": articles[i],
+                        "target_article": articles[i + 1],
+                        "remission_type": "sequencia",
+                        "context": match.group(0),
+                        "position": match.start(),
+                    })
+
+        return remissions
+
+    @classmethod
+    def extract_with_remissions(cls, text: str) -> Dict[str, Any]:
+        """
+        Extract both entities and remissions from text.
+
+        Returns:
+            Dict with 'entities' and 'remissions' lists
+        """
+        return {
+            "entities": cls.extract(text),
+            "remissions": cls.extract_remissions(text),
+        }
+
 
 # =============================================================================
 # CYPHER QUERIES
@@ -470,24 +639,62 @@ class CypherQueries:
     MATCH path = (e)-[:RELATED_TO|MENTIONS*1..{max_hops}]-(target)
     WHERE (target:Chunk OR target:Entity)
 
-    // If target is chunk, get its document
+    // Security trimming: all Chunk nodes in the path must be visible to the caller.
+    // This makes the returned path directly verifiable/auditable.
+    WHERE all(n IN nodes(path) WHERE NOT n:Chunk OR exists {
+        MATCH (d:Document)-[:HAS_CHUNK]->(n)
+        WHERE d.scope IN $allowed_scopes
+          AND (
+                d.scope = 'global'
+                OR d.tenant_id = $tenant_id
+                OR (
+                    d.scope = 'group'
+                    AND coalesce(size($group_ids), 0) > 0
+                    AND any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))
+                )
+            )
+          AND ($case_id IS NULL OR d.case_id = $case_id)
+          AND (
+                d.sigilo IS NULL
+                OR d.sigilo = false
+                OR $user_id IS NULL
+                OR $user_id IN coalesce(d.allowed_users, [])
+            )
+    })
+
+    // If target is chunk, get its document (for metadata in the response)
     OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(target)
     WHERE target:Chunk
 
-    // Security trimming
-    WHERE d IS NULL OR (
-        d.scope IN $allowed_scopes
-        AND (d.tenant_id = $tenant_id OR d.scope = 'global')
-    )
-
     RETURN
         e.name AS start_entity,
-        target.name AS end_name,
-        target.entity_id AS end_id,
+        coalesce(target.name, target.entity_id, target.chunk_uid) AS end_name,
+        coalesce(target.entity_id, target.chunk_uid) AS end_id,
         labels(target)[0] AS end_type,
         length(path) AS path_length,
         [n IN nodes(path) | coalesce(n.name, n.chunk_uid)] AS path_names,
         [r IN relationships(path) | type(r)] AS path_relations,
+        [n IN nodes(path) | coalesce(n.entity_id, n.chunk_uid, n.doc_hash)] AS path_ids,
+        [n IN nodes(path) | {
+            labels: labels(n),
+            // Stable IDs (only one will be present depending on label)
+            entity_id: n.entity_id,
+            chunk_uid: n.chunk_uid,
+            doc_hash: n.doc_hash,
+            // Common fields
+            name: n.name,
+            entity_type: n.entity_type,
+            normalized: n.normalized,
+            // Chunk fields
+            chunk_index: n.chunk_index,
+            text_preview: n.text_preview
+        }] AS path_nodes,
+        [r IN relationships(path) | {
+            type: type(r),
+            from_id: coalesce(startNode(r).entity_id, startNode(r).chunk_uid, startNode(r).doc_hash),
+            to_id: coalesce(endNode(r).entity_id, endNode(r).chunk_uid, endNode(r).doc_hash),
+            properties: properties(r)
+        }] AS path_edges,
         d.doc_hash AS doc_hash,
         target.chunk_uid AS chunk_uid
     ORDER BY path_length
@@ -508,7 +715,22 @@ class CypherQueries:
 
     MATCH (d:Document)-[:HAS_CHUNK]->(c)
     WHERE d.scope IN $allowed_scopes
-      AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+      AND (
+            d.scope = 'global'
+            OR d.tenant_id = $tenant_id
+            OR (
+                d.scope = 'group'
+                AND coalesce(size($group_ids), 0) > 0
+                AND any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))
+            )
+        )
+      AND ($case_id IS NULL OR d.case_id = $case_id)
+      AND (
+            d.sigilo IS NULL
+            OR d.sigilo = false
+            OR $user_id IS NULL
+            OR $user_id IN coalesce(d.allowed_users, [])
+        )
 
     RETURN
         c.chunk_uid AS chunk_uid,
@@ -637,9 +859,104 @@ class Neo4jMVPService:
                     except Exception as e:
                         logger.debug(f"Index may exist: {e}")
 
+            # Optional: hybrid labels schema (label per entity_type)
+            if self.config.graph_hybrid_mode and self.config.graph_hybrid_auto_schema:
+                from app.services.rag.core.graph_hybrid import (
+                    HYBRID_LABELS_BY_ENTITY_TYPE,
+                    hybrid_schema_statements,
+                    migrate_hybrid_labels,
+                )
+
+                labels = sorted(set(HYBRID_LABELS_BY_ENTITY_TYPE.values()))
+                for stmt in hybrid_schema_statements(labels):
+                    try:
+                        self._execute_write(stmt)
+                    except Exception as e:
+                        logger.debug(f"Hybrid schema statement skipped: {e}")
+
+                if self.config.graph_hybrid_migrate_on_startup:
+                    with self.driver.session(database=self.config.database) as session:
+                        migrate_hybrid_labels(session)
+
+            # Optional: Fulltext indexes (Neo4j native lexical search for UI/diagnostics)
+            if self.config.enable_fulltext_indexes:
+                fulltext_stmts = [
+                    "CREATE FULLTEXT INDEX rag_entity_fulltext IF NOT EXISTS "
+                    "FOR (e:Entity) ON EACH [e.name, e.entity_id, e.normalized]",
+                    "CREATE FULLTEXT INDEX rag_chunk_fulltext IF NOT EXISTS "
+                    "FOR (c:Chunk) ON EACH [c.text_preview]",
+                    "CREATE FULLTEXT INDEX rag_doc_fulltext IF NOT EXISTS "
+                    "FOR (d:Document) ON EACH [d.title]",
+                ]
+                for stmt in fulltext_stmts:
+                    try:
+                        self._execute_write(stmt)
+                    except Exception as e:
+                        logger.debug(f"Fulltext index statement skipped: {e}")
+
+            # Optional: Vector index for Chunk embeddings (Neo4j native semantic seeds)
+            if self.config.enable_vector_index:
+                prop = (self.config.vector_property or "embedding").strip()
+                if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", prop):
+                    logger.warning("Invalid Neo4j vector property name: %r; falling back to 'embedding'", prop)
+                    prop = "embedding"
+                sim = (self.config.vector_similarity or "cosine").strip().lower()
+                if sim not in ("cosine", "euclidean"):
+                    logger.warning("Unsupported Neo4j vector similarity %r; falling back to 'cosine'", sim)
+                    sim = "cosine"
+
+                # Neo4j vector index requires a single label + single property.
+                vector_stmt = (
+                    "CREATE VECTOR INDEX rag_chunk_vector IF NOT EXISTS "
+                    f"FOR (c:Chunk) ON (c.{prop}) "
+                    "OPTIONS {indexConfig: {"
+                    "`vector.dimensions`: $dim, "
+                    f"`vector.similarity_function`: '{sim}'"
+                    "}}"
+                )
+                try:
+                    self._execute_write(vector_stmt, {"dim": int(self.config.vector_dimensions)})
+                except Exception as e:
+                    logger.debug(f"Vector index statement skipped: {e}")
+
             logger.info("Neo4j schema created/verified")
         except Exception as e:
             logger.warning(f"Schema creation warning: {e}")
+
+    def _merge_entity(self, ent: Dict[str, Any]) -> None:
+        """Merge an Entity node, optionally applying a hybrid label."""
+        from app.services.rag.core.graph_hybrid import label_for_entity_type
+
+        label = label_for_entity_type(ent.get("entity_type")) if self.config.graph_hybrid_mode else None
+        label_clause = f":{label}" if label else ""
+
+        query = f"""
+        MERGE (e:Entity{label_clause} {{entity_id: $entity_id}})
+        ON CREATE SET
+            e.entity_type = $entity_type,
+            e.name = $name,
+            e.normalized = $normalized,
+            e.metadata = $metadata,
+            e.created_at = datetime()
+        ON MATCH SET
+            e.entity_type = $entity_type,
+            e.name = $name,
+            e.normalized = $normalized,
+            e.metadata = $metadata,
+            e.updated_at = datetime()
+        RETURN e
+        """
+
+        self._execute_write(
+            query,
+            {
+                "entity_id": ent["entity_id"],
+                "entity_type": ent["entity_type"],
+                "name": ent["name"],
+                "normalized": ent["normalized"],
+                "metadata": str(ent.get("metadata", {})),
+            },
+        )
 
     # -------------------------------------------------------------------------
     # Ingest
@@ -654,6 +971,7 @@ class Neo4jMVPService:
         scope: str = "global",
         case_id: Optional[str] = None,
         extract_entities: bool = True,
+        semantic_extraction: bool = False,
     ) -> Dict[str, Any]:
         """
         Ingest a document with its chunks into Neo4j.
@@ -665,7 +983,9 @@ class Neo4jMVPService:
             tenant_id: Tenant identifier
             scope: Access scope (global, private, group, local)
             case_id: Case identifier for local scope
-            extract_entities: Whether to extract and link entities
+            extract_entities: Whether to extract and link entities (regex-based)
+            semantic_extraction: Whether to use LLM (Gemini) for semantic entity extraction
+                                (teses, conceitos, princípios, institutos)
 
         Returns:
             Dict with counts of created nodes/relationships
@@ -676,6 +996,8 @@ class Neo4jMVPService:
             "entities": 0,
             "mentions": 0,
             "next_rels": 0,
+            "semantic_entities": 0,
+            "semantic_relations": 0,
         }
 
         # Create document node
@@ -746,16 +1068,7 @@ class Neo4jMVPService:
 
                     # Merge entity
                     if entity_id not in all_entities:
-                        self._execute_write(
-                            CypherQueries.MERGE_ENTITY,
-                            {
-                                "entity_id": entity_id,
-                                "entity_type": ent["entity_type"],
-                                "name": ent["name"],
-                                "normalized": ent["normalized"],
-                                "metadata": str(ent.get("metadata", {})),
-                            }
-                        )
+                        self._merge_entity(ent)
                         all_entities[entity_id] = ent
                         stats["entities"] += 1
 
@@ -766,9 +1079,75 @@ class Neo4jMVPService:
                     )
                     stats["mentions"] += 1
 
+        # Semantic extraction (LLM-based) for teses, conceitos, princípios
+        if semantic_extraction and chunks:
+            try:
+                from app.services.rag.core.semantic_extractor import get_semantic_extractor
+
+                extractor = get_semantic_extractor()
+
+                # Combine all chunk texts for semantic analysis
+                full_text = "\n\n".join(
+                    c.get("text", "")[:2000] for c in chunks[:10]  # Limit to avoid token overflow
+                )
+
+                # Get already extracted entities for relationship building
+                existing_entities_list = list(all_entities.values())
+
+                # Extract semantic entities
+                semantic_result = extractor.extract(full_text, existing_entities_list)
+
+                # Add semantic entities to graph
+                for sem_ent in semantic_result.get("entities", []):
+                    entity_id = sem_ent["entity_id"]
+                    if entity_id not in all_entities:
+                        self._merge_entity(sem_ent)
+                        all_entities[entity_id] = sem_ent
+                        stats["semantic_entities"] += 1
+
+                        # Link to first chunk that likely contains it
+                        if chunks:
+                            first_chunk_uid = chunks[0].get("chunk_uid")
+                            if not first_chunk_uid:
+                                first_chunk_uid = hashlib.md5(
+                                    f"{doc_hash}:0".encode()
+                                ).hexdigest()
+                            self._execute_write(
+                                CypherQueries.LINK_CHUNK_ENTITY,
+                                {"chunk_uid": first_chunk_uid, "entity_id": entity_id}
+                            )
+                            stats["mentions"] += 1
+
+                # Create semantic relationships
+                for rel in semantic_result.get("relations", []):
+                    source = rel.get("source", "")
+                    target = rel.get("target", "")
+
+                    # Find source entity ID
+                    source_id = None
+                    for ent in all_entities.values():
+                        if ent.get("normalized") == source or ent.get("entity_id") == source:
+                            source_id = ent["entity_id"]
+                            break
+
+                    # Find target entity ID
+                    target_id = None
+                    for ent in all_entities.values():
+                        if ent.get("normalized") == target or ent.get("entity_id") == target:
+                            target_id = ent["entity_id"]
+                            break
+
+                    if source_id and target_id and source_id != target_id:
+                        self.link_entities(source_id, target_id)
+                        stats["semantic_relations"] += 1
+
+            except Exception as e:
+                logger.warning(f"Semantic extraction failed for doc {doc_hash}: {e}")
+
         logger.info(
             f"Ingested doc {doc_hash}: {stats['chunks']} chunks, "
-            f"{stats['entities']} entities, {stats['mentions']} mentions"
+            f"{stats['entities']} entities, {stats['mentions']} mentions, "
+            f"{stats['semantic_entities']} semantic entities, {stats['semantic_relations']} relations"
         )
 
         return stats
@@ -853,6 +1232,81 @@ class Neo4jMVPService:
             limit=limit,
         )
 
+    def search_chunks_fulltext(
+        self,
+        query_text: str,
+        tenant_id: str,
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+        index_name: str = "rag_chunk_fulltext",
+    ) -> List[Dict[str, Any]]:
+        """
+        Lexical search using Neo4j fulltext index (optional Phase 2 backend).
+
+        This is meant for:
+        - UI/graph exploration (fast keyword search inside Chunk previews)
+        - A/B comparison against OpenSearch BM25 without adding training
+
+        Notes:
+        - Requires `NEO4J_FULLTEXT_ENABLED=true` and schema creation on startup.
+        - Returns only chunk previews (same field the graph stores).
+        """
+        if allowed_scopes is None:
+            # Default: allow global + tenant-private documents.
+            allowed_scopes = ["global", "private"]
+
+        query = """
+        CALL db.index.fulltext.queryNodes($index_name, $query_text) YIELD node, score
+        WITH node AS c, score
+        WHERE c:Chunk
+        MATCH (d:Document)-[:HAS_CHUNK]->(c)
+        WHERE d.scope IN $allowed_scopes
+          AND (
+                d.scope = 'global'
+                OR d.tenant_id = $tenant_id
+                OR (
+                    d.scope = 'group'
+                    AND coalesce(size($group_ids), 0) > 0
+                    AND any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))
+                )
+            )
+          AND ($case_id IS NULL OR d.case_id = $case_id)
+          AND (
+                d.sigilo IS NULL
+                OR d.sigilo = false
+                OR $user_id IS NULL
+                OR $user_id IN coalesce(d.allowed_users, [])
+            )
+        RETURN
+            c.chunk_uid AS chunk_uid,
+            c.text_preview AS text,
+            c.chunk_index AS chunk_index,
+            d.doc_hash AS doc_hash,
+            d.title AS doc_title,
+            d.source_type AS source_type,
+            score AS score
+        ORDER BY score DESC
+        LIMIT $limit
+        """
+
+        return self._execute_read(
+            query,
+            {
+                "index_name": index_name,
+                "query_text": query_text,
+                "tenant_id": tenant_id,
+                "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
+                "limit": limit,
+            },
+        )
+
     def expand_with_neighbors(
         self,
         chunk_uid: str,
@@ -885,6 +1339,11 @@ class Neo4jMVPService:
         entity_ids: List[str],
         tenant_id: str,
         scope: str = "global",
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         max_hops: int = 2,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
@@ -893,9 +1352,10 @@ class Neo4jMVPService:
 
         Returns explainable paths for RAG context.
         """
-        allowed_scopes = ["global"]
-        if scope in ["private", "group", "local"]:
-            allowed_scopes.append(scope)
+        if allowed_scopes is None:
+            allowed_scopes = ["global"]
+            if scope in ["private", "group", "local"]:
+                allowed_scopes.append(scope)
 
         query = CypherQueries.FIND_PATHS.format(max_hops=max_hops)
 
@@ -905,6 +1365,9 @@ class Neo4jMVPService:
                 "entity_ids": entity_ids,
                 "tenant_id": tenant_id,
                 "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
                 "limit": limit,
             }
         )
@@ -914,6 +1377,11 @@ class Neo4jMVPService:
         entity_ids: List[str],
         tenant_id: str,
         scope: str = "global",
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
         min_matches: int = 2,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
@@ -922,9 +1390,10 @@ class Neo4jMVPService:
 
         Good for finding highly relevant chunks.
         """
-        allowed_scopes = ["global"]
-        if scope in ["private", "group", "local"]:
-            allowed_scopes.append(scope)
+        if allowed_scopes is None:
+            allowed_scopes = ["global"]
+            if scope in ["private", "group", "local"]:
+                allowed_scopes.append(scope)
 
         return self._execute_read(
             CypherQueries.FIND_COOCCURRENCE,
@@ -932,6 +1401,9 @@ class Neo4jMVPService:
                 "entity_ids": entity_ids,
                 "tenant_id": tenant_id,
                 "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
                 "min_matches": min_matches,
                 "limit": limit,
             }
