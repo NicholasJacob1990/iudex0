@@ -5,6 +5,212 @@
 
 ---
 
+## 2026-01-25 — Fase 1: Observabilidade no Pipeline RAG
+
+### Contexto
+- Implementação da Fase 1 do roadmap: Observabilidade
+- Objetivo: melhorar métricas de tempo por stage e logging estruturado
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/pipeline/rag_pipeline.py`**:
+
+1. **Método `to_metrics()` na classe `PipelineTrace`** (linhas 448-507):
+   - Novo método que retorna dict com métricas de latência por stage
+   - Calcula percentis p50/p95/p99 das latências dos stages
+   - Inclui: `trace_id`, `total_duration_ms`, `stage_latencies`, `percentiles`, `stage_count`, `error_count`, `stages_with_errors`, `search_mode`, `final_results_count`
+   - Nota: percentis são calculados a partir dos stages da trace atual; para p50/p95/p99 acurados entre múltiplas requisições, agregar `stage_latencies` externamente
+
+2. **Logging estruturado no RRF Merge** (linhas 1706-1717):
+   - `logger.error()` agora inclui `extra={}` com: stage, lexical_count, vector_count, error_type, trace_id
+   - Adicionado `exc_info=True` para stack trace
+
+3. **Logging estruturado no Visual Search** (linhas 1648-1660):
+   - `logger.warning()` agora inclui `extra={}` com: stage, query, tenant_id, error_type, trace_id
+   - Adicionado `exc_info=True` para stack trace
+
+4. **Logging estruturado no Pipeline principal** (linhas 3120-3135):
+   - `logger.error()` agora inclui `extra={}` com: trace_id, query, indices, collections, stages_completed, stages_failed, error_type, total_duration_ms
+   - Permite rastreamento completo do estado do pipeline no momento da falha
+
+### Decisões Tomadas
+- Percentis calculados inline para evitar dependência de estatísticas externas
+- Logging estruturado usa formato `extra={}` do Python logging (compatível com formatadores JSON)
+- Mantida compatibilidade com código existente (sem breaking changes)
+
+### Testes Executados
+- `python3 -m py_compile rag_pipeline.py` — OK
+- Teste manual do método `to_metrics()` — OK
+- Verificação de imports e estrutura básica — OK
+
+---
+
+## 2026-01-25 — Fase 2: Error Handling no Pipeline RAG
+
+### Contexto
+- Implementação da Fase 2 do roadmap de otimização do pipeline RAG
+- Objetivo: substituir `except Exception` genéricos por exceções específicas
+- Manter comportamento fail-soft para componentes opcionais
+- Propagar erros para componentes obrigatórios quando `fail_open=False`
+
+### Arquivos Criados
+
+**`apps/api/app/services/rag/pipeline/exceptions.py`**:
+- Hierarquia completa de exceções customizadas
+- Classes: `RAGPipelineError` (base), `SearchError`, `LexicalSearchError`, `VectorSearchError`, `EmbeddingError`, `RerankerError`, `CRAGError`, `GraphEnrichError`, `CompressionError`, `ExpansionError`, `QueryExpansionError`, `ComponentInitError`
+- Cada exceção inclui:
+  - `message`: descrição do erro
+  - `component`: nome do componente que falhou
+  - `context`: dict com informações adicionais
+  - `recoverable`: indica se o pipeline pode continuar
+  - `cause`: exceção original encadeada
+  - `to_dict()`: serialização para logging/tracing
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/pipeline/__init__.py`**:
+- Adicionado import e export de todas as exceções customizadas
+
+**`apps/api/app/services/rag/pipeline/rag_pipeline.py`**:
+
+1. **Import de exceções** (linha ~129): Importadas todas as exceções de `exceptions.py`
+
+2. **Query Enhancement** (linha ~1096): `except Exception` agora:
+   - Re-raises `QueryExpansionError` se já for nossa exceção
+   - Loga com contexto extra (query, hyde, multiquery)
+   - Raises `QueryExpansionError` com causa encadeada quando `fail_open=False`
+
+3. **Lexical Search - per query** (linha ~1332): Logging melhorado com contexto
+
+4. **Lexical Search - stage** (linha ~1355): `except Exception` agora:
+   - Re-raises `LexicalSearchError` se já for nossa exceção
+   - Loga com contexto (indices, queries_count)
+   - Raises `LexicalSearchError` com causa encadeada
+
+5. **Vector Search - per query** (linha ~1528):
+   - Re-raises `EmbeddingError` (indica problemas de modelo)
+   - Logging melhorado com contexto
+
+6. **Vector Search - stage** (linha ~1551): `except Exception` agora:
+   - Re-raises `VectorSearchError` se já for nossa exceção
+   - Loga com contexto (collections, queries_count)
+   - Raises `VectorSearchError` com causa encadeada
+
+7. **CRAG Gate** (linha ~2075): `except Exception` agora:
+   - Re-raises `CRAGError` se já for nossa exceção
+   - Loga com contexto (results_count, decision, retry_count)
+   - Raises `CRAGError` com causa encadeada
+
+8. **Reranker** (linha ~2158): `except Exception` agora:
+   - Re-raises `RerankerError` se já for nossa exceção
+   - Loga com contexto (candidates_count, model)
+   - Raises `RerankerError` com causa encadeada
+
+9. **Chunk Expansion** (linha ~2239): `except Exception` agora:
+   - Re-raises `ExpansionError` se já for nossa exceção
+   - Loga com contexto (chunks_count, window, max_extra)
+   - Raises `ExpansionError` com causa encadeada
+
+10. **Compression** (linha ~2324): `except Exception` agora:
+    - Re-raises `CompressionError` se já for nossa exceção
+    - Loga com contexto (results_count, token_budget)
+    - Raises `CompressionError` com causa encadeada
+
+11. **Graph Enrich** (linha ~2700): `except Exception` agora:
+    - Re-raises `GraphEnrichError` para casos críticos
+    - Loga com contexto detalhado
+    - Mantém fail-soft (retorna contexto parcial)
+
+### Decisões Técnicas
+- **Re-raise pattern**: Cada handler verifica se já é nossa exceção antes de wrapping
+- **Fail-soft preservado**: Componentes opcionais (graph, visual) continuam não propagando
+- **Contexto rico**: Cada exceção carrega informações úteis para debugging
+- **Causa encadeada**: Exceção original preservada via `cause` parameter
+- **Logging estruturado**: Uso de `extra={}` para contexto adicional no logger
+
+### Verificações
+- ✅ Sintaxe Python verificada para `exceptions.py`
+- ✅ Sintaxe Python verificada para `rag_pipeline.py`
+- ✅ Sintaxe Python verificada para `__init__.py`
+- ✅ Teste manual de hierarquia de exceções funcionando
+
+### Próximos Passos (Fase 3+)
+- Adicionar métricas de erro por tipo de exceção
+- Integrar com observabilidade (traces, spans)
+- Considerar circuit breaker para falhas recorrentes
+
+---
+
+## 2026-01-25 — Fase 4: Async para Chamadas Síncronas no Pipeline RAG
+
+### Contexto
+- Implementação da Fase 4 do roadmap de otimização do pipeline RAG
+- Objetivo: envolver chamadas síncronas que bloqueiam o event loop com `asyncio.to_thread()`
+- Operações que demoram >10ms (embedding, reranking, extração de entidades, compressão)
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/pipeline/rag_pipeline.py`**:
+
+1. **`_stage_vector_search` (linha ~1374)**: `self._embeddings.embed_query(query)` agora usa `asyncio.to_thread`
+
+2. **`_add_graph_chunks_to_results` (linha ~1670)**: `Neo4jEntityExtractor.extract(query)` agora usa `asyncio.to_thread`
+
+3. **`_stage_crag_gate` (linha ~1901)**: Embedding de queries no retry CRAG agora usa `asyncio.to_thread`
+
+4. **`_stage_rerank` (linhas ~2027-2032)**: `self._reranker.rerank()` agora usa `asyncio.to_thread`
+
+5. **`_stage_compress` (linhas ~2158-2162)**: `self._compressor.compress_results()` agora usa `asyncio.to_thread`
+
+6. **`_stage_graph_enrich` (linhas ~2410, 2416)**: `Neo4jEntityExtractor.extract()` para query e resultados agora usa `asyncio.to_thread`
+
+### Decisões Técnicas
+- **asyncio.to_thread**: Escolhido para mover operações CPU-bound ou síncronas de I/O para threads do pool padrão
+- **Keyword args**: Para `rerank` e `compress_results`, parâmetros foram convertidos de keyword para positional pois `to_thread` não suporta kwargs diretamente
+- **Import asyncio**: Já estava presente no arquivo (linha 34)
+
+### Verificações
+- ✅ Sintaxe Python verificada
+- ✅ 5 testes RAG passando:
+  - `test_corrective_flags_do_not_force_legacy`
+  - `test_agentic_routing_applies_to_new_pipeline`
+  - `test_history_rewrite_applies_to_new_pipeline`
+  - `test_dense_research_increases_top_k_in_new_pipeline`
+  - `test_new_pipeline_uses_legacy_env_defaults_when_callers_do_not_override`
+
+---
+
+## 2026-01-25 — Fase 3: Paralelização no Pipeline RAG
+
+### Contexto
+- Implementação da Fase 3 do roadmap de otimização do pipeline RAG
+- Objetivo: executar busca lexical e vetorial em paralelo usando `asyncio.gather`
+- Controle de concorrência com semáforo para limitar operações simultâneas
+
+### Arquivos Alterados
+
+**`apps/api/app/services/rag/pipeline/rag_pipeline.py`**:
+
+1. **`__init__` (linha ~637)**: Adicionado `self._search_semaphore = asyncio.Semaphore(5)` para controle de concorrência
+
+2. **`search()` (linhas ~2701-2758)**: Refatorado Stages 2 e 3 para execução paralela:
+   - Queries de citação (`is_citation_query`) continuam executando apenas busca lexical
+   - Para queries normais, `_stage_lexical_search` e `_stage_vector_search` agora executam em paralelo via `asyncio.gather`
+   - Tratamento de exceções com `return_exceptions=True` - se uma busca falhar, a outra continua funcionando
+   - Erros são logados e adicionados ao trace, mas não quebram o pipeline
+   - Semáforo limita a 5 operações de busca concorrentes para evitar sobrecarga
+
+### Decisões Técnicas
+- **Semáforo**: Limite de 5 operações foi escolhido como balanço entre performance e uso de recursos
+- **Tratamento de erros**: Falha graceful - se lexical falha retorna `[]`, se vector falha retorna `[]`
+- **Compatibilidade**: Lógica de `skip_vector` e `is_citation_query` preservada
+
+### Verificações
+- ✅ Sintaxe Python verificada (`py_compile`)
+- ✅ Testes RAG passando (`test_rag_corrective_new_pipeline.py`)
+
+---
+
 ## 2026-01-25 — Migração para Neo4j Visualization Library (NVL)
 
 ### Contexto

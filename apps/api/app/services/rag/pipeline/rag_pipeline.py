@@ -126,6 +126,21 @@ except ImportError:
 trace_event = None  # legacy hook removed; use PipelineResult.trace instead
 TraceEventType = None  # type: ignore
 
+# Custom exceptions for structured error handling
+from app.services.rag.pipeline.exceptions import (
+    RAGPipelineError,
+    SearchError,
+    LexicalSearchError,
+    VectorSearchError,
+    EmbeddingError,
+    RerankerError,
+    CRAGError,
+    GraphEnrichError,
+    CompressionError,
+    ExpansionError,
+    QueryExpansionError,
+    ComponentInitError,
+)
 
 logger = logging.getLogger("RAGPipeline")
 
@@ -430,6 +445,67 @@ class PipelineTrace:
             "budget_usage": self.budget_usage,
         }
 
+    def to_metrics(self) -> Dict[str, Any]:
+        """
+        Generate metrics summary with latency percentiles per stage.
+
+        Returns a dict with:
+        - total_duration_ms: Total pipeline time
+        - stage_latencies: Dict of stage -> duration_ms for completed stages
+        - percentiles: p50, p95, p99 of stage latencies (when multiple stages)
+        - stage_count: Number of stages executed
+        - error_count: Number of errors
+        - stages_with_errors: List of stages that had errors
+
+        Note: Percentiles are calculated from the current trace's stages.
+        For accurate p50/p95/p99 across multiple requests, aggregate
+        stage_latencies externally.
+        """
+        # Collect latencies from completed stages (not skipped, no error)
+        stage_latencies: Dict[str, float] = {}
+        stages_with_errors: List[str] = []
+
+        for s in self.stages:
+            stage_name = s.stage.value
+            if s.error:
+                stages_with_errors.append(stage_name)
+            if not s.skipped and s.duration_ms > 0:
+                stage_latencies[stage_name] = round(s.duration_ms, 2)
+
+        # Calculate percentiles from stage durations
+        latency_values = sorted(stage_latencies.values()) if stage_latencies else []
+        percentiles: Dict[str, float] = {}
+
+        if latency_values:
+            def _percentile(data: List[float], p: float) -> float:
+                """Calculate percentile from sorted data."""
+                if not data:
+                    return 0.0
+                k = (len(data) - 1) * (p / 100.0)
+                f = int(k)
+                c = f + 1 if f + 1 < len(data) else f
+                if f == c:
+                    return data[f]
+                return data[f] * (c - k) + data[c] * (k - f)
+
+            percentiles = {
+                "p50": round(_percentile(latency_values, 50), 2),
+                "p95": round(_percentile(latency_values, 95), 2),
+                "p99": round(_percentile(latency_values, 99), 2),
+            }
+
+        return {
+            "trace_id": self.trace_id,
+            "total_duration_ms": round(self.total_duration_ms, 2),
+            "stage_latencies": stage_latencies,
+            "percentiles": percentiles,
+            "stage_count": len(self.stages),
+            "error_count": len(self.errors),
+            "stages_with_errors": stages_with_errors,
+            "search_mode": self.search_mode.value,
+            "final_results_count": self.final_results_count,
+        }
+
 
 @dataclass
 class GraphContext:
@@ -632,6 +708,9 @@ class RAGPipeline:
 
         # Lazy initialization flags
         self._components_initialized = False
+
+        # Semaphore for parallel search concurrency control (Phase 3)
+        self._search_semaphore = asyncio.Semaphore(5)
 
         logger.info(
             f"RAGPipeline initialized: crag={self.config.crag_enabled}, "
@@ -1075,12 +1154,29 @@ class RAGPipeline:
                 data={"expanded_count": len(queries) - 1},
             )
 
+        except QueryExpansionError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Query enhancement failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "query": query[:100] if query else None,
+                    "enable_hyde": enable_hyde,
+                    "enable_multiquery": enable_multiquery,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
             if not self.config.fail_open:
-                raise
+                raise QueryExpansionError(
+                    error_msg,
+                    query=query,
+                    expansion_type="hyde" if enable_hyde else "multiquery",
+                    cause=e,
+                    recoverable=True,
+                )
 
         return queries
 
@@ -1234,7 +1330,15 @@ class RAGPipeline:
                     results.extend(query_results)
 
                 except Exception as e:
-                    logger.warning(f"Lexical search failed for query: {e}")
+                    # Per-query failure is non-critical - log with context and continue
+                    logger.warning(
+                        f"Lexical search failed for query: {e}",
+                        extra={
+                            "query": query[:100] if query else None,
+                            "indices": indices,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
             # Deduplicate by chunk_uid
             seen: Set[str] = set()
@@ -1256,13 +1360,30 @@ class RAGPipeline:
                 },
             )
 
+        except LexicalSearchError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Lexical search failed: {e}"
-            logger.error(error_msg)
+            logger.error(
+                error_msg,
+                extra={
+                    "indices": indices,
+                    "queries_count": len(queries),
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
             trace.add_error(error_msg)
             if not self.config.fail_open:
-                raise
+                raise LexicalSearchError(
+                    error_msg,
+                    query=queries[0] if queries else None,
+                    indices=indices,
+                    backend="opensearch" if self._opensearch else "neo4j_fulltext",
+                    cause=e,
+                    recoverable=True,
+                )
 
         return results
 
@@ -1317,9 +1438,9 @@ class RAGPipeline:
             # Generate embeddings for queries
             for query in queries:
                 try:
-                    # Get embedding
+                    # Get embedding (run in thread to avoid blocking event loop)
                     if hasattr(self._embeddings, "embed_query"):
-                        embedding = self._embeddings.embed_query(query)
+                        embedding = await asyncio.to_thread(self._embeddings.embed_query, query)
                     else:
                         continue
 
@@ -1404,8 +1525,19 @@ class RAGPipeline:
 
                     results.extend(query_results)
 
+                except EmbeddingError:
+                    # Re-raise embedding errors (might indicate model issues)
+                    raise
                 except Exception as e:
-                    logger.warning(f"Vector search failed for query: {e}")
+                    # Per-query failure is non-critical - log with context and continue
+                    logger.warning(
+                        f"Vector search failed for query: {e}",
+                        extra={
+                            "query": query[:100] if query else None,
+                            "collections": collections,
+                            "error_type": type(e).__name__,
+                        },
+                    )
 
             # Deduplicate by chunk_uid
             seen: Set[str] = set()
@@ -1427,13 +1559,30 @@ class RAGPipeline:
                 },
             )
 
+        except VectorSearchError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Vector search failed: {e}"
-            logger.error(error_msg)
+            logger.error(
+                error_msg,
+                extra={
+                    "collections": collections,
+                    "queries_count": len(queries),
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
             trace.add_error(error_msg)
             if not self.config.fail_open:
-                raise
+                raise VectorSearchError(
+                    error_msg,
+                    query=queries[0] if queries else None,
+                    collections=collections,
+                    backend="qdrant" if self._qdrant else "neo4j_vector",
+                    cause=e,
+                    recoverable=True,
+                )
 
         return results
 
@@ -1517,7 +1666,17 @@ class RAGPipeline:
 
         except Exception as e:
             error_msg = f"Visual search failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "stage": PipelineStage.VISUAL_SEARCH.value,
+                    "query": query[:100] if query else None,
+                    "tenant_id": tenant_id,
+                    "error_type": type(e).__name__,
+                    "trace_id": trace.trace_id,
+                },
+                exc_info=True,
+            )
             stage.fail(error_msg)
             trace.add_warning(error_msg)
             # Visual search failure is non-critical, continue pipeline
@@ -1575,7 +1734,17 @@ class RAGPipeline:
 
         except Exception as e:
             error_msg = f"RRF merge failed: {e}"
-            logger.error(error_msg)
+            logger.error(
+                error_msg,
+                extra={
+                    "stage": PipelineStage.MERGE_RRF.value,
+                    "lexical_count": len(lexical_results) if lexical_results else 0,
+                    "vector_count": len(vector_results) if vector_results else 0,
+                    "error_type": type(e).__name__,
+                    "trace_id": trace.trace_id,
+                },
+                exc_info=True,
+            )
             stage.fail(error_msg)
             trace.add_error(error_msg)
 
@@ -1614,8 +1783,8 @@ class RAGPipeline:
             return existing_results
 
         try:
-            # Extract entities from query
-            entities = Neo4jEntityExtractor.extract(query)
+            # Extract entities from query (run in thread to avoid blocking event loop)
+            entities = await asyncio.to_thread(Neo4jEntityExtractor.extract, query)
             entity_ids = [e["entity_id"] for e in entities]
 
             if not entity_ids:
@@ -1845,7 +2014,8 @@ class RAGPipeline:
                                     ):
                                         for q in expanded[:2]:
                                             try:
-                                                embedding = self._embeddings.embed_query(q)
+                                                # Run in thread to avoid blocking event loop
+                                                embedding = await asyncio.to_thread(self._embeddings.embed_query, q)
                                                 tenant = str(f.get("tenant_id") or "")
                                                 user = str(f.get("user_id") or "")
                                                 group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
@@ -1931,14 +2101,32 @@ class RAGPipeline:
 
             return filtered_results, evaluation
 
+        except CRAGError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"CRAG gate failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "results_count": len(results),
+                    "decision": evaluation.decision.value if evaluation else None,
+                    "retry_count": evaluation.retry_count if evaluation else 0,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
 
             if self.config.fail_open:
                 return results, evaluation
-            raise
+            raise CRAGError(
+                error_msg,
+                decision=evaluation.decision.value if evaluation else None,
+                retry_count=evaluation.retry_count if evaluation else 0,
+                results_count=len(results),
+                cause=e,
+                recoverable=True,
+            )
 
     async def _stage_rerank(
         self,
@@ -1969,12 +2157,13 @@ class RAGPipeline:
             # Limit candidates for efficiency
             candidates = results[:self._base_config.default_fetch_k]
 
-            # Rerank
+            # Rerank (run in thread to avoid blocking event loop)
             if hasattr(self._reranker, "rerank"):
-                rerank_result = self._reranker.rerank(
+                rerank_result = await asyncio.to_thread(
+                    self._reranker.rerank,
                     query,
                     candidates,
-                    top_k=self.config.final_top_k,
+                    self.config.final_top_k,
                 )
 
                 if hasattr(rerank_result, "results"):
@@ -1995,14 +2184,30 @@ class RAGPipeline:
 
             return reranked
 
+        except RerankerError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Reranking failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "candidates_count": len(results),
+                    "model": self._base_config.rerank_model if self._base_config else None,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
 
             if self.config.fail_open:
                 return results[:self.config.final_top_k]
-            raise
+            raise RerankerError(
+                error_msg,
+                model=self._base_config.rerank_model if self._base_config else None,
+                candidates_count=len(results),
+                cause=e,
+                recoverable=True,
+            )
 
     async def _stage_expand(
         self,
@@ -2060,14 +2265,31 @@ class RAGPipeline:
 
             return expanded
 
+        except ExpansionError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Chunk expansion failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "chunks_count": len(results),
+                    "window": window,
+                    "max_extra": max_extra,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
 
             if self.config.fail_open:
                 return results
-            raise
+            raise ExpansionError(
+                error_msg,
+                chunks_count=len(results),
+                window=window,
+                cause=e,
+                recoverable=True,
+            )
 
     async def _stage_compress(
         self,
@@ -2099,12 +2321,13 @@ class RAGPipeline:
                 stage.skip("Compression disabled or compressor not available")
                 return results
 
-            # Compress
+            # Compress (run in thread to avoid blocking event loop)
             if hasattr(self._compressor, "compress_results"):
-                compression_result = self._compressor.compress_results(
+                compression_result = await asyncio.to_thread(
+                    self._compressor.compress_results,
                     query,
                     results,
-                    token_budget=token_budget,
+                    token_budget,
                 )
 
                 if hasattr(compression_result, "results"):
@@ -2127,14 +2350,30 @@ class RAGPipeline:
 
             return compressed
 
+        except CompressionError:
+            # Re-raise our custom exception as-is
+            raise
         except Exception as e:
             error_msg = f"Compression failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "results_count": len(results),
+                    "token_budget": token_budget,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
 
             if self.config.fail_open:
                 return results
-            raise
+            raise CompressionError(
+                error_msg,
+                token_budget=token_budget,
+                results_count=len(results),
+                cause=e,
+                recoverable=True,
+            )
 
     async def _stage_graph_enrich(
         self,
@@ -2349,15 +2588,16 @@ class RAGPipeline:
             entities_to_lookup: List[Tuple[str, str]] = []
 
             # Use Neo4j entity extractor if available (better patterns)
+            # Run in thread to avoid blocking event loop
             if has_neo4j and Neo4jEntityExtractor is not None:
                 # Extract from query
-                query_entities = Neo4jEntityExtractor.extract(query)
+                query_entities = await asyncio.to_thread(Neo4jEntityExtractor.extract, query)
                 entity_ids.extend([e["entity_id"] for e in query_entities])
 
                 # Extract from results
                 for result in results:
                     text = result.get("text", "")
-                    result_entities = Neo4jEntityExtractor.extract(text)
+                    result_entities = await asyncio.to_thread(Neo4jEntityExtractor.extract, text)
                     for ent in result_entities[:5]:  # Limit per result
                         if ent["entity_id"] not in entity_ids:
                             entity_ids.append(ent["entity_id"])
@@ -2519,11 +2759,23 @@ class RAGPipeline:
 
             return graph_context
 
+        except GraphEnrichError:
+            # Re-raise our custom exception as-is (for non-recoverable cases)
+            raise
         except Exception as e:
+            # Graph enrichment is optional - fail-soft with detailed logging
             error_msg = f"Graph enrichment failed: {e}"
-            logger.warning(error_msg)
+            logger.warning(
+                error_msg,
+                extra={
+                    "entities_count": len(graph_context.entities) if graph_context else 0,
+                    "has_neo4j": has_neo4j if "has_neo4j" in dir() else None,
+                    "has_networkx": has_networkx if "has_networkx" in dir() else None,
+                    "error_type": type(e).__name__,
+                },
+            )
             stage.fail(error_msg)
-
+            # Return partial context on failure (fail-soft)
             return graph_context
 
     def _generate_graph_summary(self, graph_context: GraphContext) -> str:
@@ -2695,32 +2947,64 @@ class RAGPipeline:
                 budget_tracker=budget_tracker,
             )
 
-            # Stage 2: Lexical Search
-            lexical_results = await self._stage_lexical_search(
-                queries, indices, filters, trace
-            )
+            # Stage 2 & 3: Lexical and Vector Search (parallelized - Phase 3)
+            # Use semaphore to limit concurrent operations
+            async with self._search_semaphore:
+                # For citation queries, skip vector search entirely
+                if is_citation_query:
+                    lexical_results = await self._stage_lexical_search(
+                        queries, indices, filters, trace
+                    )
+                    vector_results: List[Dict[str, Any]] = []
+                    skip_vector = True
+                else:
+                    # Run lexical and vector search in parallel
+                    lexical_task = self._stage_lexical_search(
+                        queries, indices, filters, trace
+                    )
+                    vector_task = self._stage_vector_search(
+                        queries, collections, filters, trace
+                    )
 
-            # Determine if we should skip vector search (lexical-first gating)
-            skip_vector = is_citation_query or self._should_skip_vector_search(
-                lexical_results, trace
-            )
+                    results = await asyncio.gather(
+                        lexical_task,
+                        vector_task,
+                        return_exceptions=True
+                    )
 
-            # Stage 3: Vector Search (conditional)
-            vector_results: List[Dict[str, Any]] = []
-            if not skip_vector:
-                vector_results = await self._stage_vector_search(
-                    queries, collections, filters, trace
-                )
-                trace.search_mode = SearchMode.HYBRID_LEX_VEC
-            else:
+                    # Handle potential exceptions from parallel execution
+                    lexical_results_raw, vector_results_raw = results
+
+                    if isinstance(lexical_results_raw, Exception):
+                        logger.error(f"Lexical search failed: {lexical_results_raw}")
+                        trace.add_error(f"Lexical search error: {lexical_results_raw}")
+                        lexical_results = []
+                    else:
+                        lexical_results = lexical_results_raw
+
+                    if isinstance(vector_results_raw, Exception):
+                        logger.error(f"Vector search failed: {vector_results_raw}")
+                        trace.add_error(f"Vector search error: {vector_results_raw}")
+                        vector_results = []
+                    else:
+                        vector_results = vector_results_raw
+
+                    # Determine if we should have skipped vector search (for trace info)
+                    skip_vector = self._should_skip_vector_search(lexical_results, trace)
+
+            # Set search mode based on results
+            if is_citation_query or (skip_vector and not vector_results):
                 trace.search_mode = SearchMode.LEXICAL_ONLY
-                vector_stage = trace.start_stage(
-                    PipelineStage.VECTOR_SEARCH, input_count=0
-                )
-                vector_stage.skip(
-                    "Lexical results sufficient" if trace.lexical_was_sufficient
-                    else "Citation-heavy query"
-                )
+                if is_citation_query or (skip_vector and trace.lexical_was_sufficient):
+                    vector_stage = trace.start_stage(
+                        PipelineStage.VECTOR_SEARCH, input_count=0
+                    )
+                    vector_stage.skip(
+                        "Lexical results sufficient" if trace.lexical_was_sufficient
+                        else "Citation-heavy query"
+                    )
+            else:
+                trace.search_mode = SearchMode.HYBRID_LEX_VEC
 
             # Stage 3b: Visual Search (ColPali) - optional, runs when enabled
             visual_results: List[Dict[str, Any]] = []
@@ -2854,7 +3138,20 @@ class RAGPipeline:
 
         except Exception as e:
             error_msg = f"Pipeline failed: {e}"
-            logger.error(error_msg, exc_info=True)
+            logger.error(
+                error_msg,
+                extra={
+                    "trace_id": trace.trace_id,
+                    "query": query[:100] if query else None,
+                    "indices": indices,
+                    "collections": collections,
+                    "stages_completed": [s.stage.value for s in trace.stages if not s.error],
+                    "stages_failed": [s.stage.value for s in trace.stages if s.error],
+                    "error_type": type(e).__name__,
+                    "total_duration_ms": trace.total_duration_ms,
+                },
+                exc_info=True,
+            )
             trace.add_error(error_msg)
             trace.complete(results_count=0)
 

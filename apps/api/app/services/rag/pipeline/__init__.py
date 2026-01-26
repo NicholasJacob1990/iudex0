@@ -48,6 +48,21 @@ from .orchestrator import (
     create_enhanced_pipeline,
 )
 
+from .exceptions import (
+    RAGPipelineError,
+    SearchError,
+    LexicalSearchError,
+    VectorSearchError,
+    EmbeddingError,
+    RerankerError,
+    CRAGError,
+    GraphEnrichError,
+    CompressionError,
+    ExpansionError,
+    QueryExpansionError,
+    ComponentInitError,
+)
+
 __all__ = [
     # Enums
     "SearchMode",
@@ -73,4 +88,17 @@ __all__ = [
     "EnhancedRetrievalPipeline",
     "create_orchestrator",
     "create_enhanced_pipeline",
+    # Exceptions
+    "RAGPipelineError",
+    "SearchError",
+    "LexicalSearchError",
+    "VectorSearchError",
+    "EmbeddingError",
+    "RerankerError",
+    "CRAGError",
+    "GraphEnrichError",
+    "CompressionError",
+    "ExpansionError",
+    "QueryExpansionError",
+    "ComponentInitError",
 ]
