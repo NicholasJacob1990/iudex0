@@ -6,6 +6,8 @@ import { useAuthStore, useChatStore } from '@/stores';
 import { TopNav, SidebarPro } from '@/components/layout';
 import { useUIStore } from '@/stores';
 import { HumanReviewModal } from '@/components/chat/human-review-modal';
+import { PageTransition } from '@/components/providers/page-transition';
+import { Scale } from 'lucide-react';
 
 export default function DashboardLayout({
   children,
@@ -65,10 +67,14 @@ export default function DashboardLayout({
   // Mostrar loading enquanto hidrata ou verifica autenticação
   if (!isHydrated || isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <div className="text-center">
-          <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-solid border-primary border-r-transparent"></div>
-          <p className="mt-4 text-sm text-muted-foreground">Carregando...</p>
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4 animate-blur-in">
+          <div className="relative flex h-14 w-14 items-center justify-center">
+            <div className="absolute inset-0 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 animate-spin [animation-duration:3s]" />
+            <div className="absolute inset-[2px] rounded-[10px] bg-background" />
+            <Scale className="relative h-6 w-6 text-indigo-500" />
+          </div>
+          <p className="text-sm text-muted-foreground animate-pulse">Carregando Iudex...</p>
         </div>
       </div>
     );
@@ -91,7 +97,9 @@ export default function DashboardLayout({
       <div className="flex flex-1 flex-col">
         <TopNav />
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>{children}</main>
+          <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>
+            <PageTransition>{children}</PageTransition>
+          </main>
         </div>
       </div>
       <HumanReviewModal

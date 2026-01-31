@@ -7,6 +7,8 @@ import { Search, Filter, Sparkles, Plus, FolderOpen } from 'lucide-react';
 import { JurisprudenceCard, TribunalSelectorDialog, ManualPrecedentDialog } from '@/components/dashboard';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
+import { AnimatedContainer, StaggerContainer } from '@/components/ui/animated-container';
+import { MotionDiv, fadeUp } from '@/components/ui/motion';
 
 const courts = ['Todos', 'STF', 'STJ', 'TST', 'TSE', 'TRFs', 'TJs'];
 
@@ -72,6 +74,7 @@ export default function JurisprudencePage() {
 
   return (
     <div className="space-y-8 h-full flex flex-col">
+      <AnimatedContainer>
       <div className="rounded-3xl border border-white/70 bg-white/95 p-6 shadow-soft flex-none">
         <div className="flex flex-col gap-6">
           <div>
@@ -158,6 +161,7 @@ export default function JurisprudencePage() {
           </div>
         </div>
       </div>
+      </AnimatedContainer>
 
       <section className="flex-1 rounded-3xl border border-white/70 bg-white/90 p-6 shadow-soft overflow-hidden flex flex-col">
         <div className="flex items-center justify-between mb-6 flex-none">
@@ -177,8 +181,9 @@ export default function JurisprudencePage() {
               <p className="text-sm text-muted-foreground animate-pulse">Analisando 35.000+ julgados...</p>
             </div>
           ) : (
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <StaggerContainer className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               {results.map((precedent) => (
+                <MotionDiv key={precedent.id + '-anim'} variants={fadeUp}>
                 <JurisprudenceCard
                   key={precedent.id}
                   precedent={precedent}
@@ -190,8 +195,9 @@ export default function JurisprudencePage() {
                   onSaveToLibrary={handleSaveToLibrary}
                   onDelete={handleDelete}
                 />
+                </MotionDiv>
               ))}
-            </div>
+            </StaggerContainer>
           )}
         </div>
       </section>

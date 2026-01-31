@@ -25,6 +25,8 @@ import {
     DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Badge } from '@/components/ui/badge';
+import { AnimatedContainer, StaggerContainer } from '@/components/ui/animated-container';
+import { MotionDiv, fadeUp } from '@/components/ui/motion';
 
 interface Case {
     id: string;
@@ -106,6 +108,7 @@ export default function CasesPage() {
 
     return (
         <div className="container py-8 space-y-6 max-w-7xl mx-auto">
+            <AnimatedContainer>
             <div className="flex items-center justify-between">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Gestão de Casos</h1>
@@ -175,6 +178,7 @@ export default function CasesPage() {
                     </DialogContent>
                 </Dialog>
             </div>
+            </AnimatedContainer>
 
             {/* Search & Filters */}
             <div className="flex items-center gap-4">
@@ -206,11 +210,11 @@ export default function CasesPage() {
                     <Button onClick={() => setIsCreateOpen(true)} variant="outline">Criar Caso</Button>
                 </div>
             ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <StaggerContainer className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {filteredCases.map((c) => (
+                        <MotionDiv key={c.id} variants={fadeUp}>
                         <Card
-                            key={c.id}
-                            className="group relative cursor-pointer hover:shadow-md transition-all border-outline/40 hover:border-primary/50 bg-white"
+                            className="group relative cursor-pointer hover:shadow-md transition-all border-outline/40 hover:border-primary/50 bg-white card-premium glow-hover"
                             onClick={() => router.push(`/cases/${c.id}`)}
                         >
                             <CardHeader className="pb-3">
@@ -260,8 +264,9 @@ export default function CasesPage() {
                                 </div>
                             </CardContent>
                         </Card>
+                        </MotionDiv>
                     ))}
-                </div>
+                </StaggerContainer>
             )}
         </div>
     );

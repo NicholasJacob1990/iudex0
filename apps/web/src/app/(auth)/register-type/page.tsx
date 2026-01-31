@@ -4,23 +4,32 @@ import { useRouter } from 'next/navigation';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { User, Building2 } from 'lucide-react';
+import { MotionDiv, scaleIn, fadeUp, smoothTransition } from '@/components/ui/motion';
+import { StaggerContainer } from '@/components/ui/animated-container';
 
 export default function RegisterTypePage() {
   const router = useRouter();
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4">
-      <div className="w-full max-w-4xl">
-        <div className="mb-8 text-center">
+    <div className="relative flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 p-4 overflow-hidden">
+      {/* Animated gradient mesh background */}
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/20 blur-3xl animate-drift" />
+        <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/20 blur-3xl animate-float" />
+      </div>
+
+      <div className="w-full max-w-4xl relative z-10">
+        <MotionDiv variants={fadeUp} initial="hidden" animate="visible" transition={smoothTransition} className="mb-8 text-center">
           <h1 className="font-display text-4xl font-bold">Bem-vindo ao Iudex</h1>
           <p className="mt-2 text-lg text-muted-foreground">
             Escolha o tipo de conta que melhor se adequa a você
           </p>
-        </div>
+        </MotionDiv>
 
-        <div className="grid gap-6 md:grid-cols-2">
+        <StaggerContainer className="grid gap-6 md:grid-cols-2">
           {/* Individual */}
-          <Card className="group cursor-pointer overflow-hidden border-2 border-border transition-all hover:border-primary hover:shadow-lg">
+          <MotionDiv variants={fadeUp}>
+          <Card className="group cursor-pointer overflow-hidden border-2 border-border transition-all hover:border-primary hover:shadow-lg backdrop-blur-xl bg-white/80">
             <button
               onClick={() => router.push('/register/individual')}
               className="w-full p-8 text-left"
@@ -60,9 +69,11 @@ export default function RegisterTypePage() {
               </div>
             </button>
           </Card>
+          </MotionDiv>
 
           {/* Institutional */}
-          <Card className="group cursor-pointer overflow-hidden border-2 border-border transition-all hover:border-primary hover:shadow-lg">
+          <MotionDiv variants={fadeUp}>
+          <Card className="group cursor-pointer overflow-hidden border-2 border-border transition-all hover:border-primary hover:shadow-lg backdrop-blur-xl bg-white/80">
             <button
               onClick={() => router.push('/register/institutional')}
               className="w-full p-8 text-left"
@@ -102,7 +113,8 @@ export default function RegisterTypePage() {
               </div>
             </button>
           </Card>
-        </div>
+          </MotionDiv>
+        </StaggerContainer>
 
         <p className="mt-8 text-center text-sm text-muted-foreground">
           Já tem uma conta?{' '}

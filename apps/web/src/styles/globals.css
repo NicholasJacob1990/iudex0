@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans+Text:wght@400;500;600;700&display=swap');
+/* Google Sans Flex is loaded via layout.tsx <link> tag for full variable font support */
 
 @tailwind base;
 @tailwind components;
@@ -29,7 +29,43 @@
 @property --ring-radius {
   syntax: '<number>';
   inherits: true;
-  initial-value: 0.33;
+  initial-value: 0;
+}
+
+@property --ring-thickness {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+@property --animation-tick {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
+
+@property --seed {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 42;
+}
+
+@property --particle-rows {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 40;
+}
+
+@property --particle-min-alpha {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+@property --particle-max-alpha {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0.85;
 }
 
 @property --particle-count {
@@ -73,6 +109,28 @@
   }
 
   /* 1 hour of frames roughly, loops smoothly */
+}
+
+/* Ring ripple animation - 6s wave cycle */
+@keyframes ripple {
+  0% {
+    --animation-tick: 0;
+  }
+
+  100% {
+    --animation-tick: 1;
+  }
+}
+
+/* Ring breathing - radius pulses for organic feel (like Bramus/Antigravity) */
+@keyframes ringBreathe {
+  from {
+    --ring-radius: 120;
+  }
+
+  to {
+    --ring-radius: 200;
+  }
 }
 
 @layer base {
@@ -172,7 +230,7 @@
   }
 
   .font-google-sans-text {
-    font-family: "Google Sans Text", "Google Sans", var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-family: "Google Sans Flex", "Google Sans Text", var(--font-sans), system-ui, -apple-system, "Segoe UI", sans-serif;
   }
 
   .glass-premium {
@@ -744,6 +802,50 @@
   background: hsl(var(--primary));
 }
 
+/* ============================
+   Vorbium Landing Typography (Google Sans Flex variable axes)
+   ============================ */
+
+/* Landing headings: wider optical size, tighter tracking */
+.font-google-sans h1,
+.font-google-sans h2,
+.font-google-sans h3 {
+  font-variation-settings: 'opsz' 48, 'ROND' 0, 'GRAD' 0;
+  letter-spacing: -0.02em;
+}
+
+/* Landing body text: readable optical size */
+.font-google-sans p,
+.font-google-sans span {
+  font-variation-settings: 'opsz' 16, 'ROND' 0;
+}
+
+/* Feature card titles: slightly condensed for authority */
+.font-google-sans .text-2xl,
+.font-google-sans .text-xl {
+  font-variation-settings: 'opsz' 24, 'ROND' 0;
+  letter-spacing: -0.01em;
+}
+
+/* Wobble icons — floating sine-wave bob for feature card icons */
+@keyframes wobble {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  25% { transform: translateY(-6px) rotate(2deg); }
+  75% { transform: translateY(4px) rotate(-2deg); }
+}
+
+/* Scale-reveal — CTA card scales up as it enters viewport */
+@keyframes scale-reveal {
+  from { transform: scale(0.88); opacity: 0.6; }
+  to { transform: scale(1); opacity: 1; }
+}
+
+/* Scroll-driven fade-in for feature sections */
+@keyframes scroll-fade-up {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
@@ -768,4 +870,91 @@
 
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out;
+}
+
+/* ============================
+   Premium Shimmer (replaces animate-pulse)
+   ============================ */
+@keyframes shimmer-sweep {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-premium {
+  background: linear-gradient(
+    90deg,
+    hsl(var(--muted)) 25%,
+    hsl(var(--muted-foreground) / 0.08) 50%,
+    hsl(var(--muted)) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer-sweep 1.8s ease-in-out infinite;
+}
+
+/* ============================
+   Scroll Progress Bar
+   ============================ */
+.scroll-progress {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: linear-gradient(90deg, #4f46e5, #8b5cf6, #22d3ee);
+  z-index: 9999;
+  transform-origin: left;
+  will-change: transform;
+  pointer-events: none;
+}
+
+/* ============================
+   Glow on Hover
+   ============================ */
+.glow-hover {
+  position: relative;
+}
+
+.glow-hover::before {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(139, 92, 246, 0.25));
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  z-index: -1;
+  filter: blur(16px);
+  pointer-events: none;
+}
+
+.glow-hover:hover::before {
+  opacity: 1;
+}
+
+/* ============================
+   Card Premium Hover
+   ============================ */
+.card-premium {
+  transition: transform 0.3s cubic-bezier(0.19, 1, 0.22, 1),
+              box-shadow 0.3s cubic-bezier(0.19, 1, 0.22, 1),
+              border-color 0.3s ease;
+}
+
+.card-premium:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 35px 120px rgba(15, 23, 42, 0.18);
+  border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ============================
+   Reduced Motion (a11y)
+   ============================ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

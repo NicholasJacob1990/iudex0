@@ -3,6 +3,7 @@
 import React from 'react';
 import { cn } from '@/lib/utils';
 import { LucideIcon } from 'lucide-react';
+import { AnimatedContainer, StaggerContainer } from '@/components/ui/animated-container';
 
 interface FeatureItem {
     title: string;
@@ -22,7 +23,7 @@ export function FeatureSection({ title, description, features, className }: Feat
         <section className={cn("py-24 relative snap-start", className)}>
             <div className="container mx-auto px-6">
                 {(title || description) && (
-                    <div className="mb-16 max-w-3xl">
+                    <AnimatedContainer className="mb-16 max-w-3xl">
                         {title && (
                             <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-300/80 mb-6 uppercase tracking-[0.3em] text-xs font-semibold">
                                 <span className="h-px w-10 bg-indigo-600/40 dark:bg-indigo-400/40" />
@@ -31,14 +32,23 @@ export function FeatureSection({ title, description, features, className }: Feat
                         )}
                         {title && <h2 className="text-4xl lg:text-5xl font-bold mb-6 leading-tight text-slate-900 dark:text-white">{title}</h2>}
                         {description && <p className="text-slate-600 dark:text-gray-400 text-lg leading-relaxed">{description}</p>}
-                    </div>
+                    </AnimatedContainer>
                 )}
 
-                <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <StaggerContainer className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
                     {features.map((feature, idx) => (
-                        <div key={idx} className="group p-6 rounded-2xl bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 hover:bg-white dark:hover:bg-white/10 hover:shadow-lg dark:hover:shadow-none transition-all">
+                        <AnimatedContainer
+                            key={idx}
+                            delay={idx * 0.1}
+                            className="group p-6 rounded-2xl bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 hover:bg-white dark:hover:bg-white/10 hover:shadow-lg dark:hover:shadow-none transition-all duration-500 ease-out glow-hover"
+                        >
                             {feature.icon && (
-                                <div className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-lg bg-indigo-100 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 group-hover:text-white group-hover:bg-indigo-600 dark:group-hover:bg-indigo-500 transition-colors">
+                                <div
+                                    className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-lg bg-indigo-100 dark:bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 group-hover:text-white group-hover:bg-indigo-600 dark:group-hover:bg-indigo-500 transition-colors"
+                                    style={{
+                                        animation: `wobble 4s ease-in-out ${idx * 0.3}s infinite`,
+                                    }}
+                                >
                                     <feature.icon className="h-6 w-6" />
                                 </div>
                             )}
@@ -46,9 +56,9 @@ export function FeatureSection({ title, description, features, className }: Feat
                             <p className="text-slate-600 dark:text-gray-400 text-sm leading-relaxed">
                                 {feature.description}
                             </p>
-                        </div>
+                        </AnimatedContainer>
                     ))}
-                </div>
+                </StaggerContainer>
             </div>
         </section>
     );

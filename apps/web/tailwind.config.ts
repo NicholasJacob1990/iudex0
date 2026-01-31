@@ -17,12 +17,19 @@ const config: Config = {
 		},
 		extend: {
 			fontFamily: {
+				'google-sans': [
+					"'Google Sans Flex'",
+					'var(--font-sans)',
+					'Inter',
+					'sans-serif'
+				],
 				sans: [
 					'var(--font-sans)',
 					'Inter',
 					'sans-serif'
 				],
 				display: [
+					"'Google Sans Flex'",
 					'var(--font-display)',
 					'Sora',
 					'sans-serif'
@@ -148,6 +155,26 @@ const config: Config = {
 				'char-in': {
 					'0%': { opacity: '0', transform: 'translateY(0.7em)', filter: 'blur(10px)' },
 					'100%': { opacity: '1', transform: 'translateY(0)', filter: 'blur(0px)' }
+				},
+				'slide-up-fade': {
+					'0%': { opacity: '0', transform: 'translateY(8px)' },
+					'100%': { opacity: '1', transform: 'translateY(0)' }
+				},
+				'slide-down-fade': {
+					'0%': { opacity: '0', transform: 'translateY(-8px)' },
+					'100%': { opacity: '1', transform: 'translateY(0)' }
+				},
+				'scale-in': {
+					'0%': { opacity: '0', transform: 'scale(0.95)' },
+					'100%': { opacity: '1', transform: 'scale(1)' }
+				},
+				'blur-in': {
+					'0%': { opacity: '0', filter: 'blur(8px)' },
+					'100%': { opacity: '1', filter: 'blur(0)' }
+				},
+				'glow-pulse': {
+					'0%, 100%': { boxShadow: '0 0 20px rgba(99, 102, 241, 0.15)' },
+					'50%': { boxShadow: '0 0 40px rgba(99, 102, 241, 0.3)' }
 				}
 			},
 			animation: {
@@ -158,7 +185,12 @@ const config: Config = {
 				float: 'float 6s ease-in-out infinite',
 				drift: 'drift 12s ease-in-out infinite',
 				'stream-in': 'stream-in 900ms cubic-bezier(.19,1,.22,1) forwards',
-				'char-in': 'char-in 700ms cubic-bezier(.19,1,.22,1) forwards'
+				'char-in': 'char-in 700ms cubic-bezier(.19,1,.22,1) forwards',
+				'slide-up-fade': 'slide-up-fade 0.4s cubic-bezier(.19,1,.22,1) forwards',
+				'slide-down-fade': 'slide-down-fade 0.4s cubic-bezier(.19,1,.22,1) forwards',
+				'scale-in': 'scale-in 0.3s cubic-bezier(.19,1,.22,1) forwards',
+				'blur-in': 'blur-in 0.6s ease-out forwards',
+				'glow-pulse': 'glow-pulse 3s ease-in-out infinite'
 			}
 		}
 	},

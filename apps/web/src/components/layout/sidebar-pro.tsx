@@ -22,10 +22,12 @@ import {
   EyeOff,
   Network,
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatDate } from '@/lib/utils';
 import { useUIStore, useChatStore, useAuthStore, useOrgStore } from '@/stores';
 import { RichTooltip } from '@/components/ui/rich-tooltip';
 import { Building2 } from 'lucide-react';
+import { springTransition } from '@/components/ui/motion';
 
 const resourceShortcuts = [
   { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
@@ -146,22 +148,42 @@ export function SidebarPro() {
               aria-label={item.label}
               title={isCollapsed ? item.label : undefined}
               className={cn(
-                'group flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-300',
+                'group relative flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition-all duration-300',
                 isCollapsed && 'lg:justify-center lg:px-2',
                 isActive
-                  ? 'bg-white/10 text-white shadow-inner shadow-white/5 ring-1 ring-white/10'
+                  ? 'text-white'
                   : cn(
                       'text-muted-foreground hover:bg-white/5 hover:text-white',
                       !isCollapsed && 'hover:pl-5'
                     )
               )}
             >
-              <Icon className={cn('h-4 w-4 transition-colors', isActive ? 'text-indigo-400' : 'text-muted-foreground group-hover:text-indigo-300')} />
-              <span className={cn(isCollapsed && 'lg:hidden')}>{item.label}</span>
+              {isActive && (
+                <motion.div
+                  layoutId="sidebar-active"
+                  className="absolute inset-0 rounded-xl bg-white/10 shadow-inner shadow-white/5 ring-1 ring-white/10"
+                  transition={springTransition}
+                />
+              )}
+              <Icon className={cn('relative z-10 h-4 w-4 transition-colors', isActive ? 'text-indigo-400' : 'text-muted-foreground group-hover:text-indigo-300')} />
+              <AnimatePresence mode="wait">
+                {!isCollapsed && (
+                  <motion.span
+                    key={`label-${item.href}`}
+                    initial={{ opacity: 0, x: -8 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -8 }}
+                    transition={{ duration: 0.2 }}
+                    className={cn('relative z-10', isCollapsed && 'lg:hidden')}
+                  >
+                    {item.label}
+                  </motion.span>
+                )}
+              </AnimatePresence>
               {isActive && (
                 <div
                   className={cn(
-                    'ml-auto h-1.5 w-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]',
+                    'relative z-10 ml-auto h-1.5 w-1.5 rounded-full bg-indigo-400 shadow-[0_0_8px_rgba(129,140,248,0.8)]',
                     isCollapsed && 'lg:hidden'
                   )}
                 />

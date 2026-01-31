@@ -5,6 +5,148 @@
 
 ---
 
+## 2026-01-31 — Sessão 3: Harvey/Poe/Antigravity Enhancements
+
+### Objetivo
+Melhorias inspiradas em Harvey.ai (mega-menu, security badges), Poe.com (multi-provider) e Antigravity (video demos, screenshots mockups).
+
+### Arquivos Modificados
+- `src/components/vorbium/vorbium-nav.tsx` — Reescrito com mega-menu Harvey-style (dropdowns Plataforma/Empresa com descrições, AnimatePresence, hover com delay, mobile accordion)
+- `src/app/page.tsx` — Seção video demo placeholder + seção Multi-Provider AI
+- `src/app/assistant/page.tsx` — Mockup de interface de chat com browser chrome + fix contraste Limites
+- `src/app/research/page.tsx` — Mockup de resultados de pesquisa com browser chrome
+- `src/app/workflows/page.tsx` — Browser chrome wrapper no mockup JSON
+- `src/app/platform/page.tsx` — Seção métricas de impacto (70%, 4+, 100%, 24/7)
+- `src/app/customers/page.tsx` — Cards de impacto visuais, seção testimonials, setores melhorados
+- `src/app/security/page.tsx` — Badge cards (SOC2, ISO 27001, LGPD, GDPR), seção proteção em camadas
+- `src/components/vorbium/footer.tsx` — Fix contraste dark mode (gray-700→gray-500)
+
+### Verificação
+- `npx tsc --noEmit` — OK
+
+---
+
+## 2026-01-31 — Auditoria de contraste light/dark mode nas marketing pages
+
+### Objetivo
+Auditar e corrigir problemas de contraste em todas as 6 marketing pages (research, workflows, collaboration, customers, security, platform) e nos componentes compartilhados (vorbium-nav, footer, page-hero, feature-section).
+
+### Resultado da Auditoria
+As 6 páginas de marketing já estavam com classes dual-mode corretas (`text-slate-900 dark:text-white`, `text-slate-600 dark:text-gray-400`, etc.), provavelmente corrigidas durante a criação.
+
+### Problemas encontrados e corrigidos (componentes compartilhados)
+
+#### `src/components/vorbium/vorbium-nav.tsx`
+- Links "Resources" e "About" usavam `text-gray-400` sozinho (muito claro em fundo branco)
+- Corrigido para `text-gray-500 dark:text-gray-400`
+
+#### `src/components/vorbium/footer.tsx`
+- Copyright usava `dark:text-gray-700` (quase invisível em fundo escuro)
+- Links do rodapé usavam `dark:text-gray-600` (pouco legível em fundo escuro)
+- Ambos corrigidos para `dark:text-gray-500`
+
+### Verificação
+- `npx tsc --noEmit` — OK, sem erros
+
+---
+
+## 2026-01-31 — UI/UX Premium Completo (Estilo Antigravity/Apple)
+
+### Objetivo
+Melhorias abrangentes de UI/UX em TODAS as páginas do Iudex, inspiradas no Google Antigravity e Apple.com. Framer Motion + CSS moderno + Tailwind.
+
+### Arquivos Criados (6)
+- `src/components/ui/motion.tsx` — Presets Framer Motion (transitions, variants, componentes wrapper)
+- `src/components/ui/animated-container.tsx` — Scroll-reveal genérico com useInView (cross-browser)
+- `src/components/ui/animated-counter.tsx` — Contador numérico animado com Framer Motion
+- `src/hooks/use-tilt.ts` — 3D tilt effect para cards (perspective + rotateX/Y)
+- `src/hooks/use-scroll-progress.ts` — Scroll progress 0-1
+- `src/components/providers/page-transition.tsx` — AnimatePresence page transitions
+
+### Arquivos Modificados (20+)
+**Infraestrutura:**
+- `globals.css` — shimmer-premium, glow-hover, card-premium, scroll-progress, prefers-reduced-motion
+- `tailwind.config.ts` — keyframes slide-up-fade, slide-down-fade, scale-in, blur-in, glow-pulse
+- `skeleton.tsx` — shimmer-premium no lugar de animate-pulse
+- `dialog.tsx` — backdrop-blur-md, bg-background/95, rounded-2xl
+
+**Dashboard:**
+- `(dashboard)/layout.tsx` — PageTransition wrapper, loading state premium com logo animado
+- `sidebar-pro.tsx` — layoutId sliding active indicator, AnimatePresence labels
+- `dashboard/page.tsx` — StaggerContainer para stat cards, AnimatedCounter
+- `quick-actions.tsx` — StaggerContainer, card-premium glow-hover
+- `stat-card.tsx` — value prop ReactNode para AnimatedCounter
+
+**Landing:**
+- `hero-section.tsx` — Framer Motion stagger, TiltCard 3D, scroll indicator
+- `feature-section.tsx` — AnimatedContainer cross-browser, glow-hover
+- `footer.tsx` — StaggerContainer fadeUp
+- `page.tsx` (landing) — scroll progress bar, AnimatedContainer sections
+
+**Auth:**
+- `login/page.tsx` — gradient mesh bg animado, MotionDiv scaleIn, focus glow inputs
+- `register/page.tsx` — gradient mesh bg, scaleIn card, focus glow
+- `register-type/page.tsx` — gradient mesh, StaggerContainer cards
+
+**Feature pages:**
+- `cases/page.tsx` — AnimatedContainer, StaggerContainer, card-premium glow-hover
+- `documents/page.tsx` — AnimatedContainer header
+- `legislation/page.tsx` — AnimatedContainer header
+- `jurisprudence/page.tsx` — AnimatedContainer, StaggerContainer resultados
+- `library/page.tsx` — AnimatedContainer header
+- `transcription/page.tsx` — AnimatedContainer header
+
+**Marketing:**
+- `platform/page.tsx` — AnimatedContainer CTA
+- `assistant/page.tsx` — AnimatedContainer seções
+- `research/page.tsx` — AnimatedContainer seções
+
+### Decisões Tomadas
+- Framer Motion para animações (cross-browser, já instalado v12.23.24)
+- AnimatePresence mode="wait" para page transitions (pathname como key)
+- useInView substituindo animationTimeline: 'view()' (Chrome-only)
+- layoutId para sidebar active indicator (spring animation)
+- 3D tilt cards com perspective(600px) no hero
+- prefers-reduced-motion global reset para acessibilidade
+
+### Verificação
+- `npx tsc --noEmit` — OK (sem erros)
+- ESLint com problemas pré-existentes (migração ESLint 9, não relacionado)
+
+---
+
+## 2026-01-31 — Melhorias Antigravity na Landing Page Vorbium
+
+### Objetivo
+Aplicar 3 melhorias de alto impacto visual inspiradas no Google Antigravity à landing page.
+
+### Arquivos Alterados
+- `apps/web/src/styles/globals.css` — Adicionados keyframes `wobble`, `scale-reveal` e `scroll-fade-up`
+- `apps/web/src/components/vorbium/feature-section.tsx` — Wobble icons com delay staggered + scroll-driven fade-in (substituiu useInView por animation-timeline: view())
+- `apps/web/src/app/page.tsx` — CTA final com scale-reveal no scroll + seção "Por que" com scroll-driven fade. Removido useInView (não mais necessário)
+
+### Decisões Tomadas
+- Scroll-driven animations (CSS puras) em vez de IntersectionObserver JS para melhor performance
+- Wobble com 4s duration e 0.3s stagger por card para efeito cascata natural
+- Scale-reveal de 0.88→1.0 com opacity 0.6→1.0 para CTA dramático
+- CTA envolvido em card com backdrop-blur para profundidade visual
+
+### Tipografia — Google Sans Flex
+- Expandido range de pesos CDN: 400..800 → 100..900
+- Removido import duplicado de Google Sans Text no globals.css
+- Adicionada família `font-google-sans` no Tailwind config com Google Sans Flex como primária
+- Aplicada no `<body>` via classe Tailwind (removido inline style)
+- Adicionados estilos de tipografia variável (eixos `opsz`, `ROND`, `GRAD`) para headings e body text
+- Atualizado fallback em `.font-google-sans-text` para incluir Google Sans Flex
+
+### Sessão Anterior (mesmo dia)
+- Implementado dual-ring particle system no worklet (anel estático + órbita dinâmica)
+- Cursor repulsion com cubic falloff no anel central
+- Ring breathing animation (120→200 radius)
+- Drift suave do centro (15% blend com cursor)
+
+---
+
 ## 2026-01-28 — Adoção completa do rag.md para GraphRAG/Neo4j
 
 ### Objetivo

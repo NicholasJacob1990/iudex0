@@ -132,18 +132,27 @@ export default function WorkflowsPage() {
                                 ))}
                             </ul>
                         </div>
-                        <div className="rounded-xl bg-slate-950 dark:bg-white/5 border border-slate-800 dark:border-white/10 p-8 shadow-2xl">
-                            <div className="font-mono text-xs text-slate-400 dark:text-gray-500 space-y-2">
-                                <p>{`{`}</p>
-                                <p className="pl-4">{`"execution_id": "wf_8923_khx",`}</p>
-                                <p className="pl-4">{`"timestamp": "2026-01-31T10:45:00Z",`}</p>
-                                <p className="pl-4">{`"trigger": "contract_upload",`}</p>
-                                <p className="pl-4">{`"steps": [`}</p>
-                                <p className="pl-8">{`{ "agent": "classifier", "status": "success", "confidence": 0.98 },`}</p>
-                                <p className="pl-8">{`{ "agent": "risk_analyzer", "status": "flagged", "reason": "clause_4.2" }`}</p>
-                                <p className="pl-4">{`],`}</p>
-                                <p className="pl-4 text-emerald-400">{`"human_review": "required"`}</p>
-                                <p>{`}`}</p>
+                        <div className="rounded-2xl overflow-hidden border border-slate-200 dark:border-white/10 shadow-2xl">
+                            {/* Browser chrome */}
+                            <div className="h-10 bg-slate-100 dark:bg-slate-800 flex items-center px-4 gap-2 border-b border-slate-200 dark:border-white/5">
+                                <div className="h-3 w-3 rounded-full bg-red-400/60" />
+                                <div className="h-3 w-3 rounded-full bg-yellow-400/60" />
+                                <div className="h-3 w-3 rounded-full bg-green-400/60" />
+                                <span className="ml-4 text-xs text-slate-500 dark:text-slate-400">app.iudex.ai/workflows/execution</span>
+                            </div>
+                            <div className="bg-slate-950 dark:bg-[#0a0a0c] p-8">
+                                <div className="font-mono text-xs text-slate-400 dark:text-gray-500 space-y-2">
+                                    <p>{`{`}</p>
+                                    <p className="pl-4">{`"execution_id": "wf_8923_khx",`}</p>
+                                    <p className="pl-4">{`"timestamp": "2026-01-31T10:45:00Z",`}</p>
+                                    <p className="pl-4">{`"trigger": "contract_upload",`}</p>
+                                    <p className="pl-4">{`"steps": [`}</p>
+                                    <p className="pl-8">{`{ "agent": "classifier", "status": "success", "confidence": 0.98 },`}</p>
+                                    <p className="pl-8">{`{ "agent": "risk_analyzer", "status": "flagged", "reason": "clause_4.2" }`}</p>
+                                    <p className="pl-4">{`],`}</p>
+                                    <p className="pl-4 text-emerald-400">{`"human_review": "required"`}</p>
+                                    <p>{`}`}</p>
+                                </div>
                             </div>
                         </div>
                     </div>

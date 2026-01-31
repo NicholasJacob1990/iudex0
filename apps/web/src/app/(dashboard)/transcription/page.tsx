@@ -29,6 +29,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { buildPreventiveHilIssues, type HilIssue } from '@/lib/preventive-hil';
 import { buildPreventiveAuditStatus } from '@/lib/preventive-audit';
+import { AnimatedContainer } from '@/components/ui/animated-container';
 
 function SettingInfoPopover({ children }: { children: React.ReactNode }) {
     const [open, setOpen] = useState(false);
@@ -3124,6 +3125,7 @@ export default function TranscriptionPage() {
     return (
         <>
         <div className={`flex h-full flex-col gap-6 p-6 ${hasActiveProgress ? 'pb-28' : ''}`}>
+            <AnimatedContainer>
             <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
                     <h1 className="text-3xl font-bold tracking-tight">Transcrições</h1>
@@ -3154,6 +3156,7 @@ export default function TranscriptionPage() {
                     </Button>
                 </div>
             </div>
+            </AnimatedContainer>
 
             <Tabs value={mainTab} onValueChange={(value) => setMainTab(value as typeof mainTab)} className="flex-1">
                 <TabsList className="w-full justify-start">

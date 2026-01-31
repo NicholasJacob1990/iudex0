@@ -5,6 +5,9 @@ import { MinuteHistoryGrid, QuickActions, StatCard } from '@/components/dashboar
 import { useChatStore } from '@/stores';
 import { differenceInCalendarDays } from 'date-fns';
 import apiClient from '@/lib/api-client';
+import { StaggerContainer } from '@/components/ui/animated-container';
+import { MotionDiv, fadeUp } from '@/components/ui/motion';
+import { AnimatedCounter } from '@/components/ui/animated-counter';
 
 const DRAFT_STORAGE_PREFIX = 'iudex_chat_drafts_';
 const QUALITY_SUMMARY_PREFIX = 'iudex_quality_summary:';
@@ -161,13 +164,34 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        {stats.map((stat) => (
-          <StatCard key={stat.label} {...stat} />
-        ))}
-      </section>
+      <StaggerContainer as="section" className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {stats.map((stat) => {
+          const numericValue = Number(stat.value);
+          const isNumeric = !isNaN(numericValue) && stat.value !== '--';
+          return (
+            <MotionDiv key={stat.label} variants={fadeUp}>
+              <StatCard
+                {...stat}
+                value={
+                  isNumeric ? (
+                    <AnimatedCounter to={numericValue} duration={1.2} />
+                  ) : (
+                    stat.value
+                  )
+                }
+              />
+            </MotionDiv>
+          );
+        })}
+      </StaggerContainer>
 
-      <MinuteHistoryGrid items={historyItems} />
+      <MotionDiv
+        initial={{ opacity: 0, y: 16 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.5, delay: 0.3 }}
+      >
+        <MinuteHistoryGrid items={historyItems} />
+      </MotionDiv>
 
       <QuickActions />
     </div>

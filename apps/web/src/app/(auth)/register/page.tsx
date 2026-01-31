@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
+import { MotionDiv, scaleIn, smoothTransition } from '@/components/ui/motion';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -90,7 +91,20 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[#0F1115] p-4 font-sans">
+    <div className="relative flex min-h-screen items-center justify-center bg-[#0F1115] p-4 font-sans overflow-hidden">
+      {/* Animated gradient mesh background */}
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/15 blur-3xl animate-drift" />
+        <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/15 blur-3xl animate-float" />
+      </div>
+
+      <MotionDiv
+        variants={scaleIn}
+        initial="hidden"
+        animate="visible"
+        transition={smoothTransition}
+        className="w-full max-w-md relative z-10"
+      >
       <Card className="w-full max-w-md border-white/10 bg-white/5 backdrop-blur-xl">
         <CardHeader className="space-y-1 text-center">
           <CardTitle className="text-3xl font-bold text-white">
@@ -151,7 +165,7 @@ export default function RegisterPage() {
               <div className="space-y-2">
                 <label className="text-sm font-medium text-gray-300">Nome Completo</label>
                 <Input
-                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                   placeholder="Seu nome"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -166,7 +180,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">CPF</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="000.000.000-00"
                         value={cpf}
                         onChange={(e) => setCpf(e.target.value)}
@@ -176,7 +190,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">Telefone</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="(00) 00000-0000"
                         value={phone}
                         onChange={(e) => setPhone(e.target.value)}
@@ -188,7 +202,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">OAB</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="000000"
                         value={oab}
                         onChange={(e) => setOab(e.target.value)}
@@ -198,7 +212,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">UF OAB</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="SP"
                         value={oabState}
                         onChange={(e) => setOabState(e.target.value)}
@@ -215,7 +229,7 @@ export default function RegisterPage() {
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-gray-300">Nome da Organização</label>
                     <Input
-                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                       placeholder="Nome do Escritório ou Empresa"
                       value={orgName}
                       onChange={(e) => setOrgName(e.target.value)}
@@ -227,7 +241,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">CNPJ</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="00.000.000/0000-00"
                         value={cnpj}
                         onChange={(e) => setCnpj(e.target.value)}
@@ -237,7 +251,7 @@ export default function RegisterPage() {
                     <div className="space-y-2">
                       <label className="text-sm font-medium text-gray-300">Departamento</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                         placeholder="Jurídico"
                         value={department}
                         onChange={(e) => setDepartment(e.target.value)}
@@ -282,7 +296,7 @@ export default function RegisterPage() {
                   <div className="space-y-2">
                     <label className="text-sm font-medium text-gray-300">Seu Cargo</label>
                     <Input
-                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                       placeholder="Ex: Sócio, Advogado Sênior, Diretor..."
                       value={role}
                       onChange={(e) => setRole(e.target.value)}
@@ -296,7 +310,7 @@ export default function RegisterPage() {
               <div className="space-y-2">
                 <label className="text-sm font-medium text-gray-300">Email Profissional</label>
                 <Input
-                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                   type="email"
                   placeholder="seu@email.com"
                   value={email}
@@ -310,7 +324,7 @@ export default function RegisterPage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-gray-300">Senha</label>
                   <Input
-                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                     type="password"
                     placeholder="••••••••"
                     value={password}
@@ -322,7 +336,7 @@ export default function RegisterPage() {
                 <div className="space-y-2">
                   <label className="text-sm font-medium text-gray-300">Confirmar</label>
                   <Input
-                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-500/50"
+                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
                     type="password"
                     placeholder="••••••••"
                     value={confirmPassword}
@@ -340,6 +354,7 @@ export default function RegisterPage() {
           )}
         </CardContent>
       </Card>
+      </MotionDiv>
     </div>
   );
 }

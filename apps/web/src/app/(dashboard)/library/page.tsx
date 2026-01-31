@@ -5,12 +5,14 @@ import { Button } from '@/components/ui/button';
 import { Plus, Share2 } from 'lucide-react';
 import { LibraryTable, LibrarySidebar, ShareDialog } from '@/components/dashboard';
 import { CrossFileDuplicatesModal } from '@/components/dashboard/cross-file-duplicates-modal';
+import { AnimatedContainer } from '@/components/ui/animated-container';
 
 export default function LibraryPage() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
 
   return (
     <div className="space-y-8">
+      <AnimatedContainer>
       <div className="flex flex-col gap-4 rounded-3xl border border-white/70 bg-white/95 p-6 shadow-soft lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="text-xs font-semibold uppercase text-muted-foreground">Biblioteca</p>
@@ -40,6 +42,7 @@ export default function LibraryPage() {
           </Button>
         </div>
       </div>
+      </AnimatedContainer>
 
       <div className="flex gap-6">
         <div className="hidden lg:block flex-shrink-0">

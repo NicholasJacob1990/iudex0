@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
+import { MotionDiv, scaleIn, smoothTransition } from '@/components/ui/motion';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -53,8 +54,21 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-primary/10 via-background to-secondary/10 p-4">
-      <Card className="w-full max-w-md">
+    <div className="relative flex min-h-screen items-center justify-center bg-gradient-to-br from-primary/10 via-background to-secondary/10 p-4 overflow-hidden">
+      {/* Animated gradient mesh background */}
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/20 blur-3xl animate-drift" />
+        <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/20 blur-3xl animate-float" />
+      </div>
+
+      <MotionDiv
+        variants={scaleIn}
+        initial="hidden"
+        animate="visible"
+        transition={smoothTransition}
+        className="w-full max-w-md relative z-10"
+      >
+      <Card className="w-full max-w-md backdrop-blur-xl bg-white/80 dark:bg-white/5">
         <CardHeader className="space-y-1 text-center">
           <CardTitle className="text-3xl font-bold">Iudex</CardTitle>
           <CardDescription>IA Jurídica Avançada com Multi-Agentes</CardDescription>
@@ -73,7 +87,7 @@ export default function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 disabled={isLoading}
                 required
-                className="text-slate-900 dark:text-slate-100"
+                className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
               />
             </div>
 
@@ -89,7 +103,7 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 disabled={isLoading}
                 required
-                className="text-slate-900 dark:text-slate-100"
+                className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
               />
             </div>
 
@@ -127,6 +141,7 @@ export default function LoginPage() {
           </form>
         </CardContent>
       </Card>
+      </MotionDiv>
     </div>
   );
 }

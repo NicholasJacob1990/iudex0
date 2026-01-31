@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { formatDate, formatFileSize } from '@/lib/utils';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
+import { AnimatedContainer } from '@/components/ui/animated-container';
 
 export default function DocumentsPage() {
   const { documents, fetchDocuments, deleteDocument } = useDocumentStore();
@@ -102,6 +103,7 @@ export default function DocumentsPage() {
 
   return (
     <div className="space-y-8">
+      <AnimatedContainer>
       <div className="rounded-3xl border border-white/70 bg-white/95 p-6 shadow-soft">
         <p className="text-xs font-semibold uppercase text-muted-foreground">Documentos</p>
         <h1 className="font-display text-3xl text-foreground">Organize seus arquivos jurídicos.</h1>
@@ -109,6 +111,7 @@ export default function DocumentsPage() {
           Centralize minutas, anexos, mídias e gravações com OCR automático e unificação por pastas.
         </p>
       </div>
+      </AnimatedContainer>
 
       <DocumentsDropzone onOpenDocument={handleExpand} />
 
