@@ -37,6 +37,14 @@ export const graphKeys = {
         [...graphKeys.all, 'path', sourceId, targetId, maxLength] as const,
     search: (query: string, types?: string, group?: string) =>
         [...graphKeys.all, 'search', query, types, group] as const,
+    lexicalSearch: (
+        terms: string[],
+        devices: string[],
+        authors: string[],
+        matchMode: 'all' | 'any',
+        types: string[],
+        limit?: number
+    ) => [...graphKeys.all, 'lexical-search', terms, devices, authors, matchMode, types, limit] as const,
     relationTypes: () => [...graphKeys.all, 'relation-types'] as const,
 };
 
@@ -50,6 +58,8 @@ export interface GraphDataParams {
     maxNodes?: number;
     includeRelationships?: boolean;
     entityIds?: string;
+    documentIds?: string;
+    caseIds?: string;
 }
 
 export interface PathNode {
@@ -127,6 +137,8 @@ export function useGraphData(params: GraphDataParams, enabled = true) {
                 max_nodes: params.maxNodes,
                 include_relationships: params.includeRelationships,
                 entity_ids: params.entityIds,
+                document_ids: params.documentIds,
+                case_ids: params.caseIds,
             });
             return data;
         },
@@ -259,6 +271,83 @@ export function useSearchEntities(
 }
 
 /**
+ * Server-side lexical search for entities (Neo4j)
+ *
+ * Used to seed graph export with entities that match the lexical filters.
+ */
+export function useGraphLexicalSearch(
+    params: {
+        terms: string[];
+        devices: string[];
+        authors: string[];
+        matchMode: 'all' | 'any';
+        types: string[];
+        limit?: number;
+    },
+    enabled = true
+) {
+    return useQuery({
+        queryKey: graphKeys.lexicalSearch(
+            params.terms,
+            params.devices,
+            params.authors,
+            params.matchMode,
+            params.types,
+            params.limit
+        ),
+        queryFn: async () => {
+            return await apiClient.graphLexicalSearch({
+                terms: params.terms,
+                devices: params.devices,
+                authors: params.authors,
+                matchMode: params.matchMode,
+                types: params.types,
+                limit: params.limit,
+            });
+        },
+        enabled,
+        staleTime: 1000 * 30,
+        gcTime: 1000 * 60 * 5,
+    });
+}
+
+/**
+ * Content search (OpenSearch BM25) -> entity_ids
+ */
+export function useGraphContentSearch(
+    params: {
+        query: string;
+        types: string[];
+        groups: string[];
+        maxChunks?: number;
+        maxEntities?: number;
+        includeGlobal?: boolean;
+        documentIds?: string[];
+        caseIds?: string[];
+    },
+    enabled = true
+) {
+    return useQuery({
+        queryKey: [...graphKeys.all, 'content-search', params] as const,
+        queryFn: async () => {
+            return await apiClient.graphContentSearch({
+                query: params.query,
+                types: params.types,
+                groups: params.groups,
+                maxChunks: params.maxChunks,
+                maxEntities: params.maxEntities,
+                includeGlobal: params.includeGlobal,
+                documentIds: params.documentIds,
+                caseIds: params.caseIds,
+            });
+        },
+        enabled: enabled && params.query.trim().length >= 2,
+        staleTime: 1000 * 30,
+        gcTime: 1000 * 60 * 5,
+    });
+}
+
+/**
  * Fetch available relation types
  */
 export function useRelationTypes(enabled = true) {
@@ -332,4 +421,79 @@ export function useEntityDetails(entityId: string | null) {
         },
         loadNeighbors: () => neighborsQuery.refetch(),
     };
+}
+
+// =============================================================================
+// LEXICAL SEARCH IN GRAPH
+// =============================================================================
+
+export interface LexicalSearchParams {
+    terms?: string[];
+    devices?: string[];
+    authors?: string[];
+    matchMode?: 'any' | 'all';
+    types?: string[];
+    limit?: number;
+}
+
+/**
+ * Lexical search for entities in the graph
+ * Searches entities by terms, legal devices, and authors/tribunals
+ */
+export function useLexicalSearch(params: LexicalSearchParams, enabled = true) {
+    const hasTerms = (params.terms?.length || 0) > 0 ||
+                     (params.devices?.length || 0) > 0 ||
+                     (params.authors?.length || 0) > 0;
+
+    return useQuery({
+        queryKey: ['graph', 'lexical-search', params],
+        queryFn: async () => {
+            return await apiClient.graphLexicalSearch(params);
+        },
+        enabled: enabled && hasTerms,
+        staleTime: 1000 * 60 * 2, // 2 minutes
+        gcTime: 1000 * 60 * 10,
+    });
+}
+
+// =============================================================================
+// ADD ENTITIES FROM RAG LOCAL
+// =============================================================================
+
+export interface AddFromRAGParams {
+    documentIds?: string[];
+    caseIds?: string[];
+    extractSemantic?: boolean;
+}
+
+export interface AddFromRAGResult {
+    documents_processed: number;
+    chunks_processed: number;
+    entities_extracted: number;
+    entities_added: number;
+    entities_existing: number;
+    relationships_created: number;
+    entities: Array<{
+        entity_id: string;
+        entity_type: string;
+        name: string;
+        normalized: string;
+    }>;
+}
+
+/**
+ * Mutation to add entities from RAG local documents to the graph
+ */
+export function useAddFromRAG() {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: async (params: AddFromRAGParams): Promise<AddFromRAGResult> => {
+            return await apiClient.graphAddFromRAG(params);
+        },
+        onSuccess: () => {
+            // Invalidate graph data queries to refresh the visualization
+            queryClient.invalidateQueries({ queryKey: graphKeys.all });
+        },
+    });
 }

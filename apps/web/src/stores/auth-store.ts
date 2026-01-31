@@ -6,6 +6,10 @@ interface User {
   id: string;
   name: string;
   email: string;
+  role: string;
+  plan: string;
+  account_type: string;
+  organization_id?: string | null;
   created_at: string;
 }
 

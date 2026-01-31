@@ -71,6 +71,7 @@ class RAGConfig:
     enable_tracing: bool = True
     enable_chunk_expansion: bool = True
     enable_lexical_first_gating: bool = True  # MVP: skip vector if lexical strong
+    enable_graph_retrieval: bool = True  # Neo4j as 3rd RRF source (conforme rag.md)
 
     # ==========================================================================
     # CRAG Gate Settings
@@ -86,6 +87,9 @@ class RAGConfig:
     hyde_max_tokens: int = 300
     multiquery_max: int = 3
     multiquery_model: str = "gemini-2.0-flash"
+    query_enhancement_preflight: bool = True  # Preflight lexical before HyDE/MultiQuery
+    query_enhancement_preflight_top_k: int = 6
+    multiquery_apply_to_lexical: bool = False  # Default: keep multiquery for vector-only
 
     # ==========================================================================
     # Reranking (Hybrid: Local or Cohere)
@@ -94,8 +98,9 @@ class RAGConfig:
     rerank_provider: str = "auto"
 
     # Local cross-encoder settings
-    rerank_model: str = "cross-encoder/ms-marco-multilingual-MiniLM-L6-H384-v1"
-    rerank_model_fallback: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    # Keep defaults to public, stable model ids (avoid runtime 404s on HF).
+    rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+    rerank_model_fallback: str = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
     rerank_batch_size: int = 32
     rerank_use_fp16: bool = True
     rerank_cache_model: bool = True
@@ -134,7 +139,8 @@ class RAGConfig:
     # ==========================================================================
     # Graph Backend (NetworkX or Neo4j)
     # ==========================================================================
-    graph_backend: str = "networkx"  # "networkx" or "neo4j"
+    graph_backend: str = "neo4j"  # "neo4j" (default conforme rag.md) or "networkx"
+    neo4j_only: bool = True  # Enforce Neo4j-only (no NetworkX/file fallback)
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
@@ -166,6 +172,7 @@ class RAGConfig:
     # ==========================================================================
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
+    vector_query_max_concurrency: int = 4  # Max concurrent vector queries (per request)
 
     # Qdrant collections
     qdrant_collection_lei: str = "lei"
@@ -203,6 +210,16 @@ class RAGConfig:
     rrf_k: int = 60
     lexical_weight: float = 0.5
     vector_weight: float = 0.5
+    graph_weight: float = 0.3  # Neo4j graph retrieval weight in RRF
+    graph_retrieval_limit: int = 20  # Max chunks from Neo4j graph search
+
+    # ==========================================================================
+    # Citation Grounding (post-generation verification)
+    # ==========================================================================
+    enable_citation_grounding: bool = True      # Verify legal citations in LLM output
+    citation_grounding_threshold: float = 0.85  # Min fidelity index before warning
+    citation_grounding_neo4j: bool = True       # Also check Neo4j entity store
+    citation_grounding_annotate: bool = True    # Annotate text with [NÃO VERIFICADO]
 
     # ==========================================================================
     # Budget Caps (Cost Control)
@@ -233,6 +250,58 @@ class RAGConfig:
     graph_embedding_min_new_triples: int = 100
 
     # ==========================================================================
+    # Result Cache
+    # ==========================================================================
+    enable_result_cache: bool = True
+    result_cache_ttl_seconds: int = 300  # 5 minutes
+    result_cache_max_size: int = 5000
+
+    # ==========================================================================
+    # Per-Database Timeouts (seconds)
+    # ==========================================================================
+    lexical_timeout_seconds: float = 0.5
+    vector_timeout_seconds: float = 1.0
+    graph_search_timeout_seconds: float = 0.5
+    min_sources_required: int = 1
+
+    # ==========================================================================
+    # Warm-Start
+    # ==========================================================================
+    warmup_on_startup: bool = True
+
+    # ==========================================================================
+    # CogGRAG — Cognitive Graph RAG
+    # ==========================================================================
+    enable_cograg: bool = False
+    cograg_max_depth: int = 3
+    cograg_max_children: int = 4
+    cograg_decomposer_model: str = "gemini-2.0-flash"
+    cograg_similarity_threshold: float = 0.7
+    cograg_complexity_threshold: float = 0.5
+
+    # Cognitive RAG Enhancements (Phase 2.5)
+    cograg_theme_retrieval_enabled: bool = False
+    cograg_evidence_refinement_enabled: bool = False
+    cograg_memory_enabled: bool = False
+    cograg_memory_backend: str = "auto"  # auto | neo4j | file
+    cograg_memory_similarity_threshold: float = 0.85
+    cograg_abstain_mode: bool = True
+    cograg_abstain_threshold: float = 0.3
+    cograg_graph_evidence_enabled: bool = True
+    cograg_graph_evidence_max_hops: int = 2
+    cograg_graph_evidence_limit: int = 10
+    cograg_mindmap_explain_enabled: bool = False
+    cograg_mindmap_explain_format: str = "json"  # json | mermaid | both
+    cograg_audit_mode: bool = False
+
+    # Verification (Phase 3)
+    cograg_verification_enabled: bool = False
+    cograg_verification_model: str = "gemini-2.0-flash"
+    cograg_max_rethink_attempts: int = 2
+    cograg_hallucination_loop: bool = False
+    cograg_llm_max_concurrency: int = 6  # cap parallel LLM calls in CogGRAG nodes
+
+    # ==========================================================================
     # Lexical-First Gating (MVP optimization)
     # ==========================================================================
     lexical_strong_threshold: float = 0.7  # If best lexical score > this, skip vector
@@ -260,6 +329,7 @@ class RAGConfig:
             enable_tracing=_env_bool("RAG_ENABLE_TRACING", True),
             enable_chunk_expansion=_env_bool("RAG_ENABLE_CHUNK_EXPANSION", True),
             enable_lexical_first_gating=_env_bool("RAG_ENABLE_LEXICAL_FIRST", True),
+            enable_graph_retrieval=_env_bool("RAG_ENABLE_GRAPH_RETRIEVAL", True),
 
             # CRAG
             crag_min_best_score=_env_float("RAG_CRAG_MIN_BEST_SCORE", 0.5),
@@ -271,11 +341,14 @@ class RAGConfig:
             hyde_max_tokens=_env_int("RAG_HYDE_MAX_TOKENS", 300),
             multiquery_max=_env_int("RAG_MULTIQUERY_MAX", 3),
             multiquery_model=os.getenv("RAG_MULTIQUERY_MODEL", "gemini-2.0-flash"),
+            query_enhancement_preflight=_env_bool("RAG_QUERY_ENHANCEMENT_PREFLIGHT", True),
+            query_enhancement_preflight_top_k=_env_int("RAG_QUERY_ENHANCEMENT_PREFLIGHT_TOP_K", 6),
+            multiquery_apply_to_lexical=_env_bool("RAG_MULTIQUERY_APPLY_TO_LEXICAL", False),
 
             # Reranking (Hybrid)
             rerank_provider=os.getenv("RERANK_PROVIDER", "auto"),
-            rerank_model=os.getenv("RAG_RERANK_MODEL", "cross-encoder/ms-marco-multilingual-MiniLM-L6-H384-v1"),
-            rerank_model_fallback=os.getenv("RAG_RERANK_MODEL_FALLBACK", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            rerank_model=os.getenv("RAG_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            rerank_model_fallback=os.getenv("RAG_RERANK_MODEL_FALLBACK", "cross-encoder/ms-marco-TinyBERT-L-2-v2"),
             rerank_batch_size=_env_int("RAG_RERANK_BATCH_SIZE", 32),
             rerank_use_fp16=_env_bool("RAG_RERANK_USE_FP16", True),
             rerank_cache_model=_env_bool("RAG_RERANK_CACHE_MODEL", True),
@@ -302,7 +375,8 @@ class RAGConfig:
             graph_max_nodes=_env_int("RAG_GRAPH_MAX_NODES", 50),
 
             # Graph Backend
-            graph_backend=os.getenv("RAG_GRAPH_BACKEND", "networkx"),
+            graph_backend=os.getenv("RAG_GRAPH_BACKEND", "neo4j"),
+            neo4j_only=_env_bool("RAG_NEO4J_ONLY", True),
             neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
             # Aura typically provides NEO4J_USERNAME; accept it as an alias.
             neo4j_user=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j")),
@@ -329,6 +403,7 @@ class RAGConfig:
             # Qdrant
             qdrant_url=os.getenv("QDRANT_URL", "http://localhost:6333"),
             qdrant_api_key=os.getenv("QDRANT_API_KEY", ""),
+            vector_query_max_concurrency=_env_int("RAG_VECTOR_QUERY_MAX_CONCURRENCY", 4),
             qdrant_collection_lei=os.getenv("QDRANT_COLLECTION_LEI", "lei"),
             qdrant_collection_juris=os.getenv("QDRANT_COLLECTION_JURIS", "juris"),
             qdrant_collection_pecas=os.getenv("QDRANT_COLLECTION_PECAS", "pecas_modelo"),
@@ -356,6 +431,14 @@ class RAGConfig:
             rrf_k=_env_int("RAG_RRF_K", 60),
             lexical_weight=_env_float("RAG_LEXICAL_WEIGHT", 0.5),
             vector_weight=_env_float("RAG_VECTOR_WEIGHT", 0.5),
+            graph_weight=_env_float("RAG_GRAPH_WEIGHT", 0.3),
+            graph_retrieval_limit=_env_int("RAG_GRAPH_RETRIEVAL_LIMIT", 20),
+
+            # Citation Grounding
+            enable_citation_grounding=_env_bool("CITATION_GROUNDING_ENABLED", True),
+            citation_grounding_threshold=_env_float("CITATION_GROUNDING_THRESHOLD", 0.85),
+            citation_grounding_neo4j=_env_bool("CITATION_GROUNDING_NEO4J", True),
+            citation_grounding_annotate=_env_bool("CITATION_GROUNDING_ANNOTATE", True),
 
             # Search
             default_fetch_k=_env_int("RAG_DEFAULT_FETCH_K", 50),
@@ -365,6 +448,46 @@ class RAGConfig:
             max_tokens_per_request=_env_int("RAG_MAX_TOKENS_PER_REQUEST", 50000),
             max_llm_calls_per_request=_env_int("RAG_MAX_LLM_CALLS_PER_REQUEST", 5),
             warn_at_budget_percent=_env_float("RAG_WARN_AT_BUDGET_PERCENT", 0.8),
+
+            # Result cache
+            enable_result_cache=_env_bool("RAG_ENABLE_RESULT_CACHE", True),
+            result_cache_ttl_seconds=_env_int("RAG_RESULT_CACHE_TTL", 300),
+            result_cache_max_size=_env_int("RAG_RESULT_CACHE_MAX", 5000),
+
+            # Per-database timeouts
+            lexical_timeout_seconds=_env_float("RAG_LEXICAL_TIMEOUT", 0.5),
+            vector_timeout_seconds=_env_float("RAG_VECTOR_TIMEOUT", 1.0),
+            graph_search_timeout_seconds=_env_float("RAG_GRAPH_SEARCH_TIMEOUT", 0.5),
+            min_sources_required=_env_int("RAG_MIN_SOURCES", 1),
+
+            # Warm-start
+            warmup_on_startup=_env_bool("RAG_WARMUP_ON_STARTUP", True),
+
+            # CogGRAG
+            enable_cograg=_env_bool("RAG_ENABLE_COGRAG", False),
+            cograg_max_depth=_env_int("RAG_COGRAG_MAX_DEPTH", 3),
+            cograg_max_children=_env_int("RAG_COGRAG_MAX_CHILDREN", 4),
+            cograg_decomposer_model=os.getenv("RAG_COGRAG_DECOMPOSER_MODEL", "gemini-2.0-flash"),
+            cograg_similarity_threshold=_env_float("RAG_COGRAG_SIMILARITY_THRESHOLD", 0.7),
+            cograg_complexity_threshold=_env_float("RAG_COGRAG_COMPLEXITY_THRESHOLD", 0.5),
+            cograg_theme_retrieval_enabled=_env_bool("RAG_COGRAG_THEME_RETRIEVAL", False),
+            cograg_evidence_refinement_enabled=_env_bool("RAG_COGRAG_EVIDENCE_REFINEMENT", False),
+            cograg_memory_enabled=_env_bool("RAG_COGRAG_MEMORY", False),
+            cograg_memory_backend=os.getenv("RAG_COGRAG_MEMORY_BACKEND", "auto"),
+            cograg_memory_similarity_threshold=_env_float("RAG_COGRAG_MEMORY_SIMILARITY_THRESHOLD", 0.85),
+            cograg_abstain_mode=_env_bool("RAG_COGRAG_ABSTAIN_MODE", True),
+            cograg_abstain_threshold=_env_float("RAG_COGRAG_ABSTAIN_THRESHOLD", 0.3),
+            cograg_graph_evidence_enabled=_env_bool("RAG_COGRAG_GRAPH_EVIDENCE", True),
+            cograg_graph_evidence_max_hops=_env_int("RAG_COGRAG_GRAPH_EVIDENCE_MAX_HOPS", 2),
+            cograg_graph_evidence_limit=_env_int("RAG_COGRAG_GRAPH_EVIDENCE_LIMIT", 10),
+            cograg_mindmap_explain_enabled=_env_bool("RAG_COGRAG_MINDMAP_EXPLAIN", False),
+            cograg_mindmap_explain_format=os.getenv("RAG_COGRAG_MINDMAP_EXPLAIN_FORMAT", "json"),
+            cograg_audit_mode=_env_bool("RAG_COGRAG_AUDIT_MODE", False),
+            cograg_verification_enabled=_env_bool("RAG_COGRAG_VERIFICATION", False),
+            cograg_verification_model=os.getenv("RAG_COGRAG_VERIFICATION_MODEL", "gemini-2.0-flash"),
+            cograg_max_rethink_attempts=_env_int("RAG_COGRAG_MAX_RETHINK", 2),
+            cograg_hallucination_loop=_env_bool("RAG_COGRAG_HALLUCINATION_LOOP", False),
+            cograg_llm_max_concurrency=_env_int("RAG_COGRAG_LLM_MAX_CONCURRENCY", 6),
 
             # Lexical-first
             lexical_strong_threshold=_env_float("RAG_LEXICAL_STRONG_THRESHOLD", 0.7),

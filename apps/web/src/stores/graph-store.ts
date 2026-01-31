@@ -8,7 +8,7 @@ export interface GraphNode {
     id: string;
     label: string;
     type: string;
-    group: 'legislacao' | 'jurisprudencia' | 'doutrina' | 'outros';
+    group: 'legislacao' | 'jurisprudencia' | 'doutrina' | 'fatos' | 'outros';
     metadata?: Record<string, unknown>;
     size?: number;
     // For force-graph
@@ -61,6 +61,10 @@ export const RELATION_LABELS: Record<string, { label: string; description: strin
     complementa: {
         label: 'Complementa',
         description: 'Complementa ou detalha outro dispositivo',
+    },
+    fact_refers_to: {
+        label: 'Relacionado ao fato',
+        description: 'Fato extraído do documento que referencia/conecta a entidade',
     },
 };
 
@@ -116,6 +120,7 @@ export interface GraphFilters {
     showLegislacao: boolean;
     showJurisprudencia: boolean;
     showDoutrina: boolean;
+    showFatos: boolean;
     // Specific types within groups
     entityTypes: string[];
     // Search
@@ -123,6 +128,18 @@ export interface GraphFilters {
     // Display options
     maxNodes: number;
     showRelationships: boolean;
+
+    // Material selection (documents, cases, library)
+    selectedDocuments: string[];
+    selectedCases: string[];
+    filterByMaterials: boolean;
+
+    // Lexical search (tags)
+    lexicalTerms: string[];
+    lexicalAuthors: string[];
+    lexicalDevices: string[];
+    lexicalMatchMode: 'all' | 'any';
+    lexicalSearchMode: 'entities' | 'content';
 }
 
 // =============================================================================
@@ -159,9 +176,32 @@ interface GraphState {
     setError: (error: string | null) => void;
     setFilters: (filters: Partial<GraphFilters>) => void;
     setZoomLevel: (zoom: number) => void;
-    toggleGroup: (group: 'legislacao' | 'jurisprudencia' | 'doutrina') => void;
+    toggleGroup: (group: 'legislacao' | 'jurisprudencia' | 'doutrina' | 'fatos') => void;
     resetFilters: () => void;
     clearSelection: () => void;
+
+    // Material selection actions
+    setSelectedDocuments: (docs: string[]) => void;
+    setSelectedCases: (cases: string[]) => void;
+    toggleFilterByMaterials: () => void;
+    addDocument: (docId: string) => void;
+    removeDocument: (docId: string) => void;
+    addCase: (caseId: string) => void;
+    removeCase: (caseId: string) => void;
+
+    // Lexical search actions
+    setLexicalTerms: (terms: string[]) => void;
+    setLexicalAuthors: (authors: string[]) => void;
+    setLexicalDevices: (devices: string[]) => void;
+    setLexicalMatchMode: (mode: 'all' | 'any') => void;
+    addLexicalTerm: (term: string) => void;
+    removeLexicalTerm: (term: string) => void;
+    addLexicalAuthor: (author: string) => void;
+    removeLexicalAuthor: (author: string) => void;
+    addLexicalDevice: (device: string) => void;
+    removeLexicalDevice: (device: string) => void;
+    clearLexicalFilters: () => void;
+    setLexicalSearchMode: (mode: 'entities' | 'content') => void;
 }
 
 // =============================================================================
@@ -172,10 +212,21 @@ const defaultFilters: GraphFilters = {
     showLegislacao: true,
     showJurisprudencia: true,
     showDoutrina: true,
+    showFatos: false,
     entityTypes: ['lei', 'artigo', 'sumula', 'jurisprudencia', 'tema', 'tribunal'],
     searchQuery: '',
     maxNodes: 100,
     showRelationships: true,
+    // Material selection
+    selectedDocuments: [],
+    selectedCases: [],
+    filterByMaterials: false,
+    // Lexical search
+    lexicalTerms: [],
+    lexicalAuthors: [],
+    lexicalDevices: [],
+    lexicalMatchMode: 'any',
+    lexicalSearchMode: 'entities',
 };
 
 // =============================================================================
@@ -246,6 +297,9 @@ export const useGraphStore = create<GraphState>((set, get) => ({
                     filters.entityTypes = filters.entityTypes.filter(t => !['tese', 'conceito'].includes(t));
                 }
                 break;
+            case 'fatos':
+                filters.showFatos = !filters.showFatos;
+                break;
         }
 
         return { filters };
@@ -258,6 +312,129 @@ export const useGraphStore = create<GraphState>((set, get) => ({
         selectedEntity: null,
         remissoes: null
     }),
+
+    // Material selection actions
+    setSelectedDocuments: (docs) => set((state) => ({
+        filters: { ...state.filters, selectedDocuments: docs }
+    })),
+
+    setSelectedCases: (cases) => set((state) => ({
+        filters: { ...state.filters, selectedCases: cases }
+    })),
+
+    toggleFilterByMaterials: () => set((state) => ({
+        filters: { ...state.filters, filterByMaterials: !state.filters.filterByMaterials }
+    })),
+
+    addDocument: (docId) => set((state) => ({
+        filters: {
+            ...state.filters,
+            selectedDocuments: state.filters.selectedDocuments.includes(docId)
+                ? state.filters.selectedDocuments
+                : [...state.filters.selectedDocuments, docId]
+        }
+    })),
+
+    removeDocument: (docId) => set((state) => ({
+        filters: {
+            ...state.filters,
+            selectedDocuments: state.filters.selectedDocuments.filter(id => id !== docId)
+        }
+    })),
+
+    addCase: (caseId) => set((state) => ({
+        filters: {
+            ...state.filters,
+            selectedCases: state.filters.selectedCases.includes(caseId)
+                ? state.filters.selectedCases
+                : [...state.filters.selectedCases, caseId]
+        }
+    })),
+
+    removeCase: (caseId) => set((state) => ({
+        filters: {
+            ...state.filters,
+            selectedCases: state.filters.selectedCases.filter(id => id !== caseId)
+        }
+    })),
+
+    // Lexical search actions
+    setLexicalTerms: (terms) => set((state) => ({
+        filters: { ...state.filters, lexicalTerms: terms }
+    })),
+
+    setLexicalAuthors: (authors) => set((state) => ({
+        filters: { ...state.filters, lexicalAuthors: authors }
+    })),
+
+    setLexicalDevices: (devices) => set((state) => ({
+        filters: { ...state.filters, lexicalDevices: devices }
+    })),
+
+    setLexicalMatchMode: (mode) => set((state) => ({
+        filters: { ...state.filters, lexicalMatchMode: mode }
+    })),
+
+    addLexicalTerm: (term) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalTerms: state.filters.lexicalTerms.includes(term)
+                ? state.filters.lexicalTerms
+                : [...state.filters.lexicalTerms, term]
+        }
+    })),
+
+    removeLexicalTerm: (term) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalTerms: state.filters.lexicalTerms.filter(t => t !== term)
+        }
+    })),
+
+    addLexicalAuthor: (author) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalAuthors: state.filters.lexicalAuthors.includes(author)
+                ? state.filters.lexicalAuthors
+                : [...state.filters.lexicalAuthors, author]
+        }
+    })),
+
+    removeLexicalAuthor: (author) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalAuthors: state.filters.lexicalAuthors.filter(a => a !== author)
+        }
+    })),
+
+    addLexicalDevice: (device) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalDevices: state.filters.lexicalDevices.includes(device)
+                ? state.filters.lexicalDevices
+                : [...state.filters.lexicalDevices, device]
+        }
+    })),
+
+    removeLexicalDevice: (device) => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalDevices: state.filters.lexicalDevices.filter(d => d !== device)
+        }
+    })),
+
+    clearLexicalFilters: () => set((state) => ({
+        filters: {
+            ...state.filters,
+            lexicalTerms: [],
+            lexicalAuthors: [],
+            lexicalDevices: []
+        }
+    })),
+
+    setLexicalSearchMode: (mode) => set((state) => ({
+        filters: { ...state.filters, lexicalSearchMode: mode }
+    })),
 }));
 
 // =============================================================================
@@ -267,13 +444,20 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 export const selectFilteredNodes = (state: GraphState) => {
     if (!state.graphData) return [];
 
-    const { showLegislacao, showJurisprudencia, showDoutrina, searchQuery } = state.filters;
+    const {
+        showLegislacao,
+        showJurisprudencia,
+        showDoutrina,
+        showFatos,
+        searchQuery
+    } = state.filters;
 
     return state.graphData.nodes.filter(node => {
         // Filter by group
         if (node.group === 'legislacao' && !showLegislacao) return false;
         if (node.group === 'jurisprudencia' && !showJurisprudencia) return false;
         if (node.group === 'doutrina' && !showDoutrina) return false;
+        if (node.group === 'fatos' && !showFatos) return false;
 
         // Filter by search
         if (searchQuery && !node.label.toLowerCase().includes(searchQuery.toLowerCase())) {
@@ -305,6 +489,7 @@ export const GROUP_COLORS = {
     legislacao: '#3b82f6',      // blue-500
     jurisprudencia: '#10b981',  // emerald-500
     doutrina: '#8b5cf6',        // violet-500
+    fatos: '#f97316',           // orange-500
     outros: '#6b7280',          // gray-500
 } as const;
 
@@ -320,6 +505,7 @@ export const TYPE_COLORS: Record<string, string> = {
     processo: '#9ca3af',        // gray-400
     parte: '#d1d5db',           // gray-300
     oab: '#e5e7eb',             // gray-200
+    fato: '#f97316',            // orange-500
 };
 
 export const getNodeColor = (node: GraphNode): string => {

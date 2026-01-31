@@ -141,6 +141,21 @@ const INITIAL_MINUTA_OUTLINE_TEMPLATE = (() => {
   );
 })();
 
+// CogGRAG Types
+export type CogRAGNodeState = 'pending' | 'decomposing' | 'retrieving' | 'retrieved' | 'verifying' | 'verified' | 'rejected' | 'complete' | 'error';
+export type CogRAGStatus = 'idle' | 'decomposing' | 'retrieving' | 'verifying' | 'integrating' | 'complete';
+
+export interface CogRAGNode {
+  nodeId: string;
+  question: string;
+  level: number;
+  parentId: string | null;
+  state: CogRAGNodeState;
+  childrenCount: number;
+  evidenceCount: number;
+  confidence: number;
+}
+
 type DraftMetadata = {
   processed_sections?: any[];
   has_any_divergence?: boolean;
@@ -378,6 +393,39 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
       return;
     }
 
+    // Hard Research: study_token streams content into the canvas
+    if (eventType === 'study_token' && payload?.delta) {
+      const delta = String(payload.delta);
+      if (!delta) return;
+      if (!streamActive) {
+        streamActive = true;
+        streamBuffer = '';
+        try {
+          const canvas = useCanvasStore.getState();
+          canvas.setContent('');
+        } catch {
+          // noop
+        }
+      }
+      streamBuffer += delta;
+      try {
+        const canvas = useCanvasStore.getState();
+        canvas.setContent(streamBuffer);
+        if (!streamCanvasShown) {
+          canvas.showCanvas();
+          canvas.setActiveTab('editor');
+          streamCanvasShown = true;
+        }
+      } catch {
+        // noop
+      }
+      // Also store in jobEvents for the viewer
+      set((state: any) => ({
+        jobEvents: [...state.jobEvents, data],
+      }));
+      return;
+    }
+
     const shouldStoreEvent = eventType !== 'token' && eventType !== 'meta' && eventType !== 'thinking';
     set((state: any) => ({
       ...(shouldStoreEvent ? { jobEvents: [...state.jobEvents, data] } : {}),
@@ -602,6 +650,165 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
       }
     }
 
+    // Claude Agent SDK Event Handlers
+    if (eventType === 'agent_iteration') {
+      set((state: any) => ({
+        agentIterationCount: (state.agentIterationCount || 0) + 1,
+        isAgentMode: true,
+      }));
+    }
+
+    if (eventType === 'tool_call') {
+      set({
+        lastToolCall: {
+          tool: payload?.tool || payload?.name || 'unknown',
+          status: 'pending',
+        },
+      });
+    }
+
+    if (eventType === 'tool_result') {
+      set((state: any) => ({
+        lastToolCall: state.lastToolCall
+          ? {
+              ...state.lastToolCall,
+              status: payload?.error ? 'error' : 'success',
+              result: payload?.result || payload?.output,
+            }
+          : null,
+      }));
+    }
+
+    if (eventType === 'tool_approval_required') {
+      set({
+        pendingToolApproval: {
+          tool: payload?.tool || payload?.name || 'unknown',
+          input: payload?.input || {},
+          riskLevel: payload?.risk_level || 'medium',
+        },
+      });
+    }
+
+    if (eventType === 'context_warning') {
+      const usagePercent = typeof payload?.usage_percent === 'number' ? payload.usage_percent : 0;
+      set({ contextUsagePercent: usagePercent });
+    }
+
+    if (eventType === 'compaction_done') {
+      set({
+        lastSummaryId: payload?.summary_id || null,
+        contextUsagePercent: typeof payload?.new_percent === 'number' ? payload.new_percent : 0,
+      });
+    }
+
+    if (eventType === 'checkpoint_created') {
+      set((state: any) => ({
+        checkpoints: [
+          ...(state.checkpoints || []),
+          {
+            id: payload?.id || payload?.checkpoint_id || nanoid(),
+            description: payload?.description || 'Checkpoint',
+            createdAt: payload?.created_at || new Date().toISOString(),
+          },
+        ],
+      }));
+    }
+
+    if (eventType === 'parallel_start') {
+      set({
+        parallelExecution: {
+          active: true,
+          toolCount: payload?.tool_count || payload?.count || 0,
+          completedCount: 0,
+        },
+      });
+    }
+
+    if (eventType === 'parallel_progress') {
+      set((state: any) => ({
+        parallelExecution: state.parallelExecution
+          ? {
+              ...state.parallelExecution,
+              completedCount: payload?.completed || (state.parallelExecution.completedCount + 1),
+            }
+          : null,
+      }));
+    }
+
+    if (eventType === 'parallel_complete') {
+      set({ parallelExecution: null });
+    }
+
+    // CogGRAG Event Handlers
+    if (eventType === 'cograg_decompose_start') {
+      set({
+        cogragStatus: 'decomposing',
+        cogragTree: [],
+      });
+    }
+
+    if (eventType === 'cograg_decompose_node') {
+      set((state: any) => {
+        const node: CogRAGNode = {
+          nodeId: payload?.node_id || '',
+          question: payload?.question || '',
+          level: payload?.level || 0,
+          parentId: payload?.parent_id || null,
+          state: 'decomposing',
+          childrenCount: 0,
+          evidenceCount: 0,
+          confidence: 0,
+        };
+        return {
+          cogragTree: [...(state.cogragTree || []), node],
+        };
+      });
+    }
+
+    if (eventType === 'cograg_decompose_complete') {
+      set({ cogragStatus: 'retrieving' });
+    }
+
+    if (eventType === 'cograg_retrieval_node') {
+      set((state: any) => {
+        const nodeId = payload?.node_id;
+        const cogragTree = (state.cogragTree || []).map((n: CogRAGNode) =>
+          n.nodeId === nodeId
+            ? { ...n, state: 'retrieved', evidenceCount: payload?.evidence_count || 0 }
+            : n
+        );
+        return { cogragTree };
+      });
+    }
+
+    if (eventType === 'cograg_retrieval_complete') {
+      set({ cogragStatus: 'verifying' });
+    }
+
+    if (eventType === 'cograg_verify_node') {
+      set((state: any) => {
+        const nodeId = payload?.node_id;
+        const cogragTree = (state.cogragTree || []).map((n: CogRAGNode) =>
+          n.nodeId === nodeId
+            ? {
+                ...n,
+                state: payload?.is_consistent ? 'verified' : 'rejected',
+                confidence: payload?.confidence || 0,
+              }
+            : n
+        );
+        return { cogragTree };
+      });
+    }
+
+    if (eventType === 'cograg_verify_complete') {
+      set({ cogragStatus: 'integrating' });
+    }
+
+    if (eventType === 'cograg_integrate_complete') {
+      set({ cogragStatus: 'complete' });
+    }
+
     if (data?.type === 'done') {
       const citations = Array.isArray(data.citations) ? data.citations : null;
       const streamedIntoCanvas = streamActive || String(streamBuffer || '').trim().length > 0;
@@ -683,6 +890,47 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
     'document_gate',
     'done',
     'error',
+    // Claude Agent SDK events
+    'agent_iteration',
+    'tool_call',
+    'tool_result',
+    'tool_approval_required',
+    'context_warning',
+    'compaction_done',
+    'checkpoint_created',
+    'parallel_start',
+    'parallel_progress',
+    'parallel_complete',
+    // Hard Research events
+    'hard_research_start',
+    'provider_start',
+    'provider_thinking',
+    'provider_source',
+    'provider_done',
+    'provider_error',
+    'merge_start',
+    'merge_done',
+    'study_generation_start',
+    'study_outline',
+    'study_token',
+    'study_done',
+    // Hard Research agentic events
+    'agent_thinking',
+    'agent_tool_call',
+    'agent_tool_result',
+    'agent_ask_user',
+    // CogGRAG events
+    'cograg_decompose_start',
+    'cograg_decompose_node',
+    'cograg_decompose_complete',
+    'cograg_retrieval_start',
+    'cograg_retrieval_node',
+    'cograg_retrieval_complete',
+    'cograg_verify_start',
+    'cograg_verify_node',
+    'cograg_verify_complete',
+    'cograg_integrate_start',
+    'cograg_integrate_complete',
   ];
 
   for (const name of eventNames) {
@@ -1081,6 +1329,36 @@ interface ChatState {
   // Agent State
   agentSteps: AgentStep[];
   isAgentRunning: boolean;
+
+  // Claude Agent SDK State
+  isAgentMode: boolean;
+  agentIterationCount: number;
+  contextUsagePercent: number;
+  lastSummaryId: string | null;
+  pendingToolApproval: {
+    tool: string;
+    input: Record<string, unknown>;
+    riskLevel: 'low' | 'medium' | 'high';
+  } | null;
+  toolPermissions: Record<string, 'allow' | 'deny' | 'ask'>;
+  checkpoints: Array<{
+    id: string;
+    description: string;
+    createdAt: string;
+  }>;
+  parallelExecution: {
+    active: boolean;
+    toolCount: number;
+    completedCount: number;
+  } | null;
+  // CogGRAG State
+  cogragTree: CogRAGNode[] | null;
+  cogragStatus: CogRAGStatus;
+  lastToolCall: {
+    tool: string;
+    status: 'pending' | 'success' | 'error';
+    result?: unknown;
+  } | null;
   effortLevel: number;
   selectedModel: string;
   gptModel: string;
@@ -1166,6 +1444,9 @@ interface ChatState {
   deepResearchProvider: 'auto' | 'google' | 'perplexity' | 'openai';
   deepResearchModel: string;
   deepResearchEffort: 'low' | 'medium' | 'high';
+  // Hard Research Mode
+  deepResearchMode: 'standard' | 'hard';
+  hardResearchProviders: Record<string, boolean>;
   deepResearchSearchFocus: 'web' | 'academic' | 'sec' | '';
   deepResearchDomainFilter: string;
   deepResearchSearchAfterDate: string;
@@ -1228,7 +1509,6 @@ interface ChatState {
   templateName: string | null;
   templateDocumentName: string | null;
   promptExtra: string;
-  ragAdvancedMode: boolean;
   adaptiveRouting: boolean;
   cragGate: boolean;
   hydeEnabled: boolean;
@@ -1299,6 +1579,10 @@ interface ChatState {
   setDeepResearchProvider: (provider: 'auto' | 'google' | 'perplexity' | 'openai') => void;
   setDeepResearchModel: (model: string) => void;
   setDeepResearchEffort: (effort: 'low' | 'medium' | 'high') => void;
+  setDeepResearchMode: (mode: 'standard' | 'hard') => void;
+  setHardResearchProvider: (provider: string, enabled: boolean) => void;
+  toggleHardResearchProvider: (provider: string) => void;
+  setAllHardResearchProviders: (enabled: boolean) => void;
   setDeepResearchSearchFocus: (value: 'web' | 'academic' | 'sec' | '') => void;
   setDeepResearchDomainFilter: (value: string) => void;
   setDeepResearchSearchAfterDate: (value: string) => void;
@@ -1347,7 +1631,6 @@ interface ChatState {
   setTemplateName: (name: string | null) => void;
   setTemplateDocumentName: (name: string | null) => void;
   setPromptExtra: (prompt: string) => void;
-  setRagAdvancedMode: (enabled: boolean) => void;
   setAdaptiveRouting: (enabled: boolean) => void;
   setCragGate: (enabled: boolean) => void;
   setHydeEnabled: (enabled: boolean) => void;
@@ -1408,6 +1691,14 @@ interface ChatState {
     options?: { budgetOverridePoints?: number; existingTurnId?: string; skipUserMessage?: boolean }
   ) => Promise<void>;
   createMultiChatThread: (title?: string) => Promise<any>;
+
+  // Claude Agent SDK Actions
+  setIsAgentMode: (enabled: boolean) => void;
+  compactConversation: () => Promise<void>;
+  approveToolCall: (approved: boolean, remember?: 'session' | 'always') => Promise<void>;
+  restoreCheckpoint: (checkpointId: string) => Promise<void>;
+  setToolPermission: (tool: string, permission: 'allow' | 'deny' | 'ask') => void;
+  clearPendingToolApproval: () => void;
 }
 
 // Mock initial data (fallback)
@@ -1648,6 +1939,12 @@ const buildDeepResearchPayload = (state: ChatState) => {
   if (state.deepResearchProvider) payload.deep_research_provider = state.deepResearchProvider;
   if (state.deepResearchModel) payload.deep_research_model = state.deepResearchModel;
   if (state.deepResearchEffort) payload.deep_research_effort = state.deepResearchEffort;
+  payload.deep_research_mode = state.deepResearchMode;
+  if (state.deepResearchMode === 'hard') {
+    payload.hard_research_providers = Object.entries(state.hardResearchProviders)
+      .filter(([_, enabled]) => enabled !== false)
+      .map(([provider]) => provider);
+  }
   if (state.deepResearchSearchFocus) {
     payload.deep_research_search_focus = state.deepResearchSearchFocus;
   }
@@ -1682,6 +1979,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingCanvasContext: null,
   agentSteps: [],
   isAgentRunning: false,
+
+  // Claude Agent SDK Initial State
+  isAgentMode: false,
+  agentIterationCount: 0,
+  contextUsagePercent: 0,
+  lastSummaryId: null,
+  pendingToolApproval: null,
+  toolPermissions: {},
+  checkpoints: [],
+  parallelExecution: null,
+  // CogGRAG State
+  cogragTree: null,
+  cogragStatus: 'idle' as CogRAGStatus,
+  lastToolCall: null,
+
   effortLevel: 3,
   // Modelo "Juiz" (orquestrador/judge). IDs canônicos (ver config/models.ts)
   selectedModel: 'gemini-3-flash',
@@ -1750,6 +2062,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   deepResearchProvider: loadDeepResearchProvider(),
   deepResearchModel: loadDeepResearchModel(),
   deepResearchEffort: loadDeepResearchEffort(),
+  deepResearchMode: (typeof window !== 'undefined'
+    ? localStorage.getItem('iudex_deep_research_mode') as 'standard' | 'hard'
+    : null) || 'standard',
+  hardResearchProviders: (typeof window !== 'undefined'
+    ? (() => {
+        try { return JSON.parse(localStorage.getItem('iudex_hard_research_providers') || '{}') }
+        catch { return {} }
+      })()
+    : {}) as Record<string, boolean> || {
+      gemini: true,
+      perplexity: true,
+      openai: true,
+      rag_global: true,
+      rag_local: true,
+    },
   deepResearchSearchFocus: loadDeepResearchSearchFocus(),
   deepResearchDomainFilter: loadStringPreference(DEEP_RESEARCH_DOMAIN_FILTER_STORAGE_KEY),
   deepResearchSearchAfterDate: loadStringPreference(DEEP_RESEARCH_SEARCH_AFTER_DATE_STORAGE_KEY),
@@ -1820,12 +2147,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   templateName: null,
   templateDocumentName: null,
   promptExtra: '',
-  ragAdvancedMode: false,
   adaptiveRouting: true, // Default ON for better experience
-  cragGate: false,
-  hydeEnabled: false, // Optional boost
-  graphRagEnabled: false, // Optional boost
-  argumentGraphEnabled: false,
+  cragGate: true,
+  hydeEnabled: true,
+  graphRagEnabled: true,
+  argumentGraphEnabled: true,
   graphHops: 2,
   ragScope: 'case_and_global', // case_only, case_and_global, global_only
   chatPersonality: loadChatPersonality(), // Default to persisted or legal
@@ -2330,6 +2656,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
       }
     }
   },
+  setDeepResearchMode: (mode) => {
+    set({ deepResearchMode: mode });
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('iudex_deep_research_mode', mode);
+    }
+  },
+  setHardResearchProvider: (provider, enabled) => {
+    const current = get().hardResearchProviders;
+    const updated = { ...current, [provider]: enabled };
+    set({ hardResearchProviders: updated });
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('iudex_hard_research_providers', JSON.stringify(updated));
+    }
+  },
+  toggleHardResearchProvider: (provider) => {
+    const current = get().hardResearchProviders;
+    const enabled = current[provider] !== false; // default true
+    get().setHardResearchProvider(provider, !enabled);
+  },
+  setAllHardResearchProviders: (enabled) => {
+    const updated = {
+      gemini: enabled,
+      perplexity: enabled,
+      openai: enabled,
+      rag_global: enabled,
+      rag_local: enabled,
+    };
+    set({ hardResearchProviders: updated });
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('iudex_hard_research_providers', JSON.stringify(updated));
+    }
+  },
   setDeepResearchSearchFocus: (value) => {
     set({ deepResearchSearchFocus: value });
     if (typeof window !== 'undefined') {
@@ -2466,33 +2824,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setCragMinAvgScoreOverride: (value) => set({ cragMinAvgScoreOverride: value }),
   setForceGranularDebate: (enabled) => set({ forceGranularDebate: enabled }),
   setMaxDivergenceHilRounds: (value) => set({ maxDivergenceHilRounds: value }),
-  setRagAdvancedMode: (enabled) =>
-    set((state) => ({
-      ragAdvancedMode: enabled,
-      ...(enabled
-        ? {}
-        : {
-          adaptiveRouting: true,
-          cragGate: false,
-          hydeEnabled: false,
-          graphRagEnabled: false,
-          argumentGraphEnabled: false,
-          graphHops: state.graphHops || 2,
-        }),
-    })),
-  setAdaptiveRouting: (enabled) => set({ adaptiveRouting: enabled }),
-  setCragGate: (enabled) => set({ cragGate: enabled }),
-  setHydeEnabled: (enabled) => set({ hydeEnabled: enabled }),
-  setGraphRagEnabled: (enabled) =>
-    set((state) => ({
-      graphRagEnabled: enabled,
-      ...(enabled ? {} : { argumentGraphEnabled: false }),
-    })),
-  setArgumentGraphEnabled: (enabled) =>
-    set((state) => ({
-      argumentGraphEnabled: enabled,
-      ...(enabled ? { graphRagEnabled: true } : {}),
-    })),
+  setAdaptiveRouting: () => set({ adaptiveRouting: true }),
+  setCragGate: () => set({ cragGate: true }),
+  setHydeEnabled: () => set({ hydeEnabled: true }),
+  setGraphRagEnabled: () => set({ graphRagEnabled: true, argumentGraphEnabled: true }),
+  setArgumentGraphEnabled: () => set({ argumentGraphEnabled: true, graphRagEnabled: true }),
   setGraphHops: (hops) => set({ graphHops: hops }),
   setRagScope: (scope) => set({ ragScope: scope }),
 
@@ -2851,10 +3187,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       contextMode,
       contextFiles,
       cacheTTL,
-      adaptiveRouting,
-      cragGate,
-      hydeEnabled,
-      graphRagEnabled,
       graphHops,
       denseResearch,
       useTemplates,
@@ -3065,12 +3397,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         context_mode: contextMode,
         context_files: shouldSendContextFiles ? contextFiles : undefined,
         cache_ttl: shouldSendContextFiles ? cacheTTL : undefined,
-        adaptive_routing: adaptiveRouting,
-        rag_mode: get().ragAdvancedMode ? 'manual' : 'auto',
-        crag_gate: cragGate,
-        hyde_enabled: hydeEnabled,
-        graph_rag_enabled: graphRagEnabled,
-        argument_graph_enabled: get().argumentGraphEnabled,
+        adaptive_routing: true,
+        rag_mode: 'manual',
+        crag_gate: true,
+        hyde_enabled: true,
+        graph_rag_enabled: true,
+        argument_graph_enabled: true,
         graph_hops: graphHops,
         rag_scope: get().ragScope,
         dense_research: denseResearch,
@@ -4111,32 +4443,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         template_document_id: get().templateDocumentId || undefined,
         variables: get().templateVariables,
         ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
-        rag_config: {
-          top_k: get().ragTopK,
-          sources: get().ragSources,
-          tenant_id: get().tenantId,
-          use_templates: get().useTemplates,
-          template_filters: get().templateFilters,
-          template_id: get().templateId || undefined,
-          template_document_id: get().templateDocumentId || undefined,
-          variables: get().templateVariables,
-          prompt_extra: get().promptExtra,
-          adaptive_routing: get().adaptiveRouting,
-          rag_mode: get().ragAdvancedMode ? 'manual' : 'auto',
-          crag_gate: get().cragGate,
-          ...(cragMinBestScoreOverride != null
-            ? { crag_min_best_score: cragMinBestScoreOverride }
-            : {}),
-          ...(cragMinAvgScoreOverride != null
-            ? { crag_min_avg_score: cragMinAvgScoreOverride }
-            : {}),
-          hyde_enabled: get().hydeEnabled,
-          graph_rag_enabled: get().graphRagEnabled,
-          argument_graph_enabled: get().argumentGraphEnabled,
-          graph_hops: get().graphHops,
-          rag_scope: get().ragScope,
-        },
-      } as any);
+	        rag_config: {
+	          top_k: get().ragTopK,
+	          sources: get().ragSources,
+	          tenant_id: get().tenantId,
+	          use_templates: get().useTemplates,
+	          template_filters: get().templateFilters,
+	          template_id: get().templateId || undefined,
+	          template_document_id: get().templateDocumentId || undefined,
+	          variables: get().templateVariables,
+	          prompt_extra: get().promptExtra,
+	          adaptive_routing: true,
+	          rag_mode: 'manual',
+	          crag_gate: true,
+	          ...(cragMinBestScoreOverride != null
+	            ? { crag_min_best_score: cragMinBestScoreOverride }
+	            : {}),
+	          ...(cragMinAvgScoreOverride != null
+	            ? { crag_min_avg_score: cragMinAvgScoreOverride }
+	            : {}),
+	          hyde_enabled: true,
+	          graph_rag_enabled: true,
+	          argument_graph_enabled: true,
+	          graph_hops: get().graphHops,
+	          rag_scope: get().ragScope,
+	        },
+	      } as any);
 
       clearInterval(stepsInterval);
 
@@ -4354,23 +4686,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	        gpt_model: get().gptModel,
 	        claude_model: get().claudeModel,
 	        strategist_model: get().agentStrategistModel,
-        drafter_models: get().agentDrafterModels,
-        reviewer_models: get().agentReviewerModels,
-        adaptive_routing: get().adaptiveRouting,
-        rag_mode: get().ragAdvancedMode ? 'manual' : 'auto',
-        crag_gate: get().cragGate,
-        ...(cragMinBestScoreOverride != null
-          ? { crag_min_best_score: cragMinBestScoreOverride }
-          : {}),
-        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
-        hyde_enabled: get().hydeEnabled,
-        graph_rag_enabled: get().graphRagEnabled,
-        argument_graph_enabled: get().argumentGraphEnabled,
-        graph_hops: get().graphHops,
-        rag_scope: get().ragScope,
-        stream_tokens: true,
-        stream_token_chunk_chars: 40,
-        ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
+	        drafter_models: get().agentDrafterModels,
+	        reviewer_models: get().agentReviewerModels,
+	        adaptive_routing: true,
+	        rag_mode: 'manual',
+	        crag_gate: true,
+	        ...(cragMinBestScoreOverride != null
+	          ? { crag_min_best_score: cragMinBestScoreOverride }
+	          : {}),
+	        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
+	        hyde_enabled: true,
+	        graph_rag_enabled: true,
+	        argument_graph_enabled: true,
+	        graph_hops: get().graphHops,
+	        rag_scope: get().ragScope,
+	        stream_tokens: true,
+	        stream_token_chunk_chars: 40,
+	        ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
       } as any);
 
       const jobId = jobRes.job_id;
@@ -4523,20 +4855,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
         prompt_extra: get().promptExtra,
         template_id: get().templateId || undefined,
         template_document_id: get().templateDocumentId || undefined,
-        variables: get().templateVariables,
-        adaptive_routing: get().adaptiveRouting,
-        crag_gate: get().cragGate,
-        ...(cragMinBestScoreOverride != null
-          ? { crag_min_best_score: cragMinBestScoreOverride }
-          : {}),
-        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
-        hyde_enabled: get().hydeEnabled,
-        graph_rag_enabled: get().graphRagEnabled,
-        argument_graph_enabled: get().argumentGraphEnabled,
-        graph_hops: get().graphHops,
-        rag_scope: get().ragScope,
+	        variables: get().templateVariables,
+	        adaptive_routing: true,
+	        crag_gate: true,
+	        ...(cragMinBestScoreOverride != null
+	          ? { crag_min_best_score: cragMinBestScoreOverride }
+	          : {}),
+	        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
+	        hyde_enabled: true,
+	        graph_rag_enabled: true,
+	        argument_graph_enabled: true,
+	        graph_hops: get().graphHops,
+	        rag_scope: get().ragScope,
 
-        // Context Caching (v3.4)
+	        // Context Caching (v3.4)
         // Only send if mode is upload_cache or auto.
         context_files: ['upload_cache', 'auto'].includes(get().contextMode)
           ? get().contextFiles
@@ -5396,5 +5728,156 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } finally {
       set({ isSending: false });
     }
+  },
+
+  // Claude Agent SDK Actions Implementation
+  setIsAgentMode: (enabled: boolean) => {
+    set({ isAgentMode: enabled });
+    if (!enabled) {
+      // Reset agent-specific state when leaving agent mode
+      set({
+        agentIterationCount: 0,
+        pendingToolApproval: null,
+        parallelExecution: null,
+        lastToolCall: null,
+        cogragTree: null,
+        cogragStatus: 'idle' as CogRAGStatus,
+      });
+    }
+  },
+
+  compactConversation: async () => {
+    const { currentChat, currentJobId } = get();
+    if (!currentChat?.id) {
+      toast.error('Nenhuma conversa ativa para compactar.');
+      return;
+    }
+
+    try {
+      const response = await apiClient.fetchWithAuth(
+        `/chats/${currentChat.id}/compact`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            job_id: currentJobId,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to compact conversation');
+      }
+
+      const data = await response.json();
+      set({
+        lastSummaryId: data.summary_id || null,
+        contextUsagePercent: data.new_percent || 0,
+      });
+
+      toast.success('Conversa compactada com sucesso.');
+    } catch (error) {
+      console.error('Error compacting conversation:', error);
+      toast.error('Erro ao compactar conversa.');
+    }
+  },
+
+  approveToolCall: async (approved: boolean, remember?: 'session' | 'always') => {
+    const { currentChat, currentJobId, pendingToolApproval, toolPermissions } = get();
+    if (!currentChat?.id || !pendingToolApproval) {
+      toast.error('Nenhuma aprovação pendente.');
+      return;
+    }
+
+    try {
+      const response = await apiClient.fetchWithAuth(
+        `/chats/${currentChat.id}/tool-approval`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            job_id: currentJobId,
+            tool: pendingToolApproval.tool,
+            approved,
+            remember,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to send tool approval');
+      }
+
+      // Update tool permissions if user chose to remember
+      if (remember) {
+        const newPermission = approved ? 'allow' : 'deny';
+        set({
+          toolPermissions: {
+            ...toolPermissions,
+            [pendingToolApproval.tool]: newPermission,
+          },
+        });
+      }
+
+      // Clear pending approval
+      set({ pendingToolApproval: null });
+
+      toast.success(approved ? 'Ferramenta aprovada.' : 'Ferramenta negada.');
+    } catch (error) {
+      console.error('Error approving tool call:', error);
+      toast.error('Erro ao enviar aprovação.');
+    }
+  },
+
+  restoreCheckpoint: async (checkpointId: string) => {
+    const { currentChat, currentJobId } = get();
+    if (!currentChat?.id) {
+      toast.error('Nenhuma conversa ativa.');
+      return;
+    }
+
+    try {
+      const response = await apiClient.fetchWithAuth(
+        `/chats/${currentChat.id}/restore-checkpoint`,
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            job_id: currentJobId,
+            checkpoint_id: checkpointId,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error('Failed to restore checkpoint');
+      }
+
+      const data = await response.json();
+
+      // Update checkpoints list - remove checkpoints after the restored one
+      set((state) => {
+        const idx = state.checkpoints.findIndex((cp) => cp.id === checkpointId);
+        return {
+          checkpoints: idx >= 0 ? state.checkpoints.slice(0, idx + 1) : state.checkpoints,
+          contextUsagePercent: data.context_percent || state.contextUsagePercent,
+        };
+      });
+
+      toast.success('Checkpoint restaurado.');
+    } catch (error) {
+      console.error('Error restoring checkpoint:', error);
+      toast.error('Erro ao restaurar checkpoint.');
+    }
+  },
+
+  setToolPermission: (tool: string, permission: 'allow' | 'deny' | 'ask') => {
+    set((state) => ({
+      toolPermissions: {
+        ...state.toolPermissions,
+        [tool]: permission,
+      },
+    }));
+  },
+
+  clearPendingToolApproval: () => {
+    set({ pendingToolApproval: null });
   },
 }));

@@ -34,6 +34,13 @@ HYBRID_LABELS_BY_ENTITY_TYPE: Dict[str, str] = {
     "relator": "Relator",
     # Additional types
     "oab": "OAB",
+    # Semantic extraction
+    "semanticentity": "SemanticEntity",
+    # ArgumentRAG
+    "claim": "Claim",
+    "evidence": "Evidence",
+    "actor": "Actor",
+    "issue": "Issue",
 }
 
 

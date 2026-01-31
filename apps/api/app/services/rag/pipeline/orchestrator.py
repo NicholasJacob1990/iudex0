@@ -468,7 +468,7 @@ class EnhancedRetrievalPipeline:
         self.reranker = reranker or CrossEncoderReranker.get_instance()
         self.expander = expander or ChunkExpander()
         self.compressor = compressor or ContextCompressor()
-        self.budget_manager = budget_manager or TokenBudgetManager.from_env()
+        self.budget_manager = budget_manager or TokenBudgetManager.from_rag_config()
 
     def process(
         self,

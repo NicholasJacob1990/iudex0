@@ -14,13 +14,28 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import google.generativeai as genai
+try:
+    from google import genai as _new_genai
+    _HAS_NEW_GENAI = True
+except ImportError:
+    _HAS_NEW_GENAI = False
+
+try:
+    import google.generativeai as genai
+except ImportError:
+    genai = None  # type: ignore
+
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # type: ignore
 
 from app.services.rag.config import get_rag_config
 
@@ -578,44 +593,168 @@ class QueryExpansionService:
             default_ttl=self._config.cache_ttl_seconds,
         )
 
-        # Configure Gemini
-        import os
-        api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-        if api_key:
-            genai.configure(api_key=api_key)
+        # Provider selection for the LLM calls used by HyDE / MultiQuery.
+        # - auto (default): Gemini when configured; fallback to OpenAI if available
+        # - gemini: only Gemini
+        # - openai: only OpenAI
+        self._llm_provider = (os.getenv("RAG_QUERY_EXPANSION_PROVIDER") or "auto").strip().lower()
+        if self._llm_provider not in ("auto", "gemini", "openai"):
+            self._llm_provider = "auto"
 
-        self._hyde_model: Optional[genai.GenerativeModel] = None
-        self._multiquery_model: Optional[genai.GenerativeModel] = None
+        self._openai_model = (
+            os.getenv("RAG_QUERY_EXPANSION_OPENAI_MODEL")
+            or os.getenv("RAG_QUERY_EXPANSION_MODEL")
+            or "gpt-4o-mini"
+        ).strip()
+        self._openai_client = None
+        if OpenAI is not None:
+            key = os.getenv("OPENAI_API_KEY")
+            if key and str(key).strip():
+                try:
+                    self._openai_client = OpenAI(api_key=key)
+                except Exception:
+                    self._openai_client = None
+
+        # Configure Gemini client — prefer new google.genai with Vertex AI support
+        self._use_new_genai = False
+        self._genai_client = None
+
+        auth_mode = (os.getenv("IUDEX_GEMINI_AUTH") or "auto").strip().lower()
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+        location = os.getenv("VERTEX_AI_LOCATION", "global")
+
+        use_vertex = False
+        if auth_mode in ("vertex", "vertexai", "gcp"):
+            use_vertex = True
+        elif auth_mode in ("apikey", "api_key"):
+            use_vertex = False
+        else:
+            use_vertex = bool(project_id)
+
+        if _HAS_NEW_GENAI and use_vertex and project_id:
+            self._genai_client = _new_genai.Client(
+                vertexai=True, project=project_id, location=location
+            )
+            self._use_new_genai = True
+        elif _HAS_NEW_GENAI:
+            api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if api_key:
+                self._genai_client = _new_genai.Client(api_key=api_key)
+                self._use_new_genai = True
+        else:
+            api_key = gemini_api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+            if api_key and genai is not None:
+                genai.configure(api_key=api_key)
+
+        self._hyde_model = None
+        self._multiquery_model = None
+
+    def _gemini_model_name(self, operation: str) -> str:
+        if operation == "multiquery":
+            return self._config.multi_query_model
+        return self._config.hyde_model
+
+    def _llm_params(self, operation: str) -> tuple[int, float]:
+        if operation == "multiquery":
+            return self._config.multi_query_max_tokens, self._config.multi_query_temperature
+        return self._config.hyde_max_tokens, self._config.hyde_temperature
 
     @property
-    def hyde_model(self) -> genai.GenerativeModel:
+    def hyde_model(self):
         """Lazy-initialize HyDE Gemini model."""
         if self._hyde_model is None:
-            self._hyde_model = genai.GenerativeModel(
-                model_name=self._config.hyde_model,
-                generation_config={
-                    "max_output_tokens": self._config.hyde_max_tokens,
-                    "temperature": self._config.hyde_temperature,
-                }
-            )
+            if self._use_new_genai and self._genai_client:
+                # new google.genai doesn't need model objects, just client + model name
+                pass  # We use client.models.generate_content() directly
+            elif genai is not None:
+                self._hyde_model = genai.GenerativeModel(
+                    model_name=self._config.hyde_model,
+                    generation_config={
+                        "max_output_tokens": self._config.hyde_max_tokens,
+                        "temperature": self._config.hyde_temperature,
+                    }
+                )
         return self._hyde_model
 
     @property
-    def multiquery_model(self) -> genai.GenerativeModel:
+    def multiquery_model(self):
         """Lazy-initialize Multi-Query Gemini model."""
         if self._multiquery_model is None:
-            self._multiquery_model = genai.GenerativeModel(
-                model_name=self._config.multi_query_model,
-                generation_config={
-                    "max_output_tokens": self._config.multi_query_max_tokens,
-                    "temperature": self._config.multi_query_temperature,
-                }
-            )
+            if self._use_new_genai and self._genai_client:
+                pass  # We use client.models.generate_content() directly
+            elif genai is not None:
+                self._multiquery_model = genai.GenerativeModel(
+                    model_name=self._config.multi_query_model,
+                    generation_config={
+                        "max_output_tokens": self._config.multi_query_max_tokens,
+                        "temperature": self._config.multi_query_temperature,
+                    }
+                )
         return self._multiquery_model
 
     # -----------------------------------------------------------------------
     # Async LLM Calls
     # -----------------------------------------------------------------------
+
+    async def _call_openai(
+        self,
+        prompt: str,
+        *,
+        budget_tracker: Optional[Any] = None,
+        operation: str = "unknown",
+    ) -> str:
+        if self._openai_client is None:
+            return ""
+
+        if budget_tracker is not None and BudgetTracker is not None:
+            if not budget_tracker.can_make_llm_call():
+                logger.warning(f"Skipping {operation}: LLM call budget exceeded")
+                return ""
+
+        max_tokens, temperature = self._llm_params(operation)
+        model_name = self._openai_model
+
+        def _sync_call() -> str:
+            try:
+                resp = self._openai_client.chat.completions.create(
+                    model=model_name,
+                    messages=[
+                        {"role": "system", "content": "Você é um especialista em recuperação de informação jurídica no Brasil."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=float(temperature),
+                    max_tokens=int(max_tokens),
+                )
+                if not resp or not getattr(resp, "choices", None):
+                    return ""
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as exc:
+                logger.warning(f"OpenAI call failed: {exc}")
+                return ""
+
+        t0 = time.perf_counter()
+        result = await asyncio.to_thread(_sync_call)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        try:
+            from app.services.rag.core.metrics import get_latency_collector
+
+            collector = get_latency_collector()
+            collector.record(f"qe.llm.{operation}", latency_ms)
+            collector.record(f"qe.llm.openai.{operation}", latency_ms)
+        except Exception:
+            pass
+
+        if budget_tracker is not None and estimate_tokens is not None and result:
+            input_tokens = estimate_tokens(prompt, model_name)
+            output_tokens = estimate_tokens(result, model_name)
+            budget_tracker.track_llm_call(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                model=model_name,
+                operation=operation,
+            )
+
+        return result
 
     async def _call_gemini(
         self,
@@ -636,8 +775,8 @@ class QueryExpansionService:
         Returns:
             Generated text response
         """
-        model = model or self.hyde_model
-        model_name = getattr(model, "_model_name", self._config.hyde_model)
+        model_name = self._gemini_model_name(operation)
+        max_tokens, temperature = self._llm_params(operation)
 
         # Check budget before making call
         if budget_tracker is not None and BudgetTracker is not None:
@@ -647,15 +786,49 @@ class QueryExpansionService:
 
         def _sync_call() -> str:
             try:
-                response = model.generate_content(prompt)
-                if response and response.text:
-                    return response.text.strip()
-                return ""
+                if self._use_new_genai and self._genai_client:
+                    resp = self._genai_client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config={
+                            "max_output_tokens": max_tokens,
+                            "temperature": temperature,
+                        },
+                    )
+                    if resp and resp.text:
+                        return resp.text.strip()
+                    return ""
+                else:
+                    _model = model or self.hyde_model
+                    response = _model.generate_content(prompt)
+                    if response and response.text:
+                        return response.text.strip()
+                    return ""
             except Exception as exc:
                 logger.warning(f"Gemini call failed: {exc}")
                 return ""
 
+        # Fast-path provider selection (avoid spending time on a provider we won't use).
+        if self._llm_provider == "openai":
+            return await self._call_openai(prompt, budget_tracker=budget_tracker, operation=operation)
+
+        t0 = time.perf_counter()
         result = await asyncio.to_thread(_sync_call)
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        try:
+            from app.services.rag.core.metrics import get_latency_collector
+
+            collector = get_latency_collector()
+            collector.record(f"qe.llm.{operation}", latency_ms)
+            collector.record(f"qe.llm.gemini.{operation}", latency_ms)
+        except Exception:
+            pass
+
+        # Optional fallback to OpenAI when Gemini fails (rate limits, quota, etc.)
+        if not result and self._llm_provider == "auto":
+            fallback = await self._call_openai(prompt, budget_tracker=budget_tracker, operation=operation)
+            if fallback:
+                return fallback
 
         # Track usage after successful call
         if budget_tracker is not None and estimate_tokens is not None and result:
@@ -706,38 +879,70 @@ class QueryExpansionService:
 
         extras: List[str] = []
 
-        # Check budget before multi-query expansion
-        if use_multiquery and max_queries > 0:
-            can_expand = True
-            if budget_tracker is not None and BudgetTracker is not None:
-                if not budget_tracker.can_make_llm_call():
-                    logger.info("Skipping multi-query: budget limit reached")
-                    can_expand = False
+        # Run multi-query and HyDE in parallel when possible (lower latency).
+        remaining_calls = None
+        if budget_tracker is not None and BudgetTracker is not None:
+            try:
+                remaining_calls = int(budget_tracker.get_remaining_llm_calls())
+            except Exception:
+                remaining_calls = None
 
-            if can_expand:
-                variants = await self.generate_query_variants(
-                    query=query,
-                    count=max_queries + 1,
-                    budget_tracker=budget_tracker,
+        want_multi = bool(use_multiquery and max_queries > 0)
+        want_hyde = bool(use_hyde)
+
+        # If we have an explicit call budget, avoid scheduling more calls than allowed.
+        if remaining_calls is not None:
+            if remaining_calls <= 0:
+                want_multi = False
+                want_hyde = False
+            elif remaining_calls == 1:
+                # Prefer multi-query (higher recall / also helps lexical); fallback to HyDE.
+                if want_multi:
+                    want_hyde = False
+                else:
+                    want_multi = False
+
+        tasks: List[asyncio.Task] = []
+        task_kind: List[str] = []
+
+        if want_multi:
+            tasks.append(
+                asyncio.create_task(
+                    self.generate_query_variants(
+                        query=query,
+                        count=max_queries + 1,
+                        budget_tracker=budget_tracker,
+                    )
                 )
-                # Drop the original query (always first)
-                extras.extend([v for v in variants[1:] if v and v.strip()])
+            )
+            task_kind.append("multiquery")
 
-        # Check budget before HyDE generation
-        if use_hyde:
-            can_hyde = True
-            if budget_tracker is not None and BudgetTracker is not None:
-                if not budget_tracker.can_make_llm_call():
-                    logger.info("Skipping HyDE: budget limit reached")
-                    can_hyde = False
-
-            if can_hyde:
-                hypo = await self.generate_hypothetical_document(
-                    query=query,
-                    budget_tracker=budget_tracker,
+        if want_hyde:
+            tasks.append(
+                asyncio.create_task(
+                    self.generate_hypothetical_document(
+                        query=query,
+                        budget_tracker=budget_tracker,
+                    )
                 )
-                if hypo and hypo.strip():
-                    extras.append(hypo.strip())
+            )
+            task_kind.append("hyde")
+
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for kind, res in zip(task_kind, results):
+                if isinstance(res, Exception):
+                    logger.warning(f"{kind} expansion failed: {res}")
+                    continue
+
+                if kind == "multiquery":
+                    variants = res or []
+                    # Drop the original query (always first)
+                    extras.extend([v for v in variants[1:] if v and str(v).strip()])
+                elif kind == "hyde":
+                    hypo = str(res or "").strip()
+                    if hypo:
+                        extras.append(hypo)
 
         # Deduplicate while preserving order
         seen = set()

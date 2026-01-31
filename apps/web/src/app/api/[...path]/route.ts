@@ -32,6 +32,30 @@ function filterResponseHeaders(headers: Headers): Headers {
   return out;
 }
 
+function getProxyTimeoutMs(method: string, targetPath: string): number {
+  const defaultMs = Number.parseInt(process.env.API_PROXY_TIMEOUT_MS || '300000', 10); // 5 min
+  const longMs = Number.parseInt(process.env.API_PROXY_TIMEOUT_LONG_MS || '900000', 10); // 15 min
+  const m = (method || '').toUpperCase();
+  const p = String(targetPath || '').toLowerCase();
+
+  // Long-running endpoints (LLM calls, exports, recomputes) can legitimately exceed 30s.
+  const isLong =
+    p.includes('transcription/apply-revisions')
+    || p.includes('transcription/jobs') && (p.includes('recompute') || p.includes('export') || p.includes('quality'))
+    || p.includes('quality/apply-unified-hil')
+    || p.includes('quality/convert-to-hil')
+    || p.includes('quality/validate')
+    || p.includes('quality/analyze')
+    || p.includes('quality/generate')
+    || p.includes('advanced/audit-structure-rigorous')
+    || p.includes('documents/export');
+
+  if (isLong) return longMs;
+  // Keep GETs bounded too, but allow POSTs a bit more by default.
+  if (m === 'POST' || m === 'PUT') return defaultMs;
+  return Math.min(defaultMs, 120000);
+}
+
 async function proxy(request: NextRequest, pathParts: string[]) {
   try {
     const targetBase = getTargetBase().replace(/\/+$/, '');
@@ -84,27 +108,36 @@ async function proxy(request: NextRequest, pathParts: string[]) {
     const init = makeInit();
     console.log(`[Proxy] Init:`, JSON.stringify({ ...init, body: init.body ? '[Body]' : null }));
 
-    // Add timeout to prevent indefinite hanging
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 30000); // 30s timeout
-    init.signal = controller.signal;
+    // Add timeout to prevent indefinite hanging (configurable; some endpoints are long-running).
+    const timeoutMs = getProxyTimeoutMs(method, normalizedParts.join('/'));
+    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const id = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    if (controller) init.signal = controller.signal;
 
     let res;
     try {
       res = await fetch(url.toString(), init);
-    } finally {
-      clearTimeout(id);
-    }
-    console.log(`[Proxy] Response: ${res.status} ${res.statusText}`);
-    // Follow a single redirect manually (common in FastAPI when trailing slashes differ).
-    if ([301, 302, 303, 307, 308].includes(res.status)) {
-      const loc = res.headers.get('location');
-      if (loc) {
-        const redirected = new URL(loc, url);
-        // Per RFC, 303 should switch to GET
-        const redirectedMethod = res.status === 303 ? 'GET' : method;
-        res = await fetch(redirected.toString(), makeInit(redirectedMethod));
+      console.log(`[Proxy] Response: ${res.status} ${res.statusText}`);
+      // Follow a single redirect manually (common in FastAPI when trailing slashes differ).
+      if ([301, 302, 303, 307, 308].includes(res.status)) {
+        const loc = res.headers.get('location');
+        if (loc) {
+          const redirected = new URL(loc, url);
+          // Per RFC, 303 should switch to GET
+          const redirectedMethod = res.status === 303 ? 'GET' : method;
+          const redirectedInit = makeInit(redirectedMethod);
+          if (controller) redirectedInit.signal = controller.signal;
+          res = await fetch(redirected.toString(), redirectedInit);
+        }
       }
+    } catch (e) {
+      // Surface a clearer error when we abort locally.
+      if ((e as any)?.name === 'AbortError') {
+        throw new Error(`Proxy timeout after ${timeoutMs}ms for ${method} ${url.toString()}`);
+      }
+      throw e;
+    } finally {
+      if (id) clearTimeout(id);
     }
     const resHeaders = filterResponseHeaders(res.headers);
     // For SSE: disable buffering in common reverse proxies.

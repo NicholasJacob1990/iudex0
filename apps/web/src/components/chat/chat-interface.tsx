@@ -1,11 +1,16 @@
 'use client';
 
 import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
-import { useChatStore, useCanvasStore } from '@/stores';
+import { useChatStore, useCanvasStore, useAuthStore } from '@/stores';
 import { ChatMessage } from './chat-message';
 import { MultiModelResponse } from './multi-model-response';
 import { ChatInput } from './chat-input';
 import { DeepResearchViewer } from './deep-research-viewer';
+import { HardResearchViewer } from './hard-research-viewer';
+import { CogRAGTreeViewer } from './cograg-tree-viewer';
+import { ToolApprovalModal } from './tool-approval-modal';
+import { ContextIndicatorCompact } from './context-indicator';
+import { CheckpointTimeline } from './checkpoint-timeline';
 import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
 import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy, PanelRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -40,9 +45,12 @@ export function ChatInterface({
   const {
     currentChat, setCurrentChat, sendMessage, startAgentGeneration, isSending, isLoading,
     currentJobId, jobEvents,
-    showMultiModelComparator, chatMode, selectedModel, selectedModels, denseResearch, useMultiAgent,
+    showMultiModelComparator, chatMode, selectedModel, selectedModels, denseResearch, deepResearchMode, useMultiAgent,
     multiModelDeepDebate, setMultiModelDeepDebate,
-    billingModal, closeBillingModal, retryWithBudgetOverride
+    billingModal, closeBillingModal, retryWithBudgetOverride,
+    pendingToolApproval, approveToolCall, contextUsagePercent, compactConversation,
+    checkpoints, restoreCheckpoint,
+    cogragTree, cogragStatus,
   } = useChatStore();
   const {
     selectedText,
@@ -59,6 +67,7 @@ export function ChatInterface({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const prevMessageCountRef = useRef<number>(0);
   const isNearBottomRef = useRef<boolean>(true);
+  const [isCompacting, setIsCompacting] = useState(false);
   const [editPreviewOpen, setEditPreviewOpen] = useState(false);
   const [editPreview, setEditPreview] = useState<{
     original: string;
@@ -134,6 +143,14 @@ export function ChatInterface({
     const lower = raw.toLowerCase();
     return /\b(minuta|documento|pe[cç]a|peti[cç][aã]o|inicial|contesta[cç][aã]o|recurso|agravo|apela[cç][aã]o|mandado\s+de\s+seguran[cç]a|habeas|contrato|parecer|relat[oó]rio|manifest[aã]o)\b/.test(lower);
   };
+
+  // Sync tenantId with user's organization
+  const { user } = useAuthStore();
+  const setTenantId = useChatStore((s) => s.setTenantId);
+  useEffect(() => {
+    const tid = user?.organization_id || user?.id || 'default';
+    setTenantId(tid);
+  }, [user?.organization_id, user?.id, setTenantId]);
 
   useEffect(() => {
     setCurrentChat(chatId);
@@ -532,6 +549,29 @@ export function ChatInterface({
     await sendMessage(content);
   };
 
+  const handleCompact = useCallback(async () => {
+    setIsCompacting(true);
+    try {
+      await compactConversation();
+    } finally {
+      setIsCompacting(false);
+    }
+  }, [compactConversation]);
+
+  const handleApproveToolCall = useCallback(
+    (remember?: 'session' | 'always') => {
+      approveToolCall(true, remember);
+    },
+    [approveToolCall]
+  );
+
+  const handleDenyToolCall = useCallback(
+    (remember?: 'session' | 'always') => {
+      approveToolCall(false, remember);
+    },
+    [approveToolCall]
+  );
+
   if (isLoading && !currentChat) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -579,15 +619,12 @@ export function ChatInterface({
                 <PanelRight className="h-4 w-4 text-muted-foreground" />
               </Button>
             )}
-            {latestTokenPercentLabel && (
-              <span
-                className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-[11px] font-bold text-slate-700 ring-1 ring-slate-200"
-                title="Uso da janela de contexto do modelo (última resposta)"
-                aria-label="Uso da janela de contexto do modelo (última resposta)"
-              >
-                {latestTokenPercentLabel.replace('%', '')}
-                <span className="sr-only">%</span>
-              </span>
+            {(contextUsagePercent > 0 || latestTokenPercentLabel) && (
+              <ContextIndicatorCompact
+                usagePercent={contextUsagePercent > 0 ? contextUsagePercent : (latestTokenPercent ?? 0)}
+                tokensUsed={Math.round(((contextUsagePercent > 0 ? contextUsagePercent : (latestTokenPercent ?? 0)) / 100) * 200000)}
+                tokenLimit={200000}
+              />
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -611,12 +648,32 @@ export function ChatInterface({
         )}
 
         <div className="mx-auto w-full max-w-none min-h-full flex flex-col">
-          {showDeepResearch && (
+          {showDeepResearch && deepResearchMode === 'hard' && (
+            <div className="mb-4">
+              <HardResearchViewer
+                jobId={currentJobId || ''}
+                isVisible
+                events={jobEvents}
+              />
+            </div>
+          )}
+          {showDeepResearch && deepResearchMode !== 'hard' && (
             <div className="mb-4">
               <DeepResearchViewer
                 jobId={currentJobId || ''}
                 isVisible={showDeepResearch}
                 events={jobEvents}
+              />
+            </div>
+          )}
+
+          {/* CogGRAG Tree Viewer */}
+          {cogragTree && cogragTree.length > 0 && (
+            <div className="mb-4">
+              <CogRAGTreeViewer
+                nodes={cogragTree}
+                status={cogragStatus}
+                isVisible
               />
             </div>
           )}
@@ -692,6 +749,31 @@ export function ChatInterface({
           )}
         </div>
       </div>
+
+      {/* Tool Approval Modal */}
+      {pendingToolApproval && (
+        <ToolApprovalModal
+          isOpen={!!pendingToolApproval}
+          onClose={() => useChatStore.getState().clearPendingToolApproval()}
+          tool={{
+            name: pendingToolApproval.tool,
+            input: pendingToolApproval.input as Record<string, any>,
+            riskLevel: pendingToolApproval.riskLevel,
+          }}
+          onApprove={handleApproveToolCall}
+          onDeny={handleDenyToolCall}
+        />
+      )}
+
+      {/* Checkpoint Timeline */}
+      {checkpoints.length > 0 && (
+        <div className="border-t border-slate-200 bg-white">
+          <CheckpointTimeline
+            checkpoints={checkpoints}
+            onRestore={restoreCheckpoint}
+          />
+        </div>
+      )}
 
       {/* Input Area */}
       {

@@ -2,11 +2,13 @@
 Utilitários de segurança e autenticação
 """
 
+from dataclasses import dataclass, field
 from datetime import timedelta
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+import bcrypt
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,27 +20,40 @@ from app.core.time_utils import utcnow
 from app.models.user import User
 
 # Contexto para hashing de senhas
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+#
+# Observação:
+# - `passlib` 1.7.x + `bcrypt` >= 5.0 pode falhar ao inicializar o backend do bcrypt
+#   por causa da verificação interna de "wrap bug" (usa senha >72 bytes, e a lib
+#   `bcrypt` agora levanta ValueError).
+# - Para manter testes/ambiente estáveis, usamos `pbkdf2_sha256` como padrão para
+#   novos hashes, mas preservamos verificação de hashes bcrypt existentes via
+#   `bcrypt.checkpw()` quando o hash começa com "$2".
+pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # Bearer token
-security = HTTPBearer()
+security = HTTPBearer(auto_error=False)
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verifica se a senha está correta"""
-    # Bcrypt tem limitação de 72 bytes - truncar se necessário
-    password_bytes = plain_password.encode('utf-8')
-    if len(password_bytes) > 72:
-        plain_password = password_bytes[:72].decode('utf-8', errors='ignore')
+    if not hashed_password:
+        return False
+
+    # Backward-compat: hashes bcrypt existentes ($2a/$2b/$2y)
+    if hashed_password.startswith("$2"):
+        try:
+            password_bytes = plain_password.encode("utf-8")
+            if len(password_bytes) > 72:
+                password_bytes = password_bytes[:72]
+            return bcrypt.checkpw(password_bytes, hashed_password.encode("utf-8"))
+        except Exception:
+            return False
+
     return pwd_context.verify(plain_password, hashed_password)
 
 
 def get_password_hash(password: str) -> str:
     """Gera hash da senha"""
-    # Bcrypt tem limitação de 72 bytes - truncar se necessário
-    password_bytes = password.encode('utf-8')
-    if len(password_bytes) > 72:
-        password = password_bytes[:72].decode('utf-8', errors='ignore')
     return pwd_context.hash(password)
 
 
@@ -109,6 +124,12 @@ async def get_current_user(
     """
     Dependency para obter usuário atual a partir do token
     """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not authenticated",
+        )
+
     token = credentials.credentials
     payload = decode_token(token)
     
@@ -212,5 +233,110 @@ def require_plan(*allowed_plans: str):
                 detail="Plano insuficiente para esta funcionalidade",
             )
         return current_user
-    
+
     return plan_checker
+
+
+# ---------------------------------------------------------------------------
+# Multi-tenancy: OrgContext
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OrgContext:
+    """Contexto organizacional do usuário autenticado."""
+
+    user: User
+    organization_id: Optional[str] = None
+    org_role: Optional[str] = None
+    team_ids: List[str] = field(default_factory=list)
+
+    @property
+    def is_org_member(self) -> bool:
+        return self.organization_id is not None
+
+    @property
+    def is_org_admin(self) -> bool:
+        return self.org_role == "admin"
+
+    @property
+    def tenant_id(self) -> str:
+        """Tenant ID para RAG/Neo4j: org_id se membro, senão user_id."""
+        return self.organization_id or self.user.id
+
+
+async def get_org_context(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> OrgContext:
+    """
+    Dependency que carrega contexto organizacional completo.
+    Se o usuário não tem organização, retorna OrgContext com org_id=None.
+    """
+    org_id = current_user.organization_id
+    org_role: Optional[str] = None
+    team_ids: List[str] = []
+
+    if org_id:
+        from app.models.organization import OrganizationMember, TeamMember, Team
+
+        # Buscar role na org
+        result = await db.execute(
+            select(OrganizationMember.role).where(
+                OrganizationMember.organization_id == org_id,
+                OrganizationMember.user_id == current_user.id,
+                OrganizationMember.is_active == True,  # noqa: E712
+            )
+        )
+        role_value = result.scalar_one_or_none()
+        if role_value is not None:
+            org_role = role_value.value if hasattr(role_value, "value") else str(role_value)
+
+        # Buscar teams do usuário nesta org
+        result = await db.execute(
+            select(TeamMember.team_id)
+            .join(Team, Team.id == TeamMember.team_id)
+            .where(
+                Team.organization_id == org_id,
+                TeamMember.user_id == current_user.id,
+            )
+        )
+        team_ids = list(result.scalars().all())
+
+    return OrgContext(
+        user=current_user,
+        organization_id=org_id,
+        org_role=org_role,
+        team_ids=team_ids,
+    )
+
+
+def require_org_role(*allowed_roles: str):
+    """
+    Dependency factory: verifica se usuário tem role específica na org.
+    """
+    async def checker(ctx: OrgContext = Depends(get_org_context)) -> OrgContext:
+        if not ctx.is_org_member:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Requer membro de organização",
+            )
+        if ctx.org_role not in allowed_roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Permissão insuficiente na organização",
+            )
+        return ctx
+
+    return checker
+
+
+def build_tenant_filter(ctx: OrgContext, model_class):
+    """
+    Retorna cláusula WHERE apropriada para isolamento de dados.
+
+    - Se o usuário é membro de uma org → filtra por organization_id
+    - Senão (single-user mode) → filtra por user_id
+    """
+    if ctx.is_org_member:
+        return model_class.organization_id == ctx.organization_id
+    return model_class.user_id == ctx.user.id

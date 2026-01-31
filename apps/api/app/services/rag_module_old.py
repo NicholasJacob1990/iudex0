@@ -149,6 +149,21 @@ class RAGManager:
             self.embedding_model = None
             self.collections = {}
             self.persist_directory = None
+            self._bm25_indices = {}
+            self._bm25_docs = {}
+            self._reranker = None
+            self._reranker_name = None
+            self._result_cache: Dict[str, Dict[str, Any]] = {}
+            self._cache_ttl_s = 30
+            self._cache_enabled = False
+            self._trace_enabled = False
+            self._audit_log_path = ""
+            self._use_tenant_collections = False
+            self._collection_prefix_tenant = "tenant"
+            self._collection_prefix_global = "global"
+            self._collection_prefix_group = "group"
+            self._graph_cache: Dict[str, Any] = {}
+            self._extractor_cache: Dict[str, Any] = {}
             return
             
         self.persist_directory = persist_directory or settings.CHROMA_PATH

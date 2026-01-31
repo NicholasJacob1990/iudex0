@@ -236,10 +236,11 @@ async def transcribe_advanced(request: TranscribeRequest):
             if request.dry_run:
                 return {"error": "Dry run não suporta áudio. Use arquivo .txt"}
             audio = vomo.optimize_audio(request.file_path)
-            if request.high_accuracy:
-                transcription = vomo.transcribe_beam_search(audio)
-            else:
-                transcription = vomo.transcribe(audio)
+            transcription = vomo.transcribe_file(
+                audio,
+                mode=request.mode,
+                high_accuracy=bool(request.high_accuracy),
+            )
         
         # Skip formatting mode
         if request.skip_formatting:

@@ -281,8 +281,9 @@ class SemanticCypherQueries:
     """Cypher queries for semantic entity operations."""
 
     # Create semantic entity with embedding
+    # Uses dual label :Entity:SemanticEntity so FIND_PATHS traversal works
     CREATE_SEMANTIC_ENTITY = """
-    MERGE (e:SEMANTIC_ENTITY {entity_id: $entity_id})
+    MERGE (e:Entity:SemanticEntity {entity_id: $entity_id})
     ON CREATE SET
         e.name = $name,
         e.entity_type = $entity_type,
@@ -300,7 +301,7 @@ class SemanticCypherQueries:
     # Neo4j 5.x syntax
     CREATE_SEMANTIC_VECTOR_INDEX = """
     CREATE VECTOR INDEX semantic_entity_embedding IF NOT EXISTS
-    FOR (n:SEMANTIC_ENTITY)
+    FOR (n:SemanticEntity)
     ON n.embedding
     OPTIONS {indexConfig: {
         `vector.dimensions`: $dimension,
@@ -312,7 +313,7 @@ class SemanticCypherQueries:
     CREATE_SEMANTIC_VECTOR_INDEX_ALT = """
     CALL db.index.vector.createNodeIndex(
         'semantic_entity_embedding',
-        'SEMANTIC_ENTITY',
+        'SemanticEntity',
         'embedding',
         $dimension,
         'cosine'
@@ -343,7 +344,7 @@ class SemanticCypherQueries:
 
     # Get all seed entities
     GET_SEED_ENTITIES = """
-    MATCH (e:SEMANTIC_ENTITY)
+    MATCH (e:Entity:SemanticEntity)
     WHERE e.is_seed = true
     RETURN e.entity_id AS entity_id,
            e.name AS name,
@@ -352,12 +353,14 @@ class SemanticCypherQueries:
     """
 
     # Create relationship between semantic entity and other entity
+    # Uses RELATED_TO (aligned with FIND_PATHS traversal) with relation_subtype for provenance
     CREATE_SEMANTIC_RELATION = """
-    MATCH (sem:SEMANTIC_ENTITY {entity_id: $sem_id})
-    MATCH (other {entity_id: $other_id})
-    MERGE (sem)-[r:SEMANTICALLY_RELATED]->(other)
+    MATCH (sem:Entity {entity_id: $sem_id})
+    MATCH (other:Entity {entity_id: $other_id})
+    MERGE (sem)-[r:RELATED_TO]->(other)
     ON CREATE SET
         r.weight = $weight,
+        r.relation_subtype = 'semantic',
         r.created_at = datetime()
     ON MATCH SET
         r.weight = $weight,
@@ -555,7 +558,7 @@ class SemanticEntityExtractor:
                 try:
                     create_query = f"""
                     CREATE VECTOR INDEX semantic_entity_embedding IF NOT EXISTS
-                    FOR (n:SEMANTIC_ENTITY)
+                    FOR (n:SemanticEntity)
                     ON n.embedding
                     OPTIONS {{indexConfig: {{
                         `vector.dimensions`: {self.embedding_dim},

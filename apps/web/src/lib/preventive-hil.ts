@@ -214,3 +214,86 @@ export const buildPreventiveHilIssues = (audit: any): HilIssue[] => {
 
     return issues;
 };
+
+export const buildQualityHilIssues = (analysis?: {
+    missing_laws?: string[];
+    missing_sumulas?: string[];
+    missing_decretos?: string[];
+    missing_julgados?: string[];
+    compression_warning?: string;
+} | null): HilIssue[] => {
+    if (!analysis) return [];
+    const issues: HilIssue[] = [];
+    const asList = (value: any) => (Array.isArray(value) ? value : []);
+    const buildId = (prefix: string, seed: string, idx: number) => {
+        const base = seed || `${prefix}_${idx}`;
+        return `${prefix}_${hashString(base)}`;
+    };
+    const addIssue = (prefix: string, type: string, reference: string, description: string, suggestion: string, severity = "warning") => {
+        issues.push({
+            id: buildId(prefix, `${type}:${reference}`, issues.length),
+            type,
+            fix_type: "content",
+            severity,
+            reference,
+            description: truncateText(description, 220),
+            suggestion: truncateText(suggestion, 200),
+            source: "quality",
+            origin: "quality",
+        });
+    };
+
+    asList(analysis.missing_laws).forEach((law: any) => {
+        const ref = String(law || "").trim();
+        if (!ref) return;
+        addIssue(
+            "quality_missing_law",
+            "missing_law",
+            ref,
+            `Lei possivelmente ausente: ${ref}`,
+            `Inserir referência contextual à Lei ${ref} se foi mencionada no áudio.`,
+            "warning"
+        );
+    });
+
+    asList(analysis.missing_sumulas).forEach((sumula: any) => {
+        const ref = String(sumula || "").trim();
+        if (!ref) return;
+        addIssue(
+            "quality_missing_sumula",
+            "missing_sumula",
+            ref,
+            `Súmula possivelmente ausente: ${ref}`,
+            `Inserir referência contextual à ${ref} se foi mencionada no áudio.`,
+            "warning"
+        );
+    });
+
+    asList(analysis.missing_julgados).forEach((julgado: any) => {
+        const ref = String(julgado || "").trim();
+        if (!ref) return;
+        addIssue(
+            "quality_missing_julgado",
+            "missing_julgado",
+            ref,
+            `Julgado possivelmente ausente: ${ref}`,
+            "Inserir referência contextual ou revisar o trecho correspondente.",
+            "info"
+        );
+    });
+
+    asList(analysis.missing_decretos).forEach((decreto: any) => {
+        const ref = String(decreto || "").trim();
+        if (!ref) return;
+        addIssue(
+            "quality_missing_decreto",
+            "missing_decreto",
+            ref,
+            `Decreto possivelmente ausente: ${ref}`,
+            `Inserir referência contextual ao Decreto ${ref} se foi mencionado no áudio.`,
+            "info"
+        );
+    });
+
+    return issues;
+};

@@ -48,6 +48,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^0.2.1",
+    "css-houdini-ringparticles": "^1.1.0",
     "date-fns": "^3.1.0",
     "diff": "^8.0.3",
     "dompurify": "^3.2.7",

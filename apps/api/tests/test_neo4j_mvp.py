@@ -160,6 +160,7 @@ class TestNeo4jMVPConfig:
         monkeypatch.setenv("NEO4J_VECTOR_DIM", "1536")
         monkeypatch.setenv("NEO4J_VECTOR_SIMILARITY", "cosine")
         monkeypatch.setenv("NEO4J_VECTOR_PROPERTY", "embedding")
+        monkeypatch.setenv("NEO4J_MAX_FACTS_PER_CHUNK", "5")
 
         config = Neo4jMVPConfig.from_env()
         assert config.uri == "bolt://custom:7687"
@@ -173,6 +174,23 @@ class TestNeo4jMVPConfig:
         assert config.vector_dimensions == 1536
         assert config.vector_similarity == "cosine"
         assert config.vector_property == "embedding"
+        assert config.max_facts_per_chunk == 5
+
+
+class TestFactExtractor:
+    def test_extract_prefers_fact_like_sentences(self):
+        from app.services.rag.core.neo4j_mvp import FactExtractor
+
+        text = (
+            "Em 10/01/2024 as partes celebraram contrato no valor de R$ 1.000,00. "
+            "Nos termos do Art. 5º da CF, aplica-se a regra. "
+            "O réu inadimpliu o pagamento em 15/02/2024."
+        )
+
+        facts = FactExtractor.extract(text, max_facts=2)
+        assert len(facts) == 2
+        # Should keep at least one sentence with date/value.
+        assert any("10/01/2024" in f or "R$" in f for f in facts)
 
 
 class TestNeo4jMVPService:
@@ -214,6 +232,7 @@ class TestCypherQueries:
             CypherQueries.MERGE_DOCUMENT,
             CypherQueries.MERGE_CHUNK,
             CypherQueries.MERGE_ENTITY,
+            CypherQueries.MERGE_FACT,
             CypherQueries.FIND_CHUNKS_BY_ENTITIES,
             CypherQueries.EXPAND_NEIGHBORS,
             CypherQueries.FIND_PATHS,
@@ -229,6 +248,9 @@ class TestCypherQueries:
         # Sanity checks for explainable-path query
         assert "path_nodes" in CypherQueries.FIND_PATHS
         assert "path_edges" in CypherQueries.FIND_PATHS
+
+        # Document nodes should expose the original app-level id for filtering/export.
+        assert "doc_id" in CypherQueries.MERGE_DOCUMENT
 
 
 class TestBuildGraphContext:
@@ -393,7 +415,9 @@ def _is_neo4j_available():
     """Helper to check if Neo4j is available."""
     try:
         from app.services.rag.core.neo4j_mvp import Neo4jMVPService, Neo4jMVPConfig
-        config = Neo4jMVPConfig(create_indexes=False)
+        # Use from_env() to read credentials from environment variables
+        config = Neo4jMVPConfig.from_env()
+        config.create_indexes = False  # Don't create indexes during availability check
         service = Neo4jMVPService(config)
         return service.health_check()
     except Exception:
@@ -447,3 +471,282 @@ class TestNeo4jIntegration:
         )
 
         assert len(results) >= 1
+
+
+class TestPhase0BugFixes:
+    """Tests verifying Phase 0 bug fixes for GraphRAG maturity plan."""
+
+    def test_link_related_entities_method_exists(self):
+        """Verify that link_related_entities exists on Neo4jMVPService.
+
+        Bug: neo4j_mvp.py:1399 called self.link_entities() which didn't exist.
+        Fix: Changed to self.link_related_entities().
+        """
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPService
+
+        assert hasattr(Neo4jMVPService, "link_related_entities"), (
+            "Neo4jMVPService must have link_related_entities method"
+        )
+
+    def test_ingest_document_calls_link_related_entities(self):
+        """Verify ingest_document no longer calls non-existent link_entities.
+
+        The method at line ~1399 should call link_related_entities, not link_entities.
+        """
+        import inspect
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPService
+
+        source = inspect.getsource(Neo4jMVPService.ingest_document)
+        assert "self.link_entities(" not in source, (
+            "ingest_document still calls non-existent self.link_entities()"
+        )
+        assert "self.link_related_entities(" in source, (
+            "ingest_document should call self.link_related_entities()"
+        )
+
+    def test_find_paths_includes_asserts_refers_to(self):
+        """Verify FIND_PATHS query traverses ASSERTS and REFERS_TO relationships.
+
+        Bug: FIND_PATHS only traversed RELATED_TO|MENTIONS, missing Fact paths.
+        Fix: Added ASSERTS|REFERS_TO to the traversal pattern.
+        """
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        find_paths = CypherQueries.FIND_PATHS
+        assert "ASSERTS" in find_paths, "FIND_PATHS must traverse ASSERTS relationships"
+        assert "REFERS_TO" in find_paths, "FIND_PATHS must traverse REFERS_TO relationships"
+        assert "RELATED_TO" in find_paths, "FIND_PATHS must still traverse RELATED_TO"
+        assert "MENTIONS" in find_paths, "FIND_PATHS must still traverse MENTIONS"
+
+    def test_semantic_extractor_uses_related_to(self):
+        """Verify semantic extractor creates RELATED_TO (not SEMANTICALLY_RELATED).
+
+        Bug: semantic_extractor.py created SEMANTICALLY_RELATED but FIND_PATHS
+        only traversed RELATED_TO, so semantic paths were never found.
+        Fix: Changed to RELATED_TO with relation_subtype='semantic'.
+        """
+        from app.services.rag.core.semantic_extractor import SemanticCypherQueries
+
+        query = SemanticCypherQueries.CREATE_SEMANTIC_RELATION
+        assert "RELATED_TO" in query, (
+            "Semantic relations must use RELATED_TO (aligned with FIND_PATHS)"
+        )
+        assert "SEMANTICALLY_RELATED" not in query, (
+            "SEMANTICALLY_RELATED is deprecated — use RELATED_TO with relation_subtype"
+        )
+        assert "relation_subtype" in query, (
+            "Must set relation_subtype='semantic' for provenance tracking"
+        )
+
+    def test_semantic_entity_has_dual_label(self):
+        """Verify semantic entities use dual label :Entity:SemanticEntity.
+
+        Bug: Used :SEMANTIC_ENTITY label only, so FIND_PATHS (which matches :Entity)
+        could not find semantic entities.
+        Fix: Changed to :Entity:SemanticEntity dual label.
+        """
+        from app.services.rag.core.semantic_extractor import SemanticCypherQueries
+
+        query = SemanticCypherQueries.CREATE_SEMANTIC_ENTITY
+        assert ":Entity:SemanticEntity" in query, (
+            "Semantic entities must use dual label :Entity:SemanticEntity"
+        )
+        assert ":SEMANTIC_ENTITY" not in query, (
+            "Old :SEMANTIC_ENTITY label should not be used (not traversable by FIND_PATHS)"
+        )
+
+    def test_hybrid_labels_include_semantic_entity(self):
+        """Verify SemanticEntity is registered in hybrid labels whitelist."""
+        from app.services.rag.core.graph_hybrid import HYBRID_LABELS_BY_ENTITY_TYPE
+
+        assert "semanticentity" in HYBRID_LABELS_BY_ENTITY_TYPE, (
+            "SemanticEntity must be in HYBRID_LABELS_BY_ENTITY_TYPE"
+        )
+        assert HYBRID_LABELS_BY_ENTITY_TYPE["semanticentity"] == "SemanticEntity"
+
+    def test_cypher_injection_prevention(self):
+        """Verify Neo4jAdapter rejects unknown relationship types."""
+        from app.services.rag.core.graph_factory import Neo4jAdapter
+
+        allowed = Neo4jAdapter.ALLOWED_RELATIONSHIP_TYPES
+        assert isinstance(allowed, frozenset), "ALLOWED_RELATIONSHIP_TYPES must be a frozenset"
+        assert len(allowed) > 10, "Whitelist should have a reasonable number of types"
+
+        # Core types must be present
+        for rel in ["RELATED_TO", "MENTIONS", "HAS_CHUNK", "SUPPORTS", "OPPOSES"]:
+            assert rel in allowed, f"{rel} must be in ALLOWED_RELATIONSHIP_TYPES"
+
+    def test_requirements_has_neo4j(self):
+        """Verify neo4j is listed in requirements.txt."""
+        import os
+
+        req_path = os.path.join(
+            os.path.dirname(__file__), "..", "requirements.txt"
+        )
+        with open(req_path) as f:
+            content = f.read()
+        assert "neo4j>=" in content, "neo4j must be in requirements.txt"
+
+
+class TestPhase1ArgumentRAG:
+    """Tests for Phase 1: ArgumentRAG unified schema in Neo4j."""
+
+    def test_argument_neo4j_service_importable(self):
+        """Verify ArgumentNeo4jService can be imported."""
+        from app.services.rag.core.argument_neo4j import (
+            ArgumentNeo4jService,
+            ArgumentCypher,
+            get_argument_neo4j,
+        )
+        assert ArgumentNeo4jService is not None
+        assert ArgumentCypher is not None
+
+    def test_argument_cypher_schema_constraints(self):
+        """Verify schema constraints cover all argument node types."""
+        from app.services.rag.core.argument_neo4j import ArgumentCypher
+
+        constraints = ArgumentCypher.SCHEMA_CONSTRAINTS
+        assert len(constraints) == 4, "Must have constraints for Claim, Evidence, Actor, Issue"
+
+        constraint_text = " ".join(constraints)
+        for label in ("Claim", "Evidence", "Actor", "Issue"):
+            assert label in constraint_text, f"Missing constraint for {label}"
+
+    def test_argument_cypher_schema_indexes(self):
+        """Verify schema indexes for tenant isolation and queries."""
+        from app.services.rag.core.argument_neo4j import ArgumentCypher
+
+        indexes = ArgumentCypher.SCHEMA_INDEXES
+        index_text = " ".join(indexes)
+        assert "tenant_id" in index_text, "Must index tenant_id for isolation"
+        assert "case_id" in index_text, "Must index case_id for case scoping"
+
+    def test_neo4j_mvp_schema_includes_argument_constraints(self):
+        """Verify neo4j_mvp CypherQueries includes ArgumentRAG constraints."""
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        constraints = CypherQueries.CREATE_CONSTRAINTS
+        for label in ("Claim", "Evidence", "Actor", "Issue"):
+            assert label in constraints, (
+                f"CypherQueries.CREATE_CONSTRAINTS must include {label} constraint"
+            )
+
+    def test_neo4j_mvp_schema_includes_argument_indexes(self):
+        """Verify neo4j_mvp CypherQueries includes ArgumentRAG indexes."""
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        indexes = CypherQueries.CREATE_INDEXES
+        assert "arg_claim_tenant" in indexes, "Missing arg_claim_tenant index"
+        assert "arg_evidence_tenant" in indexes, "Missing arg_evidence_tenant index"
+        assert "arg_issue_case" in indexes, "Missing arg_issue_case index"
+
+    def test_find_paths_with_arguments_includes_argument_relationships(self):
+        """Verify FIND_PATHS_WITH_ARGUMENTS traverses argument relationships."""
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        find_paths = CypherQueries.FIND_PATHS_WITH_ARGUMENTS
+        for rel in ("SUPPORTS", "OPPOSES", "EVIDENCES", "ARGUES", "CONTAINS_CLAIM"):
+            assert rel in find_paths, (
+                f"FIND_PATHS_WITH_ARGUMENTS must traverse {rel} for argument graph reachability"
+            )
+
+    def test_find_paths_entity_only_excludes_argument_relationships(self):
+        """Verify entity-only FIND_PATHS does NOT traverse argument relationships."""
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        find_paths = CypherQueries.FIND_PATHS
+        for rel in ("SUPPORTS", "OPPOSES", "EVIDENCES", "ARGUES", "CONTAINS_CLAIM"):
+            assert rel not in find_paths, (
+                f"Entity-only FIND_PATHS must NOT traverse {rel}"
+            )
+
+    def test_find_paths_with_arguments_matches_argument_targets(self):
+        """Verify FIND_PATHS_WITH_ARGUMENTS matches Claim and Evidence as targets."""
+        from app.services.rag.core.neo4j_mvp import CypherQueries
+
+        find_paths = CypherQueries.FIND_PATHS_WITH_ARGUMENTS
+        assert "target:Claim" in find_paths, "Must match Claim targets"
+        assert "target:Evidence" in find_paths, "Must match Evidence targets"
+
+    def test_hybrid_labels_include_argument_types(self):
+        """Verify graph_hybrid.py includes Claim/Evidence/Actor/Issue labels."""
+        from app.services.rag.core.graph_hybrid import HYBRID_LABELS_BY_ENTITY_TYPE
+
+        expected = {
+            "claim": "Claim",
+            "evidence": "Evidence",
+            "actor": "Actor",
+            "issue": "Issue",
+        }
+        for key, value in expected.items():
+            assert key in HYBRID_LABELS_BY_ENTITY_TYPE, f"Missing hybrid label: {key}"
+            assert HYBRID_LABELS_BY_ENTITY_TYPE[key] == value, (
+                f"Wrong hybrid label value for {key}: expected {value}"
+            )
+
+    def test_graph_factory_whitelist_includes_argument_types(self):
+        """Verify graph_factory ALLOWED_RELATIONSHIP_TYPES includes argument types."""
+        from app.services.rag.core.graph_factory import Neo4jAdapter
+
+        for rel in ("SUPPORTS", "OPPOSES", "EVIDENCES", "ARGUES", "RAISES", "CITES", "CONTAINS_CLAIM"):
+            assert rel in Neo4jAdapter.ALLOWED_RELATIONSHIP_TYPES, (
+                f"Missing {rel} in ALLOWED_RELATIONSHIP_TYPES"
+            )
+
+    def test_claim_extraction_heuristic(self):
+        """Test that ArgumentNeo4jService extracts claims from legal text."""
+        from app.services.rag.core.argument_neo4j import ArgumentNeo4jService
+
+        svc = ArgumentNeo4jService.__new__(ArgumentNeo4jService)
+        svc.config = __import__("app.services.rag.core.argument_neo4j", fromlist=["ArgumentNeo4jConfig"]).ArgumentNeo4jConfig()
+
+        text = (
+            "O réu contesta a pretensão autoral. "
+            "A testemunha confirma que o dano foi causado pelo réu. "
+            "O valor é razoável."
+        )
+        claims = svc._extract_claims(text)
+        assert len(claims) >= 1, "Should extract at least one claim"
+        # "confirma" is an assert cue => polarity should be 1
+        confirm_claim = next((c for c in claims if "confirma" in c["text"].lower()), None)
+        if confirm_claim:
+            assert confirm_claim["polarity"] == 1
+
+    def test_stance_inference(self):
+        """Test stance inference from legal text."""
+        from app.services.rag.core.argument_neo4j import ArgumentNeo4jService, ArgumentNeo4jConfig
+
+        svc = ArgumentNeo4jService.__new__(ArgumentNeo4jService)
+        svc.config = ArgumentNeo4jConfig()
+
+        assert svc._infer_stance("O réu contesta a pretensão") == "disputes"
+        assert svc._infer_stance("A perícia confirma o dano") == "asserts"
+        assert svc._infer_stance("Documento anexado aos autos") == "neutral"
+
+    def test_debate_context_no_doc_ids(self):
+        """Test get_debate_context returns empty when results have no doc_ids."""
+        from app.services.rag.core.argument_neo4j import ArgumentNeo4jService, ArgumentNeo4jConfig
+
+        svc = ArgumentNeo4jService.__new__(ArgumentNeo4jService)
+        svc.config = ArgumentNeo4jConfig()
+
+        results = [{"text": "some text", "metadata": {}}]
+        ctx, stats = svc.get_debate_context(results, "tenant1")
+        assert ctx == ""
+        assert stats["status"] == "no_doc_ids"
+
+    def test_rag_pipeline_argument_backend_env(self):
+        """Verify rag_pipeline reads RAG_ARGUMENT_BACKEND env var."""
+        import inspect
+        from app.services.rag.pipeline.rag_pipeline import RAGPipeline
+
+        source = inspect.getsource(RAGPipeline._stage_graph_enrich)
+        assert "RAG_ARGUMENT_BACKEND" in source, (
+            "rag_pipeline must read RAG_ARGUMENT_BACKEND env var"
+        )
+        assert "get_argument_neo4j" in source, (
+            "rag_pipeline must import get_argument_neo4j for Neo4j backend"
+        )
+        assert "ARGUMENT_PACK" in source, (
+            "rag_pipeline must keep ARGUMENT_PACK for legacy fallback"
+        )

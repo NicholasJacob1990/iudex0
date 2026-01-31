@@ -154,6 +154,12 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     setDeepResearchLatitude,
     deepResearchLongitude,
     setDeepResearchLongitude,
+    deepResearchMode,
+    setDeepResearchMode,
+    hardResearchProviders,
+    setHardResearchProvider,
+    toggleHardResearchProvider,
+    setAllHardResearchProviders,
     reasoningLevel,
     setReasoningLevel,
     verbosity,
@@ -162,28 +168,14 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     setThinkingBudget,
     modelOverrides,
     setModelOverride,
-    setSelectedModels,
-    setChatMode,
+	    setSelectedModels,
+	    setChatMode,
     setShowMultiModelComparator,
-    ragAdvancedMode: advancedRagMode,
-    setRagAdvancedMode: setAdvancedRagMode,
-    adaptiveRouting,
-    setAdaptiveRouting,
-    cragGate,
-    setCragGate,
-    hydeEnabled,
-    setHydeEnabled,
-    graphRagEnabled,
-    setGraphRagEnabled,
-    argumentGraphEnabled,
-    setArgumentGraphEnabled,
-    graphHops,
-    setGraphHops,
     ragScope,
     setRagScope,
     attachmentMode,
     setAttachmentMode,
-    setPendingCanvasContext,
+	    setPendingCanvasContext,
     thesis,
     setThesis,
     useTemplates,
@@ -243,6 +235,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     return Array.from(new Set(base.filter(Boolean)));
   }, [chatMode, selectedModels, selectedModel]);
   const showPerModelOverrides = chatMode === 'multi-model' && activeModelIds.length > 0;
+  const advancedRagMode = true;
 
   const filteredTemplates = useMemo(() => {
     const query = templateQuery.trim().toLowerCase();
@@ -1395,6 +1388,110 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
                     <Switch checked={denseResearch} onCheckedChange={setDenseResearch} />
                   </div>
 
+                  {/* Seletor de Modo: Standard / Hard */}
+                  {denseResearch && (
+                    <div className="space-y-3 mt-3">
+                      <div className="flex items-center gap-2">
+                        <Label className="text-xs font-medium">Modo</Label>
+                      </div>
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          disabled={!denseResearch}
+                          onClick={() => setDeepResearchMode('standard')}
+                          className={cn(
+                            'rounded-full border px-3 py-1 text-[10px] font-semibold transition-colors',
+                            deepResearchMode === 'standard'
+                              ? 'border-indigo-300 bg-indigo-500/15 text-indigo-700'
+                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
+                            !denseResearch && 'pointer-events-none'
+                          )}
+                        >
+                          Standard
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!denseResearch}
+                          onClick={() => setDeepResearchMode('hard')}
+                          className={cn(
+                            'rounded-full border px-3 py-1 text-[10px] font-semibold transition-colors',
+                            deepResearchMode === 'hard'
+                              ? 'border-red-300 bg-red-500/15 text-red-700'
+                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
+                            !denseResearch && 'pointer-events-none'
+                          )}
+                        >
+                          Hard (Multi-Provider)
+                        </button>
+                      </div>
+
+                      {/* Seletor de Fontes — visível apenas no modo Hard */}
+                      {deepResearchMode === 'hard' && (
+                        <div className="space-y-2 rounded-lg border border-red-200/50 bg-red-500/5 p-3">
+                          <div className="flex items-center justify-between">
+                            <Label className="text-xs font-medium text-red-800">
+                              Fontes da Pesquisa
+                            </Label>
+                            <div className="flex gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => setAllHardResearchProviders(true)}
+                                className="text-[10px] text-slate-500 hover:text-slate-700 underline"
+                              >
+                                Todas
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setAllHardResearchProviders(false)}
+                                className="text-[10px] text-slate-500 hover:text-slate-700 underline"
+                              >
+                                Nenhuma
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            {[
+                              { id: 'gemini', label: 'Gemini Deep Research', desc: 'Google — busca web profunda', icon: '\u2726' },
+                              { id: 'perplexity', label: 'Perplexity Sonar', desc: 'Web + Academic search', icon: '\u229B' },
+                              { id: 'openai', label: 'ChatGPT Deep Research', desc: 'OpenAI — análise profunda', icon: '\u25C9' },
+                              { id: 'rag_global', label: 'RAG Global', desc: 'Legislação, jurisprudência, súmulas', icon: '\u2696' },
+                              { id: 'rag_local', label: 'RAG Local', desc: 'Documentos do caso/processo', icon: '\u25A4' },
+                            ].map((source) => (
+                              <label
+                                key={source.id}
+                                className={cn(
+                                  'flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 cursor-pointer transition-colors',
+                                  hardResearchProviders[source.id] !== false
+                                    ? 'border-red-300/50 bg-red-500/10 text-slate-800'
+                                    : 'border-slate-200 bg-white text-slate-400'
+                                )}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={hardResearchProviders[source.id] !== false}
+                                  onChange={() => toggleHardResearchProvider(source.id)}
+                                  className="h-3.5 w-3.5 rounded border-slate-300 text-red-600 focus:ring-red-500"
+                                />
+                                <span className="text-sm">{source.icon}</span>
+                                <div className="flex-1 min-w-0">
+                                  <span className="text-xs font-medium">{source.label}</span>
+                                  <span className="text-[10px] text-muted-foreground ml-1.5">{source.desc}</span>
+                                </div>
+                              </label>
+                            ))}
+                          </div>
+
+                          <p className="text-[10px] text-red-600/60 mt-1">
+                            Mais fontes = pesquisa mais completa, porém mais lenta e custosa
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Provider selector — only visible in standard mode */}
+                  {denseResearch && deepResearchMode === 'standard' && (
                   <div className={cn('space-y-2', !denseResearch && 'opacity-50')}>
                     <div className="flex items-center gap-2">
                       {wrapTooltip(
@@ -1482,6 +1579,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
                       </div>
                     )}
                   </div>
+                  )}
 
                   <div className="h-[1px] bg-slate-200" />
 
@@ -1606,175 +1704,15 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
 
                   <div className="h-[1px] bg-slate-200" />
 
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between">
-                      <Label className="text-xs font-bold uppercase text-muted-foreground flex items-center gap-2">
-                        <Zap className="h-3 w-3" /> RAG
-                      </Label>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-muted-foreground">Auto</span>
-                        <Switch checked={advancedRagMode} onCheckedChange={setAdvancedRagMode} />
-                        <span className="text-[10px] text-muted-foreground">Avançado</span>
-                      </div>
-                    </div>
-                    <p className="text-[10px] text-muted-foreground">
-                      {advancedRagMode
-                        ? 'Ajustes avançados para precisão e profundidade. Passe o mouse nos nomes para ver detalhes técnicos.'
-                        : 'RAG auto: busca trechos relevantes e responde com base neles. Rápido e indicado para a maioria dos casos.'}
-                    </p>
-
-                    {advancedRagMode && (
-                      <>
-                        <div className="flex items-center justify-between">
-                          <div className="flex flex-col gap-0.5">
-                            {wrapTooltip(
-                              advancedRagMode,
-                              <Label
-                                className={cn(
-                                  'text-sm font-medium',
-                                  advancedRagMode && 'cursor-help'
-                                )}
-                              >
-                                Estratégia automática
-                              </Label>,
-                              'Nome tecnico: Adaptive Routing. Escolhe automaticamente a melhor estrategia por secao.',
-                              'right'
-                            )}
-                            <span className="text-xs text-muted-foreground">
-                              Recomendado para a maioria dos casos
-                            </span>
-                          </div>
-                          <Switch checked={adaptiveRouting} onCheckedChange={setAdaptiveRouting} />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <div className="flex flex-col gap-0.5">
-                            {wrapTooltip(
-                              advancedRagMode,
-                              <Label
-                                className={cn(
-                                  'text-sm font-medium',
-                                  advancedRagMode && 'cursor-help'
-                                )}
-                              >
-                                Rascunho inteligente
-                              </Label>,
-                              'HyDE (Hypothetical Document Embeddings). Cria um rascunho para recuperar melhor quando a pergunta e vaga.',
-                              'right'
-                            )}
-                            <span className="text-xs text-muted-foreground">
-                              Ajuda quando a pergunta é vaga
-                            </span>
-                          </div>
-                          <Switch checked={hydeEnabled} onCheckedChange={setHydeEnabled} />
-                        </div>
-
-                        <div className="flex items-center justify-between">
-                          <div className="flex flex-col gap-0.5">
-                            {wrapTooltip(
-                              advancedRagMode,
-                              <Label
-                                className={cn(
-                                  'text-sm font-medium',
-                                  advancedRagMode && 'cursor-help'
-                                )}
-                              >
-                                Verificacao extra
-                              </Label>,
-                              'CRAG (Corrective RAG). Reavalia a qualidade das evidencias antes de responder.',
-                              'right'
-                            )}
-                            <span className="text-xs text-muted-foreground">
-                              Checagem extra das fontes
-                            </span>
-                          </div>
-                          <Switch checked={cragGate} onCheckedChange={setCragGate} />
-                        </div>
-
-                        <div className="space-y-2 pt-2 border-t border-slate-200/70">
-                          <div className="flex items-center justify-between">
-                            <div className="flex flex-col gap-0.5">
-                              {wrapTooltip(
-                                advancedRagMode,
-                                <Label
-                                  className={cn(
-                                    'text-sm font-medium',
-                                    advancedRagMode && 'cursor-help'
-                                  )}
-                                >
-                                  Relacoes entre fatos
-                                </Label>,
-                                'GraphRAG. Conecta documentos e conceitos relacionados para ampliar o contexto. Profundidade define os saltos nas relacoes.',
-                                'right'
-                              )}
-                              <span className="text-xs text-muted-foreground">
-                                Conecta documentos e conceitos relacionados
-                              </span>
-                            </div>
-                            <Switch
-                              checked={graphRagEnabled}
-                              onCheckedChange={setGraphRagEnabled}
-                            />
-                          </div>
-                          {graphRagEnabled && (
-                            <div className="space-y-2 px-1 pt-1 animate-in zoom-in-95">
-                              <div className="flex justify-between items-center text-[10px]">
-                                <span className="text-emerald-600">Profundidade: {graphHops}</span>
-                              </div>
-                              <Slider
-                                value={[graphHops]}
-                                onValueChange={([v]) => setGraphHops(v)}
-                                max={5}
-                                min={1}
-                                step={1}
-                              />
-                              <div className="flex items-center justify-between pt-2">
-                                <div className="flex flex-col gap-0.5">
-                                  {wrapTooltip(
-                                    advancedRagMode,
-                                    <Label
-                                      className={cn(
-                                        'text-sm font-medium',
-                                        advancedRagMode && 'cursor-help'
-                                      )}
-                                    >
-                                      Contraditório (ArgumentRAG)
-                                    </Label>,
-                                    'Organiza alegações pró/contra e evidências associadas (quando disponíveis).',
-                                    'right'
-                                  )}
-                                  <span className="text-xs text-muted-foreground">
-                                    Pro/contra com evidências
-                                  </span>
-                                </div>
-                                <Switch
-                                  checked={argumentGraphEnabled}
-                                  onCheckedChange={setArgumentGraphEnabled}
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      </>
-                    )}
-                  </div>
-
                   {/* RAG Scope Selector */}
-                  <div className="space-y-2 pt-3 border-t border-slate-200">
+                  <div className="space-y-2">
                     <div className="flex flex-col gap-2">
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <Label
-                          className={cn(
-                            'text-xs font-bold uppercase text-muted-foreground',
-                            advancedRagMode && 'cursor-help'
-                          )}
-                        >
-                          Escopo de Busca
-                        </Label>,
-                        'Define quais documentos a IA pode consultar: apenas anexos do caso, base global, ou ambos.',
-                        'right'
-                      )}
+                      <Label className="text-xs font-bold uppercase text-muted-foreground flex items-center gap-2">
+                        <Zap className="h-3 w-3" /> Escopo de Busca
+                      </Label>
+                      <p className="text-[10px] text-muted-foreground">
+                        Define quais documentos a IA pode consultar. RAG otimizado com HyDE, CRAG, GraphRAG e Adaptive Routing sempre ativos.
+                      </p>
                       <div className="grid grid-cols-3 gap-1">
                         <button
                           type="button"

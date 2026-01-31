@@ -1,0 +1,195 @@
+{
+  "nodes": [
+    {
+      "id": "evidence:fbf101df1883",
+      "entity_type": "evidence",
+      "name": "STJ - Dano moral - REsp 1234567",
+      "doc_id": "f4daa1bb-d34c-4675-b4c6-9764d7806bab",
+      "chunk_id": null,
+      "title": "STJ - Dano moral - REsp 1234567",
+      "url": null,
+      "source_type": null
+    },
+    {
+      "id": "actor:04421c10410e",
+      "entity_type": "actor",
+      "name": "Autor"
+    },
+    {
+      "id": "claim:69afeafbc4f8",
+      "entity_type": "claim",
+      "name": "A parte autora afirma que houve dano moral.",
+      "text": "A parte autora afirma que houve dano moral.",
+      "polarity": 1,
+      "dates": [],
+      "times": [],
+      "from": "text"
+    },
+    {
+      "id": "claim:513a27236fca",
+      "entity_type": "claim",
+      "name": "O reu contesta e diz que nao houve dano.",
+      "text": "O reu contesta e diz que nao houve dano.",
+      "polarity": -1,
+      "dates": [],
+      "times": [],
+      "from": "text"
+    },
+    {
+      "id": "evidence:7d1202532be3",
+      "entity_type": "evidence",
+      "name": "STJ - Dano moral - REsp 1234567",
+      "doc_id": "1d4a3af6-82f7-4887-9304-3db788cc4987",
+      "chunk_id": null,
+      "title": "STJ - Dano moral - REsp 1234567",
+      "url": null,
+      "source_type": null
+    },
+    {
+      "id": "lei:8666_1993",
+      "entity_type": "lei",
+      "name": "Lei 8666/1993",
+      "numero": "8666",
+      "ano": 1993
+    },
+    {
+      "id": "evidence:5e4fc282183e",
+      "entity_type": "evidence",
+      "name": "Jurisprudencia STJ - Dano moral",
+      "doc_id": "9d1c444a-222d-45bd-b1ca-6fe6eb145a33",
+      "chunk_id": null,
+      "title": "Jurisprudência STJ - Dano moral",
+      "url": null,
+      "source_type": null
+    },
+    {
+      "id": "claim:6b77852f6870",
+      "entity_type": "claim",
+      "name": "A autora afirma que houve dano moral.",
+      "text": "A autora afirma que houve dano moral.",
+      "polarity": 1,
+      "dates": [],
+      "times": [],
+      "from": "text"
+    },
+    {
+      "id": "claim:5a5a818b89ae",
+      "entity_type": "claim",
+      "name": "A re contesta e diz que nao houve dano.",
+      "text": "A re contesta e diz que nao houve dano.",
+      "polarity": -1,
+      "dates": [],
+      "times": [],
+      "from": "text"
+    },
+    {
+      "id": "evidence:ddd7185ea7eb",
+      "entity_type": "evidence",
+      "name": "Jurisprudencia - Dano moral",
+      "doc_id": "f6bba7e1-ad91-4988-9f69-24fe3934ae6a",
+      "chunk_id": null,
+      "title": "Jurisprudência - Dano moral",
+      "url": null,
+      "source_type": null
+    }
+  ],
+  "edges": [
+    {
+      "source": "evidence:fbf101df1883",
+      "target": "claim:69afeafbc4f8",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:fbf101df1883",
+      "target": "claim:513a27236fca",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "actor:04421c10410e",
+      "target": "claim:69afeafbc4f8",
+      "relation": "disputes",
+      "weight": 1.0,
+      "via": "chunk"
+    },
+    {
+      "source": "actor:04421c10410e",
+      "target": "claim:513a27236fca",
+      "relation": "disputes",
+      "weight": 1.0,
+      "via": "chunk"
+    },
+    {
+      "source": "actor:04421c10410e",
+      "target": "claim:6b77852f6870",
+      "relation": "disputes",
+      "weight": 1.0,
+      "via": "chunk"
+    },
+    {
+      "source": "actor:04421c10410e",
+      "target": "claim:5a5a818b89ae",
+      "relation": "disputes",
+      "weight": 1.0,
+      "via": "chunk"
+    },
+    {
+      "source": "evidence:7d1202532be3",
+      "target": "claim:69afeafbc4f8",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:7d1202532be3",
+      "target": "claim:513a27236fca",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:5e4fc282183e",
+      "target": "claim:6b77852f6870",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:5e4fc282183e",
+      "target": "claim:5a5a818b89ae",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:ddd7185ea7eb",
+      "target": "claim:6b77852f6870",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    },
+    {
+      "source": "evidence:ddd7185ea7eb",
+      "target": "claim:5a5a818b89ae",
+      "relation": "contradicts",
+      "weight": 0.9,
+      "via": "text",
+      "stance": "disputes"
+    }
+  ],
+  "metadata": {
+    "saved_at": "2026-01-27T18:01:11.652461",
+    "node_count": 10,
+    "edge_count": 12
+  }
+}

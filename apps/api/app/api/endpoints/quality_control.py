@@ -167,6 +167,7 @@ class ValidateRequest(BaseModel):
     raw_content: str = Field(..., description="Original raw transcription text")
     formatted_content: str = Field(..., description="Formatted markdown/apostila text")
     document_name: str = Field(..., description="Name identifier for the document")
+    mode: str = Field(default="APOSTILA", description="APOSTILA, FIDELIDADE, AUDIENCIA, REUNIAO, or DEPOIMENTO")
 
 
 class ValidateResponse(BaseModel):
@@ -228,7 +229,8 @@ async def validate_document(request: ValidateRequest):
         result = await quality_service.validate_document(
             raw_content=request.raw_content,
             formatted_content=request.formatted_content,
-            document_name=request.document_name
+            document_name=request.document_name,
+            mode=request.mode,
         )
         return ValidateResponse(**result)
     except Exception as e:

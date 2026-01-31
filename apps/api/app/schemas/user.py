@@ -85,7 +85,10 @@ class UserResponse(UserBase):
     cnpj: Optional[str] = None
     position: Optional[str] = None
     department: Optional[str] = None
-    
+
+    # Multi-tenancy
+    organization_id: Optional[str] = None
+
     model_config = ConfigDict(from_attributes=True)
 
 

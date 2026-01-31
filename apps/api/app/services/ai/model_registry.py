@@ -445,6 +445,56 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         api_model="deepseek-reasoner",
         thinking_category="native",  # Native reasoning_content field
     ),
+
+    # ---------- AGENT EXECUTORS ----------
+    "claude-agent": ModelConfig(
+        id="claude-agent",
+        provider="anthropic",
+        family="agents",
+        label="Claude Agent",
+        context_window=200_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "agents", "tools", "juridico"],
+        for_agents=True,
+        for_juridico=True,
+        icon="anthropic.svg",
+        api_model=os.getenv("CLAUDE_AGENT_API_MODEL", "claude-sonnet-4-20250514"),
+        thinking_category="native",
+        max_output_tokens=16384,
+    ),
+    "openai-agent": ModelConfig(
+        id="openai-agent",
+        provider="openai",
+        family="agents",
+        label="OpenAI Agent",
+        context_window=128_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "agents", "tools"],
+        for_agents=True,
+        for_juridico=True,
+        icon="openai.svg",
+        api_model="gpt-4o",
+        thinking_category="xml",
+        max_output_tokens=16384,
+    ),
+    "google-agent": ModelConfig(
+        id="google-agent",
+        provider="google",
+        family="agents",
+        label="Google Agent",
+        context_window=1_000_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "agents", "tools", "multimodal"],
+        for_agents=True,
+        for_juridico=True,
+        icon="gemini.svg",
+        api_model="gemini-2.0-flash-exp",
+        thinking_category="native",
+        max_output_tokens=8192,
+    ),
 }
 
 # =============================================================================
@@ -473,6 +523,12 @@ def get_thinking_category(model_id: str) -> str:
     if not config:
         return "xml"  # Default fallback
     return config.thinking_category
+
+AGENT_MODEL_IDS = frozenset({"claude-agent", "openai-agent", "google-agent"})
+
+def is_agent_model(model_id: str) -> bool:
+    """Check if a model ID corresponds to an agent executor."""
+    return model_id in AGENT_MODEL_IDS
 
 def validate_model_id(model_id: Optional[str], *, for_juridico: bool = False, for_agents: bool = False, field_name: str = "model") -> str:
     """

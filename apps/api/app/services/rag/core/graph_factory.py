@@ -141,22 +141,71 @@ class NetworkXAdapter:
         scope: str = "global",
         scope_id: Optional[str] = None,
     ):
-        from app.services.rag.core.graph_rag import LegalKnowledgeGraph
+        from app.services.rag.core.graph_rag import LegalKnowledgeGraph, Scope
 
-        self._scope = scope
-        self._scope_id = scope_id
+        try:
+            scope_enum = Scope(scope.lower())
+        except Exception:
+            scope_enum = Scope.GLOBAL
 
-        # Determine persist path
-        if persist_path is None:
-            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            scope_key = f"{scope}_{scope_id}" if scope_id else scope
-            persist_path = os.path.join(
-                base_dir, "data", "graph_db", "scopes", f"knowledge_graph_{scope_key}.json"
-            )
+        effective_scope_id = (
+            scope_id
+            if scope_id is not None
+            else ("global" if scope_enum == Scope.GLOBAL else "default")
+        )
 
-        self._graph = LegalKnowledgeGraph(persist_path=persist_path)
-        self._persist_path = persist_path
-        logger.info(f"NetworkX graph initialized: {persist_path}")
+        self._scope = scope_enum
+        self._scope_id = effective_scope_id
+        self._entity_id_to_node_id: Dict[str, str] = {}
+
+        self._graph = LegalKnowledgeGraph(
+            scope=scope_enum,
+            scope_id=effective_scope_id,
+            persist_path=persist_path,
+        )
+        logger.info(
+            "NetworkX graph initialized: scope=%s scope_id=%s persist_path=%s",
+            scope_enum.value,
+            effective_scope_id,
+            persist_path or "(default)",
+        )
+
+    def _resolve_node_id(self, entity_id: str) -> Optional[str]:
+        """
+        Resolve an external `entity_id` (protocol) into the internal GraphRAG `node_id`.
+
+        This adapter assumes `entity_id` is globally unique; if duplicates exist across
+        entity types, resolution may be ambiguous and we pick the first match.
+        """
+        if not entity_id:
+            return None
+
+        cached = self._entity_id_to_node_id.get(entity_id)
+        if cached:
+            return cached
+
+        # If caller already passed a node_id, accept it.
+        try:
+            if ":" in entity_id and self._graph.has_entity(entity_id):
+                self._entity_id_to_node_id[entity_id] = entity_id
+                return entity_id
+        except Exception:
+            pass
+
+        try:
+            matches = self._graph.find_entities(entity_id=entity_id)
+        except Exception:
+            matches = []
+
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            logger.warning("Ambiguous entity_id '%s' resolved to %s", entity_id, matches[0])
+
+        node_id = matches[0]
+        self._entity_id_to_node_id[entity_id] = node_id
+        return node_id
 
     @property
     def backend(self) -> GraphBackend:
@@ -175,28 +224,18 @@ class NetworkXAdapter:
         properties: Optional[Dict[str, Any]] = None,
     ) -> bool:
         try:
-            from app.services.rag.core.graph_rag import EntityType, Scope
+            metadata = dict(properties or {})
+            # Ensure protocol-level fields exist on the underlying node data.
+            metadata.setdefault("entity_id", entity_id)
 
-            # Map string to EntityType enum
-            try:
-                etype = EntityType(entity_type.lower())
-            except ValueError:
-                etype = EntityType.OUTRO
-
-            # Map scope string to Scope enum
-            try:
-                scope = Scope(self._scope.lower())
-            except ValueError:
-                scope = Scope.PRIVATE
-
-            self._graph.add_entity(
+            node_id = self._graph.add_entity(
+                entity_type=(entity_type or "unknown").lower(),
                 entity_id=entity_id,
-                entity_type=etype,
                 name=name,
-                scope=scope,
-                scope_id=self._scope_id,
-                properties=properties or {},
+                metadata=metadata,
             )
+            if node_id:
+                self._entity_id_to_node_id[entity_id] = node_id
             return True
         except Exception as e:
             logger.error(f"Error adding entity: {e}")
@@ -210,28 +249,43 @@ class NetworkXAdapter:
         properties: Optional[Dict[str, Any]] = None,
     ) -> bool:
         try:
-            from app.services.rag.core.graph_rag import RelationType
+            source_node_id = self._resolve_node_id(from_entity)
+            target_node_id = self._resolve_node_id(to_entity)
 
-            # Map string to RelationType enum
-            try:
-                rtype = RelationType(relationship_type.lower())
-            except ValueError:
-                rtype = RelationType.MENCIONA
+            if not source_node_id or not target_node_id:
+                return False
 
-            self._graph.add_relationship(
-                from_id=from_entity,
-                to_id=to_entity,
-                rel_type=rtype,
-                properties=properties or {},
+            props = dict(properties or {})
+            # GraphRAG uses `weight` as an explicit argument and also stores it on
+            # edges. Avoid passing it twice via metadata.
+            raw_weight = props.pop("weight", 1.0)
+            weight = float(raw_weight) if raw_weight is not None else 1.0
+
+            return bool(
+                self._graph.add_relation(
+                    source_id=source_node_id,
+                    target_id=target_node_id,
+                    relation_type=relationship_type,
+                    weight=weight,
+                    metadata=props,
+                )
             )
-            return True
         except Exception as e:
             logger.error(f"Error adding relationship: {e}")
             return False
 
     def get_entity(self, entity_id: str) -> Optional[Dict[str, Any]]:
         try:
-            return self._graph.get_entity(entity_id)
+            node_id = self._resolve_node_id(entity_id)
+            if not node_id:
+                return None
+            data = self._graph.get_entity(node_id)
+            if data is None:
+                return None
+            data = dict(data)
+            data.setdefault("node_id", node_id)
+            data.setdefault("entity_id", entity_id)
+            return data
         except Exception:
             return None
 
@@ -242,11 +296,17 @@ class NetworkXAdapter:
         max_hops: int = 1,
     ) -> List[Dict[str, Any]]:
         try:
-            neighbors = self._graph.get_neighbors(
-                entity_id=entity_id,
-                max_hops=max_hops,
+            node_id = self._resolve_node_id(entity_id)
+            if not node_id:
+                return []
+            subgraph = self._graph.traverse(
+                start_node_id=node_id,
+                hops=max_hops,
+                relation_filter=relationship_types,
+                max_nodes=50,
             )
-            return neighbors
+            nodes = subgraph.get("nodes", []) or []
+            return [n for n in nodes if n.get("node_id") != node_id]
         except Exception as e:
             logger.error(f"Error getting neighbors: {e}")
             return []
@@ -258,10 +318,28 @@ class NetworkXAdapter:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         try:
-            results = self._graph.search(query=query, limit=limit)
+            q = (query or "").strip().lower()
+            if not q:
+                return []
+
+            allowed_types = None
             if entity_types:
-                results = [r for r in results if r.get("entity_type") in entity_types]
-            return results[:limit]
+                allowed_types = {t.lower() for t in entity_types if t}
+
+            results: List[Dict[str, Any]] = []
+            for node_id, data in self._graph.graph.nodes(data=True):  # type: ignore[attr-defined]
+                name = str(data.get("name", "")).lower()
+                eid = str(data.get("entity_id", "")).lower()
+                etype = str(data.get("entity_type", "")).lower()
+                if allowed_types is not None and etype not in allowed_types:
+                    continue
+                if q in name or q in eid:
+                    item = dict(data)
+                    item.setdefault("node_id", node_id)
+                    results.append(item)
+                    if len(results) >= limit:
+                        break
+            return results
         except Exception as e:
             logger.error(f"Error searching entities: {e}")
             return []
@@ -272,7 +350,16 @@ class NetworkXAdapter:
         max_tokens: int = 2000,
     ) -> str:
         try:
-            return self._graph.get_context_for_query(query=query, max_tokens=max_tokens)
+            node_ids = set(self._graph.resolve_query_entities(query))
+            if not node_ids:
+                hits = self.search_entities(query, limit=5)
+                node_ids = {h["node_id"] for h in hits if h.get("node_id")}
+
+            return self._graph.get_context(
+                entity_ids=node_ids,
+                hops=1,
+                token_budget=max_tokens,
+            )
         except Exception as e:
             logger.error(f"Error getting context: {e}")
             return ""
@@ -400,6 +487,22 @@ class Neo4jAdapter:
         with self._driver.session(database=self._database) as session:
             return migrate_hybrid_labels(session)
 
+    # Whitelist of allowed relationship types to prevent Cypher injection.
+    # Relationship types in Cypher cannot be parameterized, so we validate
+    # against this set before interpolating into the query string.
+    ALLOWED_RELATIONSHIP_TYPES = frozenset({
+        # Core graph schema
+        "RELATED_TO", "MENTIONS", "HAS_CHUNK", "NEXT", "ASSERTS",
+        "REFERS_TO", "CITA", "APLICA", "REVOGA", "ALTERA", "VINCULA",
+        "RELACIONADA", "INTERPRETA", "FUNDAMENTA", "CONTRAPOE", "DERIVA",
+        "JULGA", "RELATA", "RECURSO_DE", "POSSUI",
+        # ArgumentRAG schema
+        "SUPPORTS", "OPPOSES", "EVIDENCES", "ARGUES", "RAISES",
+        "CITES", "CONTAINS_CLAIM",
+        # Legacy compatibility
+        "SEMANTICALLY_RELATED",
+    })
+
     def add_relationship(
         self,
         from_entity: str,
@@ -411,6 +514,13 @@ class Neo4jAdapter:
             props = properties or {}
             # Sanitize relationship type for Cypher
             rel_type = relationship_type.upper().replace(" ", "_")
+
+            # Prevent Cypher injection: only allow whitelisted relationship types
+            if rel_type not in self.ALLOWED_RELATIONSHIP_TYPES:
+                logger.warning(
+                    "Rejected unknown relationship type %r (not in whitelist)", rel_type
+                )
+                return False
 
             query = f"""
             MATCH (a:Entity {{entity_id: $from_id}})
@@ -624,6 +734,11 @@ def get_knowledge_graph(
             logger.warning(f"Unknown graph backend '{backend_str}', using networkx")
             backend = GraphBackend.NETWORKX
 
+    # Enforce Neo4j-only mode (no NetworkX fallback)
+    if config.neo4j_only and backend != GraphBackend.NEO4J:
+        logger.info("Neo4j-only mode: overriding graph backend %s -> neo4j", backend.value)
+        backend = GraphBackend.NEO4J
+
     # Cache key
     cache_key = f"{backend.value}:{scope}:{scope_id or 'default'}"
 
@@ -637,6 +752,9 @@ def get_knowledge_graph(
                 graph = Neo4jAdapter(**kwargs)
                 logger.info(f"Using Neo4j graph backend (scope={scope})")
             except Exception as e:
+                if config.neo4j_only:
+                    logger.error(f"Neo4j required but unavailable: {e}")
+                    raise RuntimeError("Neo4j backend required but unavailable") from e
                 logger.warning(f"Neo4j unavailable ({e}), falling back to NetworkX")
                 graph = NetworkXAdapter(scope=scope, scope_id=scope_id, **kwargs)
         else:

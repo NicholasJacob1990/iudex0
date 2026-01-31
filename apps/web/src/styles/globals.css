@@ -4,6 +4,77 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 
+  Houdini worklet props (verbium-particles.js) 
+  Strict typing allows the browser to interpolate these values smoothly on the compositor thread.
+*/
+@property --t {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
+}
+
+@property --cursor-x {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0.5;
+}
+
+@property --cursor-y {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0.5;
+}
+
+@property --ring-radius {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0.33;
+}
+
+@property --particle-count {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 120;
+}
+
+@property --particle-size {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 2;
+}
+
+@property --theme-color {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4f46e5;
+}
+
+@property --color-a {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4f46e5;
+}
+
+@property --color-b {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4338ca;
+}
+
+/* The 'Clock' for the worklet - limitless continuous time */
+@keyframes vorbiumTime {
+  from {
+    --t: 0;
+  }
+
+  to {
+    --t: 3600;
+  }
+
+  /* 1 hour of frames roughly, loops smoothly */
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;
@@ -80,7 +151,7 @@
 
 @layer base {
   * {
-    @apply border-border;
+    @apply border-slate-200;
   }
 
   body {
@@ -240,6 +311,21 @@
   }
 }
 
+@layer utilities {
+  .noise-overlay {
+    background-image: url('/noise.svg');
+    background-size: 160px 160px;
+    background-repeat: repeat;
+    opacity: 0.12;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+  }
+
+  .bg-dotted-grid {
+    background-image: radial-gradient(circle, rgba(255, 255, 255, 0.15) 1px, transparent 1px);
+  }
+}
+
 .ProseMirror {
   @apply min-h-[300px] p-4 focus:outline-none overflow-x-auto text-[12px] leading-relaxed text-black;
 }
@@ -303,14 +389,14 @@
 
 .ProseMirror table,
 .editor-output table {
-  @apply w-full border-collapse border border-border text-[12px];
+  @apply w-full border-collapse border border-slate-200 text-[12px];
 }
 
 .ProseMirror th,
 .ProseMirror td,
 .editor-output th,
 .editor-output td {
-  @apply border border-border px-3 py-2 align-top;
+  @apply border border-slate-200 px-3 py-2 align-top;
 }
 
 .ProseMirror th,
@@ -323,9 +409,321 @@
   @apply bg-muted/40;
 }
 
+/* Table style presets (per-table) */
+.ProseMirror table.table-style-compact,
+.editor-output table.table-style-compact,
+.prose table.table-style-compact {
+  @apply text-[11px] border-slate-300;
+}
+
+.ProseMirror table.table-style-compact th,
+.editor-output table.table-style-compact th,
+.prose table.table-style-compact th {
+  @apply bg-slate-100 uppercase tracking-wide text-[10px];
+}
+
+.ProseMirror table.table-style-grid,
+.editor-output table.table-style-grid,
+.prose table.table-style-grid {
+  @apply border-2 border-slate-400;
+}
+
+.ProseMirror table.table-style-grid th,
+.editor-output table.table-style-grid th,
+.prose table.table-style-grid th {
+  @apply bg-slate-200 text-slate-800;
+}
+
+.ProseMirror table.table-style-minimal,
+.editor-output table.table-style-minimal,
+.prose table.table-style-minimal {
+  @apply border-transparent;
+}
+
+.ProseMirror table.table-style-minimal th,
+.editor-output table.table-style-minimal th,
+.prose table.table-style-minimal th {
+  @apply bg-transparent text-slate-700;
+}
+
+.ProseMirror table.table-style-minimal td,
+.editor-output table.table-style-minimal td,
+.prose table.table-style-minimal td {
+  @apply border-slate-200;
+}
+
+.ProseMirror table.table-style-zebra tr:nth-child(even) td,
+.editor-output table.table-style-zebra tr:nth-child(even) td,
+.prose table.table-style-zebra tr:nth-child(even) td {
+  @apply bg-slate-50;
+}
+
+/* ============================
+   Document themes (per job)
+   ============================ */
+
+.doc-page-frame.prose,
+.doc-page-frame .ProseMirror {
+  max-width: 980px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.doc-margins-compact.prose,
+.doc-margins-compact .ProseMirror {
+  padding: 1rem !important;
+}
+
+.doc-margins-normal.prose,
+.doc-margins-normal .ProseMirror {
+  padding: 1.5rem !important;
+}
+
+.doc-margins-wide.prose,
+.doc-margins-wide .ProseMirror {
+  padding: 2.5rem !important;
+}
+
+.doc-typography {
+  --doc-font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --doc-font-size: 15px;
+  --doc-line-height: 1.6;
+  --doc-paragraph-spacing: 16px;
+}
+
+.doc-typography.prose,
+.doc-typography .ProseMirror,
+.doc-typography .editor-output {
+  font-family: var(--doc-font-family);
+  font-size: var(--doc-font-size);
+  line-height: var(--doc-line-height);
+  text-align: justify;
+}
+
+.doc-typography.prose p,
+.doc-typography .ProseMirror p,
+.doc-typography .editor-output p {
+  margin-bottom: var(--doc-paragraph-spacing) !important;
+  line-height: var(--doc-line-height);
+  text-align: justify;
+  text-indent: 1cm;
+  margin-top: 6px;
+}
+
+.doc-typography.prose h1,
+.doc-typography.prose h2,
+.doc-typography.prose h3,
+.doc-typography.prose h4,
+.doc-typography.prose h5,
+.doc-typography.prose h6,
+.doc-typography .ProseMirror h1,
+.doc-typography .ProseMirror h2,
+.doc-typography .ProseMirror h3,
+.doc-typography .ProseMirror h4,
+.doc-typography .ProseMirror h5,
+.doc-typography .ProseMirror h6,
+.doc-typography .editor-output h1,
+.doc-typography .editor-output h2,
+.doc-typography .editor-output h3,
+.doc-typography .editor-output h4,
+.doc-typography .editor-output h5,
+.doc-typography .editor-output h6 {
+  text-align: left;
+}
+
+.doc-typography.prose li,
+.doc-typography .ProseMirror li,
+.doc-typography .editor-output li {
+  text-align: left;
+}
+
+.doc-typography.prose ul,
+.doc-typography.prose ol,
+.doc-typography .ProseMirror ul,
+.doc-typography .ProseMirror ol,
+.doc-typography .editor-output ul,
+.doc-typography .editor-output ol {
+  padding-left: 1.5cm;
+  margin-left: 0;
+  list-style-position: outside;
+}
+
+.doc-typography.prose li,
+.doc-typography .ProseMirror li,
+.doc-typography .editor-output li {
+  text-indent: -0.63cm;
+  padding-left: 0.63cm;
+}
+
+.doc-typography.prose li p,
+.doc-typography .ProseMirror li p,
+.doc-typography .editor-output li p {
+  text-indent: 0;
+  margin-top: 0;
+  margin-bottom: 6px;
+}
+
+.doc-typography.prose table,
+.doc-typography .ProseMirror table,
+.doc-typography .editor-output table {
+  font-size: var(--doc-font-size);
+  line-height: var(--doc-line-height);
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-typography.prose th,
+.doc-typography.prose td,
+.doc-typography .ProseMirror th,
+.doc-typography .ProseMirror td,
+.doc-typography .editor-output th,
+.doc-typography .editor-output td {
+  padding: 6px 8px;
+  vertical-align: top;
+}
+
+.doc-theme-classic .ProseMirror table,
+.doc-theme-classic .editor-output table,
+.doc-theme-classic .prose table,
+.doc-theme-classic.prose table {
+  @apply border-slate-200;
+}
+
+.doc-theme-classic.prose {
+  padding: 2.5rem;
+}
+
+.doc-theme-classic .ProseMirror th,
+.doc-theme-classic .editor-output th,
+.doc-theme-classic .prose th,
+.doc-theme-classic.prose th {
+  @apply bg-slate-100 text-slate-800;
+}
+
+.doc-theme-classic .ProseMirror td,
+.doc-theme-classic .editor-output td,
+.doc-theme-classic .prose td,
+.doc-theme-classic.prose td {
+  @apply text-slate-700;
+}
+
+.doc-theme-classic .ProseMirror table tr:nth-child(even) td,
+.doc-theme-classic .editor-output table tr:nth-child(even) td,
+.doc-theme-classic .prose table tr:nth-child(even) td,
+.doc-theme-classic.prose table tr:nth-child(even) td {
+  @apply bg-slate-50;
+}
+
+.doc-theme-minimal .ProseMirror table,
+.doc-theme-minimal .editor-output table,
+.doc-theme-minimal .prose table,
+.doc-theme-minimal.prose table {
+  @apply border-slate-200;
+}
+
+.doc-theme-minimal.prose {
+  padding: 2.25rem;
+}
+
+.doc-theme-minimal .ProseMirror th,
+.doc-theme-minimal .editor-output th,
+.doc-theme-minimal .prose th,
+.doc-theme-minimal.prose th {
+  @apply bg-transparent font-semibold;
+}
+
+.doc-theme-minimal .ProseMirror td,
+.doc-theme-minimal .editor-output td,
+.doc-theme-minimal .prose td,
+.doc-theme-minimal.prose td {
+  @apply text-slate-700;
+}
+
+.doc-theme-minimal .ProseMirror th,
+.doc-theme-minimal .ProseMirror td,
+.doc-theme-minimal .editor-output th,
+.doc-theme-minimal .editor-output td,
+.doc-theme-minimal .prose th,
+.doc-theme-minimal .prose td,
+.doc-theme-minimal.prose th,
+.doc-theme-minimal.prose td {
+  @apply border-slate-200;
+}
+
+.doc-theme-minimal .ProseMirror table tr:nth-child(even) td,
+.doc-theme-minimal .editor-output table tr:nth-child(even) td,
+.doc-theme-minimal .prose table tr:nth-child(even) td,
+.doc-theme-minimal.prose table tr:nth-child(even) td {
+  @apply bg-transparent;
+}
+
+.doc-theme-executive .ProseMirror table,
+.doc-theme-executive .editor-output table,
+.doc-theme-executive .prose table,
+.doc-theme-executive.prose table {
+  @apply border-slate-300;
+}
+
+.doc-theme-executive.prose {
+  padding: 2.75rem;
+}
+
+.doc-theme-executive .ProseMirror th,
+.doc-theme-executive .editor-output th,
+.doc-theme-executive .prose th,
+.doc-theme-executive.prose th {
+  @apply bg-slate-900 text-white uppercase tracking-wide text-[11px];
+}
+
+.doc-theme-executive .ProseMirror td,
+.doc-theme-executive .editor-output td,
+.doc-theme-executive .prose td,
+.doc-theme-executive.prose td {
+  @apply text-slate-800;
+}
+
+.doc-theme-executive .ProseMirror table tr:nth-child(even) td,
+.doc-theme-executive .editor-output table tr:nth-child(even) td,
+.doc-theme-executive .prose table tr:nth-child(even) td,
+.doc-theme-executive.prose table tr:nth-child(even) td {
+  @apply bg-slate-50;
+}
+
+.doc-theme-academic .ProseMirror table,
+.doc-theme-academic .editor-output table,
+.doc-theme-academic .prose table,
+.doc-theme-academic.prose table {
+  @apply border-slate-200;
+}
+
+.doc-theme-academic.prose {
+  padding: 2.75rem;
+}
+
+.doc-theme-academic .ProseMirror th,
+.doc-theme-academic .editor-output th,
+.doc-theme-academic .prose th,
+.doc-theme-academic.prose th {
+  @apply bg-slate-50 text-slate-700;
+}
+
+.doc-theme-academic .ProseMirror td,
+.doc-theme-academic .editor-output td,
+.doc-theme-academic .prose td,
+.doc-theme-academic.prose td {
+  @apply text-slate-700;
+}
+
+.doc-theme-academic .ProseMirror table tr:nth-child(even) td,
+.doc-theme-academic .editor-output table tr:nth-child(even) td,
+.doc-theme-academic .prose table tr:nth-child(even) td,
+.doc-theme-academic.prose table tr:nth-child(even) td {
+  @apply bg-white;
+}
+
 .ProseMirror img,
 .editor-output img {
-  @apply max-w-full rounded-lg border border-border shadow-sm;
+  @apply max-w-full rounded-lg border border-slate-200 shadow-sm;
 }
 
 ::-webkit-scrollbar {
@@ -371,4 +769,3 @@
 .animate-fade-in {
   animation: fadeIn 0.3s ease-out;
 }
-

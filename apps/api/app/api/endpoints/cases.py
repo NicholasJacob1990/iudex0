@@ -7,7 +7,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.core.database import get_db
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_org_context, OrgContext, build_tenant_filter
 from app.core.time_utils import utcnow
 from app.models.user import User
 from app.models.document import Document, DocumentStatus
@@ -57,32 +57,32 @@ class AttachResponse(BaseModel):
 async def get_cases(
     skip: int = 0,
     limit: int = 100,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
-    """Listar casos do usuário"""
+    """Listar casos do tenant (org ou usuário)"""
     service = CaseService(db)
-    return await service.get_cases(current_user.id, skip, limit)
+    return await service.get_cases(ctx, skip, limit)
 
 @router.post("/", response_model=CaseResponse)
 async def create_case(
     case_in: CaseCreate,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Criar novo caso"""
     service = CaseService(db)
-    return await service.create_case(case_in, current_user.id)
+    return await service.create_case(case_in, ctx)
 
 @router.get("/{case_id}", response_model=CaseResponse)
 async def get_case(
     case_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Obter detalhes de um caso"""
     service = CaseService(db)
-    case = await service.get_case(case_id, current_user.id)
+    case = await service.get_case(case_id, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     return case
@@ -91,12 +91,12 @@ async def get_case(
 async def update_case(
     case_id: str,
     case_in: CaseUpdate,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Atualizar caso"""
     service = CaseService(db)
-    case = await service.update_case(case_id, case_in, current_user.id)
+    case = await service.update_case(case_id, case_in, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
     return case
@@ -104,12 +104,12 @@ async def update_case(
 @router.delete("/{case_id}")
 async def delete_case(
     case_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """Arquivar/Deletar caso"""
     service = CaseService(db)
-    success = await service.delete_case(case_id, current_user.id)
+    success = await service.delete_case(case_id, ctx)
     if not success:
         raise HTTPException(status_code=404, detail="Case not found")
     return {"ok": True}
@@ -127,7 +127,7 @@ async def upload_document_to_case(
     auto_ingest_rag: bool = Form(default=True),
     auto_ingest_graph: bool = Form(default=True),
     background_tasks: BackgroundTasks = BackgroundTasks(),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -144,9 +144,10 @@ async def upload_document_to_case(
     from app.core.config import settings
     from app.models.document import DocumentType
 
+    current_user = ctx.user
     # Verify case ownership
     service = CaseService(db)
-    case = await service.get_case(case_id, current_user.id)
+    case = await service.get_case(case_id, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -188,6 +189,7 @@ async def upload_document_to_case(
         document = Document(
             id=file_id,
             user_id=str(current_user.id),
+            organization_id=ctx.organization_id,
             case_id=case_id,
             name=file.filename,
             original_name=file.filename,
@@ -209,7 +211,7 @@ async def upload_document_to_case(
             file_path=file_path,
             doc_type=doc_type,
             case_id=case_id,
-            tenant_id=str(current_user.id),
+            tenant_id=ctx.tenant_id,
             auto_ingest_rag=auto_ingest_rag,
             auto_ingest_graph=auto_ingest_graph,
         )
@@ -231,13 +233,13 @@ async def upload_document_to_case(
 @router.get("/{case_id}/documents", response_model=List[CaseDocumentResponse])
 async def get_case_documents(
     case_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """List all documents attached to a case."""
     # Verify case ownership
     service = CaseService(db)
-    case = await service.get_case(case_id, current_user.id)
+    case = await service.get_case(case_id, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -245,7 +247,7 @@ async def get_case_documents(
     result = await db.execute(
         select(Document)
         .where(Document.case_id == case_id)
-        .where(Document.user_id == str(current_user.id))
+        .where(build_tenant_filter(ctx, Document))
         .where(Document.is_archived == False)
         .order_by(Document.created_at.desc())
     )
@@ -273,7 +275,7 @@ async def attach_document_to_case(
     doc_id: str,
     request: DocumentAttachRequest = DocumentAttachRequest(),
     background_tasks: BackgroundTasks = BackgroundTasks(),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -286,7 +288,7 @@ async def attach_document_to_case(
     """
     # Verify case ownership
     service = CaseService(db)
-    case = await service.get_case(case_id, current_user.id)
+    case = await service.get_case(case_id, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -294,7 +296,7 @@ async def attach_document_to_case(
     result = await db.execute(
         select(Document)
         .where(Document.id == doc_id)
-        .where(Document.user_id == str(current_user.id))
+        .where(build_tenant_filter(ctx, Document))
     )
     document = result.scalar_one_or_none()
 
@@ -324,7 +326,7 @@ async def attach_document_to_case(
             _ingest_document_to_rag,
             doc_id=doc_id,
             case_id=case_id,
-            tenant_id=str(current_user.id),
+            tenant_id=ctx.tenant_id,
             text=document.extracted_text,
             metadata={
                 "title": document.name,
@@ -340,7 +342,7 @@ async def attach_document_to_case(
             _ingest_document_to_graph,
             doc_id=doc_id,
             case_id=case_id,
-            tenant_id=str(current_user.id),
+            tenant_id=ctx.tenant_id,
             text=document.extracted_text,
             metadata={
                 "title": document.name,
@@ -365,7 +367,7 @@ async def attach_document_to_case(
 async def detach_document_from_case(
     case_id: str,
     doc_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -376,7 +378,7 @@ async def detach_document_from_case(
     """
     # Verify case ownership
     service = CaseService(db)
-    case = await service.get_case(case_id, current_user.id)
+    case = await service.get_case(case_id, ctx)
     if not case:
         raise HTTPException(status_code=404, detail="Case not found")
 
@@ -385,7 +387,7 @@ async def detach_document_from_case(
         select(Document)
         .where(Document.id == doc_id)
         .where(Document.case_id == case_id)
-        .where(Document.user_id == str(current_user.id))
+        .where(build_tenant_filter(ctx, Document))
     )
     document = result.scalar_one_or_none()
 
@@ -513,6 +515,7 @@ async def _ingest_document_to_graph(
             case_id=case_id,
             extract_entities=True,
             semantic_extraction=True,  # Enable LLM-based extraction for teses, conceitos
+            extract_facts=True,  # Seed Fact nodes for local case graph connections
         )
 
         # Update document status

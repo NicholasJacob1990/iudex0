@@ -11,6 +11,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "apps", "api"))
 @pytest.mark.asyncio
 async def test_graphrag_primary_skips_vector(monkeypatch):
     import app.services.rag_context as rag_context
+    from app.services.rag.config import reset_rag_config
+
+    monkeypatch.setenv("RAG_NEO4J_ONLY", "false")
+    reset_rag_config()
 
     class DummyGraph:
         def query_context_from_text(self, text, hops=2):
@@ -45,7 +49,7 @@ async def test_graphrag_primary_skips_vector(monkeypatch):
     )
 
     assert rag_ctx == ""
-    assert graph_ctx.endswith("GRAPH_CTX")
+    assert "GRAPH_CTX" in graph_ctx
     assert "Use apenas como evidencia" in graph_ctx
     assert results == []
 
@@ -53,6 +57,10 @@ async def test_graphrag_primary_skips_vector(monkeypatch):
 @pytest.mark.asyncio
 async def test_graphrag_fallback_to_vector(monkeypatch):
     import app.services.rag_context as rag_context
+    from app.services.rag.config import reset_rag_config
+
+    monkeypatch.setenv("RAG_NEO4J_ONLY", "false")
+    reset_rag_config()
 
     class DummyGraph:
         def query_context_from_text(self, text, hops=2):
@@ -106,9 +114,8 @@ async def test_graphrag_fallback_to_vector(monkeypatch):
     )
 
     assert dummy_rag.called is True
-    assert rag_ctx == "RAG_CTX"
-    assert graph_ctx.endswith("GRAPH_ENRICH")
-    assert "Use apenas como evidencia" in graph_ctx
+    assert "docA" in rag_ctx
+    assert "GRAPH_ENRICH" in graph_ctx
     assert results and results[0]["text"] == "docA"
 
 

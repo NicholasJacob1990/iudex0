@@ -18,7 +18,12 @@ export default function RootLayout({
 }) {
   return (
     <html lang="pt-BR" suppressHydrationWarning>
-      <body className={`${inter.variable} ${outfit.variable} font-sans`}>
+      <head>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link href="https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@400..800&display=swap" rel="stylesheet" />
+      </head>
+      <body className={`${inter.variable} ${outfit.variable} font-sans`} style={{ fontFamily: "'Google Sans Flex', var(--font-sans)" }}>
         <Providers>{children}</Providers>
       </body>
     </html>

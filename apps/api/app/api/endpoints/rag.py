@@ -11,6 +11,7 @@ Provides:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 import hashlib
@@ -567,6 +568,15 @@ async def ingest_local(
             f"skipped={skipped_count} errors={len(errors)}"
         )
 
+        # Invalidate result cache for this tenant
+        if indexed_count > 0:
+            try:
+                from app.services.rag.core.result_cache import get_result_cache
+                cleared = get_result_cache().invalidate_tenant(request.tenant_id)
+                logger.debug(f"Result cache invalidated for tenant={request.tenant_id} (cleared={cleared})")
+            except Exception:
+                pass
+
         return IngestResponse(
             indexed_count=indexed_count,
             chunk_uids=chunk_uids,
@@ -703,6 +713,15 @@ async def ingest_global(
             f"chunks={len(chunk_uids)} skipped={skipped_count} errors={len(errors)}"
         )
 
+        # Invalidate result cache (global affects all tenants)
+        if indexed_count > 0:
+            try:
+                from app.services.rag.core.result_cache import get_result_cache
+                cleared = get_result_cache().invalidate_tenant("__all__")
+                logger.debug(f"Result cache invalidated for global ingest (cleared={cleared})")
+            except Exception:
+                pass
+
         return IngestResponse(
             indexed_count=indexed_count,
             chunk_uids=chunk_uids,
@@ -838,6 +857,27 @@ async def get_stats(
         raise HTTPException(status_code=500, detail=f"Failed to get stats: {str(e)}")
 
 
+@router.get("/metrics")
+async def get_metrics(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get RAG pipeline latency metrics.
+
+    Returns P50/P95/P99 percentiles per pipeline stage, plus result cache stats.
+    """
+    from app.services.rag.core.metrics import get_latency_collector
+    from app.services.rag.core.result_cache import get_result_cache
+
+    collector = get_latency_collector()
+    cache = get_result_cache()
+
+    return {
+        "latency": collector.summary(),
+        "result_cache": cache.stats(),
+    }
+
+
 # =============================================================================
 # Helper Functions
 # =============================================================================
@@ -965,6 +1005,8 @@ async def _ingest_document_to_graph(
                 extract_entities=True,
                 semantic_extraction=os.getenv("RAG_GRAPH_SEMANTIC_EXTRACTION", "false").lower()
                 in ("true", "1", "yes", "on"),
+                extract_facts=os.getenv("RAG_GRAPH_EXTRACT_FACTS", "false").lower()
+                in ("true", "1", "yes", "on"),
             )
             results["neo4j_mvp"] = mvp_stats
         except Exception as e:
@@ -1061,5 +1103,29 @@ async def _ingest_document_to_graph(
         except Exception as e:
             logger.error(f"GraphRAG ingest error: {e}")
             results["graph_rag_error"] = str(e)
+
+    # ------------------------------------------------------------------
+    # KG Builder: async enrichment (fire-and-forget)
+    # ------------------------------------------------------------------
+    if os.getenv("KG_BUILDER_ENABLED", "false").lower() in ("true", "1", "yes", "on"):
+        try:
+            from app.services.rag.core.kg_builder.pipeline import run_kg_builder
+
+            chunks_for_kg = _chunk_for_mvp(text)
+            asyncio.create_task(
+                run_kg_builder(
+                    chunks=chunks_for_kg,
+                    doc_hash=doc_id,
+                    tenant_id=str(tenant_id),
+                    case_id=str(case_id) if case_id else None,
+                    scope=str(scope),
+                    use_llm=os.getenv("KG_BUILDER_USE_LLM", "false").lower() in ("true", "1"),
+                    use_resolver=os.getenv("KG_BUILDER_RESOLVE_ENTITIES", "true").lower()
+                    in ("true", "1", "yes", "on"),
+                )
+            )
+            results["kg_builder"] = "scheduled"
+        except Exception as e:
+            logger.debug("KG Builder scheduling failed: %s", e)
 
     return results

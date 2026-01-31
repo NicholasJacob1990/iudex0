@@ -5,7 +5,7 @@ Modelo de Usuário
 from datetime import datetime
 from app.core.time_utils import utcnow
 from typing import Optional
-from sqlalchemy import String, DateTime, JSON, Enum as SQLEnum, Text
+from sqlalchemy import String, DateTime, ForeignKey, JSON, Enum as SQLEnum, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 import enum
 
@@ -75,6 +75,11 @@ class User(Base):
     signature_image: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     signature_text: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     
+    # Organização ativa (nullable — retrocompatível com single-user)
+    organization_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("organizations.id"), nullable=True, index=True
+    )
+
     # Preferências e metadados
     preferences: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     
@@ -97,6 +102,8 @@ class User(Base):
     watchlist_items = relationship("ProcessWatchlist", back_populates="user", cascade="all, delete-orphan")
     oab_watchlist_items = relationship("DjenOabWatchlist", back_populates="user", cascade="all, delete-orphan")
     djen_intimations = relationship("DjenIntimation", back_populates="user", cascade="all, delete-orphan")
+    org_memberships = relationship("OrganizationMember", back_populates="user", cascade="all, delete-orphan")
+    team_memberships = relationship("TeamMember", back_populates="user", cascade="all, delete-orphan")
     
     def __repr__(self) -> str:
         return f"<User(id={self.id}, email={self.email}, name={self.name}, type={self.account_type})>"

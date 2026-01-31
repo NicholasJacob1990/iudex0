@@ -22,7 +22,8 @@ class Chat(Base):
     
     id: Mapped[str] = mapped_column(String, primary_key=True)
     user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), nullable=False, index=True)
-    
+    organization_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("organizations.id"), nullable=True, index=True)
+
     title: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[ChatMode] = mapped_column(
         SQLEnum(ChatMode),

@@ -239,6 +239,8 @@ class Settings(BaseSettings):
     ENABLE_WEB_SEARCH: bool = True
     ENABLE_OCR: bool = True
     ENABLE_TRANSCRIPTION: bool = True
+    # Opt-in: diarização em APOSTILA/FIDELIDADE (AUDIENCIA/REUNIAO já usam diarização por padrão no VomoMLX)
+    ENABLE_DIARIZATION_APOSTILA: bool = False
     ENABLE_PODCAST_GENERATION: bool = True
     
     # APIs Externas

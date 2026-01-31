@@ -65,7 +65,7 @@ async def test_context_compression_applies(monkeypatch):
         rewrite_query=False,
     )
 
-    assert rag_ctx == "CTX"
+    assert "responsabilidade objetiva" in rag_ctx
     assert graph_ctx == ""
     assert dummy.last_results
     assert len(dummy.last_results[0]["text"]) <= 60
@@ -137,9 +137,9 @@ async def test_parent_child_expands_results(monkeypatch):
         rewrite_query=False,
     )
 
-    assert rag_ctx == "CTX"
+    assert "Chunk base" in rag_ctx
+    assert "Chunk vizinho" in rag_ctx
     assert graph_ctx == ""
     assert dummy.expand_called is True
     assert dummy.last_results is not None
     assert len(dummy.last_results) == 2
-

@@ -1,7 +1,20 @@
-from .base import Source, render_perplexity
+from .base import Source, render_perplexity, format_abnt_full_reference, build_abnt_references
 from .openai import openai_extract_perplexity
 from .gemini import gemini_extract_perplexity
 from .claude import claude_extract_perplexity
+from .abnt_classifier import (
+    SourceType,
+    classify_source,
+    format_abnt_full,
+    build_full_references_section,
+)
+from .grounding import (
+    verify_citations,
+    annotate_response_text,
+    GroundingResult,
+    CitationVerification,
+    VerificationStatus,
+)
 
 
 def extract_perplexity(provider: str, resp):

@@ -24,7 +24,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_org_context, OrgContext, build_tenant_filter
 from app.core.time_utils import utcnow
 from app.models.chat import Chat, ChatMessage, ChatMode
 from app.models.user import User, UserRole
@@ -141,6 +141,7 @@ from app.services.ai.perplexity_config import (
 )
 from app.services.ai.research_policy import decide_research_flags
 from app.services.ai.deep_research_service import deep_research_service
+from app.services.ai.deep_research_hard_service import deep_research_hard_service
 from app.services.web_rag_service import web_rag_service
 from app.services.ai.agent_clients import _is_anthropic_vertex_client
 from app.services.ai.genai_utils import extract_genai_text
@@ -1051,14 +1052,15 @@ def _estimate_outline_pipeline_calls(
 async def list_chats(
     skip: int = 0,
     limit: int = 20,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Listar chats do usuário
+    Listar chats do tenant (org ou usuário)
     """
+    current_user = ctx.user
     query = select(Chat).where(
-        Chat.user_id == current_user.id,
+        build_tenant_filter(ctx, Chat),
         Chat.is_active == True
     ).order_by(desc(Chat.updated_at)).offset(skip).limit(limit)
     
@@ -1079,15 +1081,17 @@ async def list_chats(
 @router.post("/", response_model=ChatResponse)
 async def create_chat(
     chat_in: ChatCreate,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Criar novo chat
     """
+    current_user = ctx.user
     chat = Chat(
         id=str(uuid.uuid4()),
         user_id=current_user.id,
+        organization_id=ctx.organization_id,
         title=chat_in.title,
         mode=chat_in.mode,
         context=chat_in.context,
@@ -1113,15 +1117,15 @@ async def create_chat(
 @router.get("/{chat_id}", response_model=ChatResponse)
 async def get_chat(
     chat_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Obter detalhes do chat
     """
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
-    
+
     if not chat:
         raise HTTPException(status_code=404, detail="Chat não encontrado")
 
@@ -1132,16 +1136,17 @@ async def get_chat(
 async def duplicate_chat(
     chat_id: str,
     payload: ChatDuplicate = Body(default=ChatDuplicate()),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Duplicar chat com todas as mensagens
     """
+    current_user = ctx.user
     result = await db.execute(
         select(Chat).where(
             Chat.id == chat_id,
-            Chat.user_id == current_user.id,
+            build_tenant_filter(ctx, Chat),
             Chat.is_active == True
         )
     )
@@ -1157,6 +1162,7 @@ async def duplicate_chat(
     new_chat = Chat(
         id=str(uuid.uuid4()),
         user_id=current_user.id,
+        organization_id=ctx.organization_id,
         title=new_title,
         mode=chat.mode,
         context=dict(chat.context or {}),
@@ -1203,21 +1209,21 @@ async def duplicate_chat(
 @router.delete("/{chat_id}")
 async def delete_chat(
     chat_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Deletar chat (soft delete)
     """
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
-    
+
     if not chat:
         raise HTTPException(status_code=404, detail="Chat não encontrado")
-        
+
     chat.is_active = False
     await db.commit()
-    
+
     return {"message": "Chat deletado com sucesso"}
 
 
@@ -1226,14 +1232,15 @@ async def list_messages(
     chat_id: str,
     skip: int = 0,
     limit: int = 50,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Listar mensagens do chat
     """
+    current_user = ctx.user
     # Verificar acesso ao chat
-    chat_result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    chat_result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     if not chat_result.scalars().first():
         raise HTTPException(status_code=404, detail="Chat não encontrado")
         
@@ -1250,14 +1257,15 @@ async def list_messages(
 async def send_message(
     chat_id: str,
     message_in: MessageCreate,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Enviar mensagem para o chat e obter resposta simples (Claude)
     """
+    current_user = ctx.user
     # Verificar chat
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
     
     if not chat:
@@ -1756,16 +1764,17 @@ async def send_message_stream(
     chat_id: str,
     message_in: MessageCreate,
     request: Request,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Enviar mensagem para o chat com streaming SSE
     """
+    current_user = ctx.user
     request_t0 = time.perf_counter()
     preprocess_done_t: Optional[float] = None
     first_token_t: Optional[float] = None
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
 
     if not chat:
@@ -3455,6 +3464,7 @@ async def send_message_stream(
         citations_by_url: Dict[str, Dict[str, Any]] = {}
         start_ms = int(time.time() * 1000)
         last_keepalive = time.time()
+        dense_research_enabled = bool(effective_dense_research)
         
         # Keepalive inicial (anti-buffering em proxies)
         yield sse_keepalive()
@@ -3520,13 +3530,88 @@ async def send_message_stream(
             system_instruction += f"\n\n{system_context}"
         if attachment_injection_context:
             system_instruction += f"\n\n{attachment_injection_context}"
-        if effective_dense_research:
+        if dense_research_enabled:
             system_instruction += "\n- Pesquisa profunda solicitada; aumente a cobertura e valide com mais cuidado."
         system_instruction += (
             "\n- Quando emitir raciocinio interno (thinking) ou resumo de raciocinio, escreva em portugues."
         )
 
-        if effective_dense_research:
+        # Deep Research Hard Mode — multi-provider orchestrated
+        if getattr(message_in, 'deep_research_mode', None) == 'hard' and dense_research_enabled:
+            hard_config = {
+                "effort": deep_effort or "medium",
+                "plan_key": plan_key,
+                "providers": getattr(message_in, 'hard_research_providers', None) or [
+                    "gemini", "perplexity", "openai", "rag_global", "rag_local"
+                ],
+                "tenant_id": tenant_id if 'tenant_id' in dir() else None,
+                "case_id": case_id if 'case_id' in dir() else None,
+                "search_focus": getattr(message_in, 'deep_research_search_focus', None),
+                "domain_filter": getattr(message_in, 'deep_research_domain_filter', None),
+                "timeout_per_provider": 120,
+                "total_timeout": 300,
+            }
+
+            hard_report = ""
+            hard_sources = []
+
+            try:
+                async for event in deep_research_hard_service.stream_hard_research(
+                    clean_content, config=hard_config
+                ):
+                    etype = (event or {}).get("type", "")
+
+                    # Forward all hard research events to client
+                    if etype in (
+                        "hard_research_start", "provider_start", "provider_thinking",
+                        "provider_source", "provider_done", "provider_error",
+                        "merge_start", "merge_done",
+                        "study_generation_start", "study_outline",
+                        "agent_iteration", "agent_thinking", "agent_tool_call",
+                        "agent_tool_result", "agent_ask_user",
+                    ):
+                        payload = dict(event)
+                        payload["turn_id"] = turn_id
+                        yield sse_event(payload)
+
+                    elif etype == "study_token":
+                        hard_report += event.get("delta", "")
+                        payload = dict(event)
+                        payload["turn_id"] = turn_id
+                        yield sse_event(payload)
+
+                    elif etype == "study_done":
+                        hard_sources = event.get("sources", [])
+                        payload = dict(event)
+                        payload["turn_id"] = turn_id
+                        yield sse_event(payload)
+
+            except Exception as e:
+                logger.error(f"Hard research failed: {e}")
+                yield sse_event({
+                    "type": "error",
+                    "message": f"Hard research error: {str(e)}",
+                    "turn_id": turn_id,
+                })
+
+            # Inject hard research report into context for subsequent chat
+            if hard_report:
+                trimmed = hard_report[:8000] if len(hard_report) > 8000 else hard_report
+                system_instruction += "\n\n## ESTUDO DE PESQUISA APROFUNDADA (Hard Mode)\n" + trimmed
+
+            if hard_sources:
+                try:
+                    from app.services.ai.citations.base import build_abnt_references
+                    refs_section = build_abnt_references(hard_sources)
+                    if refs_section:
+                        system_instruction += "\n" + refs_section
+                except Exception:
+                    pass
+
+            # Skip the standard deep research since hard already ran
+            dense_research_enabled = False
+
+        if dense_research_enabled:
             deep_report = ""
             deep_sources: List[Dict[str, Any]] = []
             try:
@@ -3544,7 +3629,7 @@ async def send_message_stream(
                     status="running",
                     detail=f"Effort: {deep_effort}",
                 )
-                deep_config: Dict[str, Any] = {"effort": deep_effort}
+                deep_config: Dict[str, Any] = {"effort": deep_effort, "plan_key": plan_key}
                 if deep_multiplier is not None:
                     deep_config["points_multiplier"] = deep_multiplier
                 if deep_provider and deep_provider != "auto":
@@ -4090,6 +4175,30 @@ async def send_message_stream(
                 lead_text = await call_model(lead_prompt, max_tokens)
                 if not lead_text:
                     lead_text = "Não foi possível gerar resposta no momento."
+
+                # --- Citation Grounding (breadth_first mode) ---
+                grounding_result = None
+                _grounding_enabled_bf = os.getenv("CITATION_GROUNDING_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+                if _grounding_enabled_bf:
+                    try:
+                        from app.services.ai.citations.grounding import (
+                            verify_citations as _verify_citations_bf,
+                            annotate_response_text as _annotate_response_bf,
+                        )
+                        grounding_result = await _verify_citations_bf(
+                            lead_text,
+                            rag_context=rag_context or "",
+                            tenant_id=str(current_user.id),
+                            threshold=float(os.getenv("CITATION_GROUNDING_THRESHOLD", "0.85")),
+                            enable_neo4j=os.getenv("CITATION_GROUNDING_NEO4J", "true").lower() in ("1", "true", "yes", "on"),
+                        )
+                        if grounding_result and grounding_result.unverified_count > 0:
+                            _annotate_bf = os.getenv("CITATION_GROUNDING_ANNOTATE", "true").lower() in ("1", "true", "yes", "on")
+                            if _annotate_bf:
+                                lead_text = _annotate_response_bf(lead_text, grounding_result)
+                    except Exception as e:
+                        logger.warning(f"Citation grounding (breadth_first) failed (fail-open): {e}")
+
                 if sources and not citations_by_url:
                     # Fallback: se a resposta não inseriu [n], ainda assim anexamos a seção de referências.
                     lead_text = append_references_section(
@@ -4140,6 +4249,8 @@ async def send_message_stream(
                 }
                 if citations_payload:
                     msg_metadata["citations"] = citations_payload
+                if grounding_result:
+                    msg_metadata["grounding"] = grounding_result.to_dict()
                 ai_msg = ChatMessage(
                     id=str(uuid.uuid4()),
                     chat_id=chat_id,
@@ -4837,7 +4948,10 @@ async def send_message_stream(
 
                     gemini_grounding_step_id: Optional[str] = None
                     gemini_grounding_started: bool = False
+                    gemini_grounding_start_emitted: bool = False
                     gemini_seen_source_urls: set = set()
+                    gemini_grounding_queries: List[str] = []
+                    gemini_grounding_sources: List[Dict[str, Any]] = []
 
                     if handled_by_mcp:
                         pass
@@ -4851,8 +4965,16 @@ async def send_message_stream(
                             system_instruction=system_instruction,
                             thinking_mode=thinking_mode_param,  # NEW
                         ):
-                            if isinstance(chunk_data, tuple):
+                            chunk_type = None
+                            delta = None
+                            if isinstance(chunk_data, (tuple, list)) and len(chunk_data) == 2:
                                 chunk_type, delta = chunk_data
+                            elif isinstance(chunk_data, dict):
+                                chunk_type = chunk_data.get("type") or chunk_data.get("kind")
+                                delta = chunk_data.get("delta") or chunk_data.get("data") or chunk_data.get("value")
+
+                            if chunk_type is not None:
+                                chunk_type = str(chunk_type)
 
                                 if chunk_type in ("thinking", "thinking_summary") and delta:
                                     full_thinking_parts.append(str(delta))
@@ -4863,10 +4985,12 @@ async def send_message_stream(
                                     continue
 
                                 if chunk_type == "grounding_query" and delta:
+                                    gemini_grounding_queries.append(str(delta)[:200])
                                     if not gemini_grounding_step_id:
                                         gemini_grounding_step_id = str(uuid.uuid4())[:8]
                                     if not gemini_grounding_started:
                                         gemini_grounding_started = True
+                                        gemini_grounding_start_emitted = True
                                         yield sse_event(
                                             {
                                                 "type": "step.start",
@@ -4889,6 +5013,7 @@ async def send_message_stream(
                                         gemini_grounding_step_id = str(uuid.uuid4())[:8]
                                     if not gemini_grounding_started:
                                         gemini_grounding_started = True
+                                        gemini_grounding_start_emitted = True
                                         yield sse_event(
                                             {
                                                 "type": "step.start",
@@ -4905,6 +5030,7 @@ async def send_message_stream(
                                             "url": getattr(delta, "url", "") or "",
                                             "title": getattr(delta, "title", "") or "",
                                         }
+                                    gemini_grounding_sources.append(source_payload)
                                     yield sse_event(
                                         {
                                             "type": "step.add_source",
@@ -4949,7 +5075,7 @@ async def send_message_stream(
                                     )
                                     continue
 
-                                # Unknown tuple kind -> ignore safely.
+                                # Unknown structured kind -> ignore safely.
                                 continue
 
                             # Retrocompatibilidade: string simples
@@ -4977,6 +5103,34 @@ async def send_message_stream(
                                     )
                                 yield sse_event(
                                     {"type": "token", "delta": str(chunk_data), "model": model_key}
+                                )
+
+                        if not gemini_grounding_start_emitted and (gemini_grounding_queries or gemini_grounding_sources):
+                            if not gemini_grounding_step_id:
+                                gemini_grounding_step_id = str(uuid.uuid4())[:8]
+                            yield sse_event(
+                                {
+                                    "type": "step.start",
+                                    "step_name": "Pesquisando",
+                                    "step_id": gemini_grounding_step_id,
+                                    "model": model_key,
+                                }
+                            )
+                            for query in gemini_grounding_queries:
+                                yield sse_event(
+                                    {
+                                        "type": "step.add_query",
+                                        "step_id": gemini_grounding_step_id,
+                                        "query": str(query)[:200],
+                                    }
+                                )
+                            for source_payload in gemini_grounding_sources:
+                                yield sse_event(
+                                    {
+                                        "type": "step.add_source",
+                                        "step_id": gemini_grounding_step_id,
+                                        "source": source_payload,
+                                    }
                                 )
 
                         if gemini_grounding_step_id:
@@ -5129,6 +5283,30 @@ async def send_message_stream(
                     yield sse_event({"type": "token", "delta": separator})
 
             full_text = "".join(full_text_parts)
+
+            # --- Citation Grounding: verify legal citations before sending ---
+            grounding_result = None
+            _grounding_enabled = os.getenv("CITATION_GROUNDING_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+            if _grounding_enabled:
+                try:
+                    from app.services.ai.citations.grounding import (
+                        verify_citations as _verify_citations,
+                        annotate_response_text as _annotate_response,
+                    )
+                    grounding_result = await _verify_citations(
+                        full_text,
+                        rag_context=rag_context or "",
+                        tenant_id=str(current_user.id),
+                        threshold=float(os.getenv("CITATION_GROUNDING_THRESHOLD", "0.85")),
+                        enable_neo4j=os.getenv("CITATION_GROUNDING_NEO4J", "true").lower() in ("1", "true", "yes", "on"),
+                    )
+                    if grounding_result and grounding_result.unverified_count > 0:
+                        _annotate = os.getenv("CITATION_GROUNDING_ANNOTATE", "true").lower() in ("1", "true", "yes", "on")
+                        if _annotate:
+                            full_text = _annotate_response(full_text, grounding_result)
+                except Exception as e:
+                    logger.warning(f"Citation grounding failed (fail-open): {e}")
+
             # Padroniza: sempre preferir anexar referências no final usando o schema unificado de citações.
             # Não confiar no LLM para escrever a seção "Fontes:" corretamente.
             if sources and not citations_by_url:
@@ -5162,6 +5340,8 @@ async def send_message_stream(
             citations_payload = list(citations_by_url.values())
             if citations_payload:
                 final_metadata["citations"] = citations_payload
+            if grounding_result:
+                final_metadata["grounding"] = grounding_result.to_dict()
 
             if citations_payload:
                 full_text = append_references_section(full_text, citations_payload, heading="References")
@@ -5377,23 +5557,20 @@ async def send_message_stream(
     )
     STREAM_SESSIONS[request_id] = session
 
-    async def _produce_session():
+    async def stream_with_session():
         try:
             async for event in event_generator():
-                await session.append(event)
+                yield await session.append(event)
         except Exception as e:
-            await session.append(sse_event({"type": "error", "error": str(e)}))
+            yield await session.append(sse_event({"type": "error", "error": str(e)}))
         finally:
             session.done = True
             async with session._cond:
                 session._cond.notify_all()
 
-    if not session.started:
-        session.started = True
-        asyncio.create_task(_produce_session())
-
+    session.started = True
     return StreamingResponse(
-        _stream_from_session(session, request.headers.get("Last-Event-ID")),
+        stream_with_session(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -5407,13 +5584,14 @@ async def send_message_stream(
 async def generate_chat_outline(
     chat_id: str,
     request: OutlineRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar outline leve para modo chat (single-model).
     """
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    current_user = ctx.user
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
     if not chat:
         raise HTTPException(status_code=404, detail="Chat não encontrado")
@@ -5470,14 +5648,15 @@ async def generate_chat_outline(
 async def generate_document(
     chat_id: str,
     request: GenerateDocumentRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar documento completo com múltiplos agentes
     """
+    current_user = ctx.user
     # Verificar chat
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
     
     if not chat:
@@ -5986,14 +6165,15 @@ async def edit_document(
     selection_context_after: str = Body(None),
     models: List[str] = Body(None),
     use_debate: bool = Body(False, description="Enable 4-round deep debate"),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     v5.4: Edit document via agent committee or single model.
     """
+    current_user = ctx.user
     # Verify chat
-    result = await db.execute(select(Chat).where(Chat.id == chat_id, Chat.user_id == current_user.id))
+    result = await db.execute(select(Chat).where(Chat.id == chat_id, build_tenant_filter(ctx, Chat)))
     chat = result.scalars().first()
     
     if not chat:
@@ -6057,3 +6237,61 @@ async def edit_document(
             "Connection": "keep-alive"
         }
     )
+
+
+@router.post("/{chat_id}/tool-approval")
+async def approve_tool_call(
+    chat_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Approve or deny a pending tool call for an agent executor."""
+    from app.services.agent_session_registry import agent_session_registry
+
+    job_id = body.get("job_id")
+    tool_name = body.get("tool")
+    approved = body.get("approved", False)
+    remember = body.get("remember", False)
+
+    if not job_id:
+        raise HTTPException(status_code=400, detail="job_id is required")
+
+    executor = agent_session_registry.get(job_id)
+    if not executor:
+        raise HTTPException(status_code=404, detail="No active agent session for this job")
+
+    try:
+        if hasattr(executor, "approve_tool"):
+            await executor.approve_tool(tool_name, approved, remember=remember)
+        elif hasattr(executor, "permission_manager"):
+            if approved:
+                executor.permission_manager.approve(tool_name, remember=remember)
+            else:
+                executor.permission_manager.deny(tool_name)
+        return {"status": "ok", "approved": approved, "tool": tool_name}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{chat_id}/restore-checkpoint")
+async def restore_checkpoint(
+    chat_id: str,
+    body: dict,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(get_current_user),
+):
+    """Restore a workflow checkpoint."""
+    from app.services.ai.langgraph.improvements.checkpoint_manager import checkpoint_manager
+
+    job_id = body.get("job_id")
+    checkpoint_id = body.get("checkpoint_id")
+
+    if not checkpoint_id:
+        raise HTTPException(status_code=400, detail="checkpoint_id is required")
+
+    state = checkpoint_manager.restore(checkpoint_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    return {"status": "ok", "checkpoint_id": checkpoint_id, "restored": True}

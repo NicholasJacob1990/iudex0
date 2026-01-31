@@ -20,10 +20,12 @@ import {
   ChevronsLeft,
   ChevronsRight,
   EyeOff,
+  Network,
 } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
-import { useUIStore, useChatStore } from '@/stores';
+import { useUIStore, useChatStore, useAuthStore, useOrgStore } from '@/stores';
 import { RichTooltip } from '@/components/ui/rich-tooltip';
+import { Building2 } from 'lucide-react';
 
 const resourceShortcuts = [
   { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
@@ -44,6 +46,7 @@ const mainNav = [
   { href: '/cnj', label: 'Metadados CNJ + DJEN', icon: Newspaper },
   { href: '/web', label: 'Web', icon: Globe },
   { href: '/library', label: 'Biblioteca', icon: Library },
+  { href: '/graph', label: 'Grafos', icon: Network },
   { href: '/bibliotecarios', label: 'Bibliotecários', icon: Users },
 ];
 
@@ -58,12 +61,17 @@ export function SidebarPro() {
   const pathname = usePathname();
   const { sidebarState, setSidebarState, toggleSidebarCollapse } = useUIStore();
   const { chats, fetchChats } = useChatStore();
+  const { user } = useAuthStore();
+  const { organization, fetchOrganization } = useOrgStore();
   const isCollapsed = sidebarState === 'collapsed';
   const isHidden = sidebarState === 'hidden';
 
   useEffect(() => {
     fetchChats().catch(() => undefined);
-  }, [fetchChats]);
+    if (user?.organization_id) {
+      fetchOrganization().catch(() => undefined);
+    }
+  }, [fetchChats, fetchOrganization, user?.organization_id]);
 
   const recentChats = useMemo(() => chats.slice(0, 3), [chats]);
 
@@ -228,17 +236,26 @@ export function SidebarPro() {
 
       {/* User / Footer */}
       <div className={cn('border-t border-white/5 p-4', isCollapsed && 'lg:hidden')}>
+        {organization && (
+          <Link
+            href="/organization"
+            className="mb-3 flex items-center gap-2 rounded-xl px-3 py-2 text-xs text-muted-foreground transition-all hover:bg-white/5 hover:text-white"
+          >
+            <Building2 className="h-3.5 w-3.5 text-indigo-400" />
+            <span className="truncate">{organization.name}</span>
+          </Link>
+        )}
         <div className="group relative overflow-hidden rounded-2xl bg-gradient-to-br from-white/5 to-white/[0.02] p-4 transition-all hover:bg-white/10">
           <div className="flex items-center gap-3">
             <div className="relative h-10 w-10 rounded-full bg-gradient-to-br from-indigo-400 to-purple-400 p-0.5">
               <div className="h-full w-full rounded-full bg-black/40 backdrop-blur-sm" />
               <div className="absolute inset-0 flex items-center justify-center text-xs font-bold text-white">
-                NJ
+                {user?.name?.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase() || '??'}
               </div>
             </div>
             <div className="flex-1 overflow-hidden">
-              <p className="truncate text-sm font-medium text-white group-hover:text-indigo-200">Dr. Nicholas</p>
-              <p className="truncate text-xs text-muted-foreground">Plano Premium</p>
+              <p className="truncate text-sm font-medium text-white group-hover:text-indigo-200">{user?.name || 'Usuário'}</p>
+              <p className="truncate text-xs text-muted-foreground">{user?.plan ? `Plano ${user.plan}` : 'Carregando...'}</p>
             </div>
           </div>
           {/* Glow effect */}

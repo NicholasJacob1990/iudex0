@@ -5,6 +5,8 @@ import argparse
 import subprocess
 import traceback
 import hashlib
+import shutil
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Optional
 try:
@@ -35,6 +37,13 @@ from collections import deque
 from time import sleep # Added for RateLimiter fallback if needed
 import logging
 
+# Carrega .env no início do módulo para garantir variáveis disponíveis
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 init(autoreset=True)
 
 try:
@@ -55,6 +64,18 @@ def _safe_float(value):
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _env_truthy(name: str, default: Optional[bool] = None) -> Optional[bool]:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    value_norm = str(value).strip().lower()
+    if value_norm in ("1", "true", "yes", "y", "on", "enable", "enabled"):
+        return True
+    if value_norm in ("0", "false", "no", "n", "off", "disable", "disabled"):
+        return False
+    return default
 
 
 def _record_llm_usage(
@@ -866,6 +887,82 @@ def chunk_texto_seguro(texto: str, max_chars: int = 25000, overlap_chars: int = 
     return chunks
 
 
+SEGMENT_BOUNDARY_RE = re.compile(
+    r'(?m)(?=^\s*(?:'
+    r'\[\d{1,2}:\d{2}(?::\d{2})?\]\s+'
+    r'|\*\*[^*]{1,40}\*\*:\s+'
+    r'|(?:SPEAKER|FALANTE)\s*\d{1,3}\s*[:\-]'
+    r'))'
+)
+
+
+def _segmentar_texto_para_mapeamento(texto: str) -> list[str]:
+    """Segmenta o texto em blocos naturais (timestamps/speaker labels) para mapeamento."""
+    if not texto:
+        return []
+    if not SEGMENT_BOUNDARY_RE.search(texto):
+        return []
+    partes = [p for p in re.split(SEGMENT_BOUNDARY_RE, texto) if p and p.strip()]
+    return partes
+
+
+def chunk_texto_por_segmentos(
+    texto: str,
+    *,
+    max_chars: int = 25000,
+    overlap_chars: int = 2000,
+    min_segments: int = 3,
+) -> Optional[list[str]]:
+    """
+    Chunking baseado em segmentos (timestamps/speaker labels), evitando cortes artificiais.
+    Retorna None quando não há segmentos suficientes.
+    """
+    segmentos = _segmentar_texto_para_mapeamento(texto)
+    if not segmentos or len(segmentos) < min_segments:
+        return None
+
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+
+    def _flush_current():
+        if not cur:
+            return
+        chunks.append("\n\n".join(cur).strip())
+
+    def _build_overlap(prev_segments: list[str]) -> list[str]:
+        if not prev_segments or overlap_chars <= 0:
+            return []
+        overlap_list: list[str] = []
+        acc = 0
+        for seg in reversed(prev_segments):
+            seg_len = len(seg) + (2 if overlap_list else 0)
+            acc += seg_len
+            overlap_list.insert(0, seg)
+            if acc >= overlap_chars:
+                break
+        return overlap_list
+
+    for seg in segmentos:
+        seg = seg.strip()
+        if not seg:
+            continue
+        seg_len = len(seg) + (2 if cur else 0)
+        if cur and (cur_len + seg_len) > max_chars:
+            _flush_current()
+            cur = _build_overlap(cur)
+            cur_len = sum(len(s) for s in cur) + max(0, len(cur) - 1) * 2
+        if not cur:
+            cur = [seg]
+            cur_len = len(seg)
+        else:
+            cur.append(seg)
+            cur_len += seg_len
+
+    _flush_current()
+    return [c for c in chunks if c]
+
+
 def validar_integridade_pos_merge(texto: str, raise_on_error: bool = False) -> tuple:
     """
     v2.28: Validação completa de integridade após merge de chunks.
@@ -932,6 +1029,37 @@ def validar_integridade_pos_merge(texto: str, raise_on_error: bool = False) -> t
     return is_valid, issues, texto_corrigido
 
 
+def remover_marcadores_continua(texto: str) -> str:
+    """
+    Remove marcadores artificiais de continuação inseridos pelo LLM.
+
+    Exemplos removidos:
+    - [continua], [continuação], [continuacao]
+    - (continua), (continuação), (continuacao)
+    """
+    if not texto:
+        return texto
+
+    # Linha isolada com marcador
+    out = re.sub(
+        r"(?im)^[ \t]*(?:\[\s*(?:continua|continuação|continuacao)\s*\]|\(\s*(?:continua|continuação|continuacao)\s*\))[ \t]*\n",
+        "",
+        texto,
+    )
+
+    # Marcador inline (substitui por um espaço)
+    out = re.sub(
+        r"(?i)\s*(?:\[\s*(?:continua|continuação|continuacao)\s*\]|\(\s*(?:continua|continuação|continuacao)\s*\))\s*",
+        " ",
+        out,
+    )
+
+    # Normalizar espaços múltiplos gerados pela remoção
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
+
+
 def sanitizar_markdown_final(texto: str) -> str:
     """
     v2.28: Sanitização final do markdown antes de salvar.
@@ -956,6 +1084,15 @@ def sanitizar_markdown_final(texto: str) -> str:
     # 3. Linhas em branco excessivas (mais de 2 consecutivas → 2)
     texto = re.sub(r'\n{4,}', '\n\n\n', texto)
 
+    # 3.5 Remover vocativos/gírias em forma de chamada ("Meu irmão,", "cara,", ...)
+    texto = remover_vocativos_girias(texto)
+
+    # 3.6 Normalizar referências "Tema" frequentemente erradas por ASR (ex.: 234→1.234, 1933→1.033)
+    texto = normalizar_temas_markdown(texto)
+
+    # 3.7 Remover marcadores artificiais de continuação (ex.: "[continua]")
+    texto = remover_marcadores_continua(texto)
+
     # 4. Validação (sem raise, apenas log)
     is_valid, issues, texto = validar_integridade_pos_merge(texto, raise_on_error=False)
 
@@ -967,12 +1104,94 @@ def sanitizar_markdown_final(texto: str) -> str:
     return texto
 
 
+def normalizar_temas_markdown(texto: str) -> str:
+    """
+    Normaliza variações comuns de "Tema" geradas por ASR/edição que criam referências inexistentes.
+
+    Regras (conservadoras):
+    - Só corrige quando o documento já contém a forma canônica.
+    - Remove parênteses/apostos que preservam variantes erradas (ex.: "(ou 1933)").
+    """
+    if not texto:
+        return texto
+
+    out = texto
+
+    def _has(pattern: str) -> bool:
+        try:
+            return re.search(pattern, out, flags=re.IGNORECASE) is not None
+        except re.error:
+            return False
+
+    # 234 -> 1.234 (apenas se "Tema 1.234" já aparece no documento)
+    if _has(r"\b[Tt]ema\s+1\.234\b"):
+        out = re.sub(r"\b([Tt]ema)\s+234\b", r"\1 1.234", out)
+        # Remove explicações que mantêm a variante errada (somente casos típicos: "(ou 234)", "(tema 234)")
+        out = re.sub(r"\s*\(\s*(?:ou\s+)?(?:tema\s+)?234\s*\)", "", out, flags=re.IGNORECASE)
+
+    # 1933 / 1.933 -> 1.033 (apenas se "Tema 1.033" já aparece no documento)
+    if _has(r"\b[Tt]ema\s+1\.033\b"):
+        # Normalize numeric variants
+        out = re.sub(r"\b([Tt]ema)\s+1933\b", r"\1 1.033", out)
+        out = re.sub(r"\b([Tt]ema)\s+1\.933\b", r"\1 1.033", out)
+        out = re.sub(r"\b([Tt]ema)\s+1\s*933\b", r"\1 1.033", out)
+        # Remove parenthetical that keeps wrong aliases (somente casos típicos: "(ou 1933)", "(tema 1933)")
+        out = re.sub(r"\s*\(\s*(?:ou\s+)?(?:tema\s+)?(?:1933|1\.933)\s*\)", "", out, flags=re.IGNORECASE)
+        # Normalize table-style combos: "Tema 1.033 / 1933" etc.
+        out = re.sub(r"\b(Tema\s+1\.033)\s*/\s*(?:1933|1\.933)\b", r"\1", out, flags=re.IGNORECASE)
+        out = re.sub(r"\b(Tema\s+1\.033)\s*\(\s*ou\s*(?:1933|1\.933)\s*\)", r"\1", out, flags=re.IGNORECASE)
+
+    return out
+
+
 # ==================== HELPERS PORTED FROM GPT SCRIPT ====================
 
 def limpar_tags_xml(texto):
     texto = re.sub(r'</?[a-z_][\w\-]*>', '', texto, flags=re.IGNORECASE)
     texto = re.sub(r'<[a-z_][\w\-]*\s+[^>]+>', '', texto, flags=re.IGNORECASE)
     return texto
+
+
+def remover_vocativos_girias(texto: str) -> str:
+    """
+    Remove vocativos/gírias comuns que não agregam conteúdo e não devem constar no formatado.
+    Ex.: "Meu irmão,", "cara,", "mano!", "minha gente:" etc.
+
+    Observação: aplica apenas em texto fora de code fences e com pontuação típica de vocativo,
+    para evitar apagar informação factual ("meu irmão" como parentesco) quando não estiver em forma de vocativo.
+    """
+    if not texto:
+        return texto
+
+    vocativos = [
+        r"meu\s+irm[aã]o",
+        r"mano",
+        r"cara",
+        r"minha\s+gente",
+        r"galera",
+        r"meu\s+velho",
+    ]
+    voc = "|".join(vocativos)
+    # Start-of-line vocative: "Meu irmão, ..."
+    re_start = re.compile(rf"^(\s*)(?:{voc})\s*[,!?:;\-–—]+\s*", flags=re.IGNORECASE)
+    # Mid-line after sentence boundary: ". Meu irmão, ..."
+    re_mid = re.compile(rf"([.!?:;])\s+(?:{voc})\s*[,!?:;\-–—]+\s*", flags=re.IGNORECASE)
+
+    out_lines = []
+    in_fence = False
+    for line in texto.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("```"):
+            in_fence = not in_fence
+            out_lines.append(line)
+            continue
+        if in_fence:
+            out_lines.append(line)
+            continue
+        new_line = re_start.sub(r"\1", line)
+        new_line = re_mid.sub(r"\1 ", new_line)
+        out_lines.append(new_line)
+    return "\n".join(out_lines)
 
 # ==================== LOGGER SHIM ====================
 class Logger:
@@ -1431,9 +1650,210 @@ def remover_titulos_orfaos(texto: str, similaridade_minima: float = 0.85) -> str
     return texto
 
 
-def aplicar_correcoes_automaticas(texto: str) -> tuple:
+def _split_long_paragraphs_markdown(
+    texto: str,
+    *,
+    max_paragraph_chars: int = 900,
+    skip_timestamped: bool = False,
+) -> tuple[str, int]:
     """
-    v2.18: Aplica correções automáticas baseadas em padrões comuns de erro.
+    Quebra parágrafos muito longos em Markdown (apenas texto "plain"), preservando
+    blocos estruturais como títulos, listas, tabelas, citações e code fences.
+
+    Returns:
+        tuple: (texto_novo, qtd_paragrafos_quebrados)
+    """
+    if not texto:
+        return texto, 0
+
+    try:
+        max_paragraph_chars = int(max_paragraph_chars)
+    except Exception:
+        max_paragraph_chars = 900
+
+    if max_paragraph_chars <= 0:
+        return texto, 0
+
+    sentence_boundary_re = re.compile(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÂÊÔÃÕÜ0-9“"(\[])')
+    timestamp_re = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?\]")
+    abbrev_re = re.compile(
+        r'(?:\b(?:art|arts|dr|dra|sr|sra|etc|cf|n|no|nº|inc|par|fls|p|pp|ex)\.)$',
+        re.IGNORECASE,
+    )
+
+    def _is_special_paragraph(paragraph_lines: list[str]) -> bool:
+        for ln in paragraph_lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith(("```", "~~~")):
+                return True
+            if s.startswith("#"):
+                return True
+            if s.startswith(">"):
+                return True
+            if s.startswith("|") and s.endswith("|"):
+                return True
+            if re.match(r"^\s*(?:[-*+]|\\d+\\.)\\s+", ln):
+                return True
+        return False
+
+    def _split_into_sentences(text: str) -> list[str]:
+        parts = [p.strip() for p in sentence_boundary_re.split(text.strip()) if p.strip()]
+        if len(parts) <= 1:
+            return parts
+
+        merged: list[str] = []
+        i = 0
+        while i < len(parts):
+            cur = parts[i]
+            if i + 1 < len(parts) and abbrev_re.search(cur.rstrip()):
+                cur = f"{cur} {parts[i + 1]}"
+                i += 2
+                merged.append(cur)
+                continue
+            merged.append(cur)
+            i += 1
+        return merged
+
+    def _group_sentences(sentences: list[str]) -> list[str]:
+        # Parágrafos dinâmicos: 2–4 frases, tamanho confortável para leitura.
+        target_min = max(220, min(320, max_paragraph_chars // 3))
+        target_max = max(420, min(650, max_paragraph_chars - 200))
+
+        paras: list[str] = []
+        cur: list[str] = []
+        cur_len = 0
+
+        def flush():
+            nonlocal cur, cur_len
+            if cur:
+                paras.append(" ".join(cur).strip())
+            cur = []
+            cur_len = 0
+
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            add_len = len(s) + (1 if cur else 0)
+            if not cur:
+                cur = [s]
+                cur_len = len(s)
+                continue
+            if cur_len + add_len <= target_max:
+                cur.append(s)
+                cur_len += add_len
+                continue
+            if cur_len < target_min:
+                cur.append(s)
+                cur_len += add_len
+                flush()
+                continue
+            flush()
+            cur = [s]
+            cur_len = len(s)
+        flush()
+
+        return [p for p in paras if p]
+
+    def _fallback_word_chunk(text: str) -> list[str]:
+        words = [w for w in re.split(r"\s+", text.strip()) if w]
+        if not words:
+            return []
+        target_max = max(420, min(650, max_paragraph_chars - 200))
+        paras: list[str] = []
+        cur: list[str] = []
+        cur_len = 0
+        for w in words:
+            add_len = len(w) + (1 if cur else 0)
+            if cur and cur_len + add_len > target_max:
+                paras.append(" ".join(cur))
+                cur = [w]
+                cur_len = len(w)
+                continue
+            cur.append(w)
+            cur_len += add_len
+        if cur:
+            paras.append(" ".join(cur))
+        return paras
+
+    lines = texto.split("\n")
+    out_lines: list[str] = []
+    in_fence = False
+    paragraph_lines: list[str] = []
+    changed_paragraphs = 0
+
+    def flush_paragraph():
+        nonlocal changed_paragraphs, paragraph_lines, out_lines
+        if not paragraph_lines:
+            return
+        if in_fence or _is_special_paragraph(paragraph_lines):
+            out_lines.extend(paragraph_lines)
+            paragraph_lines = []
+            return
+
+        joined = " ".join([l.strip() for l in paragraph_lines]).strip()
+        if skip_timestamped:
+            if timestamp_re.search(joined):
+                out_lines.extend(paragraph_lines)
+                paragraph_lines = []
+                return
+            first = paragraph_lines[0].strip()
+            if re.match(r"^\\*\\*[^*]{1,30}\\*\\*:\\s+", first):
+                out_lines.extend(paragraph_lines)
+                paragraph_lines = []
+                return
+        if len(joined) <= max_paragraph_chars:
+            out_lines.extend(paragraph_lines)
+            paragraph_lines = []
+            return
+
+        sentences = _split_into_sentences(joined)
+        if len(sentences) <= 1:
+            new_paras = _fallback_word_chunk(joined)
+        else:
+            new_paras = _group_sentences(sentences)
+
+        if len(new_paras) <= 1:
+            out_lines.extend(paragraph_lines)
+            paragraph_lines = []
+            return
+
+        changed_paragraphs += 1
+        for idx, p in enumerate(new_paras):
+            if idx > 0:
+                out_lines.append("")
+            out_lines.append(p)
+        paragraph_lines = []
+
+    for ln in lines:
+        stripped = ln.strip()
+        if stripped.startswith(("```", "~~~")):
+            flush_paragraph()
+            out_lines.append(ln)
+            in_fence = not in_fence
+            continue
+
+        if in_fence:
+            out_lines.append(ln)
+            continue
+
+        if stripped == "":
+            flush_paragraph()
+            out_lines.append(ln)
+            continue
+
+        paragraph_lines.append(ln)
+
+    flush_paragraph()
+
+    return "\n".join(out_lines), changed_paragraphs
+
+
+def aplicar_correcoes_automaticas(texto: str, *, mode: str | None = None) -> tuple:
+    """
+    v2.19: Aplica correções automáticas baseadas em padrões comuns de erro.
     Portado de format_transcription_gemini.py.
     
     Correções aplicadas:
@@ -1448,7 +1868,7 @@ def aplicar_correcoes_automaticas(texto: str) -> tuple:
     """
     from difflib import SequenceMatcher
     
-    print(f"{Fore.CYAN}🔧 Auto-Fix Pass (v2.18)...")
+    print(f"{Fore.CYAN}🔧 Auto-Fix Pass (v2.19)...")
     
     correcoes = []
     texto_original = texto
@@ -1551,6 +1971,27 @@ def aplicar_correcoes_automaticas(texto: str) -> tuple:
     if substituicoes > 0:
         texto = '\n'.join(linhas)
         correcoes.append(f"Placeholders de tabela substituídos por '—' ({substituicoes} linha(s))")
+
+    # 7. Quebrar parágrafos muito longos (APOSTILA/FIDELIDADE)
+    mode_norm = (mode or "").strip().upper()
+    if mode_norm in {"APOSTILA", "FIDELIDADE"}:
+        import os
+
+        env_key = "IUDEX_APOSTILA_MAX_PARAGRAPH_CHARS" if mode_norm == "APOSTILA" else "IUDEX_FIDELIDADE_MAX_PARAGRAPH_CHARS"
+        default_max = "900" if mode_norm == "APOSTILA" else "1200"
+        try:
+            max_chars = int(os.getenv(env_key, default_max))
+        except Exception:
+            max_chars = int(default_max)
+
+        texto_split, changed = _split_long_paragraphs_markdown(
+            texto,
+            max_paragraph_chars=max_chars,
+            skip_timestamped=(mode_norm == "FIDELIDADE"),
+        )
+        if changed > 0 and texto_split != texto:
+            texto = texto_split
+            correcoes.append(f"Parágrafos longos quebrados ({mode_norm}: {changed} parágrafo(s))")
     
     if correcoes:
         print(f"   ✅ {len(correcoes)} correções aplicadas:")
@@ -1805,6 +2246,400 @@ def renumerar_secoes(texto):
     
     logger.info("   ✅ Renumeração concluída.")
     return '\n'.join(novas_linhas)
+
+
+def audit_heading_levels(texto: str, *, apply_fixes: bool = False) -> tuple[str, list[str]]:
+    """
+    v2.34: Auditoria determinística de hierarquia.
+
+    Regras:
+    - H2 com numeração decimal (ex.: "## 18.2 ...") deve ser subtópico (H3/H4).
+    - H4 sem H3 anterior (desde o último H2) é inconsistente.
+
+    Returns:
+        tuple: (texto_atualizado, issues)
+    """
+    if not texto:
+        return texto, []
+
+    lines = texto.split("\n")
+    issues: list[str] = []
+    new_lines: list[str] = []
+    in_fence = False
+    saw_h2 = False
+    saw_h3_since_h2 = False
+
+    heading_re = re.compile(r'^(#{2,4})\s+(.+)$')
+    decimal_re = re.compile(r'^(\d+(?:\.\d+)+)\.?\s*(.+)$')
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            new_lines.append(line)
+            continue
+
+        if in_fence:
+            new_lines.append(line)
+            continue
+
+        m = heading_re.match(stripped)
+        if not m:
+            new_lines.append(line)
+            continue
+
+        hashes = m.group(1)
+        level = len(hashes)
+        raw_title = m.group(2).strip()
+
+        if level == 2:
+            saw_h2 = True
+            saw_h3_since_h2 = False
+        elif level == 3:
+            saw_h3_since_h2 = True
+
+        dec = decimal_re.match(raw_title)
+        if level == 2 and dec:
+            num = dec.group(1)
+            title = dec.group(2).strip()
+            depth = num.count(".") + 1
+            issues.append(f"Subtópico numerado em H2: '{raw_title}'")
+            if apply_fixes and saw_h2:
+                target_level = 3 if depth == 2 else 4
+                # Evitar H4 sem H3 no bloco atual.
+                if target_level == 4 and not saw_h3_since_h2:
+                    target_level = 3
+                new_lines.append(f"{'#' * target_level} {num}. {title}".strip())
+                if target_level == 3:
+                    saw_h3_since_h2 = True
+                continue
+
+        if level == 4 and not saw_h3_since_h2:
+            issues.append(f"H4 sem H3 anterior: '{raw_title}'")
+            if apply_fixes:
+                new_lines.append(f"### {raw_title}")
+                saw_h3_since_h2 = True
+                continue
+
+        new_lines.append(line)
+
+    return "\n".join(new_lines), issues
+
+
+_TABLE_HEADING_RE = re.compile(
+    r'^(#{3,5})\s*(?:[📋🎯]\s*)?(.*)$',
+    re.IGNORECASE,
+)
+
+_HEADING_RE = re.compile(r'^(#{2,4})\s+(.+)$')
+_HEADING_NUMBER_RE = re.compile(r'^(\d+(?:\.\d+)*)(?:\.)?\s*(.+)$')
+
+_STOPWORDS_PT = {
+    "para", "pela", "pelo", "como", "mais", "menos", "sobre", "entre", "depois", "antes", "quando",
+    "onde", "outra", "outro", "outros", "outras", "seu", "sua", "seus", "suas", "que", "porque",
+    "pois", "isso", "essa", "esse", "esta", "este", "estas", "estes", "nao", "não", "sim", "com",
+    "sem", "dos", "das", "nos", "nas", "por", "pro", "pra", "uma", "uns", "umas", "como", "pela",
+    "pelo", "sobre", "sob", "entre", "na", "no", "em", "ao", "aos", "as", "os", "de", "da", "do",
+    "das", "dos", "e", "a", "o", "um", "uma", "que", "ser", "sao", "são",
+}
+
+
+def _keyword_set(texto: str) -> set[str]:
+    tokens = re.findall(r"[A-Za-zÀ-ÿ0-9]+", (texto or "").lower())
+    return {
+        t for t in tokens
+        if len(t) >= 4 and t not in _STOPWORDS_PT and not t.isdigit()
+    }
+
+
+def _keyword_similarity(a: str, b: str) -> float:
+    sa = _keyword_set(a)
+    sb = _keyword_set(b)
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / max(1, len(sa | sb))
+
+
+def _extract_headings(lines: list[str]) -> list[dict]:
+    headings: list[dict] = []
+    in_fence = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = _HEADING_RE.match(stripped)
+        if not m:
+            continue
+        level = len(m.group(1))
+        raw_title = m.group(2).strip()
+        # Ignorar headings de tabelas/quadros para não quebrar seções.
+        if level >= 3:
+            lower_title = raw_title.lower()
+            if any(tok in lower_title for tok in ("tabela", "quadro", "síntese", "sintese", "pegadinha", "banca", "📋", "🎯")):
+                continue
+        number = ""
+        title = raw_title
+        nm = _HEADING_NUMBER_RE.match(raw_title)
+        if nm:
+            number = nm.group(1)
+            title = nm.group(2).strip()
+        headings.append(
+            {
+                "line": idx,
+                "level": level,
+                "number": number,
+                "title": title,
+                "raw": raw_title,
+            }
+        )
+    return headings
+
+
+def _extract_table_blocks(lines: list[str], start: int, end: int) -> list[dict]:
+    blocks: list[dict] = []
+    i = start
+    while i < end:
+        line = lines[i].strip()
+        m = _TABLE_HEADING_RE.match(line)
+        if m:
+            heading_level = len(m.group(1))
+            heading_text = m.group(2).strip()
+            # Only treat as table header if it looks like table/quadros.
+            if not any(tok in heading_text.lower() for tok in ("tabela", "quadro", "síntese", "sintese", "pegadinha", "banca")):
+                i += 1
+                continue
+            block_start = i
+            i += 1
+            has_table_rows = False
+            while i < end:
+                nxt = lines[i].strip()
+                if _HEADING_RE.match(nxt):
+                    break
+                if nxt.startswith("|"):
+                    has_table_rows = True
+                    i += 1
+                    continue
+                if has_table_rows and nxt == "":
+                    i += 1
+                    continue
+                if has_table_rows and nxt and not nxt.startswith("|"):
+                    break
+                i += 1
+            block_end = i
+            block_text = "\n".join(lines[block_start:block_end]).strip()
+            blocks.append(
+                {
+                    "start": block_start,
+                    "end": block_end,
+                    "heading_level": heading_level,
+                    "heading_text": heading_text,
+                    "text": block_text,
+                }
+            )
+            continue
+        i += 1
+    return blocks
+
+
+def reatribuir_tabelas_por_topico(
+    texto: str,
+    *,
+    apply_fixes: bool = True,
+    min_similarity: float = 0.08,
+    margin: float = 0.08,
+) -> tuple[str, list[str]]:
+    """
+    v2.34: Reatribui tabelas que parecem ter sido vinculadas ao tópico errado.
+
+    Heurística:
+    - Avalia similaridade de palavras-chave entre tabela e título atual vs título pai.
+    - Se a tabela está em subtópico (numeração decimal ou nível >=3) e o título pai é mais similar,
+      move a tabela para antes do heading do subtópico.
+    """
+    if not texto:
+        return texto, []
+
+    lines = texto.split("\n")
+    headings = _extract_headings(lines)
+    if not headings:
+        return texto, []
+
+    # Construir intervalos de seção por heading
+    sections: list[dict] = []
+    for idx, h in enumerate(headings):
+        start = h["line"] + 1
+        end = headings[idx + 1]["line"] if idx + 1 < len(headings) else len(lines)
+        parent_idx = None
+        for j in range(idx - 1, -1, -1):
+            if headings[j]["level"] < h["level"]:
+                parent_idx = j
+                break
+        sections.append(
+            {
+                "heading_index": idx,
+                "start": start,
+                "end": end,
+                "parent_index": parent_idx,
+            }
+        )
+
+    moves: list[dict] = []
+    issues: list[str] = []
+
+    for sec in sections:
+        h = headings[sec["heading_index"]]
+        parent_idx = sec["parent_index"]
+        if parent_idx is None:
+            continue
+        parent = headings[parent_idx]
+        # Considerar apenas subtópicos (decimais ou nível >=3)
+        if "." not in (h.get("number") or "") and h.get("level", 2) < 3:
+            continue
+        table_blocks = _extract_table_blocks(lines, sec["start"], sec["end"])
+        if not table_blocks:
+            continue
+        for block in table_blocks:
+            def _context_slice(start_line: int, end_line: int, *, tail: bool = False, max_lines: int = 3) -> str:
+                chunk = lines[start_line:end_line]
+                nonempty = [ln.strip() for ln in chunk if ln.strip()]
+                if not nonempty:
+                    return ""
+                if tail:
+                    return " ".join(nonempty[-max_lines:])
+                return " ".join(nonempty[:max_lines])
+
+            # Contexto do subtópico (linhas antes da tabela) e do pai (linhas imediatamente anteriores ao subtópico).
+            current_context = _context_slice(sec["start"], block["start"], tail=True)
+            parent_context = _context_slice(
+                sections[parent_idx]["start"],
+                h["line"],
+                tail=True,
+            )
+            current_score = _keyword_similarity(f"{h['title']} {current_context}", block["text"])
+            parent_score = _keyword_similarity(f"{parent['title']} {parent_context}", block["text"])
+            if parent_score >= min_similarity and (parent_score - current_score) >= margin:
+                # Move a tabela para imediatamente antes do heading do subtópico
+                moves.append(
+                    {
+                        "start": block["start"],
+                        "end": block["end"],
+                        "insert_at": h["line"],
+                        "from": h["title"],
+                        "to": parent["title"],
+                        "heading_text": block["heading_text"],
+                        "scores": (current_score, parent_score),
+                    }
+                )
+
+    if not moves or not apply_fixes:
+        if moves:
+            for m in moves:
+                issues.append(
+                    f"Tabela sugerida para mover ('{m['heading_text'][:40]}...'): '{m['from']}' → '{m['to']}'"
+                )
+        return texto, issues
+
+    # Aplicar movimentos de baixo para cima para preservar índices
+    moves.sort(key=lambda m: m["start"], reverse=True)
+    for m in moves:
+        block_lines = lines[m["start"]:m["end"]]
+        del lines[m["start"]:m["end"]]
+        insert_at = m["insert_at"]
+        if insert_at > m["start"]:
+            insert_at = max(0, insert_at - (m["end"] - m["start"]))
+        for offset, bl in enumerate(block_lines):
+            lines.insert(insert_at + offset, bl)
+        issues.append(
+            f"Tabela reatribuída: '{m['heading_text'][:40]}...' de '{m['from']}' → '{m['to']}'"
+        )
+
+    return "\n".join(lines), issues
+
+
+def coletar_candidatos_reatribuicao_tabelas(
+    texto: str,
+    *,
+    min_similarity: float = 0.08,
+    margin: float = 0.08,
+    max_candidates: int = 5,
+) -> list[dict]:
+    """
+    v2.34: Coleta casos ambíguos para reatribuição de tabelas via IA.
+    """
+    if not texto:
+        return []
+    lines = texto.split("\n")
+    headings = _extract_headings(lines)
+    if not headings:
+        return []
+
+    sections: list[dict] = []
+    for idx, h in enumerate(headings):
+        start = h["line"] + 1
+        end = headings[idx + 1]["line"] if idx + 1 < len(headings) else len(lines)
+        parent_idx = None
+        for j in range(idx - 1, -1, -1):
+            if headings[j]["level"] < h["level"]:
+                parent_idx = j
+                break
+        sections.append(
+            {
+                "heading_index": idx,
+                "start": start,
+                "end": end,
+                "parent_index": parent_idx,
+            }
+        )
+
+    def _context_slice(start_line: int, end_line: int, *, tail: bool = False, max_lines: int = 3) -> str:
+        chunk = lines[start_line:end_line]
+        nonempty = [ln.strip() for ln in chunk if ln.strip()]
+        if not nonempty:
+            return ""
+        if tail:
+            return " ".join(nonempty[-max_lines:])
+        return " ".join(nonempty[:max_lines])
+
+    candidates: list[dict] = []
+    for sec in sections:
+        h = headings[sec["heading_index"]]
+        parent_idx = sec["parent_index"]
+        if parent_idx is None:
+            continue
+        parent = headings[parent_idx]
+        if "." not in (h.get("number") or "") and h.get("level", 2) < 3:
+            continue
+        table_blocks = _extract_table_blocks(lines, sec["start"], sec["end"])
+        if not table_blocks:
+            continue
+        for block in table_blocks:
+            current_context = _context_slice(sec["start"], block["start"], tail=True)
+            parent_context = _context_slice(sections[parent_idx]["start"], h["line"], tail=True)
+            current_score = _keyword_similarity(f"{h['title']} {current_context}", block["text"])
+            parent_score = _keyword_similarity(f"{parent['title']} {parent_context}", block["text"])
+            # Ambíguo: scores próximos ou ambos baixos, mas há match mínimo com um lado.
+            if max(current_score, parent_score) < min_similarity:
+                continue
+            if abs(parent_score - current_score) < margin:
+                candidates.append(
+                    {
+                        "start": block["start"],
+                        "end": block["end"],
+                        "insert_at": h["line"],
+                        "current_title": h["title"],
+                        "parent_title": parent["title"],
+                        "current_context": current_context,
+                        "parent_context": parent_context,
+                        "table_text": block["text"],
+                    }
+                )
+        if len(candidates) >= max_candidates:
+            break
+
+    return candidates[:max_candidates]
 
 def deterministic_structure_fix(text):
     """
@@ -2690,8 +3525,10 @@ def mover_tabelas_para_fim_de_secao(texto):
         linha = linhas[i]
         linha_strip = linha.strip()
         
-        # 1. DETECTAR SE É UM TÍTULO (H1, H2, H3...)
-        if linha_strip.startswith('#'):
+        # 1. DETECTAR SE É UM TÍTULO (apenas H1/H2/H3 delimitam "bloco")
+        # Motivo: H4/H5 são frequentemente usados como subtítulos dentro do mesmo assunto.
+        # Se flusharmos em qualquer '#', a tabela pode parar antes do assunto terminar.
+        if re.match(r'^#{1,3}\s+', linha_strip):
             # Despeja tabelas antes de iniciar o novo tópico
             if tabelas_pendentes:
                 resultado.append('') # Espaço antes
@@ -3000,6 +3837,17 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
                 pos_abre = texto_lower.find(frase_curta)
                 if pos_abre != -1:
                     print(f"{Fore.YELLOW}   📍 Âncora parcial: '{frase_curta}' @ {pos_abre}")
+
+            if pos_abre == -1 and frase_abre:
+                # Fallback: busca tolerante a quebras de linha (whitespace-insensitive)
+                try:
+                    pattern = r'\s+'.join(re.escape(w) for w in frase_abre.split())
+                    m = re.search(pattern, transcricao_completa, flags=re.IGNORECASE)
+                    if m:
+                        pos_abre = m.start()
+                        print(f"{Fore.YELLOW}   📍 Âncora com whitespace-flex: '{frase_abre[:40]}...' @ {pos_abre}")
+                except re.error:
+                    pass
             
             if pos_abre != -1:
                 # Voltar até o início da linha/parágrafo
@@ -3130,6 +3978,122 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
         })
         inicio = fim
         
+    return chunks
+
+def dividir_por_blocos_markdown(
+    texto: str,
+    *,
+    max_chars: int = 25000,
+    block_prefix_pattern: Optional[str] = None,
+    split_overlap_chars: int = 300,
+) -> list:
+    """
+    Divide por blocos naturais em Markdown (v2.32).
+
+    Detecta headings "## Bloco XX — ..." (ou outros prefixos) e agrupa blocos inteiros até atingir `max_chars`.
+    Se um bloco exceder `max_chars`, ele é subdividido via `chunk_texto_seguro`.
+
+    Retorna o mesmo formato de `dividir_sequencial`: lista de dicts {inicio, fim, ...}.
+    """
+    texto = texto or ""
+    if not texto.strip():
+        return []
+
+    # Encontrar blocos por headings (prefixo configurável)
+    prefix = block_prefix_pattern or os.getenv("IUDEX_HEARING_BLOCK_PREFIX_REGEX", r"Bloco|Ato|Parte")
+    try:
+        block_regex = re.compile(rf'(?m)^##\s+(?:{prefix})\b', flags=re.IGNORECASE)
+    except re.error:
+        block_regex = re.compile(r'(?m)^##\s+Bloco\b', flags=re.IGNORECASE)
+    matches = list(block_regex.finditer(texto))
+    if len(matches) < 2:
+        # Poucos blocos → não vale chunking por bloco
+        return []
+
+    block_ranges: list[tuple[int, int]] = []
+    for idx, m in enumerate(matches):
+        start = m.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(texto)
+        block_ranges.append((start, end))
+
+    chunks: list[dict] = []
+    cur_start: Optional[int] = None
+    cur_end: Optional[int] = None
+    cur_len = 0
+    cur_blocks: list[int] = []
+
+    def _flush():
+        nonlocal cur_start, cur_end, cur_len, cur_blocks
+        if cur_start is None or cur_end is None:
+            return
+        chunks.append(
+            {
+                "inicio": cur_start,
+                "fim": cur_end,
+                "block_ids": cur_blocks[:],
+                "instituto_continua": False,
+                "instituto_nome": None,
+            }
+        )
+        cur_start = None
+        cur_end = None
+        cur_len = 0
+        cur_blocks = []
+
+    for block_idx, (b_start, b_end) in enumerate(block_ranges):
+        block_len = b_end - b_start
+        if block_len > max_chars:
+            # Se há chunk em andamento, fecha antes de subdividir bloco grande
+            _flush()
+            block_text = texto[b_start:b_end]
+            overlap_chars = max(0, int(split_overlap_chars))
+            parts = chunk_texto_seguro(block_text, max_chars=max_chars, overlap_chars=overlap_chars)
+            pos = b_start
+            for part in parts:
+                part_len = len(part)
+                end_pos = min(len(texto), pos + part_len)
+                chunks.append(
+                    {
+                        "inicio": pos,
+                        "fim": end_pos,
+                        "block_ids": [block_idx],
+                        "instituto_continua": False,
+                        "instituto_nome": None,
+                    }
+                )
+                pos = end_pos
+            continue
+
+        if cur_start is None:
+            cur_start = b_start
+            cur_end = b_end
+            cur_len = block_len
+            cur_blocks = [block_idx]
+            continue
+
+        if cur_len + block_len > max_chars and cur_blocks:
+            _flush()
+            cur_start = b_start
+            cur_end = b_end
+            cur_len = block_len
+            cur_blocks = [block_idx]
+            continue
+
+        cur_end = b_end
+        cur_len += block_len
+        cur_blocks.append(block_idx)
+
+    _flush()
+
+    # Garantir contiguidade (sem gaps). Se houver gaps, fallback para dividir_sequencial.
+    expected = 0
+    for c in chunks:
+        if c["inicio"] != expected:
+            return []
+        expected = c["fim"]
+    if expected != len(texto):
+        return []
+
     return chunks
 
 def validar_chunks(chunks, texto_completo):
@@ -3409,7 +4373,23 @@ class VomoMLX:
     # GPT-5 Mini: 400k tokens input, 128k output
     MAX_CHUNK_SIZE = 100000  
     CHUNK_OVERLAP = 3000     # 5k overlap
+    # Map structure settings (v2.31)
+    MAP_MAX_SINGLE_CHARS = 350_000
+    MAP_CHUNK_CHARS = 150_000
+    MAP_CHUNK_OVERLAP_CHARS = 8_000
+    MAP_MAX_LINES_PER_CHUNK = 60
+    RAW_CONTEXT_OVERLAP_CHARS = 1200
     
+    # ==================== INITIAL PROMPTS POR MODO (v2.29) ====================
+    # Contexto do Whisper ajustado ao tipo de áudio para melhor reconhecimento de termos
+    INITIAL_PROMPTS = {
+        "APOSTILA": "Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
+        "FIDELIDADE": "Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
+        "AUDIENCIA": "Esta é uma transcrição de audiência judicial em português brasileiro. Termos forenses, procedimentos processuais e linguagem jurídica formal.",
+        "REUNIAO": "Esta é uma transcrição de reunião profissional em português brasileiro.",
+        "DEPOIMENTO": "Esta é uma transcrição de depoimento judicial em português brasileiro. Termos forenses e linguagem jurídica formal.",
+    }
+
     # ==================== MODULAR PROMPT COMPONENTS (v2.22) ====================
     # These components are composed by _build_system_prompt to allow partial customization.
     
@@ -3447,7 +4427,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 
     PROMPT_STYLE_APOSTILA = """## ✅ DIRETRIZES DE ESTILO E FORMATAÇÃO VISUAL
 1. **Correção Gramatical**: Ajuste a linguagem coloquial para o padrão culto.
-2. **Limpeza**: Remova gírias, cacoetes ("né", "tipo assim", "então") e vícios de oralidade.
+2. **Limpeza**: Remova gírias, vocativos e cacoetes ("né", "tipo assim", "então", "meu irmão", "cara", "mano", "galera") e vícios de oralidade. Se houver parentesco factual (ex.: "Rodolfo (irmão do professor)"), mantenha a informação de forma formal.
 3. **Coesão**: Use conectivos e pontuação adequada para tornar o texto fluido.
 4. **Legibilidade Visual** (OBRIGATÓRIO):
    - **PARÁGRAFOS CURTOS**: máximo **4-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
@@ -3570,6 +4550,7 @@ VOCÊ É UM EXCELENTÍSSIMO REDATOR TÉCNICO E DIDÁTICO.
 - **Referências**: leis, artigos, jurisprudência, autores, casos citados.
 - **Ênfases intencionais**: "isso é MUITO importante" (mantenha o destaque).
 - **Observações pedagógicas**: "cuidado com isso!", "ponto polêmico".
+- **Encerramento real da aula**: se houver despedida/aviso final/horário no fim do trecho, mantenha (pode organizar como uma seção curta "Encerramento").
 
 ## 🎯 PRESERVAÇÃO ESPECIAL: DICAS DE PROVA E EXAMINADORES (CRÍTICO)
 Aulas presenciais frequentemente contêm informações valiosas sobre:
@@ -3584,7 +4565,10 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 1. **Correção Gramatical**: Corrija erros gramaticais, regências, ortográficos e de pontuação.
 2. **Limpeza Profunda:**
    - **REMOVA** marcadores de oralidade: "né", "tá?", "entende?", "veja bem", "tipo assim".
+   - **REMOVA** gírias e vocativos: "meu irmão", "cara", "mano", "galera", "minha gente" (não agregam conteúdo).
+     - Se a expressão for PARENTESCO factual ("meu irmão" = irmão do professor), reescreva de forma formal (ex.: "Rodolfo (irmão do professor)").
    - **REMOVA** interações diretas com a turma: "Isso mesmo", "A colega perguntou", "Já estão me vendo?", "Estão ouvindo?".
+   - **NÃO REMOVA** o encerramento do professor (ex.: agradecimentos, aviso de horário, "até a próxima", "boa prova") quando estiver no fim do trecho: preserve como um parágrafo final ou uma seção curta "Encerramento".
    - **REMOVA** redundâncias: "subir para cima", "criação nova".
    - **TRANSFORME** perguntas retóricas em afirmações quando possível.
 3. **Coesão**: Utilize conectivos para tornar o texto mais fluido. Aplique pontuação adequada.
@@ -3657,40 +4641,68 @@ Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **
 VOCÊ É UM REDATOR TÉCNICO FORENSE.
 - **Tom:** objetivo, fiel e formal.
 - **Pessoa:** preserve a pessoa original da fala.
-- **Objetivo:** reproduzir a audiência de forma clara e organizada, SEM RESUMIR.
+- **Objetivo:** transformar a transcrição em texto legível e coeso, mantendo a fidelidade integral, **SEM RESUMIR**.
 
-## OBJETIVO
-- Transformar a transcrição em texto legível e coeso, mantendo a fidelidade integral.
-- **Tamanho:** saída entre **95% e 115%** do trecho original (apenas limpeza de oralidade).
+## 🎯 OBJETIVO (Fidelidade com clareza)
+- **Não resumir:** a saída deve ficar entre **95% e 115%** do tamanho do trecho original (apenas limpeza de oralidade e correções leves).
+- **Preservar sequência:** mantenha a ordem cronológica real.
+- **Preservar Q&A:** perguntas e respostas devem permanecer em sequência, sem reorganizar.
 
-    ## NÃO FAZER
-    1. **NÃO RESUMA**. Não omita falas, datas, valores, nomes, eventos.
-    2. **NÃO ALTERE** a ordem dos fatos.
-    3. **NÃO INVENTE** informações ausentes.
-    4. **NÃO PADRONIZE** falas de pessoas diferentes: preserve o estilo de cada fala.
+## ❌ O QUE NÃO FAZER (CRÍTICO)
+1. **NÃO RESUMA** nem condense falas ("em síntese", "em resumo", etc.).
+2. **NÃO REORGANIZE** por temas; **mantenha cronologia**.
+3. **NÃO INVENTE** nomes, cargos, papéis, prazos, datas, valores ou decisões.
+4. **NÃO PADRONIZE** vozes diferentes: preserve diferenças entre falas.
+5. **NÃO CONVERTA** em narrativa: não transforme depoimentos em “história”.
 
-    ## REGRAS CRÍTICAS
-    1. **NÃO transforme em discurso indireto** (ex.: "o juiz disse que..."). Mantenha fala direta.
-    2. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
-    3. **NÃO infira nomes/papéis**: use exatamente os rótulos existentes (ex.: SPEAKER 1/2).
-    4. **PRESERVE marcações existentes**: [inaudível], [risos], [interrupção] e timestamps.
-    5. **NÃO fundir falas de pessoas diferentes no mesmo parágrafo**. Uma fala por parágrafo."""
+## ✅ PRESERVE OBRIGATORIAMENTE
+- **Identificação de falantes** (SPEAKER 1/2/3, JUIZ, ADVOGADO, TESTEMUNHA, etc.) quando existir.
+- **Timestamps e marcações**: [inaudível], [risos], [interrupção], [sobreposição] e quaisquer timestamps.
+- **Números exatos**: datas, valores, artigos/leis, números de processos, prazos, nomes próprios.
+- **Negativas e hesitações relevantes** (“não”, “talvez”, “acho que”, “não lembro”) quando impactarem sentido.
 
-    PROMPT_STYLE_AUDIENCIA = """## ✅ DIRETRIZES DE ESTILO
-1. Corrija erros gramaticais leves sem alterar o sentido.
-2. Remova muletas orais (ex.: "né", "tá", "tipo").
-3. Preserve nomes, datas, valores, locais e referências a provas.
-4. Use parágrafos curtos e claros.
-5. Mantenha identificação de falantes quando presente (ex.: SPEAKER 1/2/3)."""
+## 🧷 REGRAS CRÍTICAS DE TRANSCRIÇÃO
+1. **NÃO transforme em discurso indireto** (ex.: “o juiz disse que…”). Mantenha fala direta.
+2. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
+3. **NÃO infira nomes/papéis**: use exatamente os rótulos existentes (ex.: SPEAKER 1/2).
+4. **Uma fala por parágrafo**: não fundir falas de pessoas diferentes no mesmo parágrafo.
+5. **Pergunta/Resposta**: mantenha Q&A em blocos consecutivos, sem inserir comentários.
+6. **Verbatim decisório**: quando houver trechos explícitos de decisão/encaminhamento (“defiro/indefiro”, “ficou decidido”, “designo”, “intime-se”, etc.), preserve o trecho **literalmente** (pode isolar em citação curta)."""
 
-    PROMPT_STRUCTURE_AUDIENCIA = """## 📝 ESTRUTURA E TÍTULOS
-- Mantenha a ordem cronológica das falas.
-- Use títulos Markdown (##, ###) apenas quando houver mudança clara de fase:
-  (ex.: Abertura, Depoimentos, Decisão, Encerramento).
-- Preserve perguntas e respostas em sequência."""
+    PROMPT_STYLE_AUDIENCIA = """## ✅ DIRETRIZES DE ESTILO (sem mudar conteúdo)
+1. **Correção leve**: corrija erros gramaticais leves sem alterar o sentido.
+2. **Limpeza**: remova muletas orais (“né”, “tá”, “tipo”) quando não forem essenciais.
+3. **Pontuação**: ajuste pontuação para legibilidade (sem mudar o que foi dito).
+4. **Parágrafos curtos**: 1 fala = 1 parágrafo (quando houver speaker); evite blocos longos.
+5. **Não uniformize**: preserve peculiaridades da fala (quando relevantes).
+6. **Preservar nomes/dados**: nomes, datas, valores, locais, números de processo, referências jurídicas.
+7. **Remova gírias/vocativos**: ex. "meu irmão", "cara", "mano", "galera" (se houver parentesco factual, reescreva de forma formal)."""
 
-    PROMPT_TABLE_AUDIENCIA = """## 📌 OBSERVAÇÃO SOBRE TABELAS
-Não gere quadros-síntese automaticamente. Só use tabelas se solicitado explicitamente."""
+    PROMPT_STRUCTURE_AUDIENCIA = """## 📝 ESTRUTURA E TÍTULOS (mínimo necessário)
+- **Cronologia**: mantenha a ordem cronológica das falas.
+- **Títulos (##/###)**: use apenas quando houver mudança clara de fase:
+  - Abertura / Qualificação / Depoimento / Perguntas / Debates / Decisão / Encerramento (exemplos).
+- **Q&A**: preserve perguntas e respostas em sequência (sem intercalar resumos).
+- **Marcação de falas**: quando houver SPEAKER/participante, mantenha rótulos consistentes."""
+
+    PROMPT_TABLE_AUDIENCIA = """## 📌 QUADROS/TABELAS (somente quando houver conteúdo explícito)
+Por padrão, **NÃO** gere quadros-síntese “didáticos” nem tabelas analíticas.
+
+### ✅ EXCEÇÃO (permitida): Registro objetivo de atos/decisões/encaminhamentos
+Se (e somente se) existirem trechos **explícitos** de decisão/ato/encaminhamento (ex.: “defiro/indefiro”, “designo”, “intime-se”, “fica consignado”, “prazo de X dias”, “audiência redesignada”, “juntada de documento”):
+
+1) Adicione ao final da fase correspondente:
+#### 📌 Registro de atos / decisões / encaminhamentos
+
+2) Gere uma tabela Markdown **curta**:
+| Momento (timestamp se houver) | Quem falou/decidiu | Ato/decisão/encaminhamento | Trecho literal (curto) | Prazo/Responsável (se dito) |
+| :--- | :--- | :--- | :--- | :--- |
+
+**REGRAS CRÍTICAS:**
+- **Sem inferência:** se não houver timestamp/prazo/responsável, use `—`.
+- **Trecho literal curto:** copie apenas o mínimo necessário (sem reescrever).
+- **Sem `|` dentro das células** e sem quebras de linha nas células.
+- Se não houver atos/decisões explícitos, **NÃO crie** esta tabela."""
 
     # --- REUNIÃO MODE ---
     PROMPT_HEAD_REUNIAO = """# DIRETRIZES DE TRANSCRIÇÃO PROFISSIONAL (MODO REUNIÃO)
@@ -3719,24 +4731,49 @@ VOCÊ É UM REDATOR DE ATA/REUNIÃO.
     5. **NÃO fundir falas de pessoas diferentes no mesmo parágrafo**. Uma fala por parágrafo.
     6. **DESTAQUES VERBATIM (SE EXISTIREM)**: quando houver frases explícitas de decisão/encaminhamento
        (ex.: "ficou definido que..."), você pode isolá-las em bloco de citação ou lista simples,
-       copiando o trecho literalmente, sem reescrever e sem reorganizar o conteúdo."""
+       copiando o trecho literalmente, sem reescrever e sem reorganizar o conteúdo.
 
-    PROMPT_STYLE_REUNIAO = """## ✅ DIRETRIZES DE ESTILO
-1. Corrija erros gramaticais leves sem alterar o sentido.
-2. Remova muletas orais (ex.: "né", "tá", "tipo").
-3. Preserve nomes, cargos, datas, valores, prazos e referências.
-4. Use parágrafos curtos e claros.
-5. Mantenha identificação de participantes quando presente (ex.: PARTICIPANTE 1/2/3).
-6. Se houver decisões/encaminhamentos explícitos, destaque-os com listas curtas, sem criar conteúdo novo."""
+## ✅ PRESERVE OBRIGATORIAMENTE
+- **Participantes e identificação** (PARTICIPANTE 1/2/3, nomes, cargos) quando existir.
+- **Datas/valores/prazos** e quaisquer números mencionados.
+- **Decisões e encaminhamentos explícitos** (não inferir).
+- **Ordem cronológica** das falas e a sequência de perguntas/respostas quando houver.
+- **Marcações**: [inaudível], [risos], [interrupção] e timestamps."""
 
-    PROMPT_STRUCTURE_REUNIAO = """## 📝 ESTRUTURA E TÍTULOS
-- Mantenha a ordem cronológica das falas.
-- Use títulos Markdown (##, ###) apenas quando houver mudança clara de pauta/tema.
-- Se aparecerem blocos explícitos de abertura/encerramento/decisões/encaminhamentos, você pode criar subtítulos correspondentes.
-- Preserve perguntas e respostas em sequência quando houver."""
+    PROMPT_STYLE_REUNIAO = """## ✅ DIRETRIZES DE ESTILO (ata fiel, sem "embelezar")
+1. **Correção leve**: corrija erros gramaticais leves sem alterar o sentido.
+2. **Limpeza**: remova muletas (“né”, “tá”, “tipo”) quando não forem essenciais.
+3. **Pontuação e coesão**: ajuste pontuação para legibilidade, sem mudar conteúdo.
+4. **Parágrafos curtos**: uma fala por parágrafo; não fundir participantes diferentes.
+5. **Dados críticos**: preserve nomes, cargos, datas, valores, prazos e referências.
+6. **Destaques objetivos**: quando houver decisões/encaminhamentos explícitos, destaque-os ao final do tópico com listas/tabela curta, sem inventar.
+7. **Remova gírias/vocativos**: ex. "meu irmão", "cara", "mano", "galera" (se houver parentesco factual, reescreva de forma formal)."""
 
-    PROMPT_TABLE_REUNIAO = """## 📌 OBSERVAÇÃO SOBRE TABELAS
-Não gere quadros-síntese automaticamente. Só use tabelas se solicitado explicitamente."""
+    PROMPT_STRUCTURE_REUNIAO = """## 📝 ESTRUTURA E TÍTULOS (orientado a pauta)
+- **Cronologia**: mantenha a ordem cronológica das falas.
+- **Títulos (##/###)**: use apenas quando houver mudança clara de pauta/tema.
+- **Blocos operacionais**: se houver abertura/encerramento/decisões/encaminhamentos explícitos, você pode criar subtítulos correspondentes.
+- **Q&A**: preserve perguntas e respostas em sequência quando houver.
+- **Não reorganize** por “assuntos” se a reunião foi caótica: preserve a sequência real."""
+
+    PROMPT_TABLE_REUNIAO = """## 📌 QUADROS/TABELAS (somente quando houver decisões/encaminhamentos explícitos)
+Por padrão, **NÃO** gere quadros-síntese “didáticos”.
+
+### ✅ EXCEÇÃO (permitida): Decisões e encaminhamentos (quando explícitos)
+Se (e somente se) existirem falas explícitas de decisão/ação (ex.: “ficou definido que…”, “fulano vai…”, “prazo até…”, “enviar documento”, “marcar reunião”):
+
+1) Adicione ao final da pauta/tema correspondente:
+#### ✅ Decisões e encaminhamentos
+
+2) Gere uma tabela Markdown curta:
+| Item | Decisão/ação (literal curto) | Responsável (se dito) | Prazo (se dito) | Observações |
+| :--- | :--- | :--- | :--- | :--- |
+
+**REGRAS CRÍTICAS:**
+- **Sem inferência:** se não houver responsável/prazo, use `—`.
+- **Literal curto:** não reescreva para “melhorar”; copie o essencial sem inventar.
+- **Sem `|` dentro das células** e sem quebras de linha nas células.
+- Se não houver decisões/encaminhamentos explícitos, **NÃO crie** esta tabela."""
 
     # --- DEPOIMENTO MODE ---
     PROMPT_HEAD_DEPOIMENTO = """# DIRETRIZES DE TRANSCRIÇÃO JURÍDICA (MODO DEPOIMENTO)
@@ -3756,7 +4793,8 @@ VOCÊ É UM REDATOR TÉCNICO FORENSE.
     PROMPT_STYLE_DEPOIMENTO = """## ✅ DIRETRIZES DE ESTILO
 1. Corrija apenas erros gramaticais leves.
 2. Preserve nomes, datas, valores e qualificações.
-3. Se houver identificação de falante, mantenha-a."""
+3. Se houver identificação de falante, mantenha-a.
+4. Remova gírias/vocativos (ex.: "meu irmão", "cara", "mano", "galera") quando não agregarem conteúdo; se houver parentesco factual, reescreva de forma formal."""
 
     PROMPT_STRUCTURE_DEPOIMENTO = """## 📝 ESTRUTURA
 - Mantenha a sequência das falas.
@@ -3862,6 +4900,8 @@ Exemplo:
 - Use as palavras EXATAS da transcrição (podem ter erros de fala, ok).
 - Se não encontrar frase clara de abertura, use as primeiras 10 palavras do trecho.
 - A âncora FECHA de um tópico deve ser igual (ou muito similar) à âncora ABRE do próximo.
+- **NÃO use timestamps, labels de falante ou marcadores de formatação** (ex.: `[00:10]`, `**SPEAKER**:` ou `##`).
+- Prefira **frases contínuas** do conteúdo falado (8–16 palavras), sem quebras de linha.
 
 ## TRANSCRIÇÃO:
 {transcricao}
@@ -3919,6 +4959,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 1. **Correção Gramatical**: Corrija erros gramaticais, regências, ortográficos e de pontuação.
 2. **Limpeza Profunda:**
    - **REMOVA** marcadores de oralidade: "né", "tá?", "entende?", "veja bem", "tipo assim".
+   - **REMOVA** gírias e vocativos: "meu irmão", "cara", "mano", "galera", "minha gente" (se houver parentesco factual, reescreva de forma formal).
    - **REMOVA** interações diretas com a turma: "Isso mesmo", "A colega perguntou", "Já estão me vendo?", "Estão ouvindo?".
    - **REMOVA** redundâncias: "subir para cima", "criação nova".
    - **TRANSFORME** perguntas retóricas em afirmações quando possível.
@@ -4028,7 +5069,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 
 ## ✅ DIRETRIZES DE ESTILO E FORMATAÇÃO VISUAL
 1. **Correção Gramatical**: Ajuste a linguagem coloquial para o padrão culto.
-2. **Limpeza**: Remova gírias, cacoetes ("né", "tipo assim", "então") e vícios de oralidade.
+2. **Limpeza**: Remova gírias, vocativos e cacoetes ("né", "tipo assim", "então", "meu irmão", "cara", "mano", "galera") e vícios de oralidade. Se houver parentesco factual, reescreva de forma formal.
 3. **Coesão**: Use conectivos e pontuação adequada para tornar o texto fluido.
 4. **Legibilidade Visual** (OBRIGATÓRIO):
    - **PARÁGRAFOS CURTOS**: máximo **4-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
@@ -4118,6 +5159,13 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         self.provider = provider.lower()
         self.thinking_level = "medium"
         self.use_openai_primary = False
+        self._diarization_enabled = False
+        self._diarization_required = False
+
+        # v2.30: Override para condition_on_previous_text via env var
+        # Em áudios de baixa qualidade, False pode evitar propagação de alucinações
+        _cpt_env = _env_truthy("VOMO_CONDITION_PREVIOUS", default=None)
+        self._condition_on_previous = _cpt_env if _cpt_env is not None else True
 
         # Provider Configuration
         if self.provider == "openai":
@@ -4234,6 +5282,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         custom_style_override: str = None,
         allow_indirect: bool = False,
         allow_summary: bool = False,
+        include_timestamps: bool = True,
     ) -> str:
         """
         v2.22: Composes the system prompt from modular components.
@@ -4294,13 +5343,73 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 "**Ata resumida permitida**. Você pode condensar falas, mantendo decisões, encaminhamentos, nomes, datas, valores e prazos."
             )
             structure = f"{structure}\n- Com ata resumida habilitada, você pode agrupar por pauta/tema e condensar falas, sem inventar informações."
+
+        mode_norm = (mode or "").strip().upper()
+        include_timestamps = bool(include_timestamps)
+        if mode_norm in {"AUDIENCIA", "REUNIAO", "DEPOIMENTO"} and not include_timestamps:
+            # Evita conflito com regras de "preservar timestamps" quando a UI/API pede remoção.
+            head = re.sub(
+                r"(?m)^-\\s*\\*\\*Timestamps[^\\n]*\\n?",
+                "",
+                head,
+            )
+            head = head.replace(
+                "- **Marcações**: [inaudível], [risos], [interrupção] e timestamps.",
+                "- **Marcações**: [inaudível], [risos], [interrupção] (sem timestamps).",
+            )
+            head = head.replace(
+                "4. **PRESERVE marcações existentes**: [inaudível], [risos], [interrupção] e timestamps.",
+                "4. **PRESERVE marcações existentes**: [inaudível], [risos], [interrupção]. **NÃO inclua timestamps**.",
+            )
+            style = (
+                f"{style}\n\n"
+                "## ⏱️ TIMESTAMPS (CONFIGURAÇÃO)\n"
+                "- **Não incluir timestamps** no texto de saída.\n"
+                "- Se houver timestamps no input, remova-os (ex.: `[00:10]`, `[01:02:03]`).\n"
+                "- **Não invente** timestamps.\n"
+            )
         
         footer = self.PROMPT_FOOTER
         
         if custom_style_override:
-            # User provides custom style+table instructions
-            print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO de estilo/tabela ({len(custom_style_override):,} chars)")
-            composed = f"{head}\n\n{custom_style_override}\n\n{structure}\n\n{footer}"
+            # Guardrails: custom prompt is intended to be safe and not fight with structure.
+            # - For APOSTILA: treat custom prompt as TABLE/EXTRAS customization only (keep original tone/style/structure).
+            # - For other modes: keep legacy behavior (override STYLE+TABLE layers).
+            custom_lower = custom_style_override.lower()
+
+            # Warn only for "structural" headings (#/##/###). ####+ is acceptable for intra-section extras.
+            if re.search(r"(^|\n)\s{0,3}#{1,3}\s", custom_style_override):
+                print(
+                    f"{Fore.YELLOW}⚠️  Seu prompt customizado contém títulos Markdown (#/##/###). "
+                    f"Isso pode interferir na estrutura. Ideal: use no máximo #### para anexos/extras.{Style.RESET_ALL}"
+                )
+            if any(key in custom_lower for key in ("estrutura", "títulos", "titulos", "sumário", "sumario", "seção", "secao")):
+                print(
+                    f"{Fore.YELLOW}⚠️  Seu prompt customizado menciona estrutura/títulos/sumário. "
+                    f"Para evitar conflitos, restrinja o custom a TABELAS e EXTRAS (resumo/fluxograma/mapa mental/questionário).{Style.RESET_ALL}"
+                )
+
+            if mode.upper() in {"APOSTILA", "AUDIENCIA", "REUNIAO"}:
+                label = "APOSTILA" if mode.upper() == "APOSTILA" else ("AUDIÊNCIA" if mode.upper() == "AUDIENCIA" else "REUNIÃO")
+                print(f"{Fore.YELLOW}🧩 Usando PROMPT CUSTOMIZADO ({label}: apenas tabelas/extras) ({len(custom_style_override):,} chars)")
+                table_with_custom = (
+                    f"{table}\n\n"
+                    "## 🧩 PERSONALIZAÇÕES (TABELAS / EXTRAS)\n"
+                    "As instruções abaixo são do usuário e se aplicam SOMENTE ao fechamento do tópico:\n"
+                    "- Quadros-síntese e tabelas (colunas, critérios, inclusão/omissão de seções de fechamento)\n"
+                    "- Anexos ao final do tópico (ex.: resumo, fluxograma, mapa mental, questionário)\n\n"
+                    "**REGRAS DE SEGURANÇA (NÃO NEGOCIE):**\n"
+                    f"- NÃO altere o tom/estilo do modo {mode.upper()}.\n"
+                    "- NÃO altere a estrutura principal (##/###/#### do conteúdo). Se precisar de anexos, use apenas `####` após o bloco de encerramento do tópico.\n"
+                    "- NÃO resuma o conteúdo principal; anexos são complementares.\n\n"
+                    "### Instruções do usuário\n"
+                    f"{custom_style_override}\n"
+                )
+                composed = f"{head}\n\n{style}\n\n{structure}\n\n{table_with_custom}\n\n{footer}"
+            else:
+                # Legacy: User provides custom style+table instructions
+                print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO de estilo/tabela ({len(custom_style_override):,} chars)")
+                composed = f"{head}\n\n{custom_style_override}\n\n{structure}\n\n{footer}"
         else:
             # Use default components
             composed = f"{head}\n\n{style}\n\n{structure}\n\n{table}\n\n{footer}"
@@ -4342,18 +5451,37 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             return output_path
         
         print(f"   🔄 Extraindo áudio...")
-        subprocess.run([
-            'ffmpeg', '-i', file_path,
-            '-vn',                  # Sem vídeo
-            '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', # Normalização de áudio profissional
-            '-ac', '1',             # Mono
-            '-ar', '16000',         # 16kHz para Whisper
-            output_path, '-y', '-hide_banner', '-loglevel', 'error'
-        ], check=True, capture_output=True)
+        enable_loudnorm = str(os.environ.get("IUDEX_AUDIO_LOUDNORM", "1")).strip().lower() not in {"0", "false", "no", "off"}
+        ffmpeg_cmd = [
+            "ffmpeg",
+            "-i",
+            file_path,
+            "-vn",  # Sem vídeo
+            "-sn",  # Sem legendas
+            "-dn",  # Sem data streams
+            "-map",
+            "0:a:0?",
+        ]
+        if enable_loudnorm:
+            ffmpeg_cmd += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
+        ffmpeg_cmd += [
+            "-ac",
+            "1",  # Mono
+            "-ar",
+            "16000",  # 16kHz para Whisper
+            "-acodec",
+            "pcm_s16le",
+            output_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+        ]
+        subprocess.run(ffmpeg_cmd, check=True, capture_output=True)
         
         return output_path
 
-    def transcribe(self, audio_path):
+    def transcribe(self, audio_path, *, beam_size: Optional[int] = None):
         """
         MLX-Whisper OTIMIZADO com GPU acelerado + Diarização
         
@@ -4366,8 +5494,17 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         print(f"{Fore.GREEN}🎙️  Iniciando transcrição OTIMIZADA (MLX GPU)...")
         start_time = time.time()
         
-        # Cache de transcrição
-        cache_file = audio_path.replace('.wav', '_DIARIZATION.json').replace('.mp3', '_DIARIZATION.json')
+        # Cache de transcrição (separa diarização ON/OFF + hash de parâmetros)
+        # Importante: incluir parâmetros que mudam o output (ex.: initial_prompt).
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        prompt_hash = hashlib.sha256(initial_prompt.encode()).hexdigest()[:8] if initial_prompt else "noprompt"
+        clean_enabled = _env_truthy("VOMO_FILTER_ASR_HALLUCINATIONS", default=True)
+        params_str = f"{self.model_name}_{self._diarization_enabled}_{self._condition_on_previous}_{prompt_hash}_clean{int(bool(clean_enabled))}"
+        if beam_size and beam_size > 1:
+            params_str += f"_beam{int(beam_size)}"
+        params_hash = hashlib.sha256(params_str.encode()).hexdigest()[:8]
+        cache_tag = "DIARIZATION" if self._diarization_enabled else "ASR"
+        cache_file = audio_path.replace('.wav', f'_{cache_tag}_{params_hash}.json').replace('.mp3', f'_{cache_tag}_{params_hash}.json')
         
         if os.path.exists(cache_file):
             try:
@@ -4384,36 +5521,52 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         # ==================== PARÂMETROS OTIMIZADOS ====================
         print("   🔍 Transcrevendo com parâmetros otimizados...")
         
-        result = mlx_whisper.transcribe(
-            audio_path,
+        mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
             language="pt",
-            
             # === PRECISÃO ===
-            temperature=0.0,              # Mais determinístico (desativa sampling estocástico)
-            
-            # === CONTEXTO E GLOSSÁRIO ===
-            initial_prompt="Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
-            
+            temperature=0.0,  # Mais determinístico (desativa sampling estocástico)
+            # === CONTEXTO E GLOSSÁRIO (v2.29: contextual por modo) ===
+            initial_prompt=(initial_prompt or None),
             # === TIMESTAMPS ===
             word_timestamps=True,
-            
             # === PERFORMANCE ===
-            fp16=True,                    # Usa float16 (mais rápido na GPU)
-            
+            fp16=True,  # Usa float16 (mais rápido na GPU)
             # === QUALIDADE (Hallucination Suppression) ===
-            no_speech_threshold=0.6,      # Ignora segmentos com prob de silêncio > 60%
-            logprob_threshold=-1.0,       # Rejeita tokens com log prob muito baixo
+            no_speech_threshold=0.6,  # Ignora segmentos com prob de silêncio > 60%
+            logprob_threshold=-1.0,  # Rejeita tokens com log prob muito baixo
             compression_ratio_threshold=2.4,  # Detecta repetição/alucinação
-            
             # === CONTEXTO ===
-            condition_on_previous_text=True,  # Usa contexto anterior (melhora precisão)
-            
+            condition_on_previous_text=self._condition_on_previous,  # v2.30: configurável via VOMO_CONDITION_PREVIOUS
             # === SUPRESSÃO DE TOKENS PROBLEMÁTICOS ===
             suppress_tokens=[-1],  # Suprime token de padding
-            
-            verbose=False
+            verbose=False,
         )
+        if beam_size and beam_size > 1:
+            mlx_kwargs["beam_size"] = int(beam_size)
+            # `best_of` só é aceito em algumas implementações; aplicamos best-effort.
+            mlx_kwargs["best_of"] = int(beam_size)
+        try:
+            result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+        except TypeError:
+            # Compatibilidade: algumas versões aceitam `beam_size` mas não `best_of` (ou vice-versa).
+            if "best_of" in mlx_kwargs:
+                mlx_kwargs.pop("best_of", None)
+                try:
+                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                except TypeError:
+                    mlx_kwargs.pop("beam_size", None)
+                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+            else:
+                mlx_kwargs.pop("beam_size", None)
+                result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+
+        segments, filter_stats = self._filter_asr_segments(result.get("segments", []))
+        if filter_stats.get("dropped"):
+            reasons = ", ".join(
+                f"{k}={v}" for k, v in sorted((filter_stats.get("reason_counts") or {}).items())
+            )
+            print(f"{Fore.YELLOW}   🧹 ASR: removidos {filter_stats['dropped']} segmento(s) suspeitos ({reasons})")
         
         elapsed = time.time() - start_time
         audio_duration = result.get('duration', 0) if isinstance(result, dict) else 0
@@ -4423,20 +5576,23 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         transcript_result = None
         
-        # Diarização
-        if Pipeline and torch and HF_TOKEN:
+        # Diarização (condicional por política)
+        if self._diarization_enabled:
+            self._ensure_diarization_available_or_raise()
+        token = self._get_hf_token()
+        if self._diarization_enabled and Pipeline and "torch" in globals() and token:
             try:
                 print("   🗣️  Iniciando Diarização (Pyannote)...")
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    token=HF_TOKEN
+                    token=token
                 )
                 
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))
                 diarization = pipeline(audio_path)
                 
-                transcript_result = self._align_diarization(result['segments'], diarization)
+                transcript_result = self._align_diarization(segments, diarization)
                 print(f"{Fore.GREEN}✅ Diarização concluída")
             
             except Exception as e:
@@ -4448,7 +5604,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             current_block = []
             last_timestamp = None
             
-            for segment in result['segments']:
+            for segment in segments:
                 start = segment['start']
                 text = segment['text'].strip()
                 
@@ -4476,6 +5632,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 lines.append(" ".join(current_block))
             
             transcript_result = "\n\n".join(lines).strip()
+
+        transcript_result = self._strip_leaked_initial_prompt(transcript_result, initial_prompt)
+        if _env_truthy("VOMO_ASR_NORMALIZE_TEMAS", default=True):
+            try:
+                transcript_result, stats = self._normalize_asr_temas_consistency(transcript_result)
+                if stats.get("changed", 0) > 0:
+                    print(
+                        f"{Fore.YELLOW}   🧩 ASR: normalizados {stats['changed']} tema(s) inconsistentes "
+                        f"(234→1234: {stats.get('fixed_3_to_4', 0)}, variações: {stats.get('fixed_variants', 0)}){Style.RESET_ALL}"
+                    )
+            except Exception:
+                pass
         
         # Salvar cache
         try:
@@ -4498,15 +5666,21 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         Ativar via: --high-accuracy
         """
+        beam_size = self._get_asr_beam_size()
         if not FASTER_WHISPER_AVAILABLE:
-            print(f"{Fore.YELLOW}⚠️ faster-whisper não instalado. Usando MLX padrão...")
-            return self.transcribe(audio_path)
+            print(f"{Fore.YELLOW}⚠️ faster-whisper não instalado. Tentando Beam Search via MLX ({beam_size})...")
+            return self.transcribe(audio_path, beam_size=beam_size)
         
         print(f"{Fore.MAGENTA}🎯 Transcrição ALTA PRECISÃO (Beam Search)...")
         start_time = time.time()
         
-        # Cache de transcrição
-        cache_file = audio_path.replace('.wav', '_BEAM_SEARCH.json').replace('.mp3', '_BEAM_SEARCH.json')
+        # Cache de transcrição (com hash de parâmetros para invalidação)
+        beam_model_size = "large-v3-turbo"
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=True) or ""
+        prompt_hash = hashlib.sha256(initial_prompt.encode()).hexdigest()[:8] if initial_prompt else "noprompt"
+        cache_params = f"{beam_model_size}_{self._condition_on_previous}_{prompt_hash}_beam{beam_size}"
+        beam_hash = hashlib.sha256(cache_params.encode()).hexdigest()[:8]
+        cache_file = audio_path.replace('.wav', f'_BEAM_SEARCH_{beam_hash}.json').replace('.mp3', f'_BEAM_SEARCH_{beam_hash}.json')
         
         if os.path.exists(cache_file):
             try:
@@ -4526,21 +5700,24 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         segments, info = model.transcribe(
             audio_path,
             language="pt",
-            beam_size=5,           # Explora 5 caminhos de frase
-            best_of=5,             # Escolhe o melhor de 5 candidatos
+            beam_size=beam_size,           # Explora múltiplos caminhos de frase
+            best_of=beam_size,             # Escolhe o melhor de N candidatos
             patience=1.0,          # Preferência por transcrições completas
             length_penalty=1.0,    # Evita cortes abruptos
             temperature=0.0,       # Determinístico
-            condition_on_previous_text=True,
+            condition_on_previous_text=self._condition_on_previous,
             no_speech_threshold=0.6,
             compression_ratio_threshold=2.4,
-            initial_prompt="Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
+            initial_prompt=(initial_prompt or None),
             word_timestamps=True,
         )
-        
+
         # Formatar output - v2.28: pré-formatação com line breaks
         lines = []
         last_timestamp = None
+        clean_enabled = _env_truthy("VOMO_FILTER_ASR_HALLUCINATIONS", default=True)
+        last_key = None
+        repeat_run = 0
         
         for segment in segments:
             start = segment.start
@@ -4551,6 +5728,17 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             
             # Normalização leve de ruído
             text = self._normalize_raw_text(text)
+            if clean_enabled:
+                if self._asr_is_noise_only(text) or self._asr_looks_like_hallucination(text):
+                    continue
+                key = self._asr_repeat_key(text)
+                if key and key == last_key and len(key) <= 80:
+                    repeat_run += 1
+                    if repeat_run >= 2:
+                        continue
+                else:
+                    last_key = key
+                    repeat_run = 0
             
             # Timestamp a cada 30 segundos
             if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
@@ -4561,6 +5749,17 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 lines.append(text)
         
         transcript_result = "\n".join(lines).strip()
+        transcript_result = self._strip_leaked_initial_prompt(transcript_result, initial_prompt)
+        if _env_truthy("VOMO_ASR_NORMALIZE_TEMAS", default=True):
+            try:
+                transcript_result, stats = self._normalize_asr_temas_consistency(transcript_result)
+                if stats.get("changed", 0) > 0:
+                    print(
+                        f"{Fore.YELLOW}   🧩 ASR: normalizados {stats['changed']} tema(s) inconsistentes "
+                        f"(234→1234: {stats.get('fixed_3_to_4', 0)}, variações: {stats.get('fixed_variants', 0)}){Style.RESET_ALL}"
+                    )
+            except Exception:
+                pass
         
         elapsed = time.time() - start_time
         audio_duration = info.duration if info else 0
@@ -4575,44 +5774,63 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     'transcript': transcript_result,
                     'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
                     'backend': 'faster-whisper',
-                    'beam_size': 5
+                    'beam_size': beam_size
                 }, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Erro ao salvar cache: {e}")
         
         return transcript_result
-
-    def transcribe_with_segments(self, audio_path):
+    
+    def transcribe_with_segments(self, audio_path, *, beam_size: Optional[int] = None):
         """
         Transcreve e retorna segmentos com timestamps e speaker_label quando diarização estiver disponível.
         """
         if not mlx_whisper:
             raise ImportError("mlx_whisper não instalado.")
 
-        result = mlx_whisper.transcribe(
-            audio_path,
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
             language="pt",
             temperature=0.0,
-            initial_prompt="Esta é uma transcrição de audiência ou reunião jurídica em português brasileiro.",
+            initial_prompt=(initial_prompt or None),
             word_timestamps=True,
             fp16=True,
             no_speech_threshold=0.6,
             logprob_threshold=-1.0,
             compression_ratio_threshold=2.4,
-            condition_on_previous_text=True,
+            condition_on_previous_text=self._condition_on_previous,
             suppress_tokens=[-1],
-            verbose=False
+            verbose=False,
         )
+        if beam_size and beam_size > 1:
+            mlx_kwargs["beam_size"] = int(beam_size)
+            mlx_kwargs["best_of"] = int(beam_size)
+        try:
+            result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+        except TypeError:
+            if "best_of" in mlx_kwargs:
+                mlx_kwargs.pop("best_of", None)
+                try:
+                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                except TypeError:
+                    mlx_kwargs.pop("beam_size", None)
+                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+            else:
+                mlx_kwargs.pop("beam_size", None)
+                result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
 
         diarization_segments = []
         diarization = None
         labeled_segments = None
-        if Pipeline and torch and HF_TOKEN:
+        if self._diarization_enabled:
+            self._ensure_diarization_available_or_raise()
+        token = self._get_hf_token()
+        if self._diarization_enabled and Pipeline and "torch" in globals() and token:
             try:
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    token=HF_TOKEN
+                    token=token
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))
@@ -4628,8 +5846,20 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 print(f"{Fore.YELLOW}⚠️ Erro na diarização (segments): {e}")
 
         if diarization:
-            labeled_segments = self._assign_diarization_labels(result['segments'], diarization)
+            asr_segments, filter_stats = self._filter_asr_segments(result.get("segments", []))
+            if filter_stats.get("dropped"):
+                reasons = ", ".join(
+                    f"{k}={v}" for k, v in sorted((filter_stats.get("reason_counts") or {}).items())
+                )
+                print(f"{Fore.YELLOW}   🧹 ASR: removidos {filter_stats['dropped']} segmento(s) suspeitos ({reasons})")
+            labeled_segments = self._assign_diarization_labels(asr_segments, diarization)
         else:
+            asr_segments, filter_stats = self._filter_asr_segments(result.get("segments", []))
+            if filter_stats.get("dropped"):
+                reasons = ", ".join(
+                    f"{k}={v}" for k, v in sorted((filter_stats.get("reason_counts") or {}).items())
+                )
+                print(f"{Fore.YELLOW}   🧹 ASR: removidos {filter_stats['dropped']} segmento(s) suspeitos ({reasons})")
             labeled_segments = [
                 {
                     "start": seg["start"],
@@ -4637,10 +5867,11 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     "text": seg["text"],
                     "speaker_label": "SPEAKER 1"
                 }
-                for seg in result.get("segments", [])
+                for seg in asr_segments
             ]
 
         transcript_text = self._segments_to_text(labeled_segments)
+        transcript_text = self._strip_leaked_initial_prompt(transcript_text, initial_prompt)
         return {
             "text": transcript_text,
             "segments": labeled_segments,
@@ -4651,23 +5882,26 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         """
         Transcrição Beam Search com retorno de segmentos.
         """
+        beam_size = self._get_asr_beam_size()
         if not FASTER_WHISPER_AVAILABLE:
-            return self.transcribe_with_segments(audio_path)
+            print(f"{Fore.YELLOW}⚠️ faster-whisper não instalado. Tentando Beam Search via MLX ({beam_size})...")
+            return self.transcribe_with_segments(audio_path, beam_size=beam_size)
 
         model_size = "large-v3-turbo"
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=True) or ""
         segments, info = model.transcribe(
             audio_path,
             language="pt",
-            beam_size=5,
-            best_of=5,
+            beam_size=beam_size,
+            best_of=beam_size,
             patience=1.0,
             length_penalty=1.0,
             temperature=0.0,
-            condition_on_previous_text=True,
+            condition_on_previous_text=self._condition_on_previous,
             no_speech_threshold=0.6,
             compression_ratio_threshold=2.4,
-            initial_prompt="Esta é uma transcrição de audiência ou reunião jurídica em português brasileiro.",
+            initial_prompt=(initial_prompt or None),
             word_timestamps=True,
         )
 
@@ -4682,11 +5916,14 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         diarization_segments = []
         diarization = None
-        if Pipeline and torch and HF_TOKEN:
+        if self._diarization_enabled:
+            self._ensure_diarization_available_or_raise()
+        token = self._get_hf_token()
+        if self._diarization_enabled and Pipeline and "torch" in globals() and token:
             try:
                 pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    token=HF_TOKEN
+                    token=token
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
                 pipeline.to(torch.device(device))
@@ -4715,6 +5952,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             ]
 
         transcript_text = self._segments_to_text(labeled_segments)
+        transcript_text = self._strip_leaked_initial_prompt(transcript_text, initial_prompt)
         return {
             "text": transcript_text,
             "segments": labeled_segments,
@@ -4754,7 +5992,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             if speaker_label and speaker_label != current_speaker:
                 if lines:  # Não adiciona linha em branco se for o primeiro
                     lines.append("")  # Linha em branco para separar
-                lines.append(f"**{speaker_label}**")  # Header em bold markdown
+                lines.append(f"{speaker_label}")
                 current_speaker = speaker_label
                 last_timestamp = None  # Reset timestamp para novo speaker
             
@@ -4766,8 +6004,159 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 timestamp_str = ""
             
             lines.append(f"{timestamp_str}{text}")
-        
-        return "\n".join(lines).strip()
+
+        transcript = "\n".join(lines).strip()
+        if _env_truthy("VOMO_ASR_NORMALIZE_TEMAS", default=True):
+            try:
+                transcript, stats = self._normalize_asr_temas_consistency(transcript)
+                if stats.get("changed", 0) > 0:
+                    print(
+                        f"{Fore.YELLOW}   🧩 ASR: normalizados {stats['changed']} tema(s) inconsistentes "
+                        f"(234→1234: {stats.get('fixed_3_to_4', 0)}, variações: {stats.get('fixed_variants', 0)}){Style.RESET_ALL}"
+                    )
+            except Exception:
+                pass
+
+        return transcript
+
+    def _normalize_asr_temas_consistency(self, text: str):
+        """
+        Corrige inconsistências comuns de ASR em referências do tipo "Tema N":
+        - Perda do dígito inicial em temas de 4 dígitos (ex.: 234 vs 1234), quando a forma canônica já aparece no texto.
+        - Variações 4-dígitos com mesmo sufixo (ex.: 1033 vs 1933), quando uma forma é dominante.
+
+        Regra conservadora: só corrige quando há evidência interna (forma canônica presente).
+        """
+        import re
+
+        if not text:
+            return text, {"changed": 0, "fixed_3_to_4": 0, "fixed_variants": 0}
+
+        # Capture occurrences like: "Tema 1.234", "tema 1234", "tema n° 234"
+        pattern = re.compile(r"\b[Tt]ema\b\s*(?:n[º°]?\s*)?(\d{1,4})(?:\.(\d{3}))?\b")
+        matches = list(pattern.finditer(text))
+        if not matches:
+            return text, {"changed": 0, "fixed_3_to_4": 0, "fixed_variants": 0}
+
+        def _digits_from_match(m) -> str:
+            g1 = m.group(1) or ""
+            g2 = m.group(2) or ""
+            digits = re.sub(r"\D+", "", f"{g1}{g2}")
+            if digits and 2 <= len(digits) <= 4:
+                return digits
+            return ""
+
+        themes: list[str] = []
+        for m in matches:
+            d = _digits_from_match(m)
+            if d:
+                themes.append(d)
+
+        if not themes:
+            return text, {"changed": 0, "fixed_3_to_4": 0, "fixed_variants": 0}
+
+        counts: dict[str, int] = {}
+        for d in themes:
+            counts[d] = counts.get(d, 0) + 1
+
+        fixed_3_to_4 = 0
+        fixed_variants = 0
+        out = text
+
+        def _digits_to_optional_thousands_regex(digits: str) -> str:
+            digits = re.sub(r"\D+", "", digits or "")
+            if not digits:
+                return ""
+            if len(digits) <= 3:
+                return re.escape(digits)
+            if len(digits) > 6:
+                return re.escape(digits)
+            prefix = re.escape(digits[:-3])
+            suffix = re.escape(digits[-3:])
+            return rf"{prefix}\.?{suffix}"
+
+        # Optional explicit overrides for known ASR confusions (highest priority).
+        # Format: VOMO_ASR_TEMA_OVERRIDES="1933=1033,234=1234"
+        overrides_raw = (os.getenv("VOMO_ASR_TEMA_OVERRIDES") or "").strip()
+        if overrides_raw:
+            pairs = []
+            for part in overrides_raw.split(","):
+                if "=" not in part:
+                    continue
+                src, dst = part.split("=", 1)
+                src = re.sub(r"\D+", "", src.strip())
+                dst = re.sub(r"\D+", "", dst.strip())
+                if src and dst and 2 <= len(src) <= 6 and 2 <= len(dst) <= 6:
+                    pairs.append((src, dst))
+            for src, dst in pairs:
+                src_re = _digits_to_optional_thousands_regex(src)
+                if not src_re:
+                    continue
+                before = out
+                out = re.sub(
+                    rf"\b([Tt]ema)\s*(?:n[º°]?\s*)?{src_re}\b",
+                    rf"\1 {dst}",
+                    out,
+                )
+                if out != before:
+                    fixed_variants += 1
+
+        # Rule A: 3-digit -> 4-digit when the 4-digit variant (prefixed with '1') exists in the same transcript.
+        for d in list(counts.keys()):
+            if len(d) != 3:
+                continue
+            target = f"1{d}"
+            if target not in counts:
+                continue
+            before = out
+            out = re.sub(
+                rf"\b([Tt]ema)\s*(?:n[º°]?\s*)?{re.escape(d)}\b",
+                rf"\1 {target}",
+                out,
+            )
+            if out != before:
+                fixed_3_to_4 += 1
+
+        # Re-scan after replacements
+        matches = list(pattern.finditer(out))
+        counts = {}
+        for m in matches:
+            d = _digits_from_match(m)
+            if d:
+                counts[d] = counts.get(d, 0) + 1
+
+        # Rule B: unify 4-digit variants that share the same last 3 digits, when one is clearly dominant.
+        by_suffix: dict[str, list[str]] = {}
+        for d in counts:
+            if len(d) == 4:
+                by_suffix.setdefault(d[-3:], []).append(d)
+        for suffix, variants in by_suffix.items():
+            if len(variants) <= 1:
+                continue
+            ones = [v for v in variants if v.startswith("1")]
+            if ones:
+                preferred = max(ones, key=lambda v: counts.get(v, 0))
+            else:
+                preferred = max(variants, key=lambda v: counts.get(v, 0))
+
+            pref_count = counts.get(preferred, 0)
+            for v in variants:
+                if v == preferred:
+                    continue
+                v_count = counts.get(v, 0)
+                # Only normalize if the preferred is at least 2x more common or the variant is rare (<=1 hit).
+                if pref_count >= (2 * v_count) or v_count <= 1:
+                    before = out
+                    out = re.sub(
+                        rf"\b([Tt]ema)\s*(?:n[º°]?\s*)?{re.escape(v)}\b",
+                        rf"\1 {preferred}",
+                        out,
+                    )
+                    if out != before:
+                        fixed_variants += 1
+
+        changed = fixed_3_to_4 + fixed_variants if out != text else 0
+        return out, {"changed": changed, "fixed_3_to_4": fixed_3_to_4, "fixed_variants": fixed_variants}
     
     def _normalize_raw_text(self, text):
         """
@@ -4799,6 +6188,253 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             text = re.sub(pattern, replacement, text, flags=re.IGNORECASE)
         
         return text.strip()
+
+    def _asr_repeat_key(self, text: str) -> str:
+        """Normalização agressiva apenas para detecção de repetição (não para saída)."""
+        import re
+
+        if not text:
+            return ""
+        key = re.sub(r"\s+", " ", str(text)).strip().lower()
+        key = re.sub(r"[^\wÀ-ÖØ-öø-ÿ0-9 ]+", "", key)
+        key = re.sub(r"\s+", " ", key).strip()
+        return key
+
+    def _asr_is_noise_only(self, text: str) -> bool:
+        """True quando o segmento é só marcador de ruído (ex.: [música])."""
+        import re
+
+        if not text:
+            return True
+        normalized = re.sub(r"\s+", " ", str(text)).strip()
+        if not normalized:
+            return True
+        # Depois de _normalize_raw_text, os ruídos ficam padronizados como [xxx]
+        noise = r"(?:inaudível|risos|pausa|música|aplausos)"
+        return bool(re.fullmatch(rf"(?:\[(?:{noise})\]\s*)+", normalized, flags=re.IGNORECASE))
+
+    def _get_asr_beam_size(self) -> int:
+        """
+        Beam size padrão para o modo "Alta Precisão" (Beam Search).
+
+        - UI: on/off (alta precisão).
+        - Ajuste avançado via env:
+          - VOMO_ASR_BEAM_SIZE (ou VOMO_BEAM_SIZE) -> inteiro
+        """
+        raw = (os.getenv("VOMO_ASR_BEAM_SIZE") or os.getenv("VOMO_BEAM_SIZE") or "").strip()
+        try:
+            value = int(raw) if raw else 5
+        except Exception:
+            value = 5
+        # Beam search real começa em 2; limite superior conservador para evitar explosão de custo.
+        if value < 2:
+            value = 2
+        if value > 10:
+            value = 10
+        return value
+
+    def _get_whisper_initial_prompt_for_asr(self, *, high_accuracy: bool) -> Optional[str]:
+        """
+        Decide o `initial_prompt` do Whisper para a etapa de ASR.
+
+        Notas importantes:
+        - Prompt pode melhorar vocabulário, mas pode "vazar" como texto transcrito.
+        - Por padrão, evitamos usar prompt no modo normal (rápido).
+        - Em alta precisão (Beam Search), usamos o prompt por modo como padrão (best-effort),
+          pois o usuário já optou por mais qualidade e o risco é mitigado por stripping.
+
+        Controles:
+        - VOMO_WHISPER_INITIAL_PROMPT="..." (sempre tem prioridade)
+        - VOMO_WHISPER_USE_MODE_PROMPT=1 (força uso do prompt por modo em TODOS os modos)
+        - Se VOMO_WHISPER_USE_MODE_PROMPT não estiver definido:
+          - high_accuracy=True -> usa prompt por modo
+          - high_accuracy=False -> não usa prompt (default)
+        """
+        explicit = (os.getenv("VOMO_WHISPER_INITIAL_PROMPT") or "").strip()
+        if explicit:
+            return explicit
+
+        # Se o usuário não definiu explicitamente, decidimos pelo modo:
+        # - Beam (high_accuracy): ON
+        # - Normal: OFF
+        use_mode_prompt = _env_truthy("VOMO_WHISPER_USE_MODE_PROMPT", default=None)
+        if use_mode_prompt is None:
+            use_mode_prompt = bool(high_accuracy)
+
+        if not use_mode_prompt:
+            return None
+
+        mode_key = getattr(self, "_current_mode", "FIDELIDADE")
+        if isinstance(mode_key, str):
+            mode_key = mode_key.strip().upper() or "FIDELIDADE"
+        else:
+            mode_key = "FIDELIDADE"
+
+        return self.INITIAL_PROMPTS.get(mode_key, self.INITIAL_PROMPTS["FIDELIDADE"])
+
+    def _get_whisper_initial_prompt(self) -> Optional[str]:
+        """
+        Compat: mantém a API antiga (sem saber se é high_accuracy).
+        Por padrão, segue o comportamento do modo normal (não-beam).
+        """
+        return self._get_whisper_initial_prompt_for_asr(high_accuracy=False)
+
+    def _strip_leaked_initial_prompt(self, text: str, initial_prompt: str) -> str:
+        """
+        Best-effort: remove `initial_prompt` caso ele tenha vazado como primeira linha da transcrição.
+
+        Estratégia:
+        - Tokeniza primeira linha e o prompt, compara sobreposição.
+        - Remove SOMENTE quando há alta similaridade (muito conservador).
+        """
+        import re
+
+        if not text:
+            return text
+        prompt = (initial_prompt or "").strip()
+        if not prompt:
+            return text
+
+        first_line, rest = (text.split("\n", 1) + [""])[:2]
+
+        def _tokens(value: str) -> list[str]:
+            return re.findall(r"[\wÀ-ÖØ-öø-ÿ0-9]+", (value or "").lower())
+
+        prompt_tokens = _tokens(prompt)
+        if len(prompt_tokens) < 8:
+            return text
+        line_tokens = _tokens(first_line)
+        if not line_tokens:
+            return text
+
+        prompt_set = set(prompt_tokens)
+        overlap = sum(1 for t in prompt_tokens if t in set(line_tokens))
+
+        # Regras conservadoras: muita sobreposição e tamanho similar.
+        overlap_ratio = overlap / max(1, len(prompt_tokens))
+        size_ok = len(line_tokens) <= (len(prompt_tokens) + 6)
+        if overlap_ratio >= 0.9 and size_ok:
+            return (rest or "").lstrip()
+
+        return text
+
+    def _asr_has_repeated_ngram_run(self, tokens, *, max_ngram: int = 6) -> bool:
+        """Detecta repetições consecutivas extremas (alucinação típica do Whisper)."""
+        token_count = len(tokens)
+        if token_count < 12:
+            return False
+
+        max_ngram = min(max_ngram, token_count // 2)
+        for n in range(1, max_ngram + 1):
+            min_repeats = 8 if n == 1 else 4  # muito conservador para evitar falsos positivos
+            if token_count < n * min_repeats:
+                continue
+
+            # Procura por runs consecutivos em qualquer offset.
+            for i in range(0, token_count - n * min_repeats + 1):
+                phrase = tokens[i : i + n]
+                repeats = 1
+                while i + (repeats + 1) * n <= token_count and tokens[i + repeats * n : i + (repeats + 1) * n] == phrase:
+                    repeats += 1
+                if repeats >= min_repeats:
+                    return True
+
+        return False
+
+    def _asr_looks_like_hallucination(self, text: str) -> bool:
+        """
+        Heurísticas conservadoras para filtrar segmentos obviamente quebrados:
+        - Repetição extrema (palavra/frase em loop)
+        - Sequências numéricas repetidas (ex.: "50 50 50 ...")
+        """
+        import re
+
+        if not text:
+            return True
+
+        normalized = re.sub(r"\s+", " ", str(text)).strip()
+        if not normalized:
+            return True
+
+        # Tokens "palavra-like" (mantém números; remove pontuação)
+        tokens = re.findall(r"[\wÀ-ÖØ-öø-ÿ0-9]+", normalized.lower())
+        if len(tokens) < 12:
+            return False
+
+        # 1) Repetição consecutiva extrema de n-gramas curtos
+        if self._asr_has_repeated_ngram_run(tokens):
+            return True
+
+        # 2) Baixa diversidade lexical em sequência longa (ex.: mesmo slogan repetido)
+        if len(tokens) >= 25:
+            unique_ratio = len(set(tokens)) / max(1, len(tokens))
+            if unique_ratio < 0.25:
+                return True
+
+        # 3) Segmento quase só números e com pouca variedade (ex.: token IDs ou contagem)
+        numeric_tokens = [t for t in tokens if t.isdigit()]
+        if numeric_tokens and len(numeric_tokens) / len(tokens) > 0.85:
+            if len(numeric_tokens) >= 12 and len(set(numeric_tokens)) <= 3:
+                return True
+            if len(numeric_tokens) >= 30 and len(set(numeric_tokens)) <= 8:
+                return True
+
+        return False
+
+    def _filter_asr_segments(self, segments):
+        """
+        Remove segmentos claramente inúteis (ruídos/loops) antes de formatar ou diarizar.
+        Mantém timestamps originais.
+        """
+        if not segments:
+            return [], {"dropped": 0, "reason_counts": {}}
+
+        clean_enabled = _env_truthy("VOMO_FILTER_ASR_HALLUCINATIONS", default=True)
+        if not clean_enabled:
+            return segments, {"dropped": 0, "reason_counts": {}}
+
+        dropped = 0
+        reason_counts = {}
+        cleaned = []
+
+        last_key = None
+        repeat_run = 0
+
+        for seg in segments:
+            raw_text = (seg.get("text") or "").strip()
+            if not raw_text:
+                dropped += 1
+                reason_counts["empty"] = reason_counts.get("empty", 0) + 1
+                continue
+
+            text = self._normalize_raw_text(raw_text)
+            if self._asr_is_noise_only(text):
+                dropped += 1
+                reason_counts["noise_only"] = reason_counts.get("noise_only", 0) + 1
+                continue
+
+            key = self._asr_repeat_key(text)
+            if key and key == last_key and len(key) <= 80:
+                repeat_run += 1
+                # Permite no máximo 2 repetições consecutivas de segmentos curtos idênticos.
+                if repeat_run >= 2:
+                    dropped += 1
+                    reason_counts["repeat_loop"] = reason_counts.get("repeat_loop", 0) + 1
+                    continue
+            else:
+                last_key = key
+                repeat_run = 0
+
+            if self._asr_looks_like_hallucination(text):
+                dropped += 1
+                reason_counts["hallucination"] = reason_counts.get("hallucination", 0) + 1
+                continue
+
+            new_seg = dict(seg)
+            new_seg["text"] = text
+            cleaned.append(new_seg)
+
+        return cleaned, {"dropped": dropped, "reason_counts": reason_counts}
 
     def _assign_diarization_labels(self, segments, diarization_output):
         try:
@@ -4937,7 +6573,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 if lines:
                     lines.append("")  # Linha em branco extra
                 
-                lines.append(f"**{best_speaker}**")
+                lines.append(f"{best_speaker}")
                 current_speaker = best_speaker
                 last_timestamp = None  # Reset timestamp logic for new speaker? Or keep continuous? 
                 # Keeping continuous is usually better for "every 60s" regardless of speaker, 
@@ -5008,7 +6644,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 if lines:
                     lines.append("")  # Linha em branco extra
                 
-                lines.append(f"**{best_speaker}**")
+                lines.append(f"{best_speaker}")
                 current_speaker = best_speaker
                 last_timestamp = None
             
@@ -5348,7 +6984,8 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         cached_content=None,
         max_output_tokens_override=None,
         disable_cache=False,
-        table_retry=False
+        table_retry=False,
+        trunc_retry=False,
     ):
         """Processa um chunk de forma assíncrona com retry, cache e CHUNKING ADAPTATIVO (v2.10 Ported)"""
         
@@ -5365,7 +7002,10 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 return cached
         
         # Constrói o contexto e prompt
-        contexto_estilo = f"Últimos parágrafos formatados:\n{previous_context}" if previous_context else "Inicio do documento."
+        contexto_estilo = f"Últimos parágrafos formatados:\n{previous_context}" if previous_context else ""
+        contexto_raw = f"OVERLAP RAW (somente contexto, NÃO INCLUIR na resposta):\n{overlap_text}" if overlap_text else ""
+        if not contexto_estilo and not contexto_raw:
+            contexto_estilo = "Inicio do documento."
         
         # SE USAR CONTEXT CACHING: System Prompt já está no cache
         # SE NÃO USAR: System Prompt precisa ir no contents
@@ -5377,20 +7017,27 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         if global_structure and not cached_content:
             system_prompt += f"\n\n## ESTRUTURA GLOBAL (GUIA):\n{global_structure}"
             
-        # Adiciona overlap (contexto anterior local)
+        # Adiciona contexto anterior (estilo + overlap RAW)
         secao_contexto = ""
         if previous_context or overlap_text:
+            blocks = []
+            if contexto_estilo:
+                blocks.append(contexto_estilo)
+            if contexto_raw:
+                blocks.append(contexto_raw)
+            contexto_bloco = "\n\n".join(blocks).strip()
             secao_contexto = f"""
 🔒 CONTEXTO ANTERIOR (SOMENTE REFERÊNCIA DE ESTILO)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-{contexto_estilo}
+{contexto_bloco}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚠️ ATENÇÃO: O bloco acima JÁ FOI FORMATADO anteriormente.
 - NÃO formate novamente esse conteúdo
 - NÃO inclua esse conteúdo na sua resposta
 - Use APENAS como referência de estilo de escrita e continuidade
+- Se houver OVERLAP RAW, use apenas para continuidade; não copie nem reformate
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 📝 NOVO TEXTO PARA FORMATAR (comece aqui):
@@ -5401,12 +7048,13 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 {chunk_text}
 </texto_para_formatar>
 
-**INSTRUÇÕES FINAIS**:
-- Esta é a parte {idx} de {total if total else '?'} (Profundidade {depth})
-- Formate APENAS o texto entre <texto_para_formatar>
-- Se houver contexto acima, NÃO o reprocesse
-- Retorne APENAS o Markdown formatado do NOVO texto
-"""
+        **INSTRUÇÕES FINAIS**:
+        - Esta é a parte {idx} de {total if total else '?'} (Profundidade {depth})
+        - Formate APENAS o texto entre <texto_para_formatar>
+        - Se houver contexto acima, NÃO o reprocesse
+        - Retorne APENAS o Markdown formatado do NOVO texto
+        - NÃO insira marcadores artificiais de continuação (ex.: `[continua]`, `[continuação]`, `(continua)`)
+        """
 
         def _has_incomplete_table(text: str) -> bool:
             if not text:
@@ -5470,6 +7118,51 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     disable_cache=True
                 )
             return None
+
+        def _near_token_limit(completion_tokens: int, max_tokens: int) -> bool:
+            try:
+                completion_tokens = int(completion_tokens or 0)
+                max_tokens = int(max_tokens or 0)
+            except Exception:
+                return False
+            if completion_tokens <= 0 or max_tokens <= 0:
+                return False
+            return completion_tokens >= int(max_tokens * 0.92)
+
+        def _looks_hard_truncated(text: str) -> bool:
+            """
+            Heurística conservadora para truncamento "duro" (normalmente por limite de tokens):
+            - termina no meio de palavra
+            - termina com bracket aberto ou fechamento "sobrando"
+            - contém marcador de continuação no final
+            """
+            s = (text or "").strip()
+            if not s:
+                return True
+
+            tail = s[-300:]
+            if re.search(r"(?i)(?:\\[\\s*(?:continua|continuação|continuacao)\\s*\\]|\\(\\s*(?:continua|continuação|continuacao)\\s*\\))\\s*$", tail):
+                return True
+
+            last = s[-1]
+            if last in "[({":
+                return True
+
+            # Fechamento "sobrando" no tail (ex.: termina com ']' sem haver '[' suficiente)
+            tail2 = s[-2000:]
+            if last == "]" and tail2.count("[") < tail2.count("]"):
+                return True
+            if last == ")" and tail2.count("(") < tail2.count(")"):
+                return True
+            if last == "}" and tail2.count("{") < tail2.count("}"):
+                return True
+
+            # Meio de palavra no final (sem pontuação final típica)
+            if last.isalnum():
+                if not re.search(r"[.!?…][\"”’')\\]]?\\s*$", s):
+                    return True
+
+            return False
         
         try:
             # Configuração de Segurança (Block None) e Parâmetros
@@ -5501,6 +7194,12 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
                     oai_prompt = getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0
                     oai_compl = getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0
+                    finish_reason = None
+                    try:
+                        finish_reason = response.choices[0].finish_reason
+                    except Exception:
+                        finish_reason = None
+                    openai_truncated = (finish_reason == "length")
                     cached_tokens = 0
                     if hasattr(response, 'usage'):
                         details = getattr(response.usage, 'prompt_tokens_details', None)
@@ -5520,6 +7219,37 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     retry_result = await _retry_incomplete_table(result)
                     if retry_result is not None:
                         return retry_result
+
+                    if result:
+                        try:
+                            result = remover_marcadores_continua(result)
+                        except Exception:
+                            pass
+
+                    # Se aparenta truncamento por limite, split para preservar conteúdo
+                    openai_near_limit = _near_token_limit(oai_compl, max_output_tokens_override) if max_output_tokens_override else False
+                    if (
+                        not trunc_retry
+                        and depth < 2
+                        and len(chunk_text) > 4000
+                        and _looks_hard_truncated(result or "")
+                        and (openai_truncated or openai_near_limit)
+                    ):
+                        print(
+                            f"{Fore.MAGENTA}✂️ Saída aparenta truncada por limite (OpenAI, Chunk {idx}). "
+                            "Dividindo chunk..."
+                        )
+                        metrics.record_adaptive_split()
+                        return await self._split_and_retry_async(
+                            chunk_text,
+                            idx,
+                            system_prompt,
+                            total,
+                            contexto_estilo,
+                            depth,
+                            max_output_tokens_override=max_output_tokens_override,
+                            disable_cache=True,
+                        )
 
                     if depth == 0:
                         self._save_chunk_cache(chunk_text, prompt_hash, result)
@@ -5670,6 +7400,12 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             if retry_result is not None:
                 return retry_result
 
+            if result:
+                try:
+                    result = remover_marcadores_continua(result)
+                except Exception:
+                    pass
+
             # === ADAPTIVE CHUNCHING CHECK (v2.10) ===
             # v2.24: ratio por PALAVRAS (mais robusto que chars) e ignorando metadados do transcript
             # Motivo: chunks brutos podem conter "SPEAKER X" e timestamps [HH:MM], que são removidos na formatação
@@ -5717,6 +7453,30 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     depth,
                     max_output_tokens_override=max_output_tokens_override,
                     disable_cache=disable_cache
+                )
+
+            # Truncamento por limite de tokens: split para evitar perda (especialmente no final do doc)
+            if (
+                not trunc_retry
+                and depth < 2
+                and len(chunk_text) > 4000
+                and _near_token_limit(completion_tokens, max_output_tokens)
+                and _looks_hard_truncated(result or "")
+            ):
+                print(
+                    f"{Fore.MAGENTA}✂️ Saída aparenta truncada por limite (Gemini, Chunk {idx}). "
+                    "Dividindo chunk..."
+                )
+                metrics.record_adaptive_split()
+                return await self._split_and_retry_async(
+                    chunk_text,
+                    idx,
+                    system_prompt,
+                    total,
+                    contexto_estilo,
+                    depth,
+                    max_output_tokens_override=max_output_tokens_override,
+                    disable_cache=True,
                 )
 
             if depth == 0 and not disable_cache:
@@ -5768,6 +7528,12 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     # Record OpenAI metrics
                     oai_prompt = getattr(response.usage, 'prompt_tokens', 0) if hasattr(response, 'usage') else 0
                     oai_compl = getattr(response.usage, 'completion_tokens', 0) if hasattr(response, 'usage') else 0
+                    finish_reason = None
+                    try:
+                        finish_reason = response.choices[0].finish_reason
+                    except Exception:
+                        finish_reason = None
+                    openai_truncated = (finish_reason == "length")
                     cached_tokens = 0
                     if hasattr(response, 'usage'):
                         details = getattr(response.usage, 'prompt_tokens_details', None)
@@ -5784,6 +7550,35 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     # Apply cleanup to OpenAI result too
                     if contexto_estilo and result:
                         result = remover_eco_do_contexto(result, contexto_estilo)
+                    if result:
+                        try:
+                            result = remover_marcadores_continua(result)
+                        except Exception:
+                            pass
+
+                    openai_near_limit = _near_token_limit(oai_compl, max_output_tokens_override) if max_output_tokens_override else False
+                    if (
+                        not trunc_retry
+                        and depth < 2
+                        and len(chunk_text) > 4000
+                        and _looks_hard_truncated(result or "")
+                        and (openai_truncated or openai_near_limit)
+                    ):
+                        print(
+                            f"{Fore.MAGENTA}✂️ Saída aparenta truncada por limite (OpenAI fallback, Chunk {idx}). "
+                            "Dividindo chunk..."
+                        )
+                        metrics.record_adaptive_split()
+                        return await self._split_and_retry_async(
+                            chunk_text,
+                            idx,
+                            system_prompt,
+                            total,
+                            contexto_estilo,
+                            depth,
+                            max_output_tokens_override=max_output_tokens_override,
+                            disable_cache=True,
+                        )
                         
                     if depth == 0 and not disable_cache:
                         self._save_chunk_cache(chunk_text, prompt_hash, result)
@@ -6072,9 +7867,14 @@ Para cada omissão, extraia o trecho relevante da transcrição.
 Retorne APENAS os trechos extraídos, sem comentários adicionais."""
 
         try:
+            # v2.28: Expandir limite para cobrir transcrições longas (Gemini suporta ~1M tokens)
+            max_transcript_chars = 500_000
+            transcript_excerpt = raw_transcript[:max_transcript_chars]
+            if len(raw_transcript) > max_transcript_chars:
+                print(f"{Fore.YELLOW}   ⚠️ Transcrição truncada para {max_transcript_chars:,} chars (total: {len(raw_transcript):,})")
             extract_response = self.client.models.generate_content(
-                model=self.llm_model, # Use Gemini 3 for extraction/fix
-                contents=f"{extraction_prompt.format(report=omissions_report)}\n\nTRANSCRIÇÃO BRUTA (primeiros 100k chars):\n{raw_transcript[:100000]}",
+                model=self.llm_model,
+                contents=f"{extraction_prompt.format(report=omissions_report)}\n\nTRANSCRIÇÃO BRUTA:\n{transcript_excerpt}",
                 config=types.GenerateContentConfig(
                     thinking_config=types.ThinkingConfig(
                         include_thoughts=False,
@@ -6132,25 +7932,46 @@ Retorne o trecho (modificado ou inalterado)."""
             
             fixed_text = "\n\n".join(fixed_chunks)
             print(f"{Fore.GREEN}   ✅ Texto corrigido gerado ({len(fixed_chunks)} chunks processados)")
-            return fixed_text
-            
+
+            # v2.30: Re-validação heurística leve pós-correção (sem custo LLM extra)
+            reval_ok, reval_issues = self._validate_preservation_heuristics(raw_transcript, fixed_text)
+            if not reval_ok:
+                print(f"{Fore.YELLOW}   ⚠️ Re-validação pós-fix detectou {len(reval_issues)} problemas:")
+                for ri in reval_issues[:3]:
+                    print(f"      - {ri}")
+            else:
+                print(f"{Fore.GREEN}   ✅ Re-validação pós-fix aprovada")
+
+            return fixed_text, reval_ok
+
         except Exception as e:
             print(f"{Fore.RED}   ❌ Falha ao corrigir omissões: {e}")
-            return formatted_text
+            return formatted_text, False
 
     def _validate_preservation_heuristics(self, original_text, formatted_text):
         """Validação Heurística com Tolerância Adaptativa"""
         print(f"\n{Fore.CYAN}🔍 Validação Heurística de Preservação (Adaptativa)...")
         issues = []
         
-        # 1. Leis (Mantendo lógica original que é boa)
-        original_laws = set(re.findall(r'(?:Lei|lei)\s+n?º?\s*\d+[\./]\d+|Art\.?\s*\d+|Súmula\s+\d+', original_text, re.IGNORECASE))
-        formatted_laws = set(re.findall(r'(?:Lei|lei)\s+n?º?\s*\d+[\./]\d+|Art\.?\s*\d+|Súmula\s+\d+', formatted_text, re.IGNORECASE))
+        # 1. Referências legais e jurisprudenciais (v2.30: padrão expandido)
+        _LEGAL_REF_PATTERN = (
+            r'(?:Lei\s+(?:Complementar\s+|Ordinária\s+)?|LC\s+|Decreto(?:-Lei)?\s+|DL\s+|MP\s+|Medida\s+Provisória\s+)'
+            r'n?º?\s*[\d\.]+(?:/\d+)?'
+            r'|Art\.?\s*\d+[°º]?'
+            r'|Súmula(?:\s+Vinculante)?\s+\d+'
+            r'|(?:REsp|RE|HC|MS|ADI|ADPF|ADC|RCL|Rcl|AgRg|AREsp)\s*n?º?\s*[\d\.\/\-]+'
+            r'|Tema\s+(?:de\s+)?(?:Repercussão\s+Geral\s+)?\d+'
+            r'|Informativo\s+\d+'
+        )
+        original_laws = set(re.findall(_LEGAL_REF_PATTERN, original_text, re.IGNORECASE))
+        formatted_laws = set(re.findall(_LEGAL_REF_PATTERN, formatted_text, re.IGNORECASE))
         missing_laws = original_laws - formatted_laws
-        if missing_laws: 
-            issues.append(f"❌ {len(missing_laws)} referências legais omitidas")
-        else: 
-            print(f"{Fore.GREEN}   ✅ Referências legais preservadas")
+        if missing_laws:
+            # Logar as referências específicas para facilitar revisão
+            samples = list(missing_laws)[:5]
+            issues.append(f"❌ {len(missing_laws)} referências legais/jurisprudenciais omitidas: {', '.join(samples)}")
+        else:
+            print(f"{Fore.GREEN}   ✅ Referências legais preservadas ({len(original_laws)} encontradas)")
         
         # 2. Comprimento Adaptativo (Lógica do script Gemini)
         palavras_input = len(original_text.split())
@@ -6331,7 +8152,7 @@ O JSON deve ter exatamente esta estrutura:
                     result = json.loads(retry_response.text.strip())
                 except json.JSONDecodeError:
                     print(f"{Fore.RED}   ❌ Retry também falhou, usando valores padrão.")
-                    result = {"aprovado": True, "nota_fidelidade": 5, "observacoes": "Parsing falhou após retry"}
+                    result = {"aprovado": False, "nota_fidelidade": 0, "erro_validacao": True, "requires_manual_review": True, "observacoes": "Parsing JSON falhou após 5 tentativas. Revisão manual necessária."}
             
             if isinstance(result, list):
                 if len(result) > 0 and isinstance(result[0], dict):
@@ -6373,13 +8194,16 @@ O JSON deve ter exatamente esta estrutura:
             
         except Exception as e:
             print(f"{Fore.RED}   ❌ Erro na validação Full-Context: {e}")
+            print(f"{Fore.RED}   ⚠️ ATENÇÃO: Documento requer revisão manual (validação falhou).")
             return {
-                'aprovado': True,  # Fail-open para não bloquear
+                'aprovado': False,
                 'nota': 0,
+                'erro_validacao': True,
+                'requires_manual_review': True,
                 'omissoes': [],
                 'distorcoes': [],
                 'problemas_estrutura': [],
-                'observacoes': f'Erro na validação: {str(e)}'
+                'observacoes': f'ATENÇÃO: Validação falhou ({str(e)}). Revisão manual recomendada.'
             }
 
     def validate_fidelity_primary(
@@ -6415,17 +8239,138 @@ O JSON deve ter exatamente esta estrutura:
         return fallback
 
     def _validate_by_sampling(self, raw_transcript, formatted_text, video_name):
-        """Fallback: Validação por amostragem para documentos muito grandes."""
+        """Fallback: Validação por amostragem para documentos muito grandes (>1.5M tokens).
+
+        Processa 3 janelas (INÍCIO, MEIO, FIM) de 80k chars cada via LLM e agrega os resultados.
+        """
         print(f"{Fore.CYAN}   Usando validação por amostragem (3 janelas)...")
-        # Mantém a lógica antiga como fallback
+
+        window_size = 80000
+        mid_raw = len(raw_transcript) // 2
+        mid_fmt = len(formatted_text) // 2
+        half_window = window_size // 2
+
         windows = [
-            ("INÍCIO", raw_transcript[:80000], formatted_text[:80000]),
-            ("MEIO", raw_transcript[len(raw_transcript)//2-40000:len(raw_transcript)//2+40000],
-                      formatted_text[len(formatted_text)//2-40000:len(formatted_text)//2+40000]),
-            ("FIM", raw_transcript[-80000:], formatted_text[-80000:])
+            ("INÍCIO", raw_transcript[:window_size], formatted_text[:window_size]),
+            ("MEIO", raw_transcript[max(0, mid_raw - half_window):mid_raw + half_window],
+                      formatted_text[max(0, mid_fmt - half_window):mid_fmt + half_window]),
+            ("FIM", raw_transcript[-window_size:], formatted_text[-window_size:]),
         ]
-        # Implementação simplificada - apenas retorna aprovado por padrão
-        return {'aprovado': True, 'nota': 7, 'omissoes': [], 'distorcoes': [], 'problemas_estrutura': [], 'observacoes': 'Validação por amostragem (documento grande)'}
+
+        validation_prompt = """# TAREFA DE VALIDAÇÃO DE FIDELIDADE (Amostragem)
+
+Você é um auditor de qualidade para transcrições jurídicas formatadas.
+
+## SEU OBJETIVO
+Compare o TEXTO ORIGINAL (transcrição bruta) com o TEXTO FORMATADO (apostila) e identifique:
+
+1. **OMISSÕES GRAVES**: Conceitos jurídicos, leis, súmulas, artigos ou exemplos importantes que estavam no original mas foram omitidos no formatado.
+2. **DISTORÇÕES**: Informações que foram alteradas de forma que mude o sentido jurídico.
+3. **ESTRUTURA**: Verifique se os tópicos e subtópicos estão organizados de forma lógica e se não há duplicações.
+
+## REGRAS
+- NÃO considere como omissão: hesitações, "né", "então", dados repetitivos, conversas paralelas.
+- CONSIDERE como omissão: qualquer lei, súmula, artigo, jurisprudência, exemplo prático ou dica de prova.
+- Preste atenção especial em: números de leis, prazos, percentuais, valores monetários.
+- NÃO faça análise jurídica externa nem verifique a veracidade de leis.
+- Sua saída deve refletir apenas divergências entre o texto bruto e o formatado.
+
+## FORMATO DE RESPOSTA (JSON)
+{
+    "aprovado": true/false,
+    "nota_fidelidade": 0-10,
+    "omissoes_graves": ["descrição clara do item omitido"],
+    "distorcoes": ["descrição clara da distorção"],
+    "problemas_estrutura": ["títulos duplicados ou hierarquia quebrada"],
+    "observacoes": "comentário geral sobre a qualidade"
+}
+
+Retorne APENAS o JSON, sem markdown."""
+
+        all_results = []
+        for label, raw_window, fmt_window in windows:
+            print(f"{Fore.CYAN}   📊 Validando janela {label}...")
+            try:
+                response = self.client.models.generate_content(
+                    model=self.llm_model,
+                    contents=f"""{validation_prompt}
+
+## JANELA: {label}
+
+## TEXTO ORIGINAL (Transcrição Bruta):
+{raw_window}
+
+## TEXTO FORMATADO (Apostila):
+{fmt_window}
+""",
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        max_output_tokens=4000,
+                        thinking_config=types.ThinkingConfig(
+                            include_thoughts=False,
+                            thinking_level="MEDIUM"
+                        )
+                    )
+                )
+                _record_genai_usage(response, model=self.llm_model)
+
+                raw_text = response.text.strip()
+                result = None
+                try:
+                    result = json.loads(raw_text)
+                except json.JSONDecodeError:
+                    brace_start = raw_text.find('{')
+                    brace_end = raw_text.rfind('}')
+                    if brace_start != -1 and brace_end > brace_start:
+                        try:
+                            result = json.loads(raw_text[brace_start:brace_end + 1])
+                        except json.JSONDecodeError:
+                            pass
+
+                if isinstance(result, dict):
+                    all_results.append(result)
+                    nota_w = result.get('nota_fidelidade', 10)
+                    print(f"{Fore.GREEN}      ✅ {label}: nota {nota_w}/10")
+                else:
+                    print(f"{Fore.YELLOW}      ⚠️ {label}: resposta inválida, ignorando janela")
+
+            except Exception as e:
+                print(f"{Fore.RED}      ❌ {label}: erro — {e}")
+
+        if not all_results:
+            print(f"{Fore.RED}   ❌ Nenhuma janela validada. Revisão manual necessária.")
+            return {
+                'aprovado': False, 'nota': 0,
+                'omissoes': [], 'distorcoes': [], 'problemas_estrutura': [],
+                'observacoes': 'Validação por amostragem falhou em todas as janelas. Revisão manual obrigatória.',
+                'erro_validacao': True, 'requires_manual_review': True,
+            }
+
+        # Agregar resultados: aprovado só se TODAS as janelas aprovaram
+        aprovado = all(r.get('aprovado', True) for r in all_results)
+        notas = [r.get('nota_fidelidade', 10) for r in all_results]
+        nota_media = sum(notas) / len(notas)
+        omissoes = []
+        distorcoes = []
+        problemas = []
+        for r in all_results:
+            omissoes.extend(r.get('omissoes_graves', []) or [])
+            distorcoes.extend(r.get('distorcoes', []) or [])
+            problemas.extend(r.get('problemas_estrutura', []) or [])
+
+        obs_parts = [r.get('observacoes', '') for r in all_results if r.get('observacoes')]
+        observacoes = f"Validação por amostragem ({len(all_results)}/3 janelas). " + " | ".join(obs_parts)
+
+        print(f"{Fore.GREEN if aprovado else Fore.RED}   {'✅' if aprovado else '❌'} Resultado agregado: nota {nota_media:.1f}/10 ({len(all_results)} janelas)")
+
+        return {
+            'aprovado': aprovado,
+            'nota': round(nota_media, 1),
+            'omissoes': omissoes,
+            'distorcoes': distorcoes,
+            'problemas_estrutura': problemas,
+            'observacoes': observacoes,
+        }
 
     async def auto_fix_structure(self, formatted_text: str, problemas: list, global_structure: str = None) -> str:
         """
@@ -6529,45 +8474,205 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         """Creates a global structure skeleton to guide the formatting."""
         print(f"{Fore.CYAN}🗺️  Mapeando estrutura global do documento...")
         
-        # Limit input to avoid context overflow, though GPT-5 Mini handles large context well.
-        # Taking the first 200k chars is usually enough for structure.
-        input_sample = full_text[:200000] 
-        
-        try:
-            if self.provider == "openai":
-                response = await self.client.chat.completions.create(
-                    model=self.llm_model,
-                    messages=[
-                        {"role": "system", "content": self.PROMPT_MAPEAMENTO.format(transcricao=input_sample)}
-                    ],
-                    max_completion_tokens=16384 # Garante output longo
+        full_text = full_text or ""
+        max_single = int(os.getenv("IUDEX_MAP_MAX_SINGLE_CHARS", self.MAP_MAX_SINGLE_CHARS))
+        map_chunk_chars = int(os.getenv("IUDEX_MAP_CHUNK_CHARS", self.MAP_CHUNK_CHARS))
+        map_chunk_overlap = int(os.getenv("IUDEX_MAP_CHUNK_OVERLAP_CHARS", self.MAP_CHUNK_OVERLAP_CHARS))
+
+        # Preferir mapear o documento inteiro em uma chamada quando estiver dentro de um limite seguro.
+        # Para transcrições muito longas, usar chunking + merge determinístico para cobrir INÍCIO→FIM.
+        if len(full_text) <= max_single:
+            input_samples = [full_text]
+        else:
+            print(f"{Fore.YELLOW}   ℹ️  Transcrição longa ({len(full_text):,} chars). Mapeando em chunks...")
+            map_chunking_mode = os.getenv("IUDEX_MAP_CHUNKING_MODE", "auto").strip().lower()
+            input_samples = None
+            if map_chunking_mode != "safe":
+                input_samples = chunk_texto_por_segmentos(
+                    full_text,
+                    max_chars=map_chunk_chars,
+                    overlap_chars=map_chunk_overlap,
                 )
-                _record_openai_usage(response, model=self.llm_model)
-                content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
-                print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (OpenAI/GPT-5).")
-                return content
-            else:
-                # Default: Vertex AI (Gemini)
+                if input_samples:
+                    print(f"{Fore.CYAN}   🧩 Chunking por segmentos (map) ativado: {len(input_samples)}")
+            if not input_samples:
+                input_samples = chunk_texto_seguro(
+                    full_text,
+                    max_chars=map_chunk_chars,
+                    overlap_chars=map_chunk_overlap,
+                )
+                print(f"{Fore.CYAN}   📦 Chunks para mapeamento: {len(input_samples)}")
+        fallback_sample = input_samples[0] if input_samples else full_text[:200000]
+
+        def _extract_map_lines(text: str) -> list[dict]:
+            items = []
+            if not text:
+                return items
+            for raw_line in (text or "").splitlines():
+                line = raw_line.strip()
+                if not line or "| ABRE:" not in line:
+                    continue
+                m = re.match(
+                    r'^\s*(\d+(?:\.\d+)*)\.\s*([^|]+?)\s*\|\s*ABRE:\s*"([^"]+)"\s*\|\s*FECHA:\s*"([^"]+)"\s*$',
+                    raw_line,
+                    flags=re.IGNORECASE,
+                )
+                if not m:
+                    continue
+                number = m.group(1).strip()
+                title = m.group(2).strip()
+                abre = m.group(3).strip()
+                fecha = m.group(4).strip()
+                depth = number.count(".") + 1
+                items.append(
+                    {
+                        "depth": depth,
+                        "title": title,
+                        "abre": abre,
+                        "fecha": fecha,
+                    }
+                )
+            return items
+
+        def _normalize_key(value: str) -> str:
+            if not value:
+                return ""
+            value = value.lower()
+            value = re.sub(r"[^\w\s]", " ", value, flags=re.UNICODE)
+            value = re.sub(r"\s+", " ", value).strip()
+            return value
+
+        def _merge_structure_maps(maps: list[str]) -> Optional[str]:
+            if not maps:
+                return None
+            all_items: list[dict] = []
+            for part in maps:
+                all_items.extend(_extract_map_lines(part or ""))
+            if not all_items:
+                return None
+
+            # Dedup por âncora ABRE (mais estável) e fallback por título.
+            seen: set[str] = set()
+            ordered: list[dict] = []
+            for item in all_items:
+                key = _normalize_key(item.get("abre") or "") or _normalize_key(item.get("title") or "")
+                if not key:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(item)
+
+            # Renumeração determinística (máx 3 níveis) para manter sequência limpa.
+            h1 = 0
+            h2 = 0
+            h3 = 0
+            out_lines: list[str] = []
+            for item in ordered:
+                depth = int(item.get("depth") or 1)
+                depth = max(1, min(3, depth))
+                if depth == 1:
+                    h1 += 1
+                    h2 = 0
+                    h3 = 0
+                    number = f"{h1}."
+                elif depth == 2:
+                    if h1 <= 0:
+                        h1 = 1
+                    h2 += 1
+                    h3 = 0
+                    number = f"{h1}.{h2}."
+                else:
+                    if h1 <= 0:
+                        h1 = 1
+                    if h2 <= 0:
+                        h2 = 1
+                    h3 += 1
+                    number = f"{h1}.{h2}.{h3}."
+
+                indent = "   " * (depth - 1)
+                title = (item.get("title") or "").strip()
+                abre = (item.get("abre") or "").strip()
+                fecha = (item.get("fecha") or "").strip()
+                if not title or not abre or not fecha:
+                    continue
+                out_lines.append(f'{indent}{number} {title} | ABRE: "{abre}" | FECHA: "{fecha}"')
+
+            return "\n".join(out_lines).strip() or None
+
+        async def _map_one(sample: str, *, part_idx: int, total_parts: int) -> Optional[str]:
+            if not sample:
+                return None
+            # Mantém prompt original; evita inserir marcadores no texto para não contaminar âncoras verbatim.
+            prompt = self.PROMPT_MAPEAMENTO.format(transcricao=sample)
+            try:
+                if self.provider == "openai":
+                    response = await self.client.chat.completions.create(
+                        model=self.llm_model,
+                        messages=[{"role": "system", "content": prompt}],
+                        max_completion_tokens=16384,
+                    )
+                    _record_openai_usage(response, model=self.llm_model)
+                    content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
+                    print(f"{Fore.GREEN}   ✅ Estrutura mapeada (OpenAI) [{part_idx}/{total_parts}]")
+                    return content
+
                 def call_gemini():
                     return self.client.models.generate_content(
                         model=self.llm_model,
-                        contents=self.PROMPT_MAPEAMENTO.format(transcricao=input_sample),
+                        contents=prompt,
                         config=types.GenerateContentConfig(
-                            max_output_tokens=10000, # Gemini output limit
+                            max_output_tokens=10000,
                             thinking_config=types.ThinkingConfig(
                                 include_thoughts=False,
-                                thinking_level="HIGH"  
+                                thinking_level="HIGH"
                             )
                         )
                     )
 
                 response = await asyncio.to_thread(call_gemini)
                 _record_genai_usage(response, model=self.llm_model)
-                # Clean markdown code blocks if present
                 content = response.text.replace('```markdown', '').replace('```', '')
-                print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (Vertex AI).")
+                print(f"{Fore.GREEN}   ✅ Estrutura mapeada (Vertex AI) [{part_idx}/{total_parts}]")
                 return content
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️  Falha no mapeamento (parte {part_idx}/{total_parts}) via {self.provider}: {e}")
+                if self.openai_client:
+                    print(f"{Fore.CYAN}🤖 Fallback: Mapeando com OpenAI ({self.openai_model})...")
+                    try:
+                        response = await self.openai_client.chat.completions.create(
+                            model=self.openai_model,
+                            messages=[{"role": "system", "content": prompt}],
+                            max_completion_tokens=10000
+                        )
+                        _record_openai_usage(response, model=self.openai_model)
+                        content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
+                        print(f"{Fore.GREEN}   ✅ Estrutura mapeada (OpenAI Fallback) [{part_idx}/{total_parts}]")
+                        return content
+                    except Exception as e_openai:
+                        print(f"{Fore.RED}❌ Falha também no OpenAI fallback: {e_openai}")
+                        return None
+                return None
 
+        try:
+            parts = []
+            total_parts = len(input_samples)
+            for idx, sample in enumerate(input_samples, start=1):
+                mapped = await _map_one(sample, part_idx=idx, total_parts=total_parts)
+                if mapped:
+                    parts.append(mapped)
+
+            if not parts:
+                return None
+            if len(parts) == 1:
+                return parts[0]
+
+            merged = _merge_structure_maps(parts)
+            if merged:
+                print(f"{Fore.CYAN}   🧩 Estrutura global consolidada (chunks merged).")
+                return merged
+            # Fallback: concatena (melhor do que perder estrutura)
+            return "\n\n".join(parts).strip()
         except Exception as e:
             print(f"{Fore.YELLOW}⚠️  Falha no mapeamento via {self.provider}: {e}")
             
@@ -6578,7 +8683,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     response = await self.openai_client.chat.completions.create(
                         model=self.openai_model,
                         messages=[
-                            {"role": "system", "content": self.PROMPT_MAPEAMENTO.format(transcricao=input_sample)}
+                            {"role": "system", "content": self.PROMPT_MAPEAMENTO.format(transcricao=fallback_sample)}
                         ],
                         max_completion_tokens=10000
                     )
@@ -6592,6 +8697,189 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             else:
                  print(f"{Fore.RED}   ❌ Erro ao mapear estrutura e sem fallback.")
                  return None
+
+    async def _ai_reassign_tables(self, texto: str, *, max_tables: int = 3) -> tuple[str, list[str]]:
+        """
+        v2.34: Fallback de reatribuição de tabelas via IA (decisão binária PARENT/CURRENT).
+        """
+        candidates = coletar_candidatos_reatribuicao_tabelas(texto, max_candidates=max_tables)
+        if not candidates:
+            return texto, []
+
+        async def _decide_one(candidate: dict) -> str:
+            prompt = (
+                "Você é um revisor de estrutura. Decida se a tabela pertence ao TÓPICO ATUAL "
+                "ou ao TÓPICO PAI. Responda apenas com 'PARENT' ou 'CURRENT'.\n\n"
+                f"TÓPICO PAI: {candidate['parent_title']}\n"
+                f"TÓPICO ATUAL: {candidate['current_title']}\n\n"
+                f"CONTEXTO PAI (antes do subtópico): {candidate['parent_context']}\n"
+                f"CONTEXTO ATUAL (antes da tabela): {candidate['current_context']}\n\n"
+                "TABELA:\n"
+                f"{candidate['table_text'][:3500]}\n"
+            )
+            if self.provider == "openai" and self.client:
+                response = await self.client.chat.completions.create(
+                    model=self.llm_model,
+                    messages=[{"role": "system", "content": prompt}],
+                    max_completion_tokens=128,
+                )
+                content = response.choices[0].message.content or ""
+                return content.strip().upper()
+
+            from google.genai import types
+            def call_gemini():
+                return self.client.models.generate_content(
+                    model=self.llm_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=256,
+                        thinking_config=types.ThinkingConfig(
+                            include_thoughts=False,
+                            thinking_level="LOW",
+                        ),
+                    ),
+                )
+            response = await asyncio.to_thread(call_gemini)
+            _record_genai_usage(response, model=self.llm_model)
+            return (response.text or "").strip().upper()
+
+        lines = texto.split("\n")
+        moves: list[dict] = []
+        issues: list[str] = []
+        for candidate in candidates:
+            decision = await _decide_one(candidate)
+            if "PARENT" in decision:
+                moves.append(candidate)
+                issues.append(
+                    f"Tabela reatribuída via IA: '{candidate['current_title']}' → '{candidate['parent_title']}'"
+                )
+
+        if not moves:
+            return texto, []
+
+        moves.sort(key=lambda m: m["start"], reverse=True)
+        for m in moves:
+            block_lines = lines[m["start"]:m["end"]]
+            del lines[m["start"]:m["end"]]
+            insert_at = m["insert_at"]
+            if insert_at > m["start"]:
+                insert_at = max(0, insert_at - (m["end"] - m["start"]))
+            for offset, bl in enumerate(block_lines):
+                lines.insert(insert_at + offset, bl)
+        return "\n".join(lines), issues
+
+    def resolve_diarization_policy(
+        self,
+        mode: str,
+        *,
+        diarization: Optional[bool] = None,
+        diarization_strict: Optional[bool] = None,
+    ) -> tuple[bool, bool]:
+        """
+        Resolve política de diarização por modo.
+
+        - `AUDIENCIA`/`REUNIAO`/`DEPOIMENTO`: diarização ON por padrão e STRICT (falha se indisponível).
+        - `APOSTILA`/`FIDELIDADE`: diarização OFF por padrão; opt-in por configuração.
+
+        Opt-in env para apostilas:
+        - `IUDEX_ENABLE_DIARIZATION_APOSTILA=1` (ou `ENABLE_DIARIZATION_APOSTILA=1`)
+
+        Strictness:
+        - `--diarization` (forçar ON) torna strict por padrão.
+        - `IUDEX_DIARIZATION_STRICT=1` pode forçar strict quando habilitado por env.
+        """
+        mode_norm = (mode or "").strip().upper()
+
+        if diarization is None:
+            apostila_opt_in = bool(
+                _env_truthy("IUDEX_ENABLE_DIARIZATION_APOSTILA", False)
+                or _env_truthy("ENABLE_DIARIZATION_APOSTILA", False)
+            )
+            diarization_enabled = mode_norm in {"AUDIENCIA", "REUNIAO", "DEPOIMENTO"} or (
+                mode_norm in {"APOSTILA", "FIDELIDADE"} and apostila_opt_in
+            )
+        else:
+            diarization_enabled = bool(diarization)
+
+        if not diarization_enabled:
+            return False, False
+
+        strict_env = _env_truthy("IUDEX_DIARIZATION_STRICT", None)
+        if diarization_strict is not None:
+            diarization_required = bool(diarization_strict)
+        elif diarization is True:
+            diarization_required = True
+        elif mode_norm in {"AUDIENCIA", "REUNIAO", "DEPOIMENTO"}:
+            diarization_required = True
+        elif strict_env is not None:
+            diarization_required = bool(strict_env)
+        else:
+            diarization_required = False
+
+        return True, diarization_required
+
+    def set_diarization_policy(self, *, enabled: bool, required: bool) -> None:
+        self._diarization_enabled = bool(enabled)
+        self._diarization_required = bool(required) if enabled else False
+        if self._diarization_enabled:
+            strict_label = "STRICT" if self._diarization_required else "SOFT"
+            print(f"{Fore.CYAN}🗣️  Diarização: ATIVA ({strict_label})")
+        else:
+            print(f"{Fore.CYAN}🗣️  Diarização: DESATIVADA")
+
+    def _get_hf_token(self) -> Optional[str]:
+        return (os.getenv("HUGGING_FACE_TOKEN") or os.getenv("HF_TOKEN") or "").strip() or None
+
+    def _diarization_available(self) -> tuple[bool, str]:
+        if not Pipeline:
+            return False, "pyannote.audio não instalado"
+        if "torch" not in globals():
+            return False, "torch não instalado"
+        if not self._get_hf_token():
+            return False, "HUGGING_FACE_TOKEN/HF_TOKEN não configurado"
+        return True, ""
+
+    def _ensure_diarization_available_or_raise(self) -> None:
+        ok, reason = self._diarization_available()
+        if ok:
+            return
+        if self._diarization_required:
+            raise RuntimeError(
+                "Diarização obrigatória, mas indisponível. "
+                f"Motivo: {reason}. "
+                "Instale `pyannote.audio` e `torch` e configure `HUGGING_FACE_TOKEN`."
+            )
+
+    def transcribe_file(
+        self,
+        audio_path: str,
+        *,
+        mode: str = "APOSTILA",
+        high_accuracy: bool = False,
+        diarization: Optional[bool] = None,
+        diarization_strict: Optional[bool] = None,
+    ) -> str:
+        """
+        Transcrição com política de diarização por modo (ponto único de entrada).
+        """
+        # Mantém o modo atual para:
+        # - escolher `initial_prompt` por modo (quando habilitado)
+        # - consistência de logs/caches
+        self._current_mode = (mode or "FIDELIDADE").strip().upper()
+        enabled, required = self.resolve_diarization_policy(
+            mode, diarization=diarization, diarization_strict=diarization_strict
+        )
+        self.set_diarization_policy(enabled=enabled, required=required)
+
+        if enabled:
+            self._ensure_diarization_available_or_raise()
+            if high_accuracy:
+                return self.transcribe_beam_with_segments(audio_path)["text"]
+            return self.transcribe_with_segments(audio_path)["text"]
+
+        if high_accuracy:
+            return self.transcribe_beam_search(audio_path)
+        return self.transcribe(audio_path)
 
     def renumber_headings(self, text):
         """
@@ -6613,6 +8901,8 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         
         # Emoji pattern to detect decorative headers like "## 📋 Sumário"
         emoji_pattern = re.compile(r'^[\U0001F300-\U0001F9FF]')
+        seen_h2_numbers = set()
+        level_adjustments = 0
         
         for line in lines:
             stripped = line.strip()
@@ -6624,6 +8914,30 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 hashes = header_match.group(1)
                 level = len(hashes)  # 1 for H1, 2 for H2, etc.
                 raw_title = header_match.group(2).strip()
+
+                # Heurística determinística (v2.17):
+                # Se o header já contém numeração explícita (ex.: "5.5."), mas veio em nível errado (ex.: "## 5.5"),
+                # ajusta o nível para preservar a hierarquia esperada antes de renumerar sequencialmente.
+                #
+                # Ex.: "## 5.5. Subtópico" deve ser tratado como H3, para virar "### 5.5." após a renumeração stack-based.
+                num_match = re.match(r'^(\d+(?:\.\d+)*)(?:\.)?\s+', raw_title)
+                if num_match:
+                    depth = num_match.group(1).count(".") + 1
+                    desired_level = level
+                    # Regra: títulos com numeração decimal devem ser subtópicos quando já houve H2.
+                    if depth == 1 and level > 2:
+                        desired_level = 2
+                    elif depth >= 2:
+                        # Evitar criar "0.x" quando não há H2 prévio.
+                        if counters[2] > 0:
+                            desired_level = 3 if depth == 2 else 4
+                            # Se não houver H3 prévio, evita H4 direto.
+                            if desired_level == 4 and counters[3] == 0:
+                                desired_level = 3
+                    if desired_level != level and desired_level in (2, 3, 4):
+                        level = desired_level
+                        hashes = "#" * level
+                        level_adjustments += 1
                 
                 # Clean existing numbers from title (e.g., "1.2.3. Title" -> "Title")
                 title_text = re.sub(r'^(\d+(\.\d+)*\.?\s*)+', '', raw_title).strip()
@@ -6653,9 +8967,13 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     hierarchical_number = ".".join(number_parts)
                     
                     new_lines.append(f"{'#' * level} {hierarchical_number}. {title_text}")
+                    if level == 2:
+                        seen_h2_numbers.add(str(counters[2]))
             else:
                 new_lines.append(line)
         
+        if level_adjustments:
+            print(f"{Fore.YELLOW}   ℹ️  Ajustes de nível aplicados: {level_adjustments}")
         print(f"{Fore.GREEN}   ✅ Renumeração concluída: {counters[2]} seções H2, {counters[3]} H3, {counters[4]} H4")
         return '\n'.join(new_lines)
 
@@ -6781,6 +9099,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         skip_fidelity_audit=False,
         skip_sources_audit=False,
         hil_strict=False,
+        include_timestamps: bool = True,
         allow_indirect: bool = False,
         allow_summary: bool = False,
     ):
@@ -6791,8 +9110,11 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             transcription: Texto da transcrição
             video_name: Nome do vídeo
             output_folder: Pasta de saída
-            mode: "APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO" ou "DEPOIMENTO" (ignorado se custom_prompt for fornecido)
-            custom_prompt: Prompt customizado opcional (substitui os prompts padrão)
+            mode: "APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO" ou "DEPOIMENTO"
+            custom_prompt: Campo de customização opcional.
+                          - Em APOSTILA: personaliza apenas TABELAS/EXTRAS (resumo/fluxograma/mapa mental/questionário),
+                            preservando tom/estilo/estrutura do modo.
+                          - Em outros modos: substitui STYLE+TABLE do modo; HEAD/STRUCTURE/FOOTER são preservados.
             dry_run: Se True, apenas valida divisão de chunks
             skip_audit: Se True, pula a auditoria jurídica
             skip_sources_audit: Se True, pula a auditoria de fontes integrada
@@ -6821,6 +9143,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             custom_style_override=custom_prompt,
             allow_indirect=allow_indirect,
             allow_summary=allow_summary,
+            include_timestamps=include_timestamps,
         )
         
         if not custom_prompt:
@@ -6847,9 +9170,27 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         await emit("formatting", 68, "Estrutura global mapeada")
 
         # 1. Sequential Slicing (v2.17: Com âncoras de estrutura)
-        print(f"🔪 Dividindo sequencialmente (com âncoras v2.17)...")
-        # v2.17: Passa estrutura global para alinhar cortes com títulos mapeados
-        chunks_info = dividir_sequencial(transcription, chars_por_parte=25000, estrutura_global=global_structure)
+        mode_norm = (mode or "APOSTILA").strip().upper()
+        print(f"🔪 Dividindo em chunks (v2.32)...")
+
+        # Para AUDIÊNCIA/REUNIÃO/DEPOIMENTO: preferir chunking por blocos naturais (## Bloco XX — ...),
+        # evitando cortes no meio de um turno/ato.
+        chunks_info = []
+        if mode_norm in {"AUDIENCIA", "REUNIAO", "DEPOIMENTO"}:
+            block_max_chars = int(os.getenv("IUDEX_HEARING_BLOCK_MAX_CHARS", 25000))
+            block_overlap = int(os.getenv("IUDEX_HEARING_BLOCK_SPLIT_OVERLAP_CHARS", 300))
+            block_prefix = os.getenv("IUDEX_HEARING_BLOCK_PREFIX_REGEX", None)
+            chunks_info = dividir_por_blocos_markdown(
+                transcription,
+                max_chars=block_max_chars,
+                block_prefix_pattern=block_prefix,
+                split_overlap_chars=block_overlap,
+            )
+
+        # Fallback: slicing sequencial com âncoras (aulas/apostilas e quando não há blocos).
+        if not chunks_info:
+            print(f"   ℹ️  Usando divisão sequencial (com âncoras v2.17)...")
+            chunks_info = dividir_sequencial(transcription, chars_por_parte=25000, estrutura_global=global_structure)
         validar_chunks(chunks_info, transcription)
         
         total_segments = len(chunks_info)
@@ -6898,7 +9239,14 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     await emit("formatting", min(progress, 95), f"Formatando segmento {i+1}/{total_segments}...")
                 info = chunks_info[i]
                 chunk_text = transcription[info['inicio']:info['fim']]
-                
+                raw_overlap_chars = int(
+                    os.getenv("IUDEX_RAW_CONTEXT_OVERLAP_CHARS", self.RAW_CONTEXT_OVERLAP_CHARS)
+                )
+                overlap_raw = ""
+                if raw_overlap_chars > 0 and info.get("inicio", 0) > 0:
+                    start_overlap = max(0, info["inicio"] - raw_overlap_chars)
+                    overlap_raw = transcription[start_overlap:info["inicio"]].strip()
+
                 # Context Management
                 contexto_estilo = ""
                 if i > 0 and ordered_results:
@@ -6915,17 +9263,39 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     estrutura_referencia = None
                     if global_structure and not cached_context:
                         # v2.18: Contexto Localizado - Janela deslizante de ~15% da estrutura
-                        itens_estrutura = global_structure.split('\n')
+                        max_lines = int(
+                            os.getenv(
+                                "IUDEX_MAP_MAX_LINES_PER_CHUNK",
+                                self.MAP_MAX_LINES_PER_CHUNK,
+                            )
+                        )
+                        itens_estrutura = [ln for ln in global_structure.split('\n') if ln.strip()]
                         if len(itens_estrutura) > 8 and total_segments > 1:
                             ratio = len(itens_estrutura) / total_segments
                             center_idx = int(i * ratio)
-                            window_size = max(4, int(len(itens_estrutura) * 0.15))
-                            start_idx_w = max(0, center_idx - window_size)
-                            end_idx_w = min(len(itens_estrutura), center_idx + window_size + 2)
-                            slice_itens = itens_estrutura[start_idx_w:end_idx_w]
-                            if start_idx_w > 0: slice_itens.insert(0, "[... Tópicos anteriores ...]")
-                            if end_idx_w < len(itens_estrutura): slice_itens.append("[... Tópicos posteriores ...]")
-                            estrutura_referencia = '\\n'.join(slice_itens)
+                            # Mantém janela local, mas limita o tamanho para evitar prompts gigantes em áudios longos.
+                            if len(itens_estrutura) > max_lines:
+                                available = max(4, max_lines - 2)  # reserva marcadores
+                                half = max(2, available // 2)
+                                start_idx_w = max(0, center_idx - half)
+                                end_idx_w = min(len(itens_estrutura), start_idx_w + available)
+                                start_idx_w = max(0, end_idx_w - available)
+                                slice_itens = itens_estrutura[start_idx_w:end_idx_w]
+                                if start_idx_w > 0:
+                                    slice_itens.insert(0, "[... Tópicos anteriores ...]")
+                                if end_idx_w < len(itens_estrutura):
+                                    slice_itens.append("[... Tópicos posteriores ...]")
+                                estrutura_referencia = '\n'.join(slice_itens)
+                            else:
+                                window_size = max(4, int(len(itens_estrutura) * 0.15))
+                                start_idx_w = max(0, center_idx - window_size)
+                                end_idx_w = min(len(itens_estrutura), center_idx + window_size + 2)
+                                slice_itens = itens_estrutura[start_idx_w:end_idx_w]
+                                if start_idx_w > 0:
+                                    slice_itens.insert(0, "[... Tópicos anteriores ...]")
+                                if end_idx_w < len(itens_estrutura):
+                                    slice_itens.append("[... Tópicos posteriores ...]")
+                                estrutura_referencia = '\n'.join(slice_itens)
                         else:
                             estrutura_referencia = global_structure
 
@@ -6953,6 +9323,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                         previous_context=contexto_final,
                         depth=0,
                         global_structure=estrutura_referencia, # None se usar cache
+                        overlap_text=overlap_raw,
                         cached_content=cached_context
                     )
 
@@ -7048,13 +9419,48 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         print(f"\n{Fore.CYAN}🔢 Renumerando tópicos (1..N) (Stack-Based v2.16)...")
         await emit("formatting", 98, "Renumerando tópicos (1..N)...")
         full_formatted = self.renumber_headings(full_formatted)
+
+        # Passada 4.7: Auditoria determinística de hierarquia (subtópicos vs tópicos)
+        strict_subtopic_fix = os.getenv("IUDEX_STRICT_SUBTOPIC_FIX", "1").strip().lower() in ("1", "true", "yes")
+        fixed_text, level_issues = audit_heading_levels(full_formatted, apply_fixes=strict_subtopic_fix)
+        if level_issues:
+            print(f"{Fore.YELLOW}⚠️  {len(level_issues)} inconsistências de hierarquia detectadas")
+            for issue in level_issues[:5]:
+                print(f"{Fore.YELLOW}   - {issue}")
+            if strict_subtopic_fix and fixed_text != full_formatted:
+                full_formatted = fixed_text
+                # Reaplica renumeração para manter sequência coerente após correções de nível.
+                full_formatted = self.renumber_headings(full_formatted)
         
         # 5.6 v2.18: Auto-Fix Pass - Correções automáticas finais
-        full_formatted, autofix_correcoes = aplicar_correcoes_automaticas(full_formatted)
+        full_formatted, autofix_correcoes = aplicar_correcoes_automaticas(full_formatted, mode=mode)
         
         # 5.5 v2.16: Auditoria Final de Estrutura
         await emit("formatting", 99, "Auditoria Final de Estrutura...")
         full_formatted, audit_issues = self.final_structure_audit(full_formatted, global_structure)
+        if level_issues:
+            audit_issues = list(audit_issues or [])
+            audit_issues.append("\n⚠️ PROBLEMAS DE HIERARQUIA (DETERMINÍSTICO):")
+            audit_issues.extend([f"   - {issue}" for issue in level_issues])
+
+        # Passada 4.8: Reatribuição determinística de tabelas por tópico (subtópicos)
+        full_formatted, table_reassign_issues = reatribuir_tabelas_por_topico(full_formatted, apply_fixes=True)
+        if table_reassign_issues:
+            audit_issues = list(audit_issues or [])
+            audit_issues.append("\n⚠️ POSSÍVEL REATRIBUIÇÃO DE TABELAS (DETERMINÍSTICO):")
+            audit_issues.extend([f"   - {issue}" for issue in table_reassign_issues])
+
+        # Passada 4.9: Reatribuição cirúrgica via IA (fallback)
+        ai_reassign_enabled = os.getenv("IUDEX_TABLE_REASSIGN_AI", "").strip().lower() in ("1", "true", "yes")
+        if ai_reassign_enabled:
+            try:
+                full_formatted, ai_reassign_issues = await self._ai_reassign_tables(full_formatted)
+                if ai_reassign_issues:
+                    audit_issues = list(audit_issues or [])
+                    audit_issues.append("\n⚠️ REATRIBUIÇÃO DE TABELAS (IA CIRÚRGICA):")
+                    audit_issues.extend([f"   - {issue}" for issue in ai_reassign_issues])
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Falha na reatribuição de tabelas via IA: {e}")
         
         # 6. Validation & Coverage
         print(f"\n{Fore.CYAN}🛡️  Validando cobertura final...")
@@ -7094,7 +9500,9 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             print(f"📄 Relatório de fidelidade (backup) salvo: {validation_report_path.name}")
 
             # Se houver problemas graves, gerar também um markdown legível
-            if not validation_result.get('aprovado', True):
+            # v2.30: Se houve erro de validação, default é False (não mascara falha)
+            _default_aprovado = False if validation_result.get('erro_validacao') else True
+            if not validation_result.get('aprovado', _default_aprovado):
                 fidelity_md_path = Path(output_folder) / f"{video_name}_{mode_suffix}_REVISAO.md"
                 with open(fidelity_md_path, "w", encoding='utf-8') as f:
                     f.write(f"# ⚠️ REVISÃO NECESSÁRIA: {video_name}\n\n")
@@ -7119,7 +9527,9 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 print(f"{Fore.RED}📄 ATENÇÃO: Documento requer revisão! Veja: {fidelity_md_path.name}")
 
             # 7.1 v2.18: Corretor IA Seguro (Safe Mode) - Corrige problemas estruturais
-            if validation_result and not validation_result.get('aprovado', True):
+            # v2.30: Se houve erro de validação, default é False (não mascara falha)
+            _default_aprovado2 = False if (validation_result or {}).get('erro_validacao') else True
+            if validation_result and not validation_result.get('aprovado', _default_aprovado2):
                 print(f"\n{Fore.CYAN}🔁 Iniciando Auto-Fix Loop (Safe Mode)...")
 
                 # Chama o novo corretor seguro
@@ -7369,6 +9779,22 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             except Exception as e:
                 print(f"{Fore.YELLOW}⚠️ Não foi possível deletar o cache: {e}")
 
+        # v2.30: Limpeza final de vocativos/gírias (ex.: "Meu irmão, ...")
+        try:
+            full_formatted = remover_vocativos_girias(full_formatted)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Falha ao remover vocativos/gírias: {e}")
+
+        # v2.35: Normalizações finais usadas também no preview/API (não só no Word)
+        try:
+            full_formatted = normalizar_temas_markdown(full_formatted)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Falha ao normalizar Temas: {e}")
+        try:
+            full_formatted = remover_marcadores_continua(full_formatted)
+        except Exception as e:
+            print(f"{Fore.YELLOW}⚠️ Falha ao remover marcadores [continua]: {e}")
+
         await emit("formatting", 100, "Formatação concluída")
 
         return full_formatted
@@ -7454,7 +9880,21 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             return formatted_text
 
 
-    def save_as_word(self, formatted_text, video_name, output_folder, mode=None):
+    def save_as_word(
+        self,
+        formatted_text,
+        video_name,
+        output_folder,
+        mode=None,
+        document_theme="classic",
+        document_header=None,
+        document_footer=None,
+        document_margins="normal",
+        document_font_family=None,
+        document_font_size=None,
+        document_line_height=None,
+        document_paragraph_spacing=None,
+    ):
         """Salva markdown formatado como documento Word (.docx) com estilo premium"""
         # v2.23: Dynamic mode suffix for file naming
         mode_suffix = mode.upper() if mode else getattr(self, '_current_mode', 'APOSTILA')
@@ -7490,45 +9930,168 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             print(f"{Fore.YELLOW}⚠️ Erro ao reorganizar tabelas: {e}. Usando layout padrão.")
 
         doc = Document()
+
+        theme_norm = (document_theme or "classic").strip().lower()
+        margins_norm = (document_margins or "normal").strip().lower()
+        theme_presets = {
+            "classic": {
+                "font": "Arial",
+                "title_color": RGBColor(0, 51, 102),
+                "heading_color": RGBColor(0, 51, 102),
+                "margins": (1, 1, 1.25, 1.25),
+                "table": {
+                    "default": {"header_bg": "0066CC", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "F0F6FF"},
+                    "quadro_sintese": {"header_bg": "0066CC", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "E6F2FF"},
+                    "pegadinhas": {"header_bg": "E67E00", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "FFF5E6"},
+                },
+            },
+            "minimal": {
+                "font": "Arial",
+                "title_color": RGBColor(55, 65, 81),
+                "heading_color": RGBColor(55, 65, 81),
+                "margins": (0.9, 0.9, 1.0, 1.0),
+                "table": {
+                    "default": {"header_bg": "F8FAFC", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                    "quadro_sintese": {"header_bg": "F8FAFC", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                    "pegadinhas": {"header_bg": "FFF7ED", "header_text": RGBColor(120, 53, 15), "alt_row_bg": "FFFFFF"},
+                },
+            },
+            "executive": {
+                "font": "Arial",
+                "title_color": RGBColor(17, 24, 39),
+                "heading_color": RGBColor(17, 24, 39),
+                "margins": (1, 1, 1.1, 1.1),
+                "table": {
+                    "default": {"header_bg": "111827", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "F3F4F6"},
+                    "quadro_sintese": {"header_bg": "0F172A", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "E5E7EB"},
+                    "pegadinhas": {"header_bg": "B45309", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "FEF3C7"},
+                },
+            },
+            "academic": {
+                "font": "Times New Roman",
+                "title_color": RGBColor(55, 65, 81),
+                "heading_color": RGBColor(55, 65, 81),
+                "margins": (1.25, 1.25, 1.35, 1.35),
+                "table": {
+                    "default": {"header_bg": "ECEFF4", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                    "quadro_sintese": {"header_bg": "E2E8F0", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                    "pegadinhas": {"header_bg": "FFF7ED", "header_text": RGBColor(120, 53, 15), "alt_row_bg": "FFFFFF"},
+                },
+            },
+        }
+        theme = theme_presets.get(theme_norm, theme_presets["classic"])
+        font_name = theme["font"]
+        if document_font_family:
+            font_name = str(document_font_family).strip() or font_name
+        self._doc_font_name = font_name
         
         # 2. Configurações Globais de Estilo (Arial + Justificado)
         style = doc.styles['Normal']
         font = style.font
-        font.name = 'Arial'
-        font.size = Pt(11)
+        font.name = font_name
+        base_font_size = None
+        try:
+            if document_font_size is not None:
+                font_size_val = float(document_font_size)
+                # UI usa px; converter para pontos (1px ≈ 0.75pt)
+                font.size = Pt(max(8, font_size_val * 0.75))
+            else:
+                font.size = Pt(11)
+        except Exception:
+            font.size = Pt(11)
+        base_font_size = font.size or Pt(11)
         
         # Garantir Arial em documentos que ignoram o nome da fonte
         r = style.element.rPr.get_or_add_rFonts()
-        r.set(qn('w:ascii'), 'Arial')
-        r.set(qn('w:hAnsi'), 'Arial')
+        r.set(qn('w:ascii'), font_name)
+        r.set(qn('w:hAnsi'), font_name)
         
         style.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+        if document_line_height is not None:
+            try:
+                style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+                style.paragraph_format.line_spacing = float(document_line_height)
+            except Exception:
+                style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+        else:
+            style.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+
+        if document_paragraph_spacing is not None:
+            try:
+                spacing_pt = float(document_paragraph_spacing) * 0.75
+                style.paragraph_format.space_after = Pt(max(0, spacing_pt))
+            except Exception:
+                pass
         
         # Aplicar Arial também aos títulos e outros estilos
         for style_name in [f'Heading {i}' for i in range(1, 6)] + ['Quote', 'List Bullet', 'List Number']:
             try:
                 s = doc.styles[style_name]
-                s.font.name = 'Arial'
+                s.font.name = font_name
                 r = s.element.rPr.get_or_add_rFonts()
-                r.set(qn('w:ascii'), 'Arial')
-                r.set(qn('w:hAnsi'), 'Arial')
+                r.set(qn('w:ascii'), font_name)
+                r.set(qn('w:hAnsi'), font_name)
             except KeyError:
                 pass
 
         # Margens
         section = doc.sections[0]
-        section.top_margin = Inches(1)
-        section.bottom_margin = Inches(1)
-        section.left_margin = Inches(1.25)
-        section.right_margin = Inches(1.25)
+        top_m, bottom_m, left_m, right_m = theme["margins"]
+        if margins_norm == "compact":
+            top_m, bottom_m, left_m, right_m = (0.9, 0.9, 1.0, 1.0)
+        elif margins_norm == "wide":
+            top_m, bottom_m, left_m, right_m = (1.25, 1.25, 1.35, 1.35)
+        section.top_margin = Inches(top_m)
+        section.bottom_margin = Inches(bottom_m)
+        section.left_margin = Inches(left_m)
+        section.right_margin = Inches(right_m)
+
+        def _add_page_number(paragraph):
+            run = paragraph.add_run()
+            fldChar = OxmlElement('w:fldChar')
+            fldChar.set(qn('w:fldCharType'), 'begin')
+            run._r.append(fldChar)
+            instrText = OxmlElement('w:instrText')
+            instrText.set(qn('xml:space'), 'preserve')
+            instrText.text = 'PAGE'
+            run._r.append(instrText)
+            fldChar = OxmlElement('w:fldChar')
+            fldChar.set(qn('w:fldCharType'), 'end')
+            run._r.append(fldChar)
+
+        header = section.header
+        header_para = header.paragraphs[0] if header.paragraphs else header.add_paragraph()
+        header_text = (document_header or "").strip() or f"{video_name} — {mode_suffix}"
+        header_para.text = header_text
+        header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        for run in header_para.runs:
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(120, 120, 120)
+            run.font.name = font_name
+
+        footer = section.footer
+        footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
+        footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        footer_para.text = ""
+        footer_text = (document_footer or "").strip()
+        if footer_text:
+            run = footer_para.add_run(f"{footer_text} — ")
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(120, 120, 120)
+            run.font.name = font_name
+        _add_page_number(footer_para)
+        for run in footer_para.runs:
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(120, 120, 120)
+            run.font.name = font_name
         
         # Título principal
         title = doc.add_heading(video_name, level=0)
         title.alignment = WD_ALIGN_PARAGRAPH.CENTER
         for run in title.runs:
             run.font.size = Pt(20)
-            run.font.color.rgb = RGBColor(0, 51, 102)
+            run.font.color.rgb = theme["title_color"]
+            run.font.name = font_name
         
         # Data de geração e Modo
         date_para = doc.add_paragraph()
@@ -7536,6 +10099,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         date_run.italic = True
         date_run.font.size = Pt(10)
         date_run.font.color.rgb = RGBColor(128, 128, 128)
+        date_run.font.name = font_name
         date_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
         
         doc.add_paragraph()
@@ -7578,11 +10142,16 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
 
         while i < len(lines):
             line = lines[i].strip()
+
+            if line in {"<!-- PAGE_BREAK -->", "<!--PAGE_BREAK-->"}:
+                doc.add_page_break()
+                i += 1
+                continue
             
             if in_table:
                 if not line:
                     if table_rows:
-                        self._add_table_to_doc(doc, table_rows, current_table_type)
+                        self._add_table_to_doc(doc, table_rows, current_table_type, theme_norm)
                     in_table = False
                     table_rows = []
                     current_table_cols = None
@@ -7593,7 +10162,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     if _looks_like_table_header(i):
                         candidate_cols = _count_table_cols(line)
                         if current_table_cols and table_rows and candidate_cols != current_table_cols:
-                            self._add_table_to_doc(doc, table_rows, current_table_type)
+                            self._add_table_to_doc(doc, table_rows, current_table_type, theme_norm)
                             table_rows = []
                             current_table_cols = None
 
@@ -7606,7 +10175,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
 
                     if i == len(lines) - 1:
                         if table_rows:
-                            self._add_table_to_doc(doc, table_rows, current_table_type)
+                            self._add_table_to_doc(doc, table_rows, current_table_type, theme_norm)
                         in_table = False
                         table_rows = []
                         current_table_cols = None
@@ -7614,7 +10183,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     continue
 
                 if table_rows:
-                    self._add_table_to_doc(doc, table_rows, current_table_type)
+                    self._add_table_to_doc(doc, table_rows, current_table_type, theme_norm)
                 in_table = False
                 table_rows = []
                 current_table_cols = None
@@ -7646,6 +10215,9 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                     continue
                 h = doc.add_heading('', level=lvl)
                 self._format_inline_markdown(h, h_text)
+                for run in h.runs:
+                    run.font.name = font_name
+                    run.font.color.rgb = theme["heading_color"]
                 # v2.28: Detectar tipo de tabela para heading level 4
                 if lvl == 4:
                     current_table_type = _detect_table_type_from_heading(h_text)
@@ -7682,14 +10254,28 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
             # Parágrafo normal
             else:
                 p = doc.add_paragraph()
-                p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+                if document_line_height is not None:
+                    try:
+                        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.MULTIPLE
+                        p.paragraph_format.line_spacing = float(document_line_height)
+                    except Exception:
+                        p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
+                else:
+                    p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
                 p.paragraph_format.space_before = Pt(6)
-                p.paragraph_format.space_after = Pt(6) 
+                if document_paragraph_spacing is not None:
+                    try:
+                        spacing_pt = float(document_paragraph_spacing) * 0.75
+                        p.paragraph_format.space_after = Pt(max(0, spacing_pt))
+                    except Exception:
+                        p.paragraph_format.space_after = Pt(6)
+                else:
+                    p.paragraph_format.space_after = Pt(6)
                 p.paragraph_format.first_line_indent = Cm(1.0)
                 p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
                 self._format_inline_markdown(p, line)
                 for run in p.runs:
-                    run.font.size = Pt(12)
+                    run.font.size = base_font_size
             
             i += 1
             
@@ -7701,6 +10287,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         """Formata markdown inline avançado (bold, italic, code, underline-style)"""
         from docx.shared import Pt, RGBColor
         paragraph.clear()
+        font_name = getattr(self, "_doc_font_name", "Arial")
         
         # Regex robusta do format_transcription_gemini.py
         pattern = r'(\*{3}(.+?)\*{3}|_{3}(.+?)_{3}|\*{2}(.+?)\*{2}|_{2}(.+?)_{2}|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!(?:_|\s))(.+?)(?<!(?:_|\s))_(?!_)|`(.+?)`)'
@@ -7709,7 +10296,7 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         for match in re.finditer(pattern, text):
             if match.start() > last_end:
                 run = paragraph.add_run(text[last_end:match.start()])
-                run.font.name = 'Arial'
+                run.font.name = font_name
             
             full_match = match.group(0)
             
@@ -7717,28 +10304,28 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
                 run = paragraph.add_run(match.group(2))
                 run.bold = True
                 run.italic = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('___'):
                 run = paragraph.add_run(match.group(3))
                 run.bold = True
                 run.italic = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('**'):
                 run = paragraph.add_run(match.group(4))
                 run.bold = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('__'):
                 run = paragraph.add_run(match.group(5))
                 run.bold = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('*'):
                 run = paragraph.add_run(match.group(6))
                 run.italic = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('_'):
                 run = paragraph.add_run(match.group(7))
                 run.italic = True
-                run.font.name = 'Arial'
+                run.font.name = font_name
             elif full_match.startswith('`'):
                 run = paragraph.add_run(match.group(8))
                 run.font.name = 'Courier New'
@@ -7749,9 +10336,9 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         
         if last_end < len(text):
             run = paragraph.add_run(text[last_end:])
-            run.font.name = 'Arial'
+            run.font.name = font_name
 
-    def _add_table_to_doc(self, doc, rows, table_type="default"):
+    def _add_table_to_doc(self, doc, rows, table_type="default", document_theme="classic"):
         """
         v2.28: Adiciona tabela premium ao Word com estilos diferenciados.
 
@@ -7773,26 +10360,32 @@ Retorne o documento COMPLETO corrigido em Markdown. Sem explicações."""
         max_cols = max(len(row) for row in rows)
         if max_cols == 0: return
 
-        # v2.28: Cores por tipo de tabela
-        CORES = {
-            "quadro_sintese": {
-                "header_bg": "0066CC",      # Azul escuro
-                "header_text": RGBColor(255, 255, 255),
-                "alt_row_bg": "E6F2FF",     # Azul claro
+        theme_norm = (document_theme or "classic").strip().lower()
+        palettes = {
+            "classic": {
+                "default": {"header_bg": "0066CC", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "F0F6FF"},
+                "quadro_sintese": {"header_bg": "0066CC", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "E6F2FF"},
+                "pegadinhas": {"header_bg": "E67E00", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "FFF5E6"},
             },
-            "pegadinhas": {
-                "header_bg": "E67E00",      # Laranja
-                "header_text": RGBColor(255, 255, 255),
-                "alt_row_bg": "FFF5E6",     # Laranja claro
+            "minimal": {
+                "default": {"header_bg": "F8FAFC", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                "quadro_sintese": {"header_bg": "F8FAFC", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                "pegadinhas": {"header_bg": "FFF7ED", "header_text": RGBColor(120, 53, 15), "alt_row_bg": "FFFFFF"},
             },
-            "default": {
-                "header_bg": "0066CC",
-                "header_text": RGBColor(255, 255, 255),
-                "alt_row_bg": "F0F0F0",
-            }
+            "executive": {
+                "default": {"header_bg": "111827", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "F3F4F6"},
+                "quadro_sintese": {"header_bg": "0F172A", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "E5E7EB"},
+                "pegadinhas": {"header_bg": "B45309", "header_text": RGBColor(255, 255, 255), "alt_row_bg": "FEF3C7"},
+            },
+            "academic": {
+                "default": {"header_bg": "ECEFF4", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                "quadro_sintese": {"header_bg": "E2E8F0", "header_text": RGBColor(31, 41, 55), "alt_row_bg": "FFFFFF"},
+                "pegadinhas": {"header_bg": "FFF7ED", "header_text": RGBColor(120, 53, 15), "alt_row_bg": "FFFFFF"},
+            },
         }
 
-        cores = CORES.get(table_type, CORES["default"])
+        palette = palettes.get(theme_norm, palettes["classic"])
+        cores = palette.get(table_type, palette["default"])
 
         table = doc.add_table(rows=len(rows), cols=max_cols)
         table.style = 'Table Grid'
@@ -7874,6 +10467,8 @@ def process_single_video(
     skip_formatting=False,
     custom_prompt=None,
     high_accuracy=False,
+    diarization: Optional[bool] = None,
+    diarization_strict: bool = False,
     skip_audit=False,
     skip_fidelity_audit=False,
     skip_sources_audit=False,
@@ -7883,7 +10478,83 @@ def process_single_video(
     word_only=False,
     auto_apply_fixes=False,
 ):
-    if not os.path.exists(video_path): return
+    def _is_public_url(value: str) -> bool:
+        try:
+            parsed = urlparse((value or "").strip())
+            return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+        except Exception:
+            return False
+
+    def _download_public_media(url: str) -> str:
+        """
+        Baixa mídia de URL pública (ex.: YouTube) usando `yt-dlp`.
+
+        - Faz cache por hash da URL no diretório configurável.
+        - Extrai áudio para MP3 para acelerar o pipeline (FFmpeg ainda fará WAV 16k mono).
+        """
+        download_dir = os.getenv("IUDEX_URL_DOWNLOAD_DIR", "tmp/url_imports").strip() or "tmp/url_imports"
+        Path(download_dir).mkdir(parents=True, exist_ok=True)
+
+        url_norm = (url or "").strip()
+        url_hash = hashlib.sha256(url_norm.encode("utf-8")).hexdigest()[:12]
+        base = f"url_{url_hash}"
+
+        # Cache: se já existe MP3 baixado, reutiliza.
+        cached_mp3 = Path(download_dir) / f"{base}.mp3"
+        if cached_mp3.exists() and cached_mp3.stat().st_size > 1024:
+            print(f"{Fore.CYAN}🌐 URL cache: usando {cached_mp3.name}")
+            return str(cached_mp3)
+
+        ytdlp = (
+            (os.getenv("IUDEX_YTDLP_PATH") or "").strip()
+            or shutil.which("yt-dlp")
+            or shutil.which("yt_dlp")
+            or ("/opt/homebrew/bin/yt-dlp" if os.path.exists("/opt/homebrew/bin/yt-dlp") else None)
+            or ("/usr/local/bin/yt-dlp" if os.path.exists("/usr/local/bin/yt-dlp") else None)
+        )
+        if not ytdlp:
+            raise RuntimeError(
+                "Para baixar vídeos de URL (ex.: YouTube), instale `yt-dlp`.\n"
+                "macOS (Homebrew): `brew install yt-dlp`\n"
+                "Python: `python3 -m pip install -U yt-dlp`\n"
+            )
+
+        outtmpl = str(Path(download_dir) / f"{base}.%(ext)s")
+        cmd = [
+            ytdlp,
+            "--no-playlist",
+            "--restrict-filenames",
+            "-f",
+            "bestaudio/best",
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "-o",
+            outtmpl,
+            url_norm,
+        ]
+        print(f"{Fore.CYAN}🌐 Baixando URL com yt-dlp...")
+        subprocess.run(cmd, check=True)
+
+        # yt-dlp pode gerar .mp3 ou outro ext dependendo de flags; procurar resultado.
+        candidates = sorted(Path(download_dir).glob(f"{base}.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for path in candidates:
+            if path.suffix.lower() == ".mp3" and path.stat().st_size > 1024:
+                return str(path)
+        # Fallback: se não achou mp3, pega o mais recente.
+        if candidates:
+            return str(candidates[0])
+        raise RuntimeError("Falha ao baixar URL: nenhum arquivo gerado.")
+
+    if _is_public_url(video_path):
+        video_path = _download_public_media(video_path)
+
+    if not os.path.exists(video_path):
+        print(f"{Fore.RED}❌ Arquivo não encontrado: {video_path}")
+        return
+
     folder = os.path.dirname(video_path)
     video_name = Path(video_path).stem
     
@@ -7907,17 +10578,31 @@ def process_single_video(
                 print("⚠️ Dry run não suporta áudio direto ainda. Use arquivo .txt")
                 return
             audio = vomo.optimize_audio(video_path)
-            
-            raw_path = os.path.join(folder, f"{video_name}_RAW.txt")
+
+            diar_enabled, _diar_required = vomo.resolve_diarization_policy(
+                mode, diarization=diarization, diarization_strict=diarization_strict
+            )
+            raw_parts = [video_name, "RAW"]
+            if diar_enabled:
+                raw_parts.append("DIAR")
+            if high_accuracy:
+                raw_parts.append("BEAM")
+            raw_path = os.path.join(folder, f"{'_'.join(raw_parts)}.txt")
+
             if os.path.exists(raw_path):
-                with open(raw_path, 'r') as f: transcription = f.read()
+                with open(raw_path, 'r') as f:
+                    transcription = f.read()
             else:
                 # Escolhe backend de transcrição
-                if high_accuracy:
-                    transcription = vomo.transcribe_beam_search(audio)
-                else:
-                    transcription = vomo.transcribe(audio)
-                with open(raw_path, 'w') as f: f.write(transcription)
+                transcription = vomo.transcribe_file(
+                    audio,
+                    mode=mode,
+                    high_accuracy=high_accuracy,
+                    diarization=diarization,
+                    diarization_strict=diarization_strict,
+                )
+                with open(raw_path, 'w') as f:
+                    f.write(transcription)
         
         if skip_formatting and not resume_hil:
             print(f"{Fore.GREEN}✅ Transcrição RAW concluída: {raw_path}")
@@ -7990,7 +10675,9 @@ def process_single_video(
                         json.dump(validation_result, f, ensure_ascii=False, indent=2)
                     print(f"📄 Relatório de fidelidade (backup) salvo: {validation_report_path.name}")
 
-                    if not validation_result.get('aprovado', True):
+                    # v2.30: Se houve erro de validação, default é False (não mascara falha)
+                    _def_aprov = False if validation_result.get('erro_validacao') else True
+                    if not validation_result.get('aprovado', _def_aprov):
                         fidelity_md_path = Path(folder) / f"{video_name}_{mode_suffix}_REVISAO.md"
                         with open(fidelity_md_path, "w", encoding='utf-8') as f:
                             f.write(f"# ⚠️ REVISÃO NECESSÁRIA: {video_name}\n\n")
@@ -8051,6 +10738,22 @@ def process_single_video(
                 hil_strict=hil_strict,
             ))
         
+        # v2.28+: Aplicar as mesmas correções de tabelas do DOCX também no Markdown final (APOSTILA).
+        # Caso contrário, o usuário vê no .md uma tabela "no meio do assunto" que só é corrigida no DOCX.
+        try:
+            mode_label = (mode or "APOSTILA").upper()
+        except Exception:
+            mode_label = "APOSTILA"
+        if formatted and mode_label == "APOSTILA":
+            try:
+                formatted = corrigir_tabelas_prematuras(formatted)
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Erro ao corrigir tabelas prematuras (MD): {e}.")
+            try:
+                formatted = mover_tabelas_para_fim_de_secao(formatted)
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Erro ao reorganizar tabelas (MD): {e}. Usando layout padrão.")
+
         with open(os.path.join(folder, f"{video_name}_{mode}.md"), 'w') as f:
             f.write(formatted)
             
@@ -8145,10 +10848,36 @@ def _build_arg_parser():
                         help="Modo de formatacao: APOSTILA, FIDELIDADE, AUDIENCIA, REUNIAO, DEPOIMENTO.")
     parser.add_argument("--provider", type=_parse_provider, default="gemini",
                         help="Provider LLM: gemini ou openai.")
-    parser.add_argument("--prompt", help="Prompt customizado (texto direto ou arquivo .txt).")
+    parser.add_argument(
+        "--prompt",
+        help=(
+            "Prompt customizado (texto direto ou arquivo .txt). "
+            "Em APOSTILA/AUDIENCIA/REUNIAO: personaliza apenas TABELAS/EXTRAS (resumo/fluxograma/mapa mental/questionário), "
+            "preservando tom/estilo/estrutura. Em outros modos: substitui STYLE+TABLE; HEAD/STRUCTURE/FOOTER são preservados."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Executa apenas etapas locais.")
     parser.add_argument("--skip-formatting", action="store_true", help="Pula a formatacao final.")
     parser.add_argument("--high-accuracy", action="store_true", help="Usa beam search na transcricao.")
+    diar_group = parser.add_mutually_exclusive_group()
+    diar_group.add_argument(
+        "--diarization",
+        dest="diarization",
+        action="store_true",
+        help="Força diarização ON (override do padrão por modo).",
+    )
+    diar_group.add_argument(
+        "--no-diarization",
+        dest="diarization",
+        action="store_false",
+        help="Força diarização OFF (override do padrão por modo).",
+    )
+    parser.set_defaults(diarization=None)
+    parser.add_argument(
+        "--diarization-strict",
+        action="store_true",
+        help="Falha se diarização estiver indisponível (útil quando opt-in em APOSTILA/FIDELIDADE).",
+    )
     parser.add_argument("--skip-fidelity-audit", action="store_true", help="Desativa auditoria de fidelidade.")
     parser.add_argument("--skip-sources-audit", action="store_true", help="Desativa auditoria de fontes.")
     parser.add_argument("--hil-strict", action="store_true", help="Habilita checkpoint estrito de HIL.")
@@ -8178,6 +10907,8 @@ if __name__ == "__main__":
             custom_prompt=custom_prompt,
             dry_run=args.dry_run,
             high_accuracy=args.high_accuracy,
+            diarization=args.diarization,
+            diarization_strict=args.diarization_strict,
             skip_formatting=args.skip_formatting,
             skip_audit=args.skip_audit,
             skip_fidelity_audit=args.skip_fidelity_audit,

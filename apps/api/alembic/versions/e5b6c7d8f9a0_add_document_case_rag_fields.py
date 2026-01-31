@@ -25,16 +25,23 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
+    dialect = bind.dialect.name
 
     # Get existing columns in documents table
     existing_columns = [c["name"] for c in inspector.get_columns("documents")]
 
     # Add case_id column if not exists
     if "case_id" not in existing_columns:
-        op.add_column(
-            "documents",
-            sa.Column("case_id", sa.String(), sa.ForeignKey("cases.id"), nullable=True)
-        )
+        # SQLite can't ALTER TABLE to add constraints. Add the column, and add FK only on non-sqlite.
+        op.add_column("documents", sa.Column("case_id", sa.String(), nullable=True))
+        if dialect != "sqlite":
+            op.create_foreign_key(
+                "fk_documents_case_id",
+                "documents",
+                "cases",
+                ["case_id"],
+                ["id"],
+            )
         op.create_index("ix_documents_case_id", "documents", ["case_id"])
 
     # Add RAG ingestion tracking fields

@@ -57,6 +57,7 @@ async def init_db() -> None:
         from app.models.rag_ingestion import RAGIngestionEvent
         from app.models.rag_trace import RAGTraceEvent
         from app.models.rag_policy import RAGAccessPolicy
+        from app.models.tool_permission import ToolPermission
         
         # Testar conexão e criar tabelas
         async with engine.begin() as conn:

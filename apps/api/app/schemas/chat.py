@@ -123,6 +123,16 @@ class MessageCreate(MessageBase):
     deep_research_country: Optional[str] = None
     deep_research_latitude: Optional[str] = None
     deep_research_longitude: Optional[str] = None
+    # Deep Research Hard Mode
+    deep_research_mode: Optional[str] = Field(
+        default=None,
+        pattern="^(standard|hard)$",
+        description="standard = single provider, hard = multi-provider orchestrated research"
+    )
+    hard_research_providers: Optional[List[str]] = Field(
+        default=None,
+        description="Providers enabled for hard mode: gemini, perplexity, openai, rag_global, rag_local"
+    )
     use_templates: bool = False
     template_filters: Dict[str, Any] = Field(default_factory=dict)
     template_id: Optional[str] = None

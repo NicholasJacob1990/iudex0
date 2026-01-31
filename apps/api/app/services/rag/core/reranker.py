@@ -254,20 +254,10 @@ class CrossEncoderReranker:
                 f"(FP16: {self._should_use_fp16()})"
             )
 
-            # Load model with optional FP16
-            model_kwargs = {}
-            if self._should_use_fp16():
-                try:
-                    import torch
-                    model_kwargs["torch_dtype"] = torch.float16
-                except ImportError:
-                    pass
-
             model = CrossEncoder(
                 model_name,
                 max_length=512,
                 device=self._device,
-                **model_kwargs,
             )
 
             # Enable FP16 for inference if supported

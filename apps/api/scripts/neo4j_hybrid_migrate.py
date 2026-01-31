@@ -29,7 +29,7 @@ def main() -> int:
     uri = _env("NEO4J_URI", "bolt://localhost:7687")
     user = _env("NEO4J_USER", _env("NEO4J_USERNAME", "neo4j"))
     password = _env("NEO4J_PASSWORD", "")
-    database = _env("NEO4J_DATABASE", "neo4j")
+    database = _env("NEO4J_DATABASE", "iudex")
 
     if not password:
         print("Missing NEO4J_PASSWORD (set it in env).", file=sys.stderr)
@@ -39,9 +39,26 @@ def main() -> int:
 
     driver = GraphDatabase.driver(uri, auth=(user, password))
     try:
-        with driver.session(database=database) as session:
-            ensure_neo4j_schema(session, hybrid=True)
-            results: Dict[str, int] = migrate_hybrid_labels(session)
+        candidates = [database]
+        if database != "neo4j":
+            candidates.append("neo4j")
+
+        last_err: Exception | None = None
+        results: Dict[str, int] = {}
+        for db in candidates:
+            try:
+                with driver.session(database=db) as session:
+                    ensure_neo4j_schema(session, hybrid=True)
+                    results = migrate_hybrid_labels(session)
+                database = db
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+                continue
+
+        if last_err is not None:
+            raise last_err
 
         print(f"Neo4j hybrid migration complete (db={database}, uri={_redact_uri(uri)}).")
         for label, count in sorted(results.items()):
@@ -53,4 +70,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

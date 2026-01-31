@@ -88,6 +88,7 @@ interface User {
   cnpj?: string;
   position?: string;
   avatar?: string;
+  organization_id?: string | null;
 }
 
 interface Chat {
@@ -1452,6 +1453,8 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      diarization?: boolean;
+      diarization_strict?: boolean;
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1468,6 +1471,10 @@ class ApiClient {
     if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
     if (options.model_selection) formData.append('model_selection', options.model_selection);
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
+    if (options.diarization_strict !== undefined) {
+      formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
+    }
     if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
     if (options.auto_apply_fixes !== undefined) {
       formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -1496,6 +1503,16 @@ class ApiClient {
       mode: string;
       thinking_level: string;
       custom_prompt?: string;
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
       model_selection?: string;
       high_accuracy?: boolean;
       use_cache?: boolean;
@@ -1512,6 +1529,26 @@ class ApiClient {
     formData.append('mode', options.mode);
     formData.append('thinking_level', options.thinking_level);
     if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+    if (options.document_theme) formData.append('document_theme', options.document_theme);
+    if (options.document_header) formData.append('document_header', options.document_header);
+    if (options.document_footer) formData.append('document_footer', options.document_footer);
+    if (options.document_margins) formData.append('document_margins', options.document_margins);
+    if (options.document_page_frame !== undefined) {
+      formData.append('document_page_frame', options.document_page_frame ? 'true' : 'false');
+    }
+    if (options.document_show_header_footer !== undefined) {
+      formData.append('document_show_header_footer', options.document_show_header_footer ? 'true' : 'false');
+    }
+    if (options.document_font_family) formData.append('document_font_family', options.document_font_family);
+    if (options.document_font_size !== undefined) {
+      formData.append('document_font_size', String(options.document_font_size));
+    }
+    if (options.document_line_height !== undefined) {
+      formData.append('document_line_height', String(options.document_line_height));
+    }
+    if (options.document_paragraph_spacing !== undefined) {
+      formData.append('document_paragraph_spacing', String(options.document_paragraph_spacing));
+    }
     if (options.model_selection) formData.append('model_selection', options.model_selection);
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
     if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
@@ -1532,6 +1569,67 @@ class ApiClient {
     return response.data;
   }
 
+  async startTranscriptionJobFromUrl(
+    url: string,
+    options: {
+      mode: string;
+      thinking_level: string;
+      custom_prompt?: string;
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      diarization?: boolean | null;
+      diarization_strict?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
+    }
+  ): Promise<{ job_id: string; status: string }> {
+    const payload: any = {
+      url,
+      mode: options.mode,
+      thinking_level: options.thinking_level,
+      model_selection: options.model_selection || 'gemini-3-flash-preview',
+      high_accuracy: !!options.high_accuracy,
+    };
+    if (options.custom_prompt) payload.custom_prompt = options.custom_prompt;
+    if (options.document_theme) payload.document_theme = options.document_theme;
+    if (options.document_header) payload.document_header = options.document_header;
+    if (options.document_footer) payload.document_footer = options.document_footer;
+    if (options.document_margins) payload.document_margins = options.document_margins;
+    if (options.document_page_frame !== undefined) payload.document_page_frame = options.document_page_frame;
+    if (options.document_show_header_footer !== undefined) payload.document_show_header_footer = options.document_show_header_footer;
+    if (options.document_font_family) payload.document_font_family = options.document_font_family;
+    if (options.document_font_size !== undefined) payload.document_font_size = options.document_font_size;
+    if (options.document_line_height !== undefined) payload.document_line_height = options.document_line_height;
+    if (options.document_paragraph_spacing !== undefined) payload.document_paragraph_spacing = options.document_paragraph_spacing;
+    if (options.diarization !== undefined) payload.diarization = options.diarization;
+    if (options.diarization_strict !== undefined) payload.diarization_strict = options.diarization_strict;
+    if (options.use_cache !== undefined) payload.use_cache = options.use_cache;
+    if (options.auto_apply_fixes !== undefined) payload.auto_apply_fixes = options.auto_apply_fixes;
+    if (options.auto_apply_content_fixes !== undefined) payload.auto_apply_content_fixes = options.auto_apply_content_fixes;
+    if (options.skip_legal_audit !== undefined) payload.skip_legal_audit = options.skip_legal_audit;
+    if (options.skip_audit !== undefined) payload.skip_audit = options.skip_audit;
+    if (options.skip_fidelity_audit !== undefined) payload.skip_fidelity_audit = options.skip_fidelity_audit;
+    if (options.skip_sources_audit !== undefined) payload.skip_sources_audit = options.skip_sources_audit;
+
+    const response = await this.axios.post('/transcription/vomo/jobs/url', payload);
+    return response.data;
+  }
+
   async startHearingJob(
     file: File,
     payload: {
@@ -1542,7 +1640,18 @@ class ApiClient {
       high_accuracy?: boolean;
       format_mode?: string;
       custom_prompt?: string;
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
       format_enabled?: boolean;
+      include_timestamps?: boolean;
       allow_indirect?: boolean;
       allow_summary?: boolean;
       use_cache?: boolean;
@@ -1562,8 +1671,31 @@ class ApiClient {
     if (payload.high_accuracy) formData.append('high_accuracy', 'true');
     if (payload.format_mode) formData.append('format_mode', payload.format_mode);
     if (payload.custom_prompt) formData.append('custom_prompt', payload.custom_prompt);
+    if (payload.document_theme) formData.append('document_theme', payload.document_theme);
+    if (payload.document_header) formData.append('document_header', payload.document_header);
+    if (payload.document_footer) formData.append('document_footer', payload.document_footer);
+    if (payload.document_margins) formData.append('document_margins', payload.document_margins);
+    if (payload.document_page_frame !== undefined) {
+      formData.append('document_page_frame', payload.document_page_frame ? 'true' : 'false');
+    }
+    if (payload.document_show_header_footer !== undefined) {
+      formData.append('document_show_header_footer', payload.document_show_header_footer ? 'true' : 'false');
+    }
+    if (payload.document_font_family) formData.append('document_font_family', payload.document_font_family);
+    if (payload.document_font_size !== undefined) {
+      formData.append('document_font_size', String(payload.document_font_size));
+    }
+    if (payload.document_line_height !== undefined) {
+      formData.append('document_line_height', String(payload.document_line_height));
+    }
+    if (payload.document_paragraph_spacing !== undefined) {
+      formData.append('document_paragraph_spacing', String(payload.document_paragraph_spacing));
+    }
     if (payload.format_enabled !== undefined) {
       formData.append('format_enabled', payload.format_enabled ? 'true' : 'false');
+    }
+    if (payload.include_timestamps !== undefined) {
+      formData.append('include_timestamps', payload.include_timestamps ? 'true' : 'false');
     }
     if (payload.allow_indirect) formData.append('allow_indirect', 'true');
     if (payload.allow_summary) formData.append('allow_summary', 'true');
@@ -1581,6 +1713,73 @@ class ApiClient {
     const response = await this.axios.post('/transcription/hearing/jobs', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
     });
+    return response.data;
+  }
+
+  async startHearingJobFromUrl(
+    url: string,
+    payload: {
+      case_id: string;
+      goal: string;
+      thinking_level: string;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      format_mode?: string;
+      custom_prompt?: string;
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
+      format_enabled?: boolean;
+      include_timestamps?: boolean;
+      allow_indirect?: boolean;
+      allow_summary?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
+    }
+  ): Promise<{ job_id: string; status: string }> {
+    const body: any = {
+      url,
+      case_id: payload.case_id,
+      goal: payload.goal,
+      thinking_level: payload.thinking_level,
+      model_selection: payload.model_selection || 'gemini-3-flash-preview',
+      high_accuracy: !!payload.high_accuracy,
+      format_mode: payload.format_mode || 'AUDIENCIA',
+      format_enabled: payload.format_enabled !== undefined ? payload.format_enabled : true,
+      include_timestamps: payload.include_timestamps !== undefined ? payload.include_timestamps : true,
+      allow_indirect: !!payload.allow_indirect,
+      allow_summary: !!payload.allow_summary,
+    };
+    if (payload.custom_prompt) body.custom_prompt = payload.custom_prompt;
+    if (payload.document_theme) body.document_theme = payload.document_theme;
+    if (payload.document_header) body.document_header = payload.document_header;
+    if (payload.document_footer) body.document_footer = payload.document_footer;
+    if (payload.document_margins) body.document_margins = payload.document_margins;
+    if (payload.document_page_frame !== undefined) body.document_page_frame = payload.document_page_frame;
+    if (payload.document_show_header_footer !== undefined) body.document_show_header_footer = payload.document_show_header_footer;
+    if (payload.document_font_family) body.document_font_family = payload.document_font_family;
+    if (payload.document_font_size !== undefined) body.document_font_size = payload.document_font_size;
+    if (payload.document_line_height !== undefined) body.document_line_height = payload.document_line_height;
+    if (payload.document_paragraph_spacing !== undefined) body.document_paragraph_spacing = payload.document_paragraph_spacing;
+    if (payload.use_cache !== undefined) body.use_cache = payload.use_cache;
+    if (payload.auto_apply_fixes !== undefined) body.auto_apply_fixes = payload.auto_apply_fixes;
+    if (payload.auto_apply_content_fixes !== undefined) body.auto_apply_content_fixes = payload.auto_apply_content_fixes;
+    if (payload.skip_legal_audit !== undefined) body.skip_legal_audit = payload.skip_legal_audit;
+    if (payload.skip_fidelity_audit !== undefined) body.skip_fidelity_audit = payload.skip_fidelity_audit;
+    if (payload.skip_sources_audit !== undefined) body.skip_sources_audit = payload.skip_sources_audit;
+
+    const response = await this.axios.post('/transcription/hearing/jobs/url', body);
     return response.data;
   }
 
@@ -1608,9 +1807,25 @@ class ApiClient {
       applied_fixes?: string[];
       suggestions?: string | null;
       fixed_content?: string;
+      needs_revalidate?: boolean;
+      applied_issue_ids?: string[];
     }
   ): Promise<{ success: boolean; quality?: any }> {
     const response = await this.axios.post(`/transcription/jobs/${jobId}/quality`, data);
+    return response.data;
+  }
+
+  async updateTranscriptionJobContent(
+    jobId: string,
+    data: {
+      content?: string;
+      rich_text_html?: string | null;
+      rich_text_json?: any;
+      rich_text_meta?: any;
+      needs_revalidate?: boolean;
+    }
+  ): Promise<{ success: boolean; content_updated?: boolean; quality?: any }> {
+    const response = await this.axios.post(`/transcription/jobs/${jobId}/content`, data);
     return response.data;
   }
 
@@ -1821,6 +2036,8 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      diarization?: boolean;
+      diarization_strict?: boolean;
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1841,6 +2058,10 @@ class ApiClient {
       if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
       if (options.model_selection) formData.append('model_selection', options.model_selection);
       if (options.high_accuracy) formData.append('high_accuracy', 'true');
+      if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
+      if (options.diarization_strict !== undefined) {
+        formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
+      }
       if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
       if (options.auto_apply_fixes !== undefined) {
         formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -1945,6 +2166,8 @@ class ApiClient {
       custom_prompt?: string;
       model_selection?: string;
       high_accuracy?: boolean;
+      diarization?: boolean;
+      diarization_strict?: boolean;
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1965,6 +2188,10 @@ class ApiClient {
       if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
       if (options.model_selection) formData.append('model_selection', options.model_selection);
       if (options.high_accuracy) formData.append('high_accuracy', 'true');
+      if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
+      if (options.diarization_strict !== undefined) {
+        formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
+      }
       if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
       if (options.auto_apply_fixes !== undefined) {
         formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -2057,9 +2284,33 @@ class ApiClient {
     }
   }
 
-  async exportDocx(content: string, filename: string): Promise<Blob> {
+  async exportDocx(
+    content: string,
+    filename: string,
+    options?: {
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
+    }
+  ): Promise<Blob> {
     const response = await this.axios.post('/transcription/export/docx',
-      { content, filename },
+      {
+        content,
+        filename,
+        document_theme: options?.document_theme,
+        document_header: options?.document_header,
+        document_footer: options?.document_footer,
+        document_margins: options?.document_margins,
+        document_font_family: options?.document_font_family,
+        document_font_size: options?.document_font_size,
+        document_line_height: options?.document_line_height,
+        document_paragraph_spacing: options?.document_paragraph_spacing,
+      },
       { responseType: 'blob' }
     );
     return response.data;
@@ -2271,6 +2522,7 @@ class ApiClient {
     raw_content: string;
     formatted_content: string;
     document_name: string;
+    mode?: string;
   }): Promise<{
     document_name: string;
     validated_at: string;
@@ -2282,7 +2534,9 @@ class ApiClient {
     observations: string;
     error?: string;
   }> {
-    const response = await this.axios.post('/quality/validate', data);
+    const response = await this.axios.post('/quality/validate', data, {
+      timeout: 15 * 60 * 1000,
+    });
     return response.data;
   }
 
@@ -2329,6 +2583,7 @@ class ApiClient {
   async analyzeDocumentHIL(data: {
     content: string;
     document_name: string;
+    raw_content?: string;
   }): Promise<{
     document_name: string;
     analyzed_at: string;
@@ -2352,7 +2607,9 @@ class ApiClient {
     total_content_issues?: number;
     error?: string;
   }> {
-    const response = await this.axios.post('/advanced/audit-structure-rigorous', data); // Updated to advanced endpoint
+    const response = await this.axios.post('/advanced/audit-structure-rigorous', data, {
+      timeout: 15 * 60 * 1000,
+    }); // Updated to advanced endpoint
     return response.data;
   }
 
@@ -2383,7 +2640,8 @@ class ApiClient {
    * Apply transcription HIL revisions (structural + content fixes)
    */
   async applyTranscriptionRevisions(data: {
-    content: string;
+    job_id?: string;
+    content?: string;
     raw_content?: string;
     approved_issues: any[];
     model_selection?: string;
@@ -2407,7 +2665,65 @@ class ApiClient {
     model_used?: string | null;
   }> {
     const response = await this.axios.post('/transcription/apply-revisions', data, {
-      timeout: 10 * 60 * 1000,
+      timeout: 15 * 60 * 1000,
+    });
+    return response.data;
+  }
+
+  /**
+   * Persist conversion of preventive audit alerts into HIL issues for a job.
+   * This updates the job snapshot (audit_issues.json + result.json) on the backend.
+   */
+  async convertPreventiveAlertsToHil(job_id: string): Promise<{
+    job_id: string;
+    added: number;
+    total: number;
+    audit_issues: any[];
+  }> {
+    const response = await this.axios.post(`/transcription/jobs/${job_id}/convert-preventive-to-hil`, null, {
+      timeout: 2 * 60 * 1000,
+    });
+    return response.data;
+  }
+
+  /**
+   * Persistently merge audit issues into a transcription job snapshot.
+   * Useful for "sending" Quality content alerts to the HIL Corrections tab.
+   */
+  async mergeTranscriptionAuditIssues(job_id: string, issues: any[]): Promise<{
+    job_id: string;
+    added: number;
+    total: number;
+    audit_issues: any[];
+  }> {
+    const response = await this.axios.post(
+      `/transcription/jobs/${job_id}/audit-issues/merge`,
+      { issues },
+      { timeout: 2 * 60 * 1000 }
+    );
+    return response.data;
+  }
+
+  /**
+   * Apply AI-assisted revisions to a hearing/meeting job snapshot.
+   * Persists updated hearing payload on the backend.
+   */
+  async applyHearingRevisions(job_id: string, data: {
+    approved_issues: any[];
+    model_selection?: string;
+    regenerate_formatted?: boolean;
+  }): Promise<{
+    success: boolean;
+    changes_made: number;
+    issues_applied?: string[];
+    segment_error?: string | null;
+    content_error?: string | null;
+    model_used?: string;
+    mode?: string;
+    payload?: any;
+  }> {
+    const response = await this.axios.post(`/transcription/jobs/${job_id}/hearing/apply-revisions`, data, {
+      timeout: 15 * 60 * 1000,
     });
     return response.data;
   }
@@ -2555,7 +2871,9 @@ class ApiClient {
     critical_areas: string[];
     error?: string;
   }> {
-    const response = await this.axios.post('/quality/validate-hearing', data);
+    const response = await this.axios.post('/quality/validate-hearing', data, {
+      timeout: 15 * 60 * 1000,
+    });
     return response.data;
   }
 
@@ -2594,7 +2912,9 @@ class ApiClient {
     }>>;
     summary: Record<string, number>;
   }> {
-    const response = await this.axios.post('/quality/analyze-hearing-segments', data);
+    const response = await this.axios.post('/quality/analyze-hearing-segments', data, {
+      timeout: 15 * 60 * 1000,
+    });
     return response.data;
   }
 
@@ -2646,7 +2966,9 @@ class ApiClient {
     }>;
     checklist_markdown: string;
   }> {
-    const response = await this.axios.post('/quality/generate-hearing-checklist', data);
+    const response = await this.axios.post('/quality/generate-hearing-checklist', data, {
+      timeout: 15 * 60 * 1000,
+    });
     return response.data;
   }
 
@@ -2695,6 +3017,8 @@ class ApiClient {
    */
   async getGraphData(params: {
     entity_ids?: string;
+    document_ids?: string;
+    case_ids?: string;
     types?: string;
     groups?: string;
     max_nodes?: number;
@@ -2887,6 +3211,161 @@ class ApiClient {
   }> {
     const response = await this.axios.get('/graph/relation-types');
     return response.data;
+  }
+
+  /**
+   * Lexical search for entities in the graph
+   * Searches by terms, legal devices, and authors/tribunals
+   */
+  async graphLexicalSearch(params: {
+    terms?: string[];
+    devices?: string[];
+    authors?: string[];
+    matchMode?: 'any' | 'all';
+    types?: string[];
+    limit?: number;
+  }): Promise<Array<{
+    id: string;
+    name: string;
+    type: string;
+    group: string;
+    normalized: string;
+    mention_count: number;
+    metadata?: Record<string, unknown>;
+  }>> {
+    const response = await this.axios.post('/graph/lexical-search', {
+      terms: params.terms || [],
+      devices: params.devices || [],
+      authors: params.authors || [],
+      match_mode: params.matchMode || 'any',
+      types: params.types || ['lei', 'artigo', 'sumula', 'jurisprudencia', 'tema', 'tribunal'],
+      limit: params.limit || 100,
+    });
+    return response.data;
+  }
+
+  /**
+   * Add entities from RAG local documents to the graph
+   * Extracts legal entities from specified documents and adds them to Neo4j
+   */
+  async graphAddFromRAG(params: {
+    documentIds?: string[];
+    caseIds?: string[];
+    extractSemantic?: boolean;
+  }): Promise<{
+    documents_processed: number;
+    chunks_processed: number;
+    entities_extracted: number;
+    entities_added: number;
+    entities_existing: number;
+    relationships_created: number;
+    entities: Array<{
+      entity_id: string;
+      entity_type: string;
+      name: string;
+      normalized: string;
+    }>;
+  }> {
+    const response = await this.axios.post('/graph/add-from-rag', {
+      document_ids: params.documentIds || [],
+      case_ids: params.caseIds || [],
+      extract_semantic: params.extractSemantic ?? true,
+    });
+    return response.data;
+  }
+
+  /**
+   * Content search (OpenSearch BM25) -> entity_ids to seed the graph visualization
+   */
+  async graphContentSearch(params: {
+    query: string;
+    types?: string[];
+    groups?: string[];
+    maxChunks?: number;
+    maxEntities?: number;
+    includeGlobal?: boolean;
+    documentIds?: string[];
+    caseIds?: string[];
+  }): Promise<{
+    query: string;
+    chunks_count: number;
+    entities_count: number;
+    entity_ids: string[];
+    entities: Array<{
+      entity_id: string;
+      entity_type: string;
+      name: string;
+      normalized: string;
+      mentions_in_results: number;
+      group: string;
+    }>;
+  }> {
+    const response = await this.axios.post('/graph/content-search', {
+      query: params.query,
+      types: params.types || ['lei', 'artigo', 'sumula', 'jurisprudencia', 'tema', 'tribunal', 'tese', 'conceito'],
+      groups: params.groups || ['legislacao', 'jurisprudencia', 'doutrina'],
+      max_chunks: params.maxChunks ?? 15,
+      max_entities: params.maxEntities ?? 30,
+      include_global: params.includeGlobal ?? true,
+      document_ids: params.documentIds || [],
+      case_ids: params.caseIds || [],
+    });
+    return response.data;
+  }
+
+  // ============= ORGANIZATIONS =============
+
+  async createOrganization(data: { name: string; cnpj?: string; oab_section?: string }): Promise<any> {
+    const response = await this.axios.post('/organizations/', data);
+    return response.data;
+  }
+
+  async getCurrentOrganization(): Promise<any> {
+    const response = await this.axios.get('/organizations/current');
+    return response.data;
+  }
+
+  async updateOrganization(data: { name?: string; cnpj?: string; oab_section?: string }): Promise<any> {
+    const response = await this.axios.put('/organizations/current', data);
+    return response.data;
+  }
+
+  async getOrgMembers(): Promise<any[]> {
+    const response = await this.axios.get('/organizations/members');
+    return response.data;
+  }
+
+  async inviteMember(email: string, role: string = 'advogado'): Promise<any> {
+    const response = await this.axios.post('/organizations/members/invite', { email, role });
+    return response.data;
+  }
+
+  async updateMemberRole(userId: string, role: string): Promise<any> {
+    const response = await this.axios.put(`/organizations/members/${userId}/role`, { role });
+    return response.data;
+  }
+
+  async removeMember(userId: string): Promise<void> {
+    await this.axios.delete(`/organizations/members/${userId}`);
+  }
+
+  async getOrgTeams(): Promise<any[]> {
+    const response = await this.axios.get('/organizations/teams');
+    return response.data;
+  }
+
+  async createTeam(data: { name: string; description?: string }): Promise<any> {
+    const response = await this.axios.post('/organizations/teams', data);
+    return response.data;
+  }
+
+  async addTeamMember(teamId: string, userId: string): Promise<any> {
+    const response = await this.axios.post(`/organizations/teams/${teamId}/members`, { user_id: userId });
+    return response.data;
+  }
+
+  async removeTeamMember(teamId: string, userId: string): Promise<void> {
+    await this.axios.delete(`/organizations/teams/${teamId}/members/${userId}`);
   }
 }
 

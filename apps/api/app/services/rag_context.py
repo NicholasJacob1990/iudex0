@@ -2,16 +2,16 @@
 RAG Context - Compatibility shim (DEPRECATED).
 
 This module keeps the historic import path (`app.services.rag_context`) stable,
-but delegates implementation to the unified adapter.
+and delegates to the legacy implementation for backward compatibility.
 
-PREFERRED IMPORTS:
-    from app.services.rag.pipeline_adapter import build_rag_context_unified as build_rag_context
+PREFERRED IMPORTS (new pipeline):
+    from app.services.rag.pipeline_adapter import build_rag_context_unified
     from app.services.rag_module_old import get_scoped_knowledge_graph, create_rag_manager
 
 The legacy implementation lives in `app.services.rag_context_legacy`.
 """
 
-from app.services.rag.pipeline_adapter import build_rag_context_unified as build_rag_context
+from app.services.rag_context_legacy import build_rag_context
 from app.services import rag_context_legacy as _legacy
 from app.services.ai.rag_helpers import generate_multi_queries
 from app.services.rag_module_old import get_scoped_knowledge_graph as _get_scoped_knowledge_graph

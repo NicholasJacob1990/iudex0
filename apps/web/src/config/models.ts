@@ -402,3 +402,67 @@ export const PROVIDER_COLORS: Record<Provider, string> = {
     perplexity: "#111827",  // Perplexity charcoal
     internal: "#6366f1",    // Iudex purple
 };
+
+// ---------- AGENT CONFIGURATION ----------
+
+export type AgentId = "claude-agent" | "openai-agent" | "google-agent";
+
+export interface AgentConfig {
+    id: AgentId;
+    label: string;
+    provider: Provider;
+    baseModel: ModelId;
+    isAgent: true;
+    capabilities: string[];
+    description: string;
+    icon: string;
+    tooltip: string;
+}
+
+export const AGENT_REGISTRY: Record<AgentId, AgentConfig> = {
+    "claude-agent": {
+        id: "claude-agent",
+        label: "Claude Agent",
+        provider: "anthropic",
+        baseModel: "claude-4.5-opus",
+        isAgent: true,
+        capabilities: ["tools", "autonomous", "permissions", "juridico"],
+        description: "Autonomo com tools",
+        icon: "/logos/anthropic.png",
+        tooltip: "Agente autonomo que pode executar ferramentas juridicas, analisar documentos e tomar decisoes com supervisao humana. Baseado no Claude Agent SDK.",
+    },
+    "openai-agent": {
+        id: "openai-agent",
+        label: "OpenAI Agent",
+        provider: "openai",
+        baseModel: "gpt-4o",
+        isAgent: true,
+        capabilities: ["tools", "autonomous", "permissions", "juridico"],
+        description: "Autonomo com tools",
+        icon: "/logos/openai.png",
+        tooltip: "Agente autonomo baseado no OpenAI Agents SDK. Executa ferramentas juridicas com permissoes controladas e suporte a checkpoints.",
+    },
+    "google-agent": {
+        id: "google-agent",
+        label: "Google Agent",
+        provider: "google",
+        baseModel: "gemini-3-pro",
+        isAgent: true,
+        capabilities: ["tools", "autonomous", "permissions", "juridico", "adk"],
+        description: "Autonomo com ADK",
+        icon: "/logos/gemini.png",
+        tooltip: "Agente autonomo baseado no Google ADK (Agent Development Kit). Usa Gemini com suporte a Vertex AI e ferramentas juridicas unificadas.",
+    },
+};
+
+export function getAgentConfig(agentId: AgentId): AgentConfig {
+    return AGENT_REGISTRY[agentId];
+}
+
+export function listAgents(): AgentConfig[] {
+    return Object.values(AGENT_REGISTRY);
+}
+
+export function isAgentId(id: string): id is AgentId {
+    return id in AGENT_REGISTRY;
+}

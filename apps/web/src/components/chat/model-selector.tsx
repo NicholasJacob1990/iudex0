@@ -21,9 +21,10 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useChatStore } from "@/stores/chat-store";
 import { useBillingStore } from "@/stores/billing-store";
-import { listModels, ModelId, getModelConfig } from "@/config/models";
+import { listModels, ModelId, getModelConfig, listAgents, AgentId, getAgentConfig, isAgentId } from "@/config/models";
 import { getModelDescription } from "@/config/model-tooltips";
-import { ChevronDown, Sparkles, Scale, Zap, Columns2, PanelTop, HelpCircle } from "lucide-react";
+import { ChevronDown, Sparkles, Scale, Zap, Columns2, PanelTop, HelpCircle, Bot } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { useModelAttachmentLimits } from "@/lib/use-model-attachment-limits";
 import apiClient from "@/lib/api-client";
@@ -76,6 +77,9 @@ export function ModelSelector() {
     const openrouterModels = listModels().filter(m => m.provider === 'openrouter');
     const perplexityModels = listModels().filter((m) => m.provider === 'perplexity');
     const internalModels = listModels().filter(m => m.provider === 'internal');
+
+    // List agents
+    const agents = listAgents();
 
     // Helper to render icon
     const ModelIcon = ({ iconPath }: { iconPath: string }) => (
@@ -513,6 +517,68 @@ export function ModelSelector() {
         );
     };
 
+    const renderAgentItem = (agent: any) => {
+        const isSelected = selectedModels.includes(agent.id);
+        return (
+            <DropdownMenuCheckboxItem
+                key={agent.id}
+                checked={isSelected}
+                onCheckedChange={() => toggleModel(agent.id)}
+                className="flex items-center"
+            >
+                <div className="relative w-4 h-4 mr-2 flex items-center justify-center rounded-sm bg-gradient-to-br from-amber-500 to-orange-600">
+                    <Bot className="w-3 h-3 text-white" />
+                </div>
+                <div className="flex w-full items-start justify-between gap-2">
+                    <div className="flex flex-col">
+                        <div className="flex items-center gap-1.5">
+                            <span className="font-medium">{agent.label}</span>
+                            <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-amber-100 text-amber-700 border-amber-300">
+                                Agent
+                            </Badge>
+                        </div>
+                        <span className="text-[10px] text-muted-foreground">
+                            {agent.description}
+                        </span>
+                    </div>
+                    <TooltipProvider>
+                        <Tooltip>
+                            <TooltipTrigger asChild>
+                                <button
+                                    type="button"
+                                    className="ml-auto inline-flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                    }}
+                                    aria-label={`Ver detalhes de ${agent.label}`}
+                                >
+                                    <HelpCircle className="h-4 w-4" />
+                                </button>
+                            </TooltipTrigger>
+                            <TooltipContent side="right" className="max-w-[260px]">
+                                <div className="text-xs font-semibold flex items-center gap-1.5">
+                                    <Bot className="w-3.5 h-3.5" />
+                                    {agent.label}
+                                </div>
+                                <div className="text-[11px] text-muted-foreground mt-1">
+                                    {agent.tooltip}
+                                </div>
+                                <div className="mt-2 flex flex-wrap gap-1">
+                                    {agent.capabilities.map((cap: string) => (
+                                        <Badge key={cap} variant="outline" className="text-[9px] px-1 py-0">
+                                            {cap}
+                                        </Badge>
+                                    ))}
+                                </div>
+                            </TooltipContent>
+                        </Tooltip>
+                    </TooltipProvider>
+                </div>
+            </DropdownMenuCheckboxItem>
+        );
+    };
+
     return (
         <div className="flex items-center gap-2">
             <DropdownMenu>
@@ -520,10 +586,22 @@ export function ModelSelector() {
                     <Button variant="outline" size="sm" className="h-8 gap-2">
                         {selectedModels.length === 0 ? "Selecionar Modelo" :
                             selectedModels.length === 1 ? (
-                                <>
-                                    <ModelIcon iconPath={getModelConfig(selectedModels[0] as ModelId)?.icon || ''} />
-                                    {getModelConfig(selectedModels[0] as ModelId)?.label}
-                                </>
+                                isAgentId(selectedModels[0]) ? (
+                                    <>
+                                        <div className="relative w-4 h-4 flex items-center justify-center rounded-sm bg-gradient-to-br from-amber-500 to-orange-600">
+                                            <Bot className="w-3 h-3 text-white" />
+                                        </div>
+                                        {getAgentConfig(selectedModels[0] as AgentId)?.label}
+                                        <Badge variant="secondary" className="h-4 px-1.5 text-[9px] bg-amber-100 text-amber-700 border-amber-300">
+                                            Agent
+                                        </Badge>
+                                    </>
+                                ) : (
+                                    <>
+                                        <ModelIcon iconPath={getModelConfig(selectedModels[0] as ModelId)?.icon || ''} />
+                                        {getModelConfig(selectedModels[0] as ModelId)?.label}
+                                    </>
+                                )
                             ) : (
                                 <>
                                     <Sparkles className="w-4 h-4 text-primary" />
@@ -596,45 +674,51 @@ export function ModelSelector() {
                             </DropdownMenuCheckboxItem>
                         </>
                     )}
-                    <DropdownMenuSeparator />
+                    {agents.length > 0 && (
+                        <>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuLabel className="flex items-center gap-1.5">
+                                <Bot className="w-3.5 h-3.5 text-amber-600" />
+                                Agentes
+                            </DropdownMenuLabel>
+                            {agents.map(renderAgentItem)}
+                        </>
+                    )}
 
-                    <DropdownMenuLabel>OpenAI</DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>Modelos</DropdownMenuLabel>
+
+                    <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-0">OpenAI</DropdownMenuLabel>
                     {openaiModels.map(renderModelItem)}
 
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>Anthropic</DropdownMenuLabel>
+                    <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">Anthropic</DropdownMenuLabel>
                     {anthropicModels.map(renderModelItem)}
 
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>Google</DropdownMenuLabel>
+                    <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">Google</DropdownMenuLabel>
                     {googleModels.map(renderModelItem)}
 
                     {perplexityModels.length > 0 && (
                         <>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuLabel>Perplexity</DropdownMenuLabel>
+                            <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">Perplexity</DropdownMenuLabel>
                             {perplexityModels.map(renderModelItem)}
                         </>
                     )}
 
                     {xaiModels.length > 0 && (
                         <>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuLabel>xAI</DropdownMenuLabel>
+                            <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">xAI</DropdownMenuLabel>
                             {xaiModels.map(renderModelItem)}
                         </>
                     )}
 
                     {openrouterModels.length > 0 && (
                         <>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuLabel>OpenRouter / Meta</DropdownMenuLabel>
+                            <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">OpenRouter / Meta</DropdownMenuLabel>
                             {openrouterModels.map(renderModelItem)}
                         </>
                     )}
 
-                    <DropdownMenuSeparator />
-                    <DropdownMenuLabel>Interno</DropdownMenuLabel>
+                    <DropdownMenuLabel className="text-[10px] font-normal text-muted-foreground pt-2">Interno</DropdownMenuLabel>
                     {internalModels.map(renderModelItem)}
 
                 </DropdownMenuContent>

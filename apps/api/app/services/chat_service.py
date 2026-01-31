@@ -1303,6 +1303,39 @@ Retorne APENAS o texto final, sem explicações.
         history = _trim_history_for_models(history, selected_models, base_instruction, user_message)
         history_block = _format_history_block(history)
 
+        async def _persist_rag_history_to_redis() -> None:
+            """Best-effort: persist compact chat history for RAG memory features (Redis + TTL)."""
+            try:
+                from app.services.ai.rag_memory_store import RAGMemoryStore
+            except Exception:
+                return
+            try:
+                thread_now = self.thread_manager.get_thread(thread_id)
+                if not thread_now:
+                    return
+                payload = [{"role": m.role, "content": m.content} for m in thread_now.messages]
+                try:
+                    max_items = int(os.getenv("RAG_MEMORY_MAX_ITEMS", "30") or 30)
+                except Exception:
+                    max_items = 30
+                if max_items > 0:
+                    payload = payload[-max_items:]
+                try:
+                    max_chars = int(os.getenv("RAG_MEMORY_MAX_CHARS_PER_MESSAGE", "2000") or 2000)
+                except Exception:
+                    max_chars = 2000
+                if max_chars > 0:
+                    for item in payload:
+                        content = item.get("content")
+                        if isinstance(content, str) and len(content) > max_chars:
+                            item["content"] = content[:max_chars]
+                await RAGMemoryStore().set_history(thread_id, payload)
+            except Exception as exc:
+                logger.debug(f"RAG memory persist skipped: {exc}")
+
+        # Fire-and-forget: cache history after receiving the user message.
+        asyncio.create_task(_persist_rag_history_to_redis())
+
         attachment_docs = attachment_docs or []
         attachment_mode = (attachment_mode or "auto").lower()
         if attachment_mode not in ("auto", "rag_local", "prompt_injection"):
@@ -3081,6 +3114,7 @@ Retorne APENAS o texto final, sem explicações.
 
                 # Save final message
                 self.thread_manager.add_message(thread_id, "assistant", full_response, model=model_id)
+                asyncio.create_task(_persist_rag_history_to_redis())
                 
                 yield {
                     "type": "done",

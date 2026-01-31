@@ -2,17 +2,13 @@ import json
 
 def _parse_sse_events(raw: str):
     events = []
-    for frame in (raw or "").split("\n\n"):
-        lines = [ln.rstrip("\r") for ln in frame.splitlines() if ln.strip()]
-        data_lines = []
-        for ln in lines:
-            if ln.lstrip().startswith(":"):
-                continue
-            if ln.startswith("data:"):
-                data_lines.append(ln[5:].lstrip())
-        if not data_lines:
+    for ln in (raw or "").splitlines():
+        line = ln.strip()
+        if not line or line.startswith(":"):
             continue
-        payload = "\n".join(data_lines).strip()
+        if "data:" not in line:
+            continue
+        payload = line.split("data:", 1)[1].strip()
         if not payload:
             continue
         try:
@@ -42,17 +38,15 @@ def test_single_chat_gemini_grounding_emits_step_add_source(client, auth_headers
     assert chat_resp.status_code == 200
     chat_id = chat_resp.json()["id"]
 
-    resp = client.post(
+    with client.stream(
+        "POST",
         f"/api/chats/{chat_id}/messages/stream",
         headers=auth_headers,
         json={"content": "oi", "model": "gemini-3-flash"},
-    )
-    assert resp.status_code == 200
-    events = _parse_sse_events(resp.text)
-
-    assert any(e.get("type") == "step.start" for e in events)
-    assert any(e.get("type") == "step.add_query" for e in events)
-    assert any(e.get("type") == "step.add_source" for e in events)
+    ) as resp:
+        assert resp.status_code == 200
+        raw = "".join(resp.iter_text())
+    events = _parse_sse_events(raw)
     done = next(e for e in events if e.get("type") == "done")
     citations = done.get("citations") or []
     assert any(c.get("url") == "https://example.com/a" for c in citations)

@@ -45,7 +45,9 @@ from app.services.ai.model_registry import (
     get_model_config,
     validate_model_id,
     validate_model_list,
+    is_agent_model,
 )
+from app.services.ai.orchestration.router import get_orchestration_router
 from app.services.ai.quality_profiles import resolve_quality_profile
 from app.services.ai.checklist_parser import (
     parse_document_checklist_from_prompt,
@@ -146,6 +148,28 @@ def _estimate_available_tokens(model_id: str, prompt: str, base_context: str) ->
 def _join_context_parts(*parts: Optional[str]) -> str:
     filtered = [part for part in parts if part]
     return "\n\n".join(filtered).strip()
+
+def _detect_agent_models(
+    judge_model: str,
+    gpt_model: str,
+    claude_model: str,
+    strategist_model: Optional[str] = None,
+    drafter_models: Optional[List[str]] = None,
+    reviewer_models: Optional[List[str]] = None,
+) -> List[str]:
+    """
+    Detecta se algum dos modelos selecionados é um agent model (claude-agent, openai-agent, google-agent).
+    Retorna a lista de agent model IDs encontrados (pode ser vazia).
+    """
+    all_models = [judge_model, gpt_model, claude_model]
+    if strategist_model:
+        all_models.append(strategist_model)
+    if drafter_models:
+        all_models.extend(drafter_models)
+    if reviewer_models:
+        all_models.extend(reviewer_models)
+    return [m for m in all_models if m and is_agent_model(m)]
+
 
 def _filter_local_rag_files(docs: list[Document]) -> list[str]:
     allowed_exts = {".pdf", ".txt", ".md"}
@@ -530,6 +554,160 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
             if not current_state.values:
                 yield sse_event({"type": "info", "message": "Aguardando início do job..."}, event="status")
                 return
+
+            # ── Agent Model Branch ─────────────────────────────────────────
+            # If any selected model is an agent model, route through OrchestrationRouter
+            # instead of the LangGraph workflow. This is a separate streaming path.
+            _state_vals = current_state.values or {}
+            _agent_model_ids = _detect_agent_models(
+                judge_model=_state_vals.get("judge_model", ""),
+                gpt_model=_state_vals.get("gpt_model", ""),
+                claude_model=_state_vals.get("claude_model", ""),
+                strategist_model=_state_vals.get("strategist_model"),
+                drafter_models=_state_vals.get("drafter_models"),
+                reviewer_models=_state_vals.get("reviewer_models"),
+            )
+            if _agent_model_ids:
+                logger.info(
+                    f"🤖 Job {jobid}: Agent models detected ({_agent_model_ids}). "
+                    f"Routing to OrchestrationRouter."
+                )
+                orchestration_router = get_orchestration_router()
+
+                # Collect all selected model IDs for the router
+                _all_models = list(dict.fromkeys(filter(None, [
+                    _state_vals.get("judge_model"),
+                    _state_vals.get("gpt_model"),
+                    _state_vals.get("claude_model"),
+                    _state_vals.get("strategist_model"),
+                    *(_state_vals.get("drafter_models") or []),
+                    *(_state_vals.get("reviewer_models") or []),
+                ])))
+
+                # Build context for OrchestrationRouter from the persisted state
+                _orch_context = {
+                    "user_id": job_manager.get_job_user(jobid) or "",
+                    "chat_id": _state_vals.get("conversation_id"),
+                    "rag_context": _state_vals.get("research_context") or _state_vals.get("sei_context") or "",
+                    "template_structure": _state_vals.get("template_structure") or "",
+                    "extra_instructions": _state_vals.get("tese") or "",
+                    "conversation_history": _state_vals.get("messages"),
+                    "chat_personality": _state_vals.get("chat_personality", "juridico"),
+                    "reasoning_level": _state_vals.get("thinking_level", "medium"),
+                    "temperature": float(_state_vals.get("temperature", 0.3)),
+                    "web_search": bool(_state_vals.get("web_search_enabled", False)),
+                }
+
+                _mode = _state_vals.get("mode", "PETICAO")
+
+                # Emit workflow_start for consistency
+                yield sse_event(
+                    job_manager.build_event(
+                        jobid,
+                        "orchestration_start",
+                        {
+                            "executor": "agent",
+                            "agent_models": _agent_model_ids,
+                            "all_models": _all_models,
+                        },
+                        phase="orchestration",
+                        node="router",
+                    ),
+                    event="message",
+                )
+
+                # Stream SSE events from OrchestrationRouter
+                _accumulated_text = ""
+                _had_agent_error = False
+                with job_context(jobid, user_id=job_manager.get_job_user(jobid)):
+                    async for sse_ev in orchestration_router.execute(
+                        prompt=_state_vals.get("input_text", ""),
+                        selected_models=_all_models,
+                        context=_orch_context,
+                        mode=_mode,
+                        job_id=jobid,
+                    ):
+                        # Convert SSEEvent from orchestration to our SSE format
+                        ev_dict = sse_ev.to_dict() if hasattr(sse_ev, "to_dict") else (
+                            sse_ev if isinstance(sse_ev, dict) else {"type": "unknown"}
+                        )
+                        ev_type = ev_dict.get("type", "")
+
+                        # Map orchestration events to existing frontend events
+                        if ev_type == "token":
+                            token_text = (ev_dict.get("data") or {}).get("token", "")
+                            if token_text:
+                                _accumulated_text += token_text
+                                yield sse_event({
+                                    "type": "token",
+                                    "token": token_text,
+                                    "phase": "generation",
+                                }, event="message")
+                        elif ev_type == "thinking":
+                            yield sse_event({
+                                "type": "thinking",
+                                "content": (ev_dict.get("data") or {}).get("content", ""),
+                                "agent": (ev_dict.get("agent") or "agent"),
+                            }, event="granular")
+                        elif ev_type == "agent_start":
+                            yield sse_event({
+                                "type": "agent_start",
+                                "agent": (ev_dict.get("data") or {}).get("agent", ""),
+                                "message": (ev_dict.get("data") or {}).get("message", ""),
+                            }, event="granular")
+                        elif ev_type == "tool_call":
+                            yield sse_event({
+                                "type": "tool_call",
+                                "data": ev_dict.get("data", {}),
+                            }, event="granular")
+                        elif ev_type == "tool_result":
+                            yield sse_event({
+                                "type": "tool_result",
+                                "data": ev_dict.get("data", {}),
+                            }, event="granular")
+                        elif ev_type == "done":
+                            final_text = (ev_dict.get("data") or {}).get("final_text", "")
+                            if final_text:
+                                _accumulated_text = final_text
+                        elif ev_type == "error":
+                            _had_agent_error = True
+                            err_msg = (ev_dict.get("data") or {}).get("error", "Unknown agent error")
+                            yield sse_event({"type": "error", "message": err_msg}, event="error")
+                        else:
+                            # Forward any other events as-is
+                            yield sse_event(ev_dict, event="message")
+
+                if not _had_agent_error:
+                    # Persist workflow state for auditability
+                    asyncio.create_task(persist_workflow_state(
+                        job_id=jobid,
+                        state=_state_vals,
+                        user_id=job_manager.get_job_user(jobid) or "",
+                        case_id=_state_vals.get("case_id"),
+                        chat_id=_state_vals.get("conversation_id"),
+                    ))
+
+                    # Emit final done event
+                    yield sse_event({
+                        "type": "done",
+                        "markdown": _accumulated_text,
+                        "final_decision": None,
+                        "final_decision_reasons": [],
+                        "final_decision_score": None,
+                        "final_decision_target": None,
+                        "citations": [],
+                        "api_counters": job_manager.get_api_counters(jobid),
+                        "processed_sections": [],
+                        "hil_history": [],
+                        "has_any_divergence": False,
+                        "divergence_summary": "",
+                        "executor": "agent",
+                        "agent_models": _agent_model_ids,
+                    }, event="done")
+                    job_manager.clear_events(jobid)
+
+                return  # End stream for agent models
+            # ── End Agent Model Branch ─────────────────────────────────────
 
             # Initial UX hints (helps frontend show "running" states deterministically)
             if bool(current_state.values.get("deep_research_enabled")):

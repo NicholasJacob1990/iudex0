@@ -7,3 +7,4 @@ export { useUIStore } from './ui-store';
 export { useContextStore } from './context-store';
 export { useLibraryStore } from './library-store';
 export { useCanvasStore } from './canvas-store';
+export { useOrgStore } from './org-store';

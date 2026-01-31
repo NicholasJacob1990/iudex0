@@ -21,6 +21,10 @@ class HearingTranscriptionRequest(BaseModel):
     format_mode: str = Field(default="AUDIENCIA", description="Modo de formatação: AUDIENCIA, REUNIAO ou DEPOIMENTO")
     custom_prompt: Optional[str] = Field(None, description="Prompt customizado de estilo/tabela")
     format_enabled: bool = Field(default=True, description="Gera texto formatado adicional")
+    include_timestamps: bool = Field(
+        default=True,
+        description="Controla timestamps no texto formatado/preview (o RAW mantém timestamps para navegação e auditoria)"
+    )
     allow_indirect: bool = Field(default=False, description="Permite discurso indireto nos modos AUDIENCIA, REUNIAO ou DEPOIMENTO")
     allow_summary: bool = Field(default=False, description="Permite ata resumida nos modos AUDIENCIA, REUNIAO ou DEPOIMENTO")
     use_cache: bool = Field(default=True, description="Reaproveita transcrição RAW anterior")

@@ -12,6 +12,8 @@ All endpoints require authentication and use the user's ID as tenant_id.
 """
 
 from __future__ import annotations
+import hashlib
+import json
 
 import logging
 from typing import Any, Dict, List, Optional
@@ -23,6 +25,7 @@ from app.core.security import get_current_user
 from app.models.user import User
 from app.services.rag.core.neo4j_mvp import (
     EntityType,
+    FactExtractor,
     LegalEntityExtractor,
     get_neo4j_mvp,
 )
@@ -94,6 +97,80 @@ class PathResult(BaseModel):
     length: int
 
 
+class LexicalSearchRequest(BaseModel):
+    """Request for lexical search in graph entities."""
+    terms: List[str] = Field(default=[], description="Search terms/phrases")
+    devices: List[str] = Field(default=[], description="Legal devices (Art. 5º, Lei 8.666)")
+    authors: List[str] = Field(default=[], description="Authors/tribunals (STF, Min. Barroso)")
+    match_mode: str = Field(default="any", description="Match mode: 'any' (OR) or 'all' (AND)")
+    types: List[str] = Field(
+        default=["lei", "artigo", "sumula", "jurisprudencia", "tema", "tribunal"],
+        description="Entity types to search"
+    )
+    limit: int = Field(default=100, ge=1, le=500)
+
+
+class ContentSearchRequest(BaseModel):
+    """Request for content-based search (OpenSearch BM25) to seed the graph."""
+    query: str = Field(..., min_length=2, description="Free-text query to search in chunks (BM25)")
+    types: List[str] = Field(
+        default=["lei", "artigo", "sumula", "jurisprudencia", "tema", "tribunal", "tese", "conceito"],
+        description="Entity types to extract/return"
+    )
+    groups: List[str] = Field(
+        default=["legislacao", "jurisprudencia", "doutrina"],
+        description="Which content groups to search (maps to OpenSearch indices)"
+    )
+    max_chunks: int = Field(default=15, ge=1, le=50, description="Max chunks to fetch from OpenSearch")
+    max_entities: int = Field(default=30, ge=1, le=200, description="Max entity IDs to return")
+    include_global: bool = Field(default=True, description="Include global scope content in OpenSearch search")
+    document_ids: List[str] = Field(default=[], description="Restrict search to these doc_ids (UUIDs) if provided")
+    case_ids: List[str] = Field(default=[], description="Restrict search to these case_ids if provided")
+
+
+class ContentSearchResponse(BaseModel):
+    """Response for content-based search used to seed the graph visualization."""
+    query: str
+    chunks_count: int
+    entities_count: int
+    entity_ids: List[str]
+    entities: List[Dict[str, Any]]
+
+
+class AddFromRAGRequest(BaseModel):
+    """Request to add entities from RAG local documents to graph."""
+    document_ids: List[str] = Field(default=[], description="Document IDs to extract from")
+    case_ids: List[str] = Field(default=[], description="Case IDs to extract from")
+    extract_semantic: bool = Field(default=True, description="Use semantic extraction (LLM)")
+
+
+class AddFromRAGResponse(BaseModel):
+    """Response from adding entities from RAG."""
+    documents_processed: int
+    chunks_processed: int
+    entities_extracted: int
+    entities_added: int
+    entities_existing: int
+    relationships_created: int
+    entities: List[Dict[str, Any]]
+
+
+class AddFactsFromRAGRequest(BaseModel):
+    """Request to backfill Fact nodes from already-ingested local RAG chunks."""
+    document_ids: List[str] = Field(default=[], description="Document IDs to extract from")
+    case_ids: List[str] = Field(default=[], description="Case IDs to extract from")
+    max_chunks: int = Field(default=2000, ge=1, le=20000, description="Max chunks to scan")
+    max_facts_per_chunk: int = Field(default=2, ge=1, le=10, description="Max facts extracted per chunk")
+
+
+class AddFactsFromRAGResponse(BaseModel):
+    """Response from backfilling facts."""
+    documents_processed: int
+    chunks_processed: int
+    facts_upserted: int
+    fact_refs_upserted: int
+
+
 class GraphStats(BaseModel):
     """Graph statistics."""
     total_entities: int
@@ -130,7 +207,29 @@ ENTITY_GROUPS = {
     "parte": "outros",
     "oab": "outros",
     "processo": "outros",
+    # Fatos (extraidos de documentos locais)
+    "fato": "fatos",
 }
+
+
+def parse_metadata(metadata_value: Any) -> Dict[str, Any]:
+    """
+    Parse metadata from Neo4j property.
+
+    Neo4j only supports primitive types and homogeneous lists as properties.
+    Metadata is stored as JSON string and needs to be deserialized on read.
+    """
+    if metadata_value is None:
+        return {}
+    if isinstance(metadata_value, dict):
+        return metadata_value
+    if isinstance(metadata_value, str):
+        try:
+            return json.loads(metadata_value)
+        except (json.JSONDecodeError, ValueError):
+            return {"raw": metadata_value}
+    return {"raw": str(metadata_value)}
+
 
 # Tipos de relações semânticas no grafo
 SEMANTIC_RELATIONS = {
@@ -197,6 +296,11 @@ SEMANTIC_RELATIONS = {
         "description": "É exceção ou ressalva de outra regra",
         "semantic": True,
     },
+    "fact_refers_to": {
+        "label": "Relacionado ao fato",
+        "description": "Fato extraído do documento que referencia/conecta esta entidade",
+        "semantic": False,
+    },
 }
 
 
@@ -212,6 +316,42 @@ def get_relation_info(relation_type: str) -> Dict[str, Any]:
         "description": "Relação semântica",
         "semantic": True,
     })
+
+
+def _opensearch_indices_for_groups(groups: List[str]) -> List[str]:
+    """
+    Map graph groups (legislacao/jurisprudencia/doutrina) to OpenSearch indices.
+    """
+    try:
+        from app.services.rag.config import get_rag_config
+        cfg = get_rag_config()
+    except Exception:
+        cfg = None  # type: ignore
+
+    if cfg is None:
+        return []
+
+    group_set = {g.strip().lower() for g in (groups or []) if g}
+    indices: List[str] = []
+
+    # Always keep local index available; scope filter decides visibility.
+    indices.append(cfg.opensearch_index_local)
+
+    if "legislacao" in group_set:
+        indices.append(cfg.opensearch_index_lei)
+    if "jurisprudencia" in group_set:
+        indices.append(cfg.opensearch_index_juris)
+    if "doutrina" in group_set:
+        indices.append(cfg.opensearch_index_doutrina)
+
+    # De-dup preserving order
+    seen = set()
+    out: List[str] = []
+    for idx in indices:
+        if idx and idx not in seen:
+            seen.add(idx)
+            out.append(idx)
+    return out
 
 
 # =============================================================================
@@ -294,9 +434,10 @@ async def search_entities(
     try:
         results = neo4j._execute_read(cypher, params)
 
-        # Add group to results
+        # Add group and parse metadata
         for r in results:
             r["group"] = get_entity_group(r.get("type", ""))
+            r["metadata"] = parse_metadata(r.get("metadata"))
 
         return results
     except Exception as e:
@@ -396,7 +537,7 @@ async def get_entity_detail(
             name=entity["name"],
             type=entity["type"],
             normalized=entity.get("normalized", ""),
-            metadata=entity.get("metadata") or {},
+            metadata=parse_metadata(entity.get("metadata")),
             neighbors=neighbors,
             chunks=chunks,
         )
@@ -414,6 +555,14 @@ async def export_graph(
     entity_ids: Optional[str] = Query(
         None,
         description="Comma-separated entity IDs to start from"
+    ),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)"
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id)"
     ),
     types: str = Query(
         "lei,artigo,sumula,jurisprudencia,tema",
@@ -436,6 +585,9 @@ async def export_graph(
 
     type_list = [t.strip().lower() for t in types.split(",") if t.strip()]
     group_list = [g.strip().lower() for g in groups.split(",") if g.strip()]
+    doc_id_list = [d.strip() for d in (document_ids or "").split(",") if d.strip()] or None
+    case_id_list = [c.strip() for c in (case_ids or "").split(",") if c.strip()] or None
+    include_facts = "fatos" in group_list
 
     # Filter types by groups
     type_list = [t for t in type_list if get_entity_group(t) in group_list]
@@ -461,6 +613,12 @@ async def export_graph(
                 WHERE neighbor.entity_type IN $types
                   AND (d.tenant_id = $tenant_id OR d.scope = 'global')
                   AND (d.sigilo IS NULL OR d.sigilo = false)
+                  AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+                  AND (
+                        $document_ids IS NULL
+                        OR d.doc_id IN $document_ids
+                        OR d.doc_hash IN $document_ids
+                  )
                 RETURN collect(DISTINCT neighbor)[0..$max_neighbors] AS neighbors
             }
 
@@ -480,7 +638,9 @@ async def export_graph(
                 "seed_ids": seed_ids,
                 "types": type_list,
                 "tenant_id": tenant_id,
-                "max_neighbors": max_nodes // 2
+                "max_neighbors": max_nodes // 2,
+                "case_ids": case_id_list,
+                "document_ids": doc_id_list,
             })
 
             for r in results:
@@ -493,7 +653,7 @@ async def export_graph(
                         label=r["name"],
                         type=entity_type,
                         group=group,
-                        metadata=r.get("metadata") or {},
+                        metadata=parse_metadata(r.get("metadata")),
                         size=len(r.get("neighbors", [])) + 1
                     ))
                     node_ids.add(r["id"])
@@ -536,10 +696,17 @@ async def export_graph(
                     WHEN d IS NOT NULL
                      AND (d.tenant_id = $tenant_id OR d.scope = 'global')
                      AND (d.sigilo IS NULL OR d.sigilo = false)
+                     AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+                     AND (
+                           $document_ids IS NULL
+                           OR d.doc_id IN $document_ids
+                           OR d.doc_hash IN $document_ids
+                     )
                     THEN 1
                     ELSE 0
                 END
             ) AS mention_count
+            WHERE mention_count > 0
             ORDER BY mention_count DESC
             LIMIT $limit
             RETURN
@@ -553,7 +720,9 @@ async def export_graph(
             results = neo4j._execute_read(top_query, {
                 "types": type_list,
                 "tenant_id": tenant_id,
-                "limit": max_nodes
+                "limit": max_nodes,
+                "case_ids": case_id_list,
+                "document_ids": doc_id_list,
             })
 
             for r in results:
@@ -566,7 +735,7 @@ async def export_graph(
                         label=r["name"],
                         type=entity_type,
                         group=group,
-                        metadata=r.get("metadata") or {},
+                        metadata=parse_metadata(r.get("metadata")),
                         size=r.get("mention_count", 1)
                     ))
                     node_ids.add(r["id"])
@@ -581,6 +750,12 @@ async def export_graph(
                   AND e1.entity_id < e2.entity_id
                   AND (d.tenant_id = $tenant_id OR d.scope = 'global')
                   AND (d.sigilo IS NULL OR d.sigilo = false)
+                  AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+                  AND (
+                        $document_ids IS NULL
+                        OR d.doc_id IN $document_ids
+                        OR d.doc_hash IN $document_ids
+                  )
                 WITH e1, e2, count(DISTINCT c) AS weight
                 RETURN
                     e1.entity_id AS source,
@@ -590,7 +765,15 @@ async def export_graph(
                 LIMIT 200
                 """
 
-                rel_results = neo4j._execute_read(rel_query, {"node_ids": list(node_ids), "tenant_id": tenant_id})
+                rel_results = neo4j._execute_read(
+                    rel_query,
+                    {
+                        "node_ids": list(node_ids),
+                        "tenant_id": tenant_id,
+                        "case_ids": case_id_list,
+                        "document_ids": doc_id_list,
+                    },
+                )
 
                 for r in rel_results:
                     rel_info = get_relation_info("co_occurrence")
@@ -633,6 +816,78 @@ async def export_graph(
                         )
                     )
 
+        # Optional: include Fact nodes extracted from local documents to connect narrative -> entities.
+        if include_facts and node_ids:
+            fact_query = """
+            MATCH (c:Chunk)-[:ASSERTS]->(f:Fact)-[:REFERS_TO]->(e:Entity)
+            MATCH (d:Document)-[:HAS_CHUNK]->(c)
+            WHERE e.entity_id IN $node_ids
+              AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+              AND (d.sigilo IS NULL OR d.sigilo = false)
+              AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+              AND (
+                    $document_ids IS NULL
+                    OR d.doc_id IN $document_ids
+                    OR d.doc_hash IN $document_ids
+              )
+            RETURN DISTINCT
+                f.fact_id AS fact_id,
+                coalesce(f.text_preview, f.text) AS fact_text,
+                f.metadata AS metadata,
+                e.entity_id AS entity_id
+            LIMIT $limit
+            """
+
+            limit = min(500, max_nodes * 2)
+            fact_rows = neo4j._execute_read(
+                fact_query,
+                {
+                    "node_ids": list(node_ids),
+                    "tenant_id": tenant_id,
+                    "case_ids": case_id_list,
+                    "document_ids": doc_id_list,
+                    "limit": limit,
+                },
+            )
+
+            rel_info = get_relation_info("fact_refers_to")
+            for r in fact_rows:
+                fid = str(r.get("fact_id") or "").strip()
+                eid = str(r.get("entity_id") or "").strip()
+                if not fid or not eid:
+                    continue
+
+                if fid not in node_ids:
+                    text = str(r.get("fact_text") or "").strip()
+                    label = text[:120] + ("..." if len(text) > 120 else "")
+                    nodes.append(
+                        GraphNode(
+                            id=fid,
+                            label=label or fid,
+                            type="fato",
+                            group="fatos",
+                            metadata={
+                                "text": text,
+                                **parse_metadata(r.get("metadata")),
+                            },
+                            size=1,
+                        )
+                    )
+                    node_ids.add(fid)
+
+                if include_relationships:
+                    links.append(
+                        GraphLink(
+                            source=fid,
+                            target=eid,
+                            type="fact_refers_to",
+                            label=rel_info["label"],
+                            description=rel_info["description"],
+                            weight=1.0,
+                            semantic=bool(rel_info.get("semantic", False)),
+                        )
+                    )
+
         return GraphData(nodes=nodes, links=links)
 
     except Exception as e:
@@ -658,7 +913,7 @@ async def find_path(
     path_query = f"""
     MATCH (e1:Entity {{entity_id: $source_id}})
     MATCH (e2:Entity {{entity_id: $target_id}})
-    MATCH path = shortestPath((e1)-[:MENTIONS|RELATED_TO*1..{max_length}]-(e2))
+    MATCH path = shortestPath((e1)-[:MENTIONS|RELATED_TO|ASSERTS|REFERS_TO*1..{max_length}]-(e2))
     WHERE all(n IN nodes(path) WHERE NOT n:Chunk OR exists {{
         MATCH (d:Document)-[:HAS_CHUNK]->(n)
         WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
@@ -1015,4 +1270,730 @@ async def get_remissoes(
 
     except Exception as e:
         logger.error(f"Error getting remissoes: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# LEXICAL SEARCH IN GRAPH
+# =============================================================================
+
+
+@router.post("/lexical-search", response_model=List[Dict[str, Any]])
+async def lexical_search_entities(
+    request: LexicalSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Search entities in the graph using Neo4j fulltext index.
+
+    Uses the `rag_entity_fulltext` index with Lucene query syntax for efficient search.
+
+    Supports:
+    - Terms: general search terms
+    - Devices: legal devices (Art. 5º, Lei 8.666, Súmula 331)
+    - Authors: authors/tribunals (STF, Min. Barroso)
+    - Match mode: 'any' (OR) or 'all' (AND)
+
+    Returns entities that match the search criteria, ranked by relevance score.
+    """
+    neo4j = get_neo4j_mvp()
+    tenant_id = str(current_user.id)
+
+    # Combine all search terms
+    all_terms = request.terms + request.devices + request.authors
+
+    if not all_terms:
+        raise HTTPException(status_code=400, detail="At least one search term required")
+
+    # Build Lucene query string
+    # Escape special Lucene characters: + - && || ! ( ) { } [ ] ^ " ~ * ? : \ /
+    def escape_lucene(term: str) -> str:
+        special_chars = r'+-&|!(){}[]^"~*?:\/'
+        escaped = ""
+        for c in term:
+            if c in special_chars:
+                escaped += f"\\{c}"
+            else:
+                escaped += c
+        return escaped
+
+    # Build query based on match mode
+    escaped_terms = [escape_lucene(t) for t in all_terms]
+
+    if request.match_mode == "all":
+        # AND: all terms must match (use Lucene AND operator)
+        lucene_query = " AND ".join(escaped_terms)
+    else:
+        # OR: any term matches (default Lucene behavior, but explicit OR for clarity)
+        lucene_query = " OR ".join(escaped_terms)
+
+    # Use Neo4j fulltext index for efficient search
+    # The rag_entity_fulltext index is on: [e.name, e.entity_id, e.normalized]
+    cypher = """
+    CALL db.index.fulltext.queryNodes('rag_entity_fulltext', $lucene_query) YIELD node AS e, score
+    WHERE e.entity_type IN $types
+
+    // Get mention count for additional ranking
+    OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
+    OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
+    WITH e, score, sum(
+        CASE
+            WHEN d IS NOT NULL
+             AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+             AND (d.sigilo IS NULL OR d.sigilo = false)
+            THEN 1
+            ELSE 0
+        END
+    ) AS mention_count
+
+    RETURN
+        e.entity_id AS id,
+        e.name AS name,
+        e.entity_type AS type,
+        e.normalized AS normalized,
+        e.metadata AS metadata,
+        score AS relevance_score,
+        mention_count
+    ORDER BY score DESC, mention_count DESC, e.name
+    LIMIT $limit
+    """
+
+    params: Dict[str, Any] = {
+        "lucene_query": lucene_query,
+        "types": [t.lower() for t in request.types],
+        "tenant_id": tenant_id,
+        "limit": request.limit,
+    }
+
+    try:
+        results = neo4j._execute_read(cypher, params)
+
+        # Add group and parse metadata
+        for r in results:
+            r["group"] = get_entity_group(r.get("type", ""))
+            r["metadata"] = parse_metadata(r.get("metadata"))
+
+        return results
+    except Exception as e:
+        # Fallback to CONTAINS-based search if fulltext index not available
+        logger.warning(f"Fulltext search failed, falling back to CONTAINS: {e}")
+
+        # Build CONTAINS-based fallback query
+        if request.match_mode == "all":
+            conditions = [f"toLower(e.name) CONTAINS toLower($term{i})" for i, _ in enumerate(all_terms)]
+            where_clause = " AND ".join(conditions)
+        else:
+            conditions = [f"toLower(e.name) CONTAINS toLower($term{i})" for i, _ in enumerate(all_terms)]
+            where_clause = " OR ".join(conditions)
+
+        fallback_cypher = f"""
+        MATCH (e:Entity)
+        WHERE e.entity_type IN $types
+          AND ({where_clause})
+
+        OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
+        OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
+        WITH e, sum(
+            CASE
+                WHEN d IS NOT NULL
+                 AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+                 AND (d.sigilo IS NULL OR d.sigilo = false)
+                THEN 1
+                ELSE 0
+            END
+        ) AS mention_count
+
+        RETURN
+            e.entity_id AS id,
+            e.name AS name,
+            e.entity_type AS type,
+            e.normalized AS normalized,
+            e.metadata AS metadata,
+            1.0 AS relevance_score,
+            mention_count
+        ORDER BY mention_count DESC, e.name
+        LIMIT $limit
+        """
+
+        fallback_params: Dict[str, Any] = {
+            "types": [t.lower() for t in request.types],
+            "tenant_id": tenant_id,
+            "limit": request.limit,
+        }
+        for i, term in enumerate(all_terms):
+            fallback_params[f"term{i}"] = term
+
+        try:
+            results = neo4j._execute_read(fallback_cypher, fallback_params)
+            for r in results:
+                r["group"] = get_entity_group(r.get("type", ""))
+                r["metadata"] = parse_metadata(r.get("metadata"))
+            return results
+        except Exception as fallback_error:
+            logger.error(f"Error in lexical search fallback: {fallback_error}")
+            raise HTTPException(status_code=500, detail=str(fallback_error))
+
+
+# =============================================================================
+# CONTENT SEARCH (OPENSEARCH) -> ENTITY IDS (SEED GRAPH)
+# =============================================================================
+
+
+@router.post("/content-search", response_model=ContentSearchResponse)
+async def content_search_seed_graph(
+    request: ContentSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Search chunk content via OpenSearch BM25 and return entity_ids to seed /graph/export.
+
+    This is the "Modo Conteudo" for the graph UI:
+    1) OpenSearch BM25 finds relevant chunks ("onde no texto")
+    2) Regex extractor derives legal entities from those chunks
+    3) The UI calls /graph/export with the returned entity_ids ("como se conecta")
+    """
+    try:
+        from app.services.rag.storage.opensearch_service import get_opensearch_service
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenSearch service not available: {e}")
+
+    service = get_opensearch_service()
+    tenant_id = str(current_user.id)
+    user_id = str(current_user.id)
+
+    indices = _opensearch_indices_for_groups(request.groups)
+    if not indices:
+        raise HTTPException(status_code=400, detail="No indices available for requested groups")
+
+    doc_ids = [d for d in request.document_ids if d]
+    case_ids = [c for c in request.case_ids if c]
+
+    source_filter: Optional[Dict[str, Any]] = None
+    if doc_ids or case_ids:
+        must_filters: List[Dict[str, Any]] = []
+        if doc_ids:
+            must_filters.append({"terms": {"doc_id": doc_ids}})
+        if case_ids:
+            must_filters.append({"terms": {"case_id": case_ids}})
+        source_filter = {"bool": {"must": must_filters}}
+
+    # Two-pass search to include local scope without requiring a single case_id.
+    results: List[Dict[str, Any]] = []
+    try:
+        results.extend(
+            service.search_lexical(
+                query=request.query,
+                indices=indices,
+                top_k=request.max_chunks,
+                scope=None,
+                tenant_id=tenant_id,
+                case_id=None,
+                user_id=user_id,
+                group_ids=None,
+                sigilo=None,
+                include_global=bool(request.include_global),
+                source_filter=source_filter,
+            )
+            or []
+        )
+    except Exception as e:
+        logger.warning(f"OpenSearch content search failed (default scopes): {e}")
+
+    try:
+        local_results = service.search_lexical(
+            query=request.query,
+            indices=[indices[0]],  # local index is always first
+            top_k=request.max_chunks,
+            scope="local",
+            tenant_id=tenant_id,
+            case_id=None,
+            user_id=user_id,
+            group_ids=None,
+            sigilo=None,
+            include_global=False,
+            source_filter=source_filter,
+        )
+        results.extend(local_results or [])
+    except Exception as e:
+        logger.warning(f"OpenSearch content search failed (local scope): {e}")
+
+    # Deduplicate by chunk_uid
+    seen_uids = set()
+    unique_chunks: List[Dict[str, Any]] = []
+    for r in results:
+        uid = str(r.get("chunk_uid") or "")
+        if not uid or uid in seen_uids:
+            continue
+        seen_uids.add(uid)
+        unique_chunks.append(r)
+        if len(unique_chunks) >= request.max_chunks:
+            break
+
+    allowed_types = {t.strip().lower() for t in (request.types or []) if t}
+    counts: Dict[str, int] = {}
+    sample: Dict[str, Dict[str, Any]] = {}
+
+    for ch in unique_chunks:
+        text = ch.get("text") or ""
+        if not text:
+            continue
+        for ent in LegalEntityExtractor.extract(text):
+            etype = str(ent.get("entity_type") or "").lower()
+            eid = str(ent.get("entity_id") or "")
+            if not eid:
+                continue
+            if allowed_types and etype not in allowed_types:
+                continue
+            counts[eid] = counts.get(eid, 0) + 1
+            if eid not in sample:
+                sample[eid] = ent
+
+    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    entity_ids = [eid for eid, _ in ranked[: request.max_entities]]
+
+    entities_out: List[Dict[str, Any]] = []
+    for eid in entity_ids:
+        ent = dict(sample.get(eid) or {})
+        ent["mentions_in_results"] = counts.get(eid, 0)
+        ent["group"] = get_entity_group(ent.get("entity_type", ""))
+        entities_out.append(ent)
+
+    return ContentSearchResponse(
+        query=request.query,
+        chunks_count=len(unique_chunks),
+        entities_count=len(entity_ids),
+        entity_ids=entity_ids,
+        entities=entities_out,
+    )
+
+
+# =============================================================================
+# ADD ENTITIES FROM RAG LOCAL
+# =============================================================================
+
+
+@router.post("/add-from-rag", response_model=AddFromRAGResponse)
+async def add_entities_from_rag(
+    request: AddFromRAGRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Extract entities from RAG local documents and add them to the knowledge graph.
+
+    This endpoint:
+    1. Retrieves chunks from specified documents/cases
+    2. Extracts legal entities using regex patterns
+    3. Optionally uses semantic extraction (LLM) for concepts
+    4. Adds new entities to Neo4j graph
+    5. Creates MENTIONS relationships between chunks and entities
+
+    Use this to populate the graph from your local document collection.
+    """
+    neo4j = get_neo4j_mvp()
+    tenant_id = str(current_user.id)
+
+    if not request.document_ids and not request.case_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one document_id or case_id required"
+        )
+
+    # Build query to get chunks from specified documents
+    cypher_get_chunks = """
+    MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+    WHERE d.tenant_id = $tenant_id
+    """
+
+    params: Dict[str, Any] = {"tenant_id": tenant_id}
+
+    conditions = []
+    if request.document_ids:
+        # Support both canonical doc_hash and the original app-level document UUID (d.doc_id).
+        conditions.append("(d.doc_id IN $doc_ids OR d.doc_hash IN $doc_ids)")
+        params["doc_ids"] = request.document_ids
+    if request.case_ids:
+        conditions.append("d.case_id IN $case_ids")
+        params["case_ids"] = request.case_ids
+
+    if conditions:
+        cypher_get_chunks += " AND (" + " OR ".join(conditions) + ")"
+
+    cypher_get_chunks += """
+    RETURN
+        coalesce(d.doc_id, d.doc_hash) AS doc_id,
+        d.title AS doc_title,
+        c.chunk_uid AS chunk_id,
+        c.text_preview AS text,
+        c.chunk_index AS chunk_index
+    ORDER BY d.doc_hash, c.chunk_index
+    """
+
+    try:
+        chunks = neo4j._execute_read(cypher_get_chunks, params)
+
+        if not chunks:
+            return AddFromRAGResponse(
+                documents_processed=0,
+                chunks_processed=0,
+                entities_extracted=0,
+                entities_added=0,
+                entities_existing=0,
+                relationships_created=0,
+                entities=[]
+            )
+
+        # Track results
+        doc_ids_processed = set()
+        all_extracted_entities = []
+        entities_added = []
+        entities_existing = []
+        relationships_created = 0
+
+        # Process each chunk
+        for chunk in chunks:
+            doc_ids_processed.add(chunk["doc_id"])
+            text = chunk.get("text", "")
+            chunk_id = chunk.get("chunk_id")
+
+            if not text or not chunk_id:
+                continue
+
+            # Extract entities using regex patterns
+            extracted = LegalEntityExtractor.extract(text)
+
+            for entity in extracted:
+                entity_id = entity.get("entity_id")
+                if not entity_id:
+                    continue
+
+                all_extracted_entities.append(entity)
+
+                # Check if entity exists
+                exists_query = """
+                MATCH (e:Entity {entity_id: $entity_id})
+                RETURN e.entity_id AS id
+                """
+                existing = neo4j._execute_read(exists_query, {"entity_id": entity_id})
+
+                if existing:
+                    entities_existing.append(entity)
+                else:
+                    entities_added.append(entity)
+
+                # Use MERGE for entity (Neo4j best practice: avoids duplicates)
+                # MERGE will create if not exists, or match if exists
+                merge_entity = """
+                MERGE (e:Entity {entity_id: $entity_id})
+                ON CREATE SET
+                    e.entity_type = $entity_type,
+                    e.name = $name,
+                    e.normalized = $normalized,
+                    e.metadata = $metadata,
+                    e.created_at = datetime()
+                ON MATCH SET
+                    e.updated_at = datetime()
+                RETURN e.entity_id AS id
+                """
+                # Neo4j only supports primitive types and homogeneous lists as properties
+                # Maps/dicts must be serialized as JSON string
+                raw_metadata = entity.get("metadata", {})
+                metadata_str = json.dumps(raw_metadata) if isinstance(raw_metadata, dict) else str(raw_metadata)
+
+                neo4j._execute_write(merge_entity, {
+                    "entity_id": entity_id,
+                    "entity_type": entity.get("entity_type", "unknown"),
+                    "name": entity.get("name", entity_id),
+                    "normalized": entity.get("normalized", entity_id),
+                    "metadata": metadata_str
+                })
+
+                # MERGE relationship: MATCH nodes first, then MERGE relationship
+                # This is the Neo4j best practice pattern
+                merge_rel = """
+                MATCH (c:Chunk {chunk_uid: $chunk_id})
+                MATCH (e:Entity {entity_id: $entity_id})
+                MERGE (c)-[r:MENTIONS]->(e)
+                ON CREATE SET r.created_at = datetime()
+                RETURN type(r) AS rel_type
+                """
+                result = neo4j._execute_write(merge_rel, {
+                    "chunk_id": chunk_id,
+                    "entity_id": entity_id
+                })
+                if result:
+                    relationships_created += 1
+
+        return AddFromRAGResponse(
+            documents_processed=len(doc_ids_processed),
+            chunks_processed=len(chunks),
+            entities_extracted=len(all_extracted_entities),
+            entities_added=len(entities_added),
+            entities_existing=len(entities_existing),
+            relationships_created=relationships_created,
+            entities=entities_added[:50]  # Return first 50 new entities
+        )
+
+    except Exception as e:
+        logger.error(f"Error adding entities from RAG: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# ARGUMENT GRAPH VISUALIZATION
+# =============================================================================
+
+
+class ArgumentGraphNode(BaseModel):
+    """Node in the argument graph."""
+    id: str
+    type: str  # claim, evidence, actor, issue
+    label: str
+    claim_type: Optional[str] = None  # tese, contratese
+    polarity: Optional[int] = None
+    role: Optional[str] = None
+
+
+class ArgumentGraphEdge(BaseModel):
+    """Edge in the argument graph."""
+    source: str
+    target: str
+    type: str  # SUPPORTS, OPPOSES, EVIDENCES, ARGUES, RAISES
+    stance: Optional[str] = None
+    weight: Optional[float] = None
+
+
+class ArgumentGraphData(BaseModel):
+    """Full argument graph for visualization."""
+    nodes: List[ArgumentGraphNode]
+    edges: List[ArgumentGraphEdge]
+    stats: Dict[str, int]
+
+
+@router.get("/argument-graph/{case_id}", response_model=ArgumentGraphData)
+async def get_argument_graph(
+    case_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get the argument graph for a case.
+
+    Returns the full debate structure (Claims, Evidence, Actors, Issues)
+    with relationships (SUPPORTS, OPPOSES, EVIDENCES, ARGUES, RAISES)
+    suitable for frontend visualization.
+
+    Nodes are colored by type:
+    - Claims (tese=green, contratese=red)
+    - Evidence (blue)
+    - Actor (orange)
+    - Issue (purple)
+    """
+    try:
+        from app.services.rag.core.argument_neo4j import get_argument_neo4j
+
+        svc = get_argument_neo4j()
+        tenant_id = str(current_user.id)
+
+        graph = svc.get_argument_graph(tenant_id=tenant_id, case_id=case_id)
+        stats = svc.get_stats(tenant_id=tenant_id)
+
+        nodes = [
+            ArgumentGraphNode(**n) for n in graph.get("nodes", [])
+        ]
+        edges = [
+            ArgumentGraphEdge(**e) for e in graph.get("edges", [])
+        ]
+
+        return ArgumentGraphData(
+            nodes=nodes,
+            edges=edges,
+            stats=stats,
+        )
+
+    except Exception as e:
+        logger.error("Error getting argument graph for case %s: %s", case_id, e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/argument-stats", response_model=Dict[str, int])
+async def get_argument_stats(
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get argument graph statistics for the current tenant.
+
+    Returns counts of Claims, Evidence, Actors, and Issues.
+    """
+    try:
+        from app.services.rag.core.argument_neo4j import get_argument_neo4j
+
+        svc = get_argument_neo4j()
+        tenant_id = str(current_user.id)
+        return svc.get_stats(tenant_id=tenant_id)
+
+    except Exception as e:
+        logger.error("Error getting argument stats: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# FACT NODES FROM RAG
+# =============================================================================
+
+
+@router.post("/add-facts-from-rag", response_model=AddFactsFromRAGResponse)
+async def add_facts_from_rag(
+    request: AddFactsFromRAGRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Backfill Fact nodes from already-ingested local documents (Document/Chunk already in Neo4j).
+
+    This is useful if you ingested documents before enabling `extract_facts` on ingestion.
+    It uses `Chunk.text_preview` (not full text), so it's best-effort and intentionally conservative.
+    """
+    neo4j = get_neo4j_mvp()
+    tenant_id = str(current_user.id)
+
+    if not request.document_ids and not request.case_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one document_id or case_id required",
+        )
+
+    cypher = """
+    MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+    WHERE d.tenant_id = $tenant_id
+      AND d.scope = 'local'
+    """
+
+    params: Dict[str, Any] = {
+        "tenant_id": tenant_id,
+        "max_chunks": int(request.max_chunks or 2000),
+    }
+
+    conditions = []
+    if request.document_ids:
+        conditions.append("(d.doc_id IN $doc_ids OR d.doc_hash IN $doc_ids)")
+        params["doc_ids"] = request.document_ids
+    if request.case_ids:
+        conditions.append("d.case_id IN $case_ids")
+        params["case_ids"] = request.case_ids
+
+    if conditions:
+        cypher += " AND (" + " OR ".join(conditions) + ")"
+
+    cypher += """
+    OPTIONAL MATCH (c)-[:MENTIONS]->(e:Entity)
+    RETURN
+        d.doc_hash AS doc_hash,
+        coalesce(d.doc_id, d.doc_hash) AS doc_id,
+        d.scope AS scope,
+        d.case_id AS case_id,
+        c.chunk_uid AS chunk_uid,
+        c.text_preview AS text,
+        c.chunk_index AS chunk_index,
+        collect(DISTINCT e.entity_id) AS entity_ids
+    ORDER BY d.doc_hash, c.chunk_index
+    LIMIT $max_chunks
+    """
+
+    try:
+        rows = neo4j._execute_read(cypher, params)
+        if not rows:
+            return AddFactsFromRAGResponse(
+                documents_processed=0,
+                chunks_processed=0,
+                facts_upserted=0,
+                fact_refs_upserted=0,
+            )
+
+        fact_rows: List[Dict[str, Any]] = []
+        docs_processed: set = set()
+        max_facts = int(request.max_facts_per_chunk or 2)
+
+        for r in rows:
+            doc_hash = str(r.get("doc_hash") or "")
+            doc_id = str(r.get("doc_id") or "")
+            chunk_uid = str(r.get("chunk_uid") or "")
+            chunk_index = int(r.get("chunk_index") or 0)
+            text = str(r.get("text") or "")
+            entity_ids = [str(e) for e in (r.get("entity_ids") or []) if e]
+
+            if not doc_hash or not chunk_uid or not text.strip():
+                continue
+
+            docs_processed.add(doc_id or doc_hash)
+
+            for fact_text in FactExtractor.extract(text, max_facts=max_facts):
+                fact_norm = " ".join(fact_text.strip().lower().split())
+                fact_hash = hashlib.sha256(f"{doc_hash}:{chunk_uid}:{fact_norm}".encode()).hexdigest()[:24]
+                fact_id = f"fact_{fact_hash}"
+
+                fact_rows.append(
+                    {
+                        "fact_id": fact_id,
+                        "text": fact_text[:2000],
+                        "text_preview": fact_text[:320],
+                        "doc_hash": doc_hash,
+                        "doc_id": doc_id or None,
+                        "tenant_id": tenant_id,
+                        "scope": "local",
+                        "case_id": r.get("case_id"),
+                        "metadata": json.dumps(
+                            {"chunk_uid": chunk_uid, "chunk_index": chunk_index},
+                            ensure_ascii=True,
+                        ),
+                        "chunk_uid": chunk_uid,
+                        "entity_ids": entity_ids,
+                    }
+                )
+
+        if not fact_rows:
+            return AddFactsFromRAGResponse(
+                documents_processed=len(docs_processed),
+                chunks_processed=len(rows),
+                facts_upserted=0,
+                fact_refs_upserted=0,
+            )
+
+        # Batch write (UNWIND) to reduce round-trips.
+        upsert_query = """
+        UNWIND $rows AS row
+        MERGE (f:Fact {fact_id: row.fact_id})
+        ON CREATE SET
+            f.text = row.text,
+            f.text_preview = row.text_preview,
+            f.doc_hash = row.doc_hash,
+            f.doc_id = row.doc_id,
+            f.tenant_id = row.tenant_id,
+            f.scope = row.scope,
+            f.case_id = row.case_id,
+            f.metadata = row.metadata,
+            f.created_at = datetime()
+        ON MATCH SET
+            f.updated_at = datetime()
+        WITH row, f
+        MATCH (c:Chunk {chunk_uid: row.chunk_uid})
+        MERGE (c)-[:ASSERTS]->(f)
+        WITH row, f
+        UNWIND coalesce(row.entity_ids, []) AS eid
+        MATCH (e:Entity {entity_id: eid})
+        MERGE (f)-[:REFERS_TO]->(e)
+        RETURN count(*) AS refs
+        """
+
+        batch_size = 200
+        for i in range(0, len(fact_rows), batch_size):
+            neo4j._execute_write(upsert_query, {"rows": fact_rows[i:i + batch_size]})
+
+        fact_refs = sum(len(r.get("entity_ids") or []) for r in fact_rows)
+        return AddFactsFromRAGResponse(
+            documents_processed=len(docs_processed),
+            chunks_processed=len(rows),
+            facts_upserted=len(fact_rows),
+            fact_refs_upserted=fact_refs,
+        )
+
+    except Exception as e:
+        logger.error(f"Error adding facts from RAG: {e}")
         raise HTTPException(status_code=500, detail=str(e))

@@ -2233,7 +2233,7 @@ export default function MinutaPage() {
                         title="CRAG: melhor fonte"
                         description="Define o minimo de qualidade da melhor evidencia. Quanto maior, mais conservador."
                         badge="CRAG"
-                        meta="Usado apenas se CRAG estiver ligado"
+                        meta="CRAG sempre ativo"
                       >
                         <div className="text-[10px] font-semibold uppercase text-slate-500">CRAG (melhor fonte)</div>
                       </RichTooltip>
@@ -2247,16 +2247,14 @@ export default function MinutaPage() {
                         value={cragMinBestScoreOverride ?? ''}
                         onChange={(e) => setCragMinBestScoreOverride(clampCragScore(parseOptionalNumber(e.target.value)))}
                       />
-                      {!cragGate && (
-                        <p className="text-[10px] text-slate-400">Ative o CRAG no menu RAG para usar.</p>
-                      )}
+                      <p className="text-[10px] text-slate-400">CRAG sempre ativo. Ajuste opcional.</p>
                     </div>
                     <div className="space-y-1">
                       <RichTooltip
                         title="CRAG: media das 3 melhores"
                         description="Define o minimo de qualidade media das 3 melhores fontes. Evita usar evidencias fracas."
                         badge="CRAG"
-                        meta="Usado apenas se CRAG estiver ligado"
+                        meta="CRAG sempre ativo"
                       >
                         <div className="text-[10px] font-semibold uppercase text-slate-500">CRAG (media top 3)</div>
                       </RichTooltip>
@@ -2270,9 +2268,7 @@ export default function MinutaPage() {
                         value={cragMinAvgScoreOverride ?? ''}
                         onChange={(e) => setCragMinAvgScoreOverride(clampCragScore(parseOptionalNumber(e.target.value)))}
                       />
-                      {!cragGate && (
-                        <p className="text-[10px] text-slate-400">Ative o CRAG no menu RAG para usar.</p>
-                      )}
+                      <p className="text-[10px] text-slate-400">CRAG sempre ativo. Ajuste opcional.</p>
                     </div>
                     <div className="space-y-1">
                       <RichTooltip

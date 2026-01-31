@@ -1,18 +1,19 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { Upload, FileAudio, FileVideo, Mic, CheckCircle, AlertCircle, Loader2, FileText, FileType, Book, MessageSquare, ChevronUp, ChevronDown, X, Users, Gavel, ListChecks, Star, Clock, Trash2, Info, AlertTriangle, Edit3 } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback, useMemo, type CSSProperties } from 'react';
+	import { Upload, FileAudio, FileVideo, Mic, CheckCircle, AlertCircle, Loader2, FileText, FileType, Book, MessageSquare, ChevronUp, ChevronDown, X, Users, Gavel, ListChecks, Star, Clock, Trash2, Info, AlertTriangle, Edit3, Search, RefreshCw, SlidersHorizontal, Plus, PanelRightOpen, LayoutTemplate, Heading, Table2, Scissors, ArrowLeftRight, Type } from 'lucide-react';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
 import { useDocumentStore } from '@/stores/document-store';
-import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
-// import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-// import { Textarea } from '@/components/ui/textarea';
-// import { ScrollArea } from '@/components/ui/scroll-area';
-// import { Separator } from '@/components/ui/separator';
+	import { Button } from '@/components/ui/button';
+	import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+	import { Label } from '@/components/ui/label';
+	import { Badge } from '@/components/ui/badge';
+	import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
+	// import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+	// import { Textarea } from '@/components/ui/textarea';
+	// import { ScrollArea } from '@/components/ui/scroll-area';
+	// import { Separator } from '@/components/ui/separator';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { QualityPanel } from '@/components/dashboard/quality-panel';
@@ -22,10 +23,11 @@ import { TranscriptionPromptPicker } from '@/components/dashboard/transcription-
 import { SyncedTranscriptViewer } from '@/components/dashboard/synced-transcript-viewer';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
-import { MarkdownEditorPanel, MarkdownPreview } from '@/components/dashboard/markdown-editor-panel';
+import { MarkdownEditorPanel, MarkdownPreview, RichHtmlPreview } from '@/components/dashboard/markdown-editor-panel';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
-import { buildPreventiveHilIssues } from '@/lib/preventive-hil';
+import { Input } from '@/components/ui/input';
+import { buildPreventiveHilIssues, type HilIssue } from '@/lib/preventive-hil';
 import { buildPreventiveAuditStatus } from '@/lib/preventive-audit';
 
 function SettingInfoPopover({ children }: { children: React.ReactNode }) {
@@ -54,17 +56,207 @@ function SettingInfoPopover({ children }: { children: React.ReactNode }) {
     );
 }
 
+type PromptSnippet = { id: string; title: string; template: string };
+type DocumentTheme = { id: string; title: string; description: string };
+type DocumentLayout = {
+    margins: 'compact' | 'normal' | 'wide';
+    headerText: string;
+    footerText: string;
+    showHeaderFooter: boolean;
+    pageFrame: boolean;
+    fontFamily: string;
+    fontSize: number;
+    lineHeight: number;
+    paragraphSpacing: number;
+};
+
+const PROMPT_SNIPPETS = {
+    apostila: [
+        {
+            id: 'apostila-table-columns',
+            title: 'Ajustar colunas do Quadro-síntese',
+            template: [
+                'Personalização de TABELAS (sem alterar tom/estrutura):',
+                '- No **Quadro-síntese**, use estas colunas (mantendo regras de não inventar):',
+                '  1) Conceito/tema',
+                '  2) Regra/definição (1 frase)',
+                '  3) Requisitos/condições',
+                '  4) Base legal/jurisprudência citada (ou "—")',
+                '  5) Exemplo/pegadinha (ou "—")',
+                '- Não gere a "Tabela 2 — Como a banca cobra / pegadinhas".',
+            ].join('\n'),
+        },
+        {
+            id: 'apostila-resumo',
+            title: 'Adicionar resumo por tópico',
+            template: [
+                'Após o quadro-síntese de cada tópico, adicione:',
+                '#### 🧾 Resumo do tópico (8 bullets)',
+                '- 8 bullets curtos, objetivos, **sem inventar**.',
+            ].join('\n'),
+        },
+        {
+            id: 'apostila-fluxograma',
+            title: 'Adicionar fluxograma (Mermaid)',
+            template: [
+                'Após o quadro-síntese de cada tópico, adicione:',
+                '#### 🔁 Fluxograma (Mermaid)',
+                '```mermaid',
+                'flowchart TD',
+                '  A[Conceito] --> B[Requisitos]',
+                '  B --> C[Consequência/efeito]',
+                '```',
+                'Regras: use apenas nós/etapas que aparecerem no trecho; se faltar informação, omita o nó.',
+            ].join('\n'),
+        },
+        {
+            id: 'apostila-mapa-mental',
+            title: 'Adicionar mapa mental (bullets)',
+            template: [
+                'Após o quadro-síntese de cada tópico, adicione:',
+                '#### 🧠 Mapa mental (bullets)',
+                '- Tema',
+                '  - Subtema 1',
+                '    - Pontos-chave (apenas do trecho)',
+                '  - Subtema 2',
+            ].join('\n'),
+        },
+        {
+            id: 'apostila-questionario',
+            title: 'Adicionar questionário + gabarito',
+            template: [
+                'Após o quadro-síntese de cada tópico, adicione:',
+                '#### 📝 Questionário (5 questões)',
+                '- 5 questões (múltipla escolha ou V/F), baseadas **somente** no trecho.',
+                '#### ✅ Gabarito',
+                '- 1) A',
+                '- 2) C',
+                '- 3) V',
+                '- 4) F',
+                '- 5) B',
+            ].join('\n'),
+        },
+    ] satisfies PromptSnippet[],
+    hearingAudiencia: [
+        {
+            id: 'audiencia-registro-colunas',
+            title: 'Customizar tabela de decisões/atos',
+            template: [
+                'Personalização de TABELAS/EXTRAS (sem alterar tom/estrutura):',
+                '- Quando houver atos/decisões **explícitos**, inclua também a coluna "Documento/Prova citada" (ou "—").',
+                '- Não invente prazo/responsável/timestamp: se não estiver dito, use "—".',
+            ].join('\n'),
+        },
+        {
+            id: 'audiencia-providencias',
+            title: 'Lista de providências (se ditas)',
+            template: [
+                'Ao final da fase em que surgirem determinações **explícitas**, adicione:',
+                '#### ✅ Providências (somente as ditas em audiência)',
+                '- Liste em bullets curtos: ação + responsável (se dito) + prazo (se dito).',
+                '- Se não estiver dito, use "—" e **não invente**.',
+            ].join('\n'),
+        },
+    ] satisfies PromptSnippet[],
+    hearingReuniao: [
+        {
+            id: 'reuniao-tabela-colunas',
+            title: 'Customizar tabela de encaminhamentos',
+            template: [
+                'Personalização de TABELAS/EXTRAS (sem alterar tom/estrutura):',
+                '- Na tabela de "Decisões e encaminhamentos", adicione a coluna "Dependências/Pré-requisitos" (ou "—").',
+                '- Não invente responsável/prazo; se não estiver dito, use "—".',
+            ].join('\n'),
+        },
+        {
+            id: 'reuniao-checklist',
+            title: 'Checklist de ações (se explícitas)',
+            template: [
+                'Ao final de cada pauta com encaminhamentos **explícitos**, adicione:',
+                '#### ✅ Checklist de ações',
+                '- [ ] Ação (responsável — / prazo —)',
+                '- [ ] Ação (responsável — / prazo —)',
+                'Regras: só crie itens a partir do que foi dito; se faltar responsável/prazo, deixe "—".',
+            ].join('\n'),
+        },
+    ] satisfies PromptSnippet[],
+    fidelity: [
+        {
+            id: 'fidelidade-safe',
+            title: 'Fidelidade: ajustes mínimos',
+            template: [
+                'Ajustes permitidos (sem mexer em estrutura):',
+                '- Corrigir apenas gramática/pontuação.',
+                '- Remover muletas (“né”, “tipo”) quando não afetar sentido.',
+                '- Não resumir e não reorganizar tópicos.',
+            ].join('\n'),
+        },
+    ] satisfies PromptSnippet[],
+    depoimento: [
+        {
+            id: 'depoimento-safe',
+            title: 'Depoimento: ajustes mínimos',
+            template: [
+                'Ajustes permitidos (sem mexer em estrutura):',
+                '- Manter perguntas e respostas em sequência.',
+                '- Uma fala por parágrafo quando houver identificação.',
+                '- Não resumir e não transformar em discurso indireto.',
+            ].join('\n'),
+        },
+    ] satisfies PromptSnippet[],
+} as const;
+
+const DOCUMENT_THEMES: DocumentTheme[] = [
+    {
+        id: 'classic',
+        title: 'Clássico',
+        description: 'Tabela padrão com zebra suave e cabeçalho claro.',
+    },
+    {
+        id: 'minimal',
+        title: 'Minimal',
+        description: 'Sem zebra, bordas discretas e visual limpo.',
+    },
+    {
+        id: 'executive',
+        title: 'Executivo',
+        description: 'Cabeçalho destacado e contraste maior.',
+    },
+    {
+        id: 'academic',
+        title: 'Acadêmico',
+        description: 'Linhas sutis e foco em legibilidade.',
+    },
+];
+
 export default function TranscriptionPage() {
     const [files, setFiles] = useState<File[]>([]);
+    const [publicUrl, setPublicUrl] = useState('');
     const [transcriptionType, setTranscriptionType] = useState<'apostila' | 'hearing'>('apostila');
     const [mode, setMode] = useState('FIDELIDADE');
     const [thinkingLevel, setThinkingLevel] = useState('medium');
     const [customPrompt, setCustomPrompt] = useState('');
+    const [documentTheme, setDocumentTheme] = useState('classic');
+    const [documentLayout, setDocumentLayout] = useState<DocumentLayout>({
+        margins: 'normal',
+        headerText: '',
+        footerText: '',
+        showHeaderFooter: true,
+        pageFrame: true,
+        fontFamily: '',
+        fontSize: 15,
+        lineHeight: 1.5,
+        paragraphSpacing: 8,
+    });
     const [highAccuracy, setHighAccuracy] = useState(false);
+    const [enableDiarization, setEnableDiarization] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
     const [selectedModel, setSelectedModel] = useState('gemini-3-flash-preview');
     const [result, setResult] = useState<string | null>(null);
     const [rawResult, setRawResult] = useState<string | null>(null);
+    const [richTextHtml, setRichTextHtml] = useState<string | null>(null);
+    const [richTextJson, setRichTextJson] = useState<any | null>(null);
+    const [richTextMeta, setRichTextMeta] = useState<any | null>(null);
     const [previewMode, setPreviewMode] = useState<'formatted' | 'raw'>('formatted');
     const [isEditingResult, setIsEditingResult] = useState(false);
     const [draftResult, setDraftResult] = useState<string | null>(null);
@@ -93,7 +285,20 @@ export default function TranscriptionPage() {
     const [hearingUseCustomPrompt, setHearingUseCustomPrompt] = useState(false);
     const [hearingAllowIndirect, setHearingAllowIndirect] = useState(false);
     const [hearingAllowSummary, setHearingAllowSummary] = useState(false);
+    const [hearingIncludeTimestamps, setHearingIncludeTimestamps] = useState(true);
     const [hearingCustomPrompt, setHearingCustomPrompt] = useState('');
+    const [hearingDocumentTheme, setHearingDocumentTheme] = useState('classic');
+    const [hearingDocumentLayout, setHearingDocumentLayout] = useState<DocumentLayout>({
+        margins: 'normal',
+        headerText: '',
+        footerText: '',
+        showHeaderFooter: true,
+        pageFrame: true,
+        fontFamily: '',
+        fontSize: 15,
+        lineHeight: 1.5,
+        paragraphSpacing: 8,
+    });
     const [hearingSpeakers, setHearingSpeakers] = useState<any[]>([]);
     const [enrollName, setEnrollName] = useState('');
     const [enrollRole, setEnrollRole] = useState('outro');
@@ -106,6 +311,7 @@ export default function TranscriptionPage() {
     const [hearingNotes, setHearingNotes] = useState('');
     const [isDragActive, setIsDragActive] = useState(false);
     const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+    const [jobMediaFiles, setJobMediaFiles] = useState<Array<{ name: string; url: string }>>([]);
     const [playbackRate, setPlaybackRate] = useState(1);
     const [currentTime, setCurrentTime] = useState(0);
     const [mediaDuration, setMediaDuration] = useState(0);
@@ -122,6 +328,7 @@ export default function TranscriptionPage() {
     const [savedDocuments, setSavedDocuments] = useState<any[]>([]);
     const [savedDocsLoading, setSavedDocsLoading] = useState(false);
     const [activeJobId, setActiveJobId] = useState<string | null>(null);
+    const [activeDocumentName, setActiveDocumentName] = useState<string>('Documento');
     const [jobQuality, setJobQuality] = useState<any | null>(null);
     const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
     const [selectedSavedDocIds, setSelectedSavedDocIds] = useState<Set<string>>(new Set());
@@ -142,20 +349,99 @@ export default function TranscriptionPage() {
     const [progressPercent, setProgressPercent] = useState<number>(0);
     const [progressMessage, setProgressMessage] = useState<string>('');
     const [logs, setLogs] = useState<{ timestamp: string; message: string }[]>([]);
+    const [progressLogsOpen, setProgressLogsOpen] = useState(false);
+    const [progressDockMinimized, setProgressDockMinimized] = useState(false);
 
     // HIL Audit State
     const [auditIssues, setAuditIssues] = useState<any[]>([]);
     const [selectedIssues, setSelectedIssues] = useState<Set<string>>(new Set());
+
     const [isApplyingFixes, setIsApplyingFixes] = useState(false);
     const [showDiffConfirm, setShowDiffConfirm] = useState(false);
     const [pendingRevision, setPendingRevision] = useState<{ content: string; data: any; evidenceUsed?: any } | null>(null);
     const [isAuditOutdated, setIsAuditOutdated] = useState(false);
-    const [recentCases, setRecentCases] = useState<any[]>([]);
-    const [casesLoading, setCasesLoading] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const [followJobLive, setFollowJobLive] = useState(true);
+    const [mainTab, setMainTab] = useState<'jobs' | 'preview'>('jobs');
+    const [jobsSearch, setJobsSearch] = useState('');
+    const [jobsStatusFilter, setJobsStatusFilter] = useState<'all' | 'completed' | 'running' | 'queued' | 'error' | 'canceled'>('all');
+    const [jobsTypeFilter, setJobsTypeFilter] = useState<'all' | 'transcription' | 'hearing'>('all');
+    const [jobsFromDate, setJobsFromDate] = useState('');
+    const [jobsToDate, setJobsToDate] = useState('');
+    const [savedDocsSearch, setSavedDocsSearch] = useState('');
+    const [layoutDialogOpen, setLayoutDialogOpen] = useState(false);
+    const [layoutDialogTab, setLayoutDialogTab] = useState<'tables' | 'margins' | 'header' | 'page' | 'breaks' | 'typography'>('tables');
     const refreshDocuments = useDocumentStore((state) => state.fetchDocuments);
 
     const isHearing = transcriptionType === 'hearing';
+    const activeDocumentTheme = isHearing ? hearingDocumentTheme : documentTheme;
+    const activeDocumentLayout = isHearing ? hearingDocumentLayout : documentLayout;
+    const documentThemeClass = activeDocumentTheme ? `doc-theme-${activeDocumentTheme}` : 'doc-theme-classic';
+    const documentLayoutClass = `doc-typography doc-margins-${activeDocumentLayout.margins}${activeDocumentLayout.pageFrame ? ' doc-page-frame' : ''}`;
     const isRawMode = !isHearing && mode === 'RAW';
+    const hasActiveProgress = Boolean(progressStage || (isProcessing && progressMessage) || logs.length > 0);
+    const documentTypographyStyle = useMemo(() => {
+        const style: CSSProperties & Record<string, string> = {
+            '--doc-font-size': `${activeDocumentLayout.fontSize}px`,
+            '--doc-line-height': String(activeDocumentLayout.lineHeight),
+            '--doc-paragraph-spacing': `${activeDocumentLayout.paragraphSpacing}px`,
+        };
+        if (activeDocumentLayout.fontFamily) {
+            style['--doc-font-family'] = activeDocumentLayout.fontFamily;
+        }
+        return style;
+    }, [
+        activeDocumentLayout.fontFamily,
+        activeDocumentLayout.fontSize,
+        activeDocumentLayout.lineHeight,
+        activeDocumentLayout.paragraphSpacing,
+    ]);
+
+    const setActiveTheme = useCallback((themeId: string) => {
+        if (isHearing) {
+            setHearingDocumentTheme(themeId);
+        } else {
+            setDocumentTheme(themeId);
+        }
+    }, [isHearing]);
+
+    const updateActiveLayout = useCallback((patch: Partial<DocumentLayout>) => {
+        if (isHearing) {
+            setHearingDocumentLayout((prev) => ({ ...prev, ...patch }));
+        } else {
+            setDocumentLayout((prev) => ({ ...prev, ...patch }));
+        }
+    }, [isHearing]);
+
+    const openLayoutDialog = useCallback(
+        (tab?: 'tables' | 'margins' | 'header' | 'page' | 'breaks' | 'typography') => {
+            if (tab) setLayoutDialogTab(tab);
+            setLayoutDialogOpen(true);
+        },
+        [setLayoutDialogOpen, setLayoutDialogTab]
+    );
+
+    const previewHeaderText = (activeDocumentLayout.headerText || '').trim()
+        || (activeDocumentName || '').trim()
+        || (isHearing ? 'Audiência' : 'Documento');
+    const previewFooterText = (activeDocumentLayout.footerText || '').trim();
+    const plainLogsText = useMemo(
+        () => logs.map((log) => `[${log.timestamp}] ${log.message}`).join('\n'),
+        [logs]
+    );
+    const appendToPrompt = useCallback((current: string, snippet: string) => {
+        const trimmed = snippet.trim();
+        if (!trimmed) return current;
+        return current?.trim() ? `${current.trim()}\n\n${trimmed}` : trimmed;
+    }, []);
+    const appendCustomPromptSnippet = useCallback(
+        (snippet: string) => setCustomPrompt((prev) => appendToPrompt(prev, snippet)),
+        [appendToPrompt]
+    );
+    const appendHearingCustomPromptSnippet = useCallback(
+        (snippet: string) => setHearingCustomPrompt((prev) => appendToPrompt(prev, snippet)),
+        [appendToPrompt]
+    );
     const hasPreventiveAudit = !isHearing && Boolean(
         reportPaths?.preventive_fidelity_json_path || reportPaths?.preventive_fidelity_md_path
     );
@@ -427,6 +713,47 @@ export default function TranscriptionPage() {
         return { ...doc, id: resolvedId };
     }, [resolveSavedDocumentId]);
 
+    const filteredJobHistory = useMemo(() => {
+        const search = jobsSearch.trim().toLowerCase();
+        const fromMs = jobsFromDate ? new Date(`${jobsFromDate}T00:00:00`).getTime() : null;
+        const toMs = jobsToDate ? new Date(`${jobsToDate}T23:59:59`).getTime() : null;
+
+        return (jobHistory || []).filter((job: any) => {
+            const status = String(job?.status || '').toLowerCase();
+            if (jobsStatusFilter !== 'all' && status !== jobsStatusFilter) return false;
+
+            const type = String(job?.job_type || '').toLowerCase();
+            if (jobsTypeFilter !== 'all') {
+                const normalized = jobsTypeFilter === 'transcription' ? 'transcription' : 'hearing';
+                if (type !== normalized) return false;
+            }
+
+            if (fromMs || toMs) {
+                const createdAt = job?.created_at || job?.updated_at;
+                const createdMs = createdAt ? new Date(createdAt).getTime() : NaN;
+                if (!Number.isFinite(createdMs)) return false;
+                if (fromMs && createdMs < fromMs) return false;
+                if (toMs && createdMs > toMs) return false;
+            }
+
+            if (!search) return true;
+            const title = type === 'hearing'
+                ? `caso ${job?.config?.case_id || ''} ${job?.job_id || ''}`
+                : `${(job?.file_names || []).join(', ')} ${job?.job_id || ''}`;
+            return title.toLowerCase().includes(search);
+        });
+    }, [jobHistory, jobsSearch, jobsStatusFilter, jobsTypeFilter, jobsFromDate, jobsToDate]);
+
+    const filteredSavedDocuments = useMemo(() => {
+        const search = savedDocsSearch.trim().toLowerCase();
+        if (!search) return savedDocuments || [];
+        return (savedDocuments || []).filter((doc: any) => {
+            const name = String(doc?.name || '').toLowerCase();
+            const id = String(resolveSavedDocumentId(doc) || '').toLowerCase();
+            return name.includes(search) || id.includes(search);
+        });
+    }, [savedDocuments, savedDocsSearch, resolveSavedDocumentId]);
+
     const upsertSavedDocuments = (docs: any[]) => {
         if (!docs.length) return;
         setSavedDocuments((prev) => {
@@ -502,6 +829,7 @@ export default function TranscriptionPage() {
         if (e.target.files && e.target.files.length > 0) {
             const newFiles = Array.from(e.target.files);
             setFiles(prev => [...prev, ...newFiles]);
+            setPublicUrl('');
         }
         e.target.value = '';
     };
@@ -534,6 +862,7 @@ export default function TranscriptionPage() {
         const droppedFiles = Array.from(e.dataTransfer.files || []);
         if (droppedFiles.length === 0) return;
         setFiles(prev => [...prev, ...droppedFiles]);
+        setPublicUrl('');
     };
 
     const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -583,21 +912,6 @@ export default function TranscriptionPage() {
             mediaRef.current.playbackRate = playbackRate;
         }
     }, [playbackRate]);
-
-    useEffect(() => {
-        const loadCases = async () => {
-            try {
-                setCasesLoading(true);
-                const data = await apiClient.getCases();
-                setRecentCases(Array.isArray(data) ? data.slice(0, 5) : []);
-            } catch (error) {
-                console.error(error);
-            } finally {
-                setCasesLoading(false);
-            }
-        };
-        loadCases();
-    }, [normalizeSavedDocument]);
 
     const loadJobHistory = useCallback(async () => {
         try {
@@ -694,6 +1008,24 @@ export default function TranscriptionPage() {
         const cleaned = content.replace(/<!--\s*RELATÓRIO:[\s\S]*?-->/gi, '');
         return cleaned.replace(/\n{3,}/g, '\n\n').trim();
     };
+
+    const coerceNumber = (value: any, fallback: number) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    };
+
+    const handleInsertPageBreak = useCallback(() => {
+        const marker = '\n\n<!-- PAGE_BREAK -->\n\n';
+        const base = stripReportBlocks(draftResult ?? result ?? '') || '';
+        const normalized = base.replace(/\s+$/g, '');
+        const next = normalized.endsWith('<!-- PAGE_BREAK -->')
+            ? normalized + '\n'
+            : `${normalized}${marker}`;
+
+        setDraftResult(next);
+        setIsEditingResult(true);
+        toast.success('Quebra de página inserida. Você pode movê-la no editor.');
+    }, [draftResult, result, setDraftResult, setIsEditingResult, stripReportBlocks]);
 
     const enrichHilIssues = (issues: any[], rawText?: string | null, formattedText?: string | null) => {
         if (!Array.isArray(issues) || issues.length === 0) return Array.isArray(issues) ? issues : [];
@@ -893,16 +1225,29 @@ export default function TranscriptionPage() {
         return entries;
     };
 
-    const processResponse = (content: string, rawContent?: string | null) => {
+    const processResponse = (
+        content: string,
+        rawContent?: string | null,
+        rich?: { html?: string | null; json?: any; meta?: any } | null
+    ) => {
         // Extrair relatório (<!-- RELATÓRIO: ... -->)
         setReport(extractReports(content));
         const cleaned = stripReportBlocks(content) || content;
         setResult(cleaned);
         setRawResult(rawContent ?? cleaned);
+        setRichTextHtml(rich?.html ?? null);
+        setRichTextJson(rich?.json ?? null);
+        setRichTextMeta(rich?.meta ?? null);
         setIsEditingResult(false);
         setDraftResult(null);
         setHilDiagnostics(null);
     };
+
+    const clearRichContent = useCallback(() => {
+        setRichTextHtml(null);
+        setRichTextJson(null);
+        setRichTextMeta(null);
+    }, []);
 
     const fetchPreventiveAudit = useCallback(async (force = false) => {
         if (isHearing || !activeJobId) {
@@ -1015,24 +1360,26 @@ export default function TranscriptionPage() {
 
     const buildReportEntries = (reports: Record<string, string> | null) => {
         if (!reports) return [];
-        const orderedKeys: Array<[string, string]> = [
-            ['legal_audit_path', 'Auditoria jurídica (AUDITORIA.md)'],
-            ['audit_path', 'Auditoria jurídica (AUDITORIA.md)'],
-            ['structure_audit_path', 'Auditoria estrutural (verificacao.txt)'],
-            ['coverage_path', 'Validação (validacao.txt)'],
-            ['fidelity_path', 'Fidelidade (fidelidade.json)'],
-            ['preventive_fidelity_md_path', 'Auditoria preventiva (AUDITORIA_FIDELIDADE.md)'],
-            ['preventive_fidelity_json_path', 'Auditoria preventiva (AUDITORIA_FIDELIDADE.json)'],
-            ['revision_path', 'Revisão (REVISAO.md)'],
-            ['analysis_path', 'Análise estrutural (ANALISE.json)'],
-            ['validation_path', 'Validação de fidelidade (FIDELIDADE.json)'],
-            ['suggestions_path', 'Sugestões HIL (SUGESTOES.json)'],
-            ['docx_path', 'Documento final (DOCX)'],
-            ['md_path', 'Documento final (MD)'],
-            ['raw_path', 'Transcrição RAW (txt)'],
-            ['original_md_path', 'Documento original (MD)'],
-            ['original_docx_path', 'Documento original (DOCX)'],
-        ];
+	        const orderedKeys: Array<[string, string]> = [
+	            ['legal_audit_path', 'Auditoria jurídica (AUDITORIA.md)'],
+	            ['audit_path', 'Auditoria jurídica (AUDITORIA.md)'],
+	            ['structure_audit_path', 'Auditoria estrutural (verificacao.txt)'],
+	            ['coverage_path', 'Validação (validacao.txt)'],
+	            ['fidelity_path', 'Fidelidade (fidelidade.json)'],
+	            ['preventive_fidelity_md_path', 'Auditoria preventiva (AUDITORIA_FIDELIDADE.md)'],
+	            ['preventive_fidelity_json_path', 'Auditoria preventiva (AUDITORIA_FIDELIDADE.json)'],
+	            ['revision_path', 'Revisão (REVISAO.md)'],
+	            ['analysis_path', 'Análise estrutural (ANALISE.json)'],
+	            ['validation_path', 'Validação de fidelidade (FIDELIDADE.json)'],
+	            ['suggestions_path', 'Sugestões HIL (SUGESTOES.json)'],
+	            ['format_source_path', 'Fonte usada na formatação (transcript_for_formatting.md)'],
+	            ['transcript_no_timestamps_path', 'Transcrição sem timestamps (hearing_transcript_no_timestamps.md)'],
+	            ['docx_path', 'Documento final (DOCX)'],
+	            ['md_path', 'Documento final (MD)'],
+	            ['raw_path', 'Transcrição RAW (txt)'],
+	            ['original_md_path', 'Documento original (MD)'],
+	            ['original_docx_path', 'Documento original (DOCX)'],
+	        ];
         const seen = new Set<string>();
         return orderedKeys
             .map(([key, label]) => {
@@ -1293,7 +1640,9 @@ export default function TranscriptionPage() {
         setHearingFormatted(cleanFormatted);
         const reportContent = extractReports(formatted) || extractReports(transcript);
         setReport(reportContent);
-        setResult(cleanTranscript || null);
+        // Preview padrão deve ser o resultado formatado (quando existir).
+        setResult(cleanFormatted || cleanTranscript || null);
+        clearRichContent();
         const mergedReports = mergeReportKeys(reportMap, auditSummary);
         if (mergedReports) {
             setReportPaths(normalizeReportPaths(mergedReports));
@@ -1418,6 +1767,14 @@ export default function TranscriptionPage() {
             setTranscriptionType('hearing');
             applyHearingPayload(payload?.payload || payload);
             setJobQuality(payload?.quality ?? null);
+            setIsAuditOutdated(Boolean(payload?.quality?.needs_revalidate));
+            setActiveDocumentName(
+                hearingCaseId?.trim()
+                    ? `Caso ${hearingCaseId.trim()}`
+                    : files.length === 1
+                        ? files[0]?.name || 'Audiência'
+                        : 'Audiência'
+            );
             setIsProcessing(false);
             setProgressPercent(100);
             setEtaSeconds(0);
@@ -1440,14 +1797,29 @@ export default function TranscriptionPage() {
         }
 
         setTranscriptionType('apostila');
+        if (payload?.mode) {
+            setMode(String(payload.mode));
+        }
         setHearingPayload(null);
         setHearingTranscript(null);
         setHearingFormatted(null);
+        setActiveDocumentName(
+            files.length === 0
+                ? 'Documento'
+                : files.length === 1
+                    ? files[0]?.name || 'Documento'
+                    : `${files.length} arquivos`
+        );
         const content = payload?.content ?? payload?.raw_content ?? '';
         const rawContent = payload?.raw_content ?? payload?.content ?? '';
-        processResponse(content, rawContent);
+        processResponse(content, rawContent, {
+            html: payload?.rich_text_html ?? null,
+            json: payload?.rich_text_json ?? null,
+            meta: payload?.rich_text_meta ?? null,
+        });
         setReportPaths(normalizeReportPaths(mergeReportKeys(payload?.reports ?? null, payload?.audit_summary)));
         setJobQuality(payload?.quality ?? null);
+        setIsAuditOutdated(Boolean(payload?.quality?.needs_revalidate));
         setIsProcessing(false);
         setProgressPercent(100);
         setEtaSeconds(0);
@@ -1502,35 +1874,89 @@ export default function TranscriptionPage() {
             setProgressPercent(100);
             setEtaSeconds(0);
             setLogs([]);
+            setJobMediaFiles([]);
 
             // Load media URL from server (persisted audio/video)
             try {
                 const mediaData = await apiClient.listJobMedia(jobId);
-                if (mediaData?.files?.length > 0) {
-                    // Use the first media file
-                    const serverMediaUrl = apiClient.getJobMediaUrl(jobId, 0);
-                    setMediaUrl(serverMediaUrl);
-                    console.log('[handleLoadJobResult] Media URL loaded:', serverMediaUrl);
+                if (Array.isArray(mediaData?.files) && mediaData.files.length > 0) {
+                    const mapped = mediaData.files.map((f, idx) => ({
+                        name: f?.name || `Arquivo ${idx + 1}`,
+                        url: apiClient.getJobMediaUrl(jobId, idx),
+                    }));
+                    setJobMediaFiles(mapped);
+                    setMediaUrl(mapped[0]?.url || null);
+                    console.log('[handleLoadJobResult] Media URL loaded:', mapped[0]?.url);
+                } else {
+                    setMediaUrl(null);
                 }
             } catch (mediaError) {
                 console.warn('[handleLoadJobResult] Could not load media:', mediaError);
+                setMediaUrl(null);
             }
 
             if (data?.job_type === 'hearing' || data?.payload) {
                 setTranscriptionType('hearing');
                 applyHearingPayload(data);
                 setJobQuality(data?.quality ?? null);
+                setIsAuditOutdated(Boolean(data?.quality?.needs_revalidate));
+                setHearingDocumentTheme(String(data?.config?.document_theme || 'classic'));
+                setHearingDocumentLayout((prev) => ({
+                    ...prev,
+                    margins: (String(data?.config?.document_margins || prev.margins) as DocumentLayout['margins']),
+                    headerText: String(data?.config?.document_header || ''),
+                    footerText: String(data?.config?.document_footer || ''),
+                    showHeaderFooter: data?.config?.document_show_header_footer !== undefined
+                        ? Boolean(data.config.document_show_header_footer)
+                        : prev.showHeaderFooter,
+                    pageFrame: data?.config?.document_page_frame !== undefined
+                        ? Boolean(data.config.document_page_frame)
+                        : prev.pageFrame,
+                    fontFamily: String(data?.config?.document_font_family || prev.fontFamily || ''),
+                    fontSize: coerceNumber(data?.config?.document_font_size, prev.fontSize),
+                    lineHeight: coerceNumber(data?.config?.document_line_height, prev.lineHeight),
+                    paragraphSpacing: coerceNumber(data?.config?.document_paragraph_spacing, prev.paragraphSpacing),
+                }));
+                const caseId = data?.payload?.case_id || data?.config?.case_id || data?.case_id;
+                setActiveDocumentName(caseId ? `Caso ${caseId}` : 'Audiência');
                 toast.success('Resultado de audiência carregado!');
             } else {
                 setTranscriptionType('apostila');
+                if (data?.mode) {
+                    setMode(String(data.mode));
+                }
                 setHearingPayload(null);
                 setHearingTranscript(null);
                 setHearingFormatted(null);
+                setDocumentTheme(String(data?.config?.document_theme || 'classic'));
+                setDocumentLayout((prev) => ({
+                    ...prev,
+                    margins: (String(data?.config?.document_margins || prev.margins) as DocumentLayout['margins']),
+                    headerText: String(data?.config?.document_header || ''),
+                    footerText: String(data?.config?.document_footer || ''),
+                    showHeaderFooter: data?.config?.document_show_header_footer !== undefined
+                        ? Boolean(data.config.document_show_header_footer)
+                        : prev.showHeaderFooter,
+                    pageFrame: data?.config?.document_page_frame !== undefined
+                        ? Boolean(data.config.document_page_frame)
+                        : prev.pageFrame,
+                    fontFamily: String(data?.config?.document_font_family || prev.fontFamily || ''),
+                    fontSize: coerceNumber(data?.config?.document_font_size, prev.fontSize),
+                    lineHeight: coerceNumber(data?.config?.document_line_height, prev.lineHeight),
+                    paragraphSpacing: coerceNumber(data?.config?.document_paragraph_spacing, prev.paragraphSpacing),
+                }));
+                const fileNames = Array.isArray(data?.file_names) ? data.file_names.filter(Boolean) : [];
+                setActiveDocumentName(fileNames.length ? fileNames.join(', ') : 'Documento');
                 const content = data?.content ?? data?.raw_content ?? '';
                 const rawContent = data?.raw_content ?? data?.content ?? '';
-                processResponse(content, rawContent);
+                processResponse(content, rawContent, {
+                    html: data?.rich_text_html ?? null,
+                    json: data?.rich_text_json ?? null,
+                    meta: data?.rich_text_meta ?? null,
+                });
                 setReportPaths(normalizeReportPaths(mergeReportKeys(data?.reports ?? null, data?.audit_summary)));
                 setJobQuality(data?.quality ?? null);
+                setIsAuditOutdated(Boolean(data?.quality?.needs_revalidate));
                 setActiveTab('preview');
 
                 // Processar auto_applied_fixes se disponível
@@ -1569,13 +1995,15 @@ export default function TranscriptionPage() {
     const handleResumeJob = async (jobId: string) => {
         setActiveJobId(jobId);
         setIsProcessing(true);
-        setResult(null);
+            setResult(null);
+            clearRichContent();
         setRawResult(null);
         setReport(null);
         setReportPaths(null);
         setHearingPayload(null);
         setHearingTranscript(null);
         setHearingFormatted(null);
+        setJobMediaFiles([]);
         setProgressStage('starting');
         setProgressPercent(0);
         setProgressMessage('Retomando...');
@@ -1766,19 +2194,38 @@ export default function TranscriptionPage() {
     };
 
     const handleSubmit = async () => {
-        if (files.length === 0) {
-            toast.error('Selecione pelo menos um arquivo de áudio, vídeo ou texto.');
+        const urlValue = publicUrl.trim();
+        const hasUrl = Boolean(urlValue);
+        if (files.length === 0 && !hasUrl) {
+            toast.error('Selecione um arquivo OU informe uma URL pública (YouTube).');
+            return;
+        }
+        if (files.length > 0 && hasUrl) {
+            toast.error('Escolha apenas uma fonte: arquivos OU URL (não ambos).');
             return;
         }
 
         setJobQuality(null);
+        setJobMediaFiles([]);
         const onlyTextFiles = files.length > 0 && files.every(isTextFile);
         const options = {
             mode,
             thinking_level: thinkingLevel,
             custom_prompt: customPrompt || undefined,
+            document_theme: documentTheme,
+            document_header: (documentLayout.headerText || '').trim() || undefined,
+            document_footer: (documentLayout.footerText || '').trim() || undefined,
+            document_margins: documentLayout.margins,
+            document_page_frame: documentLayout.pageFrame,
+            document_show_header_footer: documentLayout.showHeaderFooter,
+            document_font_family: documentLayout.fontFamily || undefined,
+            document_font_size: documentLayout.fontSize,
+            document_line_height: documentLayout.lineHeight,
+            document_paragraph_spacing: documentLayout.paragraphSpacing,
             model_selection: selectedModel,
             high_accuracy: highAccuracy,
+            diarization: enableDiarization ? true : undefined,
+            diarization_strict: enableDiarization ? true : undefined,
             use_cache: useRawCache,
             auto_apply_fixes: autoApplyFixes,
             auto_apply_content_fixes: autoApplyContentFixes,
@@ -1792,7 +2239,7 @@ export default function TranscriptionPage() {
                 toast.error('Informe o número do processo/caso.');
                 return;
             }
-            if (files.length > 1) {
+            if (!hasUrl && files.length > 1) {
                 toast.error('Para audiências/reuniões, envie apenas um arquivo por vez.');
                 return;
             }
@@ -1800,14 +2247,104 @@ export default function TranscriptionPage() {
                 toast.error('Informe o prompt personalizado para formatação.');
                 return;
             }
-            if (files.length === 1 && isTextFile(files[0])) {
+            if (!hasUrl && files.length === 1 && isTextFile(files[0])) {
                 toast.error('Audiências requerem arquivo de áudio ou vídeo.');
                 return;
             }
         }
 
+        if (!followJobLive) {
+            try {
+                if (isHearing) {
+                    setActiveDocumentName(hearingCaseId?.trim() ? `Caso ${hearingCaseId.trim()}` : 'Audiência');
+                    const formatEnabled = hearingFormatMode !== 'none';
+                    const formatMode = formatEnabled ? hearingFormatMode.toUpperCase() : 'AUDIENCIA';
+                    const customPrompt =
+                        formatEnabled && hearingUseCustomPrompt ? hearingCustomPrompt.trim() : undefined;
+                    const allowIndirect = formatEnabled && hearingAllowIndirect;
+                    const allowSummary = formatEnabled && hearingAllowSummary;
+                    const job = hasUrl
+                        ? await apiClient.startHearingJobFromUrl(urlValue, {
+                            case_id: hearingCaseId.trim(),
+                            goal: hearingGoal,
+                            thinking_level: thinkingLevel,
+                            model_selection: selectedModel,
+                            high_accuracy: highAccuracy,
+                            format_mode: formatMode,
+                            custom_prompt: customPrompt,
+                            document_theme: hearingDocumentTheme,
+                            document_header: (hearingDocumentLayout.headerText || '').trim() || undefined,
+                            document_footer: (hearingDocumentLayout.footerText || '').trim() || undefined,
+                            document_margins: hearingDocumentLayout.margins,
+                            document_page_frame: hearingDocumentLayout.pageFrame,
+                            document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
+                            document_font_family: hearingDocumentLayout.fontFamily || undefined,
+                            document_font_size: hearingDocumentLayout.fontSize,
+                            document_line_height: hearingDocumentLayout.lineHeight,
+                            document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
+                            format_enabled: formatEnabled,
+                            include_timestamps: hearingIncludeTimestamps,
+                            allow_indirect: allowIndirect,
+                            allow_summary: allowSummary,
+                            use_cache: useRawCache,
+                            auto_apply_fixes: autoApplyFixes,
+                            auto_apply_content_fixes: autoApplyContentFixes,
+                            skip_legal_audit: skipLegalAudit,
+                            skip_fidelity_audit: skipFidelityAudit,
+                            skip_sources_audit: skipFidelityAudit,
+                        })
+                        : await apiClient.startHearingJob(files[0], {
+                            case_id: hearingCaseId.trim(),
+                            goal: hearingGoal,
+                            thinking_level: thinkingLevel,
+                            model_selection: selectedModel,
+                            high_accuracy: highAccuracy,
+                            format_mode: formatMode,
+                            custom_prompt: customPrompt,
+                            document_theme: hearingDocumentTheme,
+                            document_header: (hearingDocumentLayout.headerText || '').trim() || undefined,
+                            document_footer: (hearingDocumentLayout.footerText || '').trim() || undefined,
+                            document_margins: hearingDocumentLayout.margins,
+                            document_page_frame: hearingDocumentLayout.pageFrame,
+                            document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
+                            document_font_family: hearingDocumentLayout.fontFamily || undefined,
+                            document_font_size: hearingDocumentLayout.fontSize,
+                            document_line_height: hearingDocumentLayout.lineHeight,
+                            document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
+                            format_enabled: formatEnabled,
+                            include_timestamps: hearingIncludeTimestamps,
+                            allow_indirect: allowIndirect,
+                            allow_summary: allowSummary,
+                            use_cache: useRawCache,
+                            auto_apply_fixes: autoApplyFixes,
+                            auto_apply_content_fixes: autoApplyContentFixes,
+                            skip_legal_audit: skipLegalAudit,
+                            skip_fidelity_audit: skipFidelityAudit,
+                            skip_sources_audit: skipFidelityAudit,
+                        });
+                    if (job?.job_id) setActiveJobId(job.job_id);
+                } else {
+                    setActiveDocumentName(hasUrl ? 'URL pública' : (files.length === 1 ? files[0]?.name || 'Documento' : `${files.length} arquivos`));
+                    const job = hasUrl
+                        ? await apiClient.startTranscriptionJobFromUrl(urlValue, options)
+                        : await apiClient.startTranscriptionJob(files, options);
+                    if (job?.job_id) setActiveJobId(job.job_id);
+                }
+                toast.success('Job iniciado. Acompanhe no dashboard.');
+                setFiles([]);
+                setPublicUrl('');
+                setSettingsOpen(false);
+                setMainTab('jobs');
+                await loadJobHistory().catch(() => undefined);
+            } catch (error: any) {
+                toast.error(formatApiError(error, 'Falha ao iniciar job.'));
+            }
+            return;
+        }
+
         setIsProcessing(true);
         setResult(null);
+        clearRichContent();
         setRawResult(null);
         setReport(null);
         setReportPaths(null);
@@ -1822,8 +2359,7 @@ export default function TranscriptionPage() {
         setCurrentTime(0);
 
         setEtaSeconds(null);
-
-
+        setSettingsOpen(false);
 
         if (isHearing) {
             const formatEnabled = hearingFormatMode !== 'none';
@@ -1834,25 +2370,67 @@ export default function TranscriptionPage() {
             const allowSummary = formatEnabled && hearingAllowSummary;
 
             try {
-                const job = await apiClient.startHearingJob(files[0], {
-                    case_id: hearingCaseId.trim(),
-                    goal: hearingGoal,
-                    thinking_level: thinkingLevel,
-                    model_selection: selectedModel,
-                    high_accuracy: highAccuracy,
-                    format_mode: formatMode,
-                    custom_prompt: customPrompt,
-                    format_enabled: formatEnabled,
-                    allow_indirect: allowIndirect,
-                    allow_summary: allowSummary,
-                    use_cache: useRawCache,
-                    auto_apply_fixes: autoApplyFixes,
-                    auto_apply_content_fixes: autoApplyContentFixes,
-                    skip_legal_audit: skipLegalAudit,
-                    skip_fidelity_audit: skipFidelityAudit,
-                    skip_sources_audit: skipFidelityAudit,
-                });
+                const job = hasUrl
+                    ? await apiClient.startHearingJobFromUrl(urlValue, {
+                        case_id: hearingCaseId.trim(),
+                        goal: hearingGoal,
+                        thinking_level: thinkingLevel,
+                        model_selection: selectedModel,
+                        high_accuracy: highAccuracy,
+                        format_mode: formatMode,
+                        custom_prompt: customPrompt,
+                        document_theme: hearingDocumentTheme,
+                        document_header: (hearingDocumentLayout.headerText || '').trim() || undefined,
+                        document_footer: (hearingDocumentLayout.footerText || '').trim() || undefined,
+                        document_margins: hearingDocumentLayout.margins,
+                        document_page_frame: hearingDocumentLayout.pageFrame,
+                        document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
+                        document_font_family: hearingDocumentLayout.fontFamily || undefined,
+                        document_font_size: hearingDocumentLayout.fontSize,
+                        document_line_height: hearingDocumentLayout.lineHeight,
+                        document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
+                        format_enabled: formatEnabled,
+                        include_timestamps: hearingIncludeTimestamps,
+                        allow_indirect: allowIndirect,
+                        allow_summary: allowSummary,
+                        use_cache: useRawCache,
+                        auto_apply_fixes: autoApplyFixes,
+                        auto_apply_content_fixes: autoApplyContentFixes,
+                        skip_legal_audit: skipLegalAudit,
+                        skip_fidelity_audit: skipFidelityAudit,
+                        skip_sources_audit: skipFidelityAudit,
+                    })
+                    : await apiClient.startHearingJob(files[0], {
+                        case_id: hearingCaseId.trim(),
+                        goal: hearingGoal,
+                        thinking_level: thinkingLevel,
+                        model_selection: selectedModel,
+                        high_accuracy: highAccuracy,
+                        format_mode: formatMode,
+                        custom_prompt: customPrompt,
+                        document_theme: hearingDocumentTheme,
+                        document_header: (hearingDocumentLayout.headerText || '').trim() || undefined,
+                        document_footer: (hearingDocumentLayout.footerText || '').trim() || undefined,
+                        document_margins: hearingDocumentLayout.margins,
+                        document_page_frame: hearingDocumentLayout.pageFrame,
+                        document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
+                        document_font_family: hearingDocumentLayout.fontFamily || undefined,
+                        document_font_size: hearingDocumentLayout.fontSize,
+                        document_line_height: hearingDocumentLayout.lineHeight,
+                        document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
+                        format_enabled: formatEnabled,
+                        include_timestamps: hearingIncludeTimestamps,
+                        allow_indirect: allowIndirect,
+                        allow_summary: allowSummary,
+                        use_cache: useRawCache,
+                        auto_apply_fixes: autoApplyFixes,
+                        auto_apply_content_fixes: autoApplyContentFixes,
+                        skip_legal_audit: skipLegalAudit,
+                        skip_fidelity_audit: skipFidelityAudit,
+                        skip_sources_audit: skipFidelityAudit,
+                    });
                 setActiveJobId(job.job_id);
+                setMainTab('preview');
                 await runJobStream(job.job_id, async (payload) => {
                     await handleJobCompletion(payload, true);
                 });
@@ -1862,8 +2440,11 @@ export default function TranscriptionPage() {
             return;
         }
         try {
-            const job = await apiClient.startTranscriptionJob(files, options);
+            const job = hasUrl
+                ? await apiClient.startTranscriptionJobFromUrl(urlValue, options)
+                : await apiClient.startTranscriptionJob(files, options);
             setActiveJobId(job.job_id);
+            setMainTab('preview');
             await runJobStream(job.job_id, async (payload) => {
                 await handleJobCompletion(payload, true);
             });
@@ -1900,30 +2481,39 @@ export default function TranscriptionPage() {
         reader.onload = (event) => {
             const content = event.target?.result as string;
             if (content) {
-                processResponse(content);
+                processResponse(content, null, null);
                 setReportPaths(null);
                 toast.success('Arquivo carregado para revisão!');
             }
         };
         reader.readAsText(file);
     };
-    const handleExportDocx = async () => {
-        if (!isHearing && hasPreventiveAudit) {
-            if (preventiveAuditLoading) {
-                toast.info('Carregando auditoria preventiva...');
-            } else if (preventiveShouldBlock) {
-                toast.warning(`Revisão recomendada: ${preventiveBlockReason}`);
-            }
-        }
-        if (isHearing ? !hearingTranscript : !result) return;
-        try {
-            const exportContent = (isHearing ? buildHearingExportContent() : result) || '';
-            const blob = await apiClient.exportDocx(exportContent, `transcricao-${new Date().getTime()}.docx`);
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `transcricao-${new Date().getTime()}.docx`;
-            document.body.appendChild(a);
+	    const handleExportDocx = async () => {
+	        if (!isHearing && hasPreventiveAudit) {
+	            if (preventiveAuditLoading) {
+	                toast.info('Carregando auditoria preventiva...');
+	            } else if (preventiveShouldBlock) {
+	                toast.warning(`Revisão recomendada: ${preventiveBlockReason}`);
+	            }
+	        }
+	        if (isHearing ? !hearingTranscript : !result) return;
+	        try {
+	            const exportContent = (isHearing ? buildHearingExportContent() : result) || '';
+                const blob = await apiClient.exportDocx(exportContent, `transcricao-${new Date().getTime()}.docx`, {
+                    document_theme: activeDocumentTheme,
+                    document_header: (activeDocumentLayout.headerText || '').trim() || undefined,
+                    document_footer: (activeDocumentLayout.footerText || '').trim() || undefined,
+                    document_margins: activeDocumentLayout.margins,
+                    document_font_family: activeDocumentLayout.fontFamily || undefined,
+                    document_font_size: activeDocumentLayout.fontSize,
+                    document_line_height: activeDocumentLayout.lineHeight,
+                    document_paragraph_spacing: activeDocumentLayout.paragraphSpacing,
+                });
+	            const url = URL.createObjectURL(blob);
+	            const a = document.createElement('a');
+	            a.href = url;
+	            a.download = `transcricao-${new Date().getTime()}.docx`;
+	            document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
@@ -1934,31 +2524,130 @@ export default function TranscriptionPage() {
         }
     };
 
-    const handleConvertPreventiveToHil = () => {
+    const handleConvertPreventiveToHil = async () => {
         if (!preventiveAudit) {
             toast.info('Relatorio preventivo ainda nao disponivel.');
             return;
         }
-        const issues = buildPreventiveHilIssues(preventiveAudit);
-        if (issues.length === 0) {
+        const localIssues = buildPreventiveHilIssues(preventiveAudit);
+        if (localIssues.length === 0) {
             toast.info('Nenhum alerta preventivo para converter.');
             return;
         }
-        const existingIds = new Set(auditIssues.map((issue: any) => issue?.id).filter(Boolean));
-        const newIssues = issues.filter((issue: any) => issue?.id && !existingIds.has(issue.id));
-        if (newIssues.length === 0) {
-            toast.info('Alertas preventivos ja convertidos em issues HIL.');
+
+        if (!activeJobId) {
+            const existingIds = new Set(auditIssues.map((issue: any) => issue?.id).filter(Boolean));
+            const newIssues = localIssues.filter((issue: any) => issue?.id && !existingIds.has(issue.id));
+            if (newIssues.length === 0) {
+                toast.info('Alertas preventivos ja convertidos em issues HIL.');
+                return;
+            }
+            setAuditIssues((prev) => [...prev, ...newIssues]);
+            setSelectedIssues((prev) => {
+                const next = new Set(prev);
+                newIssues.forEach((issue: any) => {
+                    if (issue?.id) next.add(issue.id);
+                });
+                return next;
+            });
+            toast.success(`${newIssues.length} issue(s) adicionada(s) a Revisao HIL.`);
+            if (!hasRawForHil) {
+                toast.warning('RAW necessario para aplicar correcoes de conteudo.');
+            }
             return;
         }
-        setAuditIssues((prev) => [...prev, ...newIssues]);
-        setSelectedIssues((prev) => {
-            const next = new Set(prev);
-            newIssues.forEach((issue: any) => {
-                if (issue?.id) next.add(issue.id);
-            });
-            return next;
+
+        const beforeIds = new Set(auditIssues.map((issue: any) => issue?.id).filter(Boolean));
+        const toastId = toast.loading('Convertendo alertas preventivos...');
+        try {
+            const data = await apiClient.convertPreventiveAlertsToHil(activeJobId);
+            const merged = Array.isArray(data?.audit_issues) ? data.audit_issues : [];
+            const addedIssues = merged.filter((issue: any) => issue?.id && !beforeIds.has(issue.id));
+            if (merged.length > 0) {
+                setAuditIssues(merged);
+            }
+            if (addedIssues.length > 0) {
+                setSelectedIssues((prev) => {
+                    const next = new Set(prev);
+                    addedIssues.forEach((issue: any) => {
+                        if (issue?.id) next.add(issue.id);
+                    });
+                    return next;
+                });
+                toast.success(`${addedIssues.length} issue(s) adicionada(s) a Revisao HIL.`, { id: toastId });
+            } else {
+                toast.info('Alertas preventivos ja convertidos em issues HIL.', { id: toastId });
+            }
+            if (!hasRawForHil) {
+                toast.warning('RAW necessario para aplicar correcoes de conteudo.');
+            }
+        } catch (error: any) {
+            console.error(error);
+            const message = formatApiError(error, 'Falha ao converter alertas preventivos:');
+            toast.error(message, { id: toastId });
+        }
+    };
+
+    const handleConvertQualityAlertsToHil = (issues: HilIssue[]) => {
+        if (!Array.isArray(issues) || issues.length === 0) {
+            toast.info('Nenhum alerta de conteudo para converter.');
+            return;
+        }
+        const existingIds = new Set(auditIssues.map((issue: any) => issue?.id).filter(Boolean));
+        const existingRefs = new Set(
+            auditIssues.map((issue: any) => `${issue?.type || ''}:${issue?.reference || ''}`)
+        );
+        const newIssues = issues.filter((issue) => {
+            if (!issue?.id) return false;
+            if (existingIds.has(issue.id)) return false;
+            const refKey = `${issue?.type || ''}:${issue?.reference || ''}`;
+            if (existingRefs.has(refKey)) return false;
+            return true;
         });
-        toast.success(`${newIssues.length} issue(s) adicionada(s) a Revisao HIL.`);
+        if (newIssues.length === 0) {
+            toast.info('Alertas ja estao em Correcoes (HIL).');
+            setActiveTab('hil');
+            return;
+        }
+        const mergeLocal = () => {
+            setAuditIssues((prevAudit) => [...prevAudit, ...newIssues]);
+            setSelectedIssues((prevSelected) => {
+                const next = new Set(prevSelected);
+                newIssues.forEach((issue) => {
+                    if (issue?.id) next.add(issue.id);
+                });
+                return next;
+            });
+            setActiveTab('hil');
+            toast.success(`${newIssues.length} alerta(s) enviado(s) para Correcoes (HIL).`);
+        };
+
+        if (!activeJobId) {
+            mergeLocal();
+        } else {
+            const toastId = toast.loading('Salvando alertas na Revisao HIL...');
+            apiClient
+                .mergeTranscriptionAuditIssues(activeJobId, newIssues)
+                .then((data) => {
+                    const merged = Array.isArray(data?.audit_issues) ? data.audit_issues : [];
+                    if (merged.length > 0) setAuditIssues(merged);
+                    setSelectedIssues((prevSelected) => {
+                        const next = new Set(prevSelected);
+                        newIssues.forEach((issue) => {
+                            if (issue?.id) next.add(issue.id);
+                        });
+                        return next;
+                    });
+                    setActiveTab('hil');
+                    toast.success(`${newIssues.length} alerta(s) enviado(s) para Correcoes (HIL).`, { id: toastId });
+                })
+                .catch((error: any) => {
+                    console.error(error);
+                    toast.error(formatApiError(error, 'Falha ao salvar alertas:'), { id: toastId });
+                    // Best-effort fallback: still show locally.
+                    mergeLocal();
+                });
+        }
         if (!hasRawForHil) {
             toast.warning('RAW necessario para aplicar correcoes de conteudo.');
         }
@@ -2021,11 +2710,19 @@ export default function TranscriptionPage() {
         setShowDiffConfirm(false);
         setPendingRevision(null);
 
-        setResult(finalContent);
+            setResult(finalContent);
+            clearRichContent();
         setIsAuditOutdated(true);
 
         if (activeJobId) {
-            apiClient.updateTranscriptionJobQuality(activeJobId, { fixed_content: finalContent })
+            apiClient
+                .updateTranscriptionJobQuality(activeJobId, {
+                    fixed_content: finalContent,
+                    applied_issue_ids: Array.from(new Set(data.applied_issue_ids || data.issues_applied || [])),
+                })
+                .then((resp) => {
+                    if (resp?.quality) setJobQuality(resp.quality);
+                })
                 .catch(() => toast.warning('Correções aplicadas localmente, mas não foi possível salvar no histórico.'));
         }
 
@@ -2119,9 +2816,7 @@ export default function TranscriptionPage() {
 
             // Re-auditar após aplicação (se o usuário quiser)
             if (totalApplied > 0 && remainingIssues.length === 0) {
-                // Se todas as correções foram aplicadas, marcar auditoria como atualizada
-                setIsAuditOutdated(false);
-                toast.info('✅ Todas as correções foram aplicadas. Documento auditado com sucesso!', { duration: 3000 });
+                toast.info('✅ Todas as correções foram aplicadas. Revalide a Qualidade para atualizar métricas e auditorias.', { duration: 3500 });
             } else if (remainingIssues.length > 0) {
                 // Ainda há issues pendentes
                 toast.info(`ℹ️ ${remainingIssues.length} issue(s) pendente(s). Revise ou aplique mais correções.`, { duration: 3000 });
@@ -2180,9 +2875,16 @@ export default function TranscriptionPage() {
             // O diff de confirmação (DiffConfirmDialog) é mostrado DEPOIS, permitindo
             // que o usuário revise e aprove/rejeite o resultado antes de aplicá-lo ao documento.
             // Este é o comportamento correto: confirmar o OUTPUT do LLM, não o INPUT.
+            const totalChars = (result?.length || 0) + (rawResult?.length || 0);
+            const shouldUseJobSnapshot = Boolean(activeJobId) && totalChars > 600_000;
+            if (shouldUseJobSnapshot) {
+                toast.info('Documento grande: aplicando correções usando o snapshot do job para evitar falhas de rede.');
+            }
             const data = await apiClient.applyTranscriptionRevisions({
-                content: result,
-                raw_content: rawResult || undefined,
+                job_id: activeJobId || undefined,
+                content: shouldUseJobSnapshot ? undefined : result,
+                // Always prefer loading RAW from the job snapshot when available to reduce request size and avoid aborts.
+                raw_content: activeJobId ? undefined : (rawResult || undefined),
                 approved_issues: approvedIssues,
                 model_selection: selectedModel
             });
@@ -2214,10 +2916,19 @@ export default function TranscriptionPage() {
             toast.info('Revise as alterações antes de aplicar.');
         } catch (error: any) {
             console.error(error);
-            toast.error(formatApiError(error, 'Erro ao aplicar correções:'), { id: toastId });
+            const message = formatApiError(error, 'Erro ao aplicar correções:');
+            const lower = String(message || '').toLowerCase();
+            if (lower.includes('aborted') || lower.includes('abort')) {
+                toast.error(
+                    'Erro ao aplicar correções: requisição foi interrompida (aborted). Tente novamente com menos issues ou reabra o preview e tente de novo.',
+                    { id: toastId }
+                );
+            } else {
+                toast.error(message, { id: toastId });
+            }
             setHilDiagnostics((prev) => ({
                 ...prev,
-                contentError: formatApiError(error, 'Erro ao aplicar correções:'),
+                contentError: message,
             }));
         } finally {
             if (slowTimer) clearTimeout(slowTimer);
@@ -2404,25 +3115,411 @@ export default function TranscriptionPage() {
         }
     }, [activeSegmentId]);
 
+    useEffect(() => {
+        if (isProcessing) {
+            setProgressDockMinimized(false);
+        }
+    }, [isProcessing]);
+
     return (
-        <div className="flex h-full flex-col gap-6 p-6">
-            <div className="flex items-center justify-between">
+        <>
+        <div className={`flex h-full flex-col gap-6 p-6 ${hasActiveProgress ? 'pb-28' : ''}`}>
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h1 className="text-3xl font-bold tracking-tight">Transcrição (Aulas e Audiências)</h1>
+                    <h1 className="text-3xl font-bold tracking-tight">Transcrições</h1>
                     <p className="text-muted-foreground">
-                        Apostilas para aulas ou transcrição estruturada de audiências com quadro de evidências.
+                        Dashboard de jobs para acompanhar múltiplas transcrições em paralelo e abrir o preview/auditoria por job.
                     </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                    <Button onClick={() => setSettingsOpen(true)}>
+                        <Plus className="mr-2 h-4 w-4" />
+                        Nova transcrição
+                    </Button>
+                    <Button
+                        variant="outline"
+                        onClick={() => loadJobHistory()}
+                        disabled={jobsLoading}
+                    >
+                        <RefreshCw className={`mr-2 h-4 w-4 ${jobsLoading ? 'animate-spin' : ''}`} />
+                        Atualizar
+                    </Button>
+                    <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={() => setSettingsOpen(true)}
+                        title="Configurações"
+                    >
+                        <SlidersHorizontal className="h-5 w-5" />
+                    </Button>
                 </div>
             </div>
 
-            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 h-full">
-                {/* Configuração */}
-                <Card className="col-span-1 h-fit">
-                    <CardHeader>
-                        <CardTitle>Configuração</CardTitle>
-                        <CardDescription>Ajuste os parâmetros de processamento.</CardDescription>
+            <Tabs value={mainTab} onValueChange={(value) => setMainTab(value as typeof mainTab)} className="flex-1">
+                <TabsList className="w-full justify-start">
+                    <TabsTrigger value="jobs">Transcription Jobs</TabsTrigger>
+                    <TabsTrigger value="preview">Resultado</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="jobs" className="mt-4">
+                    {/* Dashboard de Jobs */}
+                    <Card className="flex flex-col min-h-[700px]">
+                    <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
+                        <div className="space-y-1">
+                            <CardTitle>Transcription Jobs</CardTitle>
+                            <CardDescription>Filtre, selecione e abra jobs (em andamento ou concluídos).</CardDescription>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                                <input
+                                    ref={jobsSelectAllRef}
+                                    type="checkbox"
+                                    className="h-3.5 w-3.5 rounded border border-input"
+                                    checked={allJobsSelected}
+                                    disabled={deletableJobIds.length === 0}
+                                    onChange={(e) => handleSelectAllJobs(e.target.checked)}
+                                />
+                                Selecionar
+                            </label>
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleDeleteSelectedJobs()}
+                                disabled={selectedJobIds.size === 0}
+                            >
+                                <Trash2 className="mr-2 h-4 w-4" />
+                                Excluir
+                            </Button>
+                        </div>
                     </CardHeader>
-                    <CardContent className="space-y-4">
+                    <CardContent className="flex-1 overflow-hidden">
+                        <Tabs defaultValue="jobs" className="flex h-full flex-col">
+                            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                                <TabsList className="w-full md:w-auto">
+                                    <TabsTrigger value="jobs">Jobs</TabsTrigger>
+                                    <TabsTrigger value="saved">Arquivos salvos</TabsTrigger>
+                                </TabsList>
+                                {activeJobId ? (
+                                    <div className="text-xs text-muted-foreground">
+                                        Selecionado: <span className="font-mono">{activeJobId}</span>
+                                    </div>
+                                ) : (
+                                    <div className="text-xs text-muted-foreground">
+                                        Selecione um job para abrir no preview.
+                                    </div>
+                                )}
+                            </div>
+
+                            <TabsContent value="jobs" className="mt-4 flex-1 overflow-hidden">
+                                <div className="grid gap-2 md:grid-cols-12">
+                                    <div className="relative md:col-span-6">
+                                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                                        <Input
+                                            value={jobsSearch}
+                                            onChange={(e) => setJobsSearch(e.target.value)}
+                                            placeholder="Buscar por arquivo, caso ou ID..."
+                                            className="pl-9"
+                                        />
+                                    </div>
+                                    <div className="md:col-span-3">
+                                        <select
+                                            className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                                            value={jobsStatusFilter}
+                                            onChange={(e) => setJobsStatusFilter(e.target.value as any)}
+                                        >
+                                            <option value="all">Todos status</option>
+                                            <option value="running">Em andamento</option>
+                                            <option value="queued">Na fila</option>
+                                            <option value="completed">Concluído</option>
+                                            <option value="error">Erro</option>
+                                            <option value="canceled">Cancelado</option>
+                                        </select>
+                                    </div>
+                                    <div className="md:col-span-3">
+                                        <select
+                                            className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+                                            value={jobsTypeFilter}
+                                            onChange={(e) => setJobsTypeFilter(e.target.value as any)}
+                                        >
+                                            <option value="all">Todos tipos</option>
+                                            <option value="transcription">Aula/Apostila</option>
+                                            <option value="hearing">Audiência/Reunião</option>
+                                        </select>
+                                    </div>
+                                    <div className="md:col-span-3">
+                                        <Input
+                                            type="date"
+                                            value={jobsFromDate}
+                                            onChange={(e) => setJobsFromDate(e.target.value)}
+                                            placeholder="De"
+                                        />
+                                    </div>
+                                    <div className="md:col-span-3">
+                                        <Input
+                                            type="date"
+                                            value={jobsToDate}
+                                            onChange={(e) => setJobsToDate(e.target.value)}
+                                            placeholder="Até"
+                                        />
+                                    </div>
+                                    <div className="md:col-span-6 flex items-center justify-end gap-2">
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() => {
+                                                setJobsSearch('');
+                                                setJobsStatusFilter('all');
+                                                setJobsTypeFilter('all');
+                                                setJobsFromDate('');
+                                                setJobsToDate('');
+                                            }}
+                                        >
+                                            Limpar filtros
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4 h-full overflow-auto rounded-md border">
+                                    <div className="grid grid-cols-[28px_minmax(220px,1fr)_140px_140px_160px_160px_220px] gap-3 border-b bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+                                        <div />
+                                        <div>Arquivo/Caso</div>
+                                        <div>Tipo</div>
+                                        <div>Perfil</div>
+                                        <div>Status</div>
+                                        <div>Atualizado</div>
+                                        <div className="text-right">Ações</div>
+                                    </div>
+                                    {jobsLoading ? (
+                                        <div className="p-4 text-sm text-muted-foreground">Carregando jobs...</div>
+                                    ) : filteredJobHistory.length === 0 ? (
+                                        <div className="p-6 text-sm text-muted-foreground">Nenhum job encontrado com os filtros atuais.</div>
+                                    ) : (
+                                        filteredJobHistory.map((job: any) => {
+                                            const type = String(job?.job_type || '').toLowerCase();
+                                            const isH = type === 'hearing';
+                                            const title = isH
+                                                ? `Caso ${job?.config?.case_id || '—'}`
+                                                : (job?.file_names || []).join(', ') || job?.job_id;
+                                            const profile = isH ? (job?.config?.format_mode || '—') : (job?.config?.mode || '—');
+                                            const status = String(job?.status || '');
+                                            const canLoad = status === 'completed';
+                                            const canResume = status === 'running' || status === 'queued';
+                                            const canDelete = !canResume;
+                                            const isSelected = Boolean(activeJobId && activeJobId === job?.job_id);
+                                            const statusVariant = status === 'completed' ? 'default' : status === 'error' ? 'destructive' : 'secondary';
+
+                                            return (
+                                                <div
+                                                    key={job.job_id}
+                                                    className={`grid grid-cols-[28px_minmax(220px,1fr)_140px_140px_160px_160px_220px] gap-3 px-3 py-3 text-sm border-b last:border-b-0 ${isSelected ? 'bg-primary/5' : 'bg-background'}`}
+                                                >
+                                                    <div className="pt-0.5">
+                                                        <input
+                                                            type="checkbox"
+                                                            className="h-3.5 w-3.5 rounded border border-input"
+                                                            checked={selectedJobIds.has(job.job_id)}
+                                                            disabled={!canDelete}
+                                                            onChange={(e) => toggleJobSelection(job.job_id, e.target.checked)}
+                                                            title={canDelete ? 'Selecionar job' : 'Job em execução'}
+                                                        />
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        className="min-w-0 text-left"
+                                                        onClick={() => setActiveJobId(job.job_id)}
+                                                        title={title}
+                                                    >
+                                                        <div className="truncate font-medium">{title}</div>
+                                                        <div className="truncate text-xs text-muted-foreground font-mono">{job.job_id}</div>
+                                                    </button>
+                                                    <div className="text-xs text-muted-foreground pt-0.5">
+                                                        {isH ? 'Audiência' : 'Transcrição'}
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground pt-0.5 truncate" title={String(profile)}>
+                                                        {String(profile)}
+                                                    </div>
+                                                    <div className="pt-0.5">
+                                                        <div className="flex items-center gap-2">
+                                                            <Badge variant={statusVariant as any}>{status}</Badge>
+                                                            {typeof job.progress === 'number' ? (
+                                                                <span className="text-xs text-muted-foreground">{job.progress}%</span>
+                                                            ) : null}
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground pt-0.5">
+                                                        {formatJobTime(job.updated_at || job.created_at)}
+                                                    </div>
+                                                    <div className="flex items-center justify-end gap-2">
+                                                        {canLoad ? (
+                                                            <Button
+                                                                size="sm"
+                                                                variant="secondary"
+                                                                onClick={async () => {
+                                                                    await handleLoadJobResult(job.job_id);
+                                                                    setMainTab('preview');
+                                                                }}
+                                                            >
+                                                                Abrir
+                                                            </Button>
+                                                        ) : null}
+                                                        {canResume ? (
+                                                            <Button size="sm" variant="outline" onClick={() => handleResumeJob(job.job_id)}>
+                                                                Acompanhar
+                                                            </Button>
+                                                        ) : null}
+                                                        {canResume ? (
+                                                            <Button size="sm" variant="destructive" onClick={() => handleCancelJob(job.job_id)}>
+                                                                Interromper
+                                                            </Button>
+                                                        ) : null}
+                                                        <Button
+                                                            size="icon"
+                                                            variant="ghost"
+                                                            className="h-8 w-8 text-destructive"
+                                                            onClick={() => handleDeleteJob(job.job_id)}
+                                                            disabled={!canDelete}
+                                                            title={canDelete ? 'Excluir job' : 'Job em execução'}
+                                                        >
+                                                            <Trash2 className="h-4 w-4" />
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </TabsContent>
+
+                            <TabsContent value="saved" className="mt-4 flex-1 overflow-hidden">
+                                <div className="grid gap-2 md:grid-cols-12">
+                                    <div className="relative md:col-span-8">
+                                        <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                                        <Input
+                                            value={savedDocsSearch}
+                                            onChange={(e) => setSavedDocsSearch(e.target.value)}
+                                            placeholder="Buscar por nome..."
+                                            className="pl-9"
+                                        />
+                                    </div>
+                                    <div className="md:col-span-4 flex items-center justify-end gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={loadSavedDocuments}
+                                            disabled={savedDocsLoading}
+                                        >
+                                            <RefreshCw className={`mr-2 h-4 w-4 ${savedDocsLoading ? 'animate-spin' : ''}`} />
+                                            Atualizar
+                                        </Button>
+                                        <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                                            <input
+                                                ref={savedDocsSelectAllRef}
+                                                type="checkbox"
+                                                className="h-3.5 w-3.5 rounded border border-input"
+                                                checked={allDocsSelected}
+                                                disabled={selectableSavedDocIds.length === 0}
+                                                onChange={(e) => handleSelectAllSavedDocs(e.target.checked)}
+                                            />
+                                            Selecionar
+                                        </label>
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => handleDeleteSelectedSavedDocuments()}
+                                            disabled={selectedSavedDocIds.size === 0}
+                                        >
+                                            <Trash2 className="mr-2 h-4 w-4" />
+                                            Excluir
+                                        </Button>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4 h-full overflow-auto rounded-md border">
+                                    <div className="grid grid-cols-[28px_minmax(220px,1fr)_180px_220px] gap-3 border-b bg-muted/40 px-3 py-2 text-xs font-medium text-muted-foreground">
+                                        <div />
+                                        <div>Nome</div>
+                                        <div>Criado</div>
+                                        <div className="text-right">Ações</div>
+                                    </div>
+                                    {savedDocsLoading ? (
+                                        <div className="p-4 text-sm text-muted-foreground">Carregando...</div>
+                                    ) : filteredSavedDocuments.length === 0 ? (
+                                        <div className="p-6 text-sm text-muted-foreground">Nenhum arquivo salvo encontrado.</div>
+                                    ) : (
+                                        filteredSavedDocuments.map((doc: any) => {
+                                            const docId = resolveSavedDocumentId(doc);
+                                            const canSelect = Boolean(docId);
+                                            return (
+                                                <div
+                                                    key={docId || `${doc?.name || 'documento'}-${doc?.created_at || ''}`}
+                                                    className="grid grid-cols-[28px_minmax(220px,1fr)_180px_220px] gap-3 px-3 py-3 text-sm border-b last:border-b-0"
+                                                >
+                                                    <div className="pt-0.5">
+                                                        <input
+                                                            type="checkbox"
+                                                            className="h-3.5 w-3.5 rounded border border-input"
+                                                            checked={docId ? selectedSavedDocIds.has(docId) : false}
+                                                            disabled={!canSelect}
+                                                            onChange={(e) => docId && toggleSavedDocSelection(docId, e.target.checked)}
+                                                        />
+                                                    </div>
+                                                    <div className="min-w-0">
+                                                        <div className="truncate font-medium" title={doc?.name}>{doc?.name || 'Documento'}</div>
+                                                        <div className="truncate text-xs text-muted-foreground font-mono">{docId || '—'}</div>
+                                                    </div>
+                                                    <div className="text-xs text-muted-foreground pt-0.5">
+                                                        {formatJobTime(doc?.created_at)}
+                                                    </div>
+                                                    <div className="flex items-center justify-end gap-2">
+                                                        <Button
+                                                            size="sm"
+                                                            variant="outline"
+                                                            onClick={() => (window.location.href = '/documents')}
+                                                        >
+                                                            Abrir
+                                                        </Button>
+                                                        <Button
+                                                            size="icon"
+                                                            variant="ghost"
+                                                            className="h-8 w-8 text-destructive"
+                                                            onClick={() => handleDeleteSavedDocument(doc)}
+                                                            disabled={!canSelect}
+                                                            title={canSelect ? 'Excluir documento' : 'ID indisponível'}
+                                                        >
+                                                            <Trash2 className="h-4 w-4" />
+                                                        </Button>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })
+                                    )}
+                                </div>
+                            </TabsContent>
+                        </Tabs>
+                    </CardContent>
+                </Card>
+                </TabsContent>
+
+                <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+                    <DialogContent className="fixed right-0 top-0 left-auto h-[100vh] w-full max-w-xl translate-x-0 translate-y-0 rounded-none p-0">
+                        <Card className="h-full rounded-none border-0 shadow-none">
+                            <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0 border-b">
+                                <div className="space-y-1">
+                                    <CardTitle>Nova transcrição</CardTitle>
+                                    <CardDescription>Configure arquivos e parâmetros do job.</CardDescription>
+                                </div>
+                                <div className="flex items-center gap-2 pt-1">
+                                    <Label htmlFor="follow-job-live" className="text-xs text-muted-foreground">
+                                        Acompanhar ao vivo
+                                    </Label>
+                                    <Switch
+                                        id="follow-job-live"
+                                        checked={followJobLive}
+                                        onCheckedChange={setFollowJobLive}
+                                    />
+                                </div>
+                            </CardHeader>
+                            <CardContent className="h-[calc(100vh-92px)] overflow-y-auto p-6 space-y-4">
                         <div className="space-y-2">
                             <Label>Tipo de Transcrição</Label>
                             <select
@@ -2432,6 +3529,7 @@ export default function TranscriptionPage() {
                                     const value = e.target.value as 'apostila' | 'hearing';
                                     setTranscriptionType(value);
                                     setResult(null);
+                                    clearRichContent();
                                     setReport(null);
                                     setHearingPayload(null);
                                     setHearingTranscript(null);
@@ -2444,9 +3542,9 @@ export default function TranscriptionPage() {
                             </select>
                         </div>
 
-                        {/* Upload */}
-                        <div className="space-y-2">
-                            <Label>Arquivos (Áudio/Vídeo/Texto)</Label>
+	                        {/* Upload */}
+	                        <div className="space-y-2">
+	                            <Label>Arquivos (Áudio/Vídeo/Texto)</Label>
                             <div
                                 className={`relative flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed p-4 text-center transition-colors ${isDragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25'}`}
                                 onDragOver={handleDragOver}
@@ -2473,7 +3571,7 @@ export default function TranscriptionPage() {
                                     Áudio/Vídeo/Texto (mp3, wav, m4a, mp4, mov, mkv, txt, md)
                                 </div>
                             </div>
-                            {files.length > 0 && (
+	                            {files.length > 0 && (
                                 <div className="space-y-1 mt-2 max-h-40 overflow-y-auto">
                                     {files.map((file, idx) => (
                                         <div key={idx} className="flex items-center gap-1 text-xs bg-muted/50 rounded px-2 py-1">
@@ -2501,8 +3599,71 @@ export default function TranscriptionPage() {
                                         {files.length > 1 ? `📚 ${files.length} arquivos serão unificados na ordem acima` : ''}
                                     </p>
                                 </div>
-                            )}
-                        </div>
+	                            )}
+	                        </div>
+
+                            <div className="space-y-2">
+                                <Label>OU URL pública (YouTube)</Label>
+                                <input
+                                    className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                                    placeholder="https://www.youtube.com/watch?v=..."
+                                    value={publicUrl}
+                                    onChange={(e) => {
+                                        const value = e.target.value;
+                                        setPublicUrl(value);
+                                        if (value.trim()) {
+                                            setFiles([]);
+                                        }
+                                    }}
+                                />
+                                <p className="text-xs text-muted-foreground">
+                                    Dica: por segurança, o backend aceita apenas hosts permitidos (default: youtube.com, youtu.be).
+                                </p>
+                            </div>
+	
+                        <div className="border-t border-border" />
+
+                        {!isHearing && (
+                            <div className="space-y-2">
+                                <Label>Tema visual do documento</Label>
+                                <select
+                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    value={documentTheme}
+                                    onChange={(e) => setDocumentTheme(e.target.value)}
+                                >
+                                    {DOCUMENT_THEMES.map((theme) => (
+                                        <option key={theme.id} value={theme.id}>
+                                            {theme.title}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p className="text-xs text-muted-foreground">
+                                    {DOCUMENT_THEMES.find((t) => t.id === documentTheme)?.description
+                                        || 'Defina o estilo visual do preview (especialmente tabelas).'}
+                                </p>
+                            </div>
+                        )}
+
+                        {isHearing && (
+                            <div className="space-y-2">
+                                <Label>Tema visual do documento</Label>
+                                <select
+                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    value={hearingDocumentTheme}
+                                    onChange={(e) => setHearingDocumentTheme(e.target.value)}
+                                >
+                                    {DOCUMENT_THEMES.map((theme) => (
+                                        <option key={theme.id} value={theme.id}>
+                                            {theme.title}
+                                        </option>
+                                    ))}
+                                </select>
+                                <p className="text-xs text-muted-foreground">
+                                    {DOCUMENT_THEMES.find((t) => t.id === hearingDocumentTheme)?.description
+                                        || 'Defina o estilo visual do preview (especialmente tabelas).'}
+                                </p>
+                            </div>
+                        )}
 
                         <div className="border-t border-border" />
 
@@ -2633,13 +3794,93 @@ export default function TranscriptionPage() {
                                                     onCheckedChange={setHearingAllowSummary}
                                                 />
                                             </div>
+                                            <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
+                                                <Label htmlFor="hearing-timestamps" className="flex flex-col space-y-1">
+                                                    <span>Incluir timestamps no resultado</span>
+                                                    <span className="font-normal text-xs text-muted-foreground">
+                                                        Controla timestamps apenas no texto formatado/preview; o RAW mantém timestamps para navegação e auditoria.
+                                                    </span>
+                                                </Label>
+                                                <Switch
+                                                    id="hearing-timestamps"
+                                                    checked={hearingIncludeTimestamps}
+                                                    onCheckedChange={setHearingIncludeTimestamps}
+                                                />
+                                            </div>
                                         </div>
                                     )}
                                     <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
                                         <Label htmlFor="hearing-custom-prompt" className="flex flex-col space-y-1">
-                                            <span>Prompt personalizado</span>
+                                            <span className="flex items-center gap-2">
+                                                Prompt personalizado
+                                                <SettingInfoPopover>
+                                                    <div className="space-y-3">
+                                                        <div className="font-semibold">O que pode ser customizado</div>
+                                                        {hearingFormatMode === 'audiencia' || hearingFormatMode === 'reuniao' ? (
+                                                            <div>
+                                                                Este campo é usado para <span className="font-medium">TABELAS/EXTRAS</span> (ex.: tabela de decisões/encaminhamentos,
+                                                                checklist, resumo final), sem alterar tom/estrutura do modo.
+                                                            </div>
+                                                        ) : (
+                                                            <div>
+                                                                Este campo substitui a camada de <span className="font-medium">estilo/tabelas</span> do modo selecionado (use com cuidado).
+                                                            </div>
+                                                        )}
+
+                                                        <div className="font-semibold">Exemplos rápidos</div>
+                                                        <div className="flex flex-wrap gap-2">
+                                                            {hearingFormatMode === 'audiencia' &&
+                                                                PROMPT_SNIPPETS.hearingAudiencia.map((s) => (
+                                                                    <Button
+                                                                        key={s.id}
+                                                                        type="button"
+                                                                        variant="outline"
+                                                                        size="sm"
+                                                                        className="h-7 px-2 text-[11px]"
+                                                                        onClick={() => appendHearingCustomPromptSnippet(s.template)}
+                                                                    >
+                                                                        {s.title}
+                                                                    </Button>
+                                                                ))}
+                                                            {hearingFormatMode === 'reuniao' &&
+                                                                PROMPT_SNIPPETS.hearingReuniao.map((s) => (
+                                                                    <Button
+                                                                        key={s.id}
+                                                                        type="button"
+                                                                        variant="outline"
+                                                                        size="sm"
+                                                                        className="h-7 px-2 text-[11px]"
+                                                                        onClick={() => appendHearingCustomPromptSnippet(s.template)}
+                                                                    >
+                                                                        {s.title}
+                                                                    </Button>
+                                                                ))}
+                                                            {hearingFormatMode === 'depoimento' &&
+                                                                PROMPT_SNIPPETS.depoimento.map((s) => (
+                                                                    <Button
+                                                                        key={s.id}
+                                                                        type="button"
+                                                                        variant="outline"
+                                                                        size="sm"
+                                                                        className="h-7 px-2 text-[11px]"
+                                                                        onClick={() => appendHearingCustomPromptSnippet(s.template)}
+                                                                    >
+                                                                        {s.title}
+                                                                    </Button>
+                                                                ))}
+                                                        </div>
+
+                                                        <div className="text-muted-foreground">
+                                                            Dica: evite usar <span className="font-mono">##</span> ou <span className="font-mono">###</span> aqui; se precisar de um anexo,
+                                                            prefira <span className="font-mono">####</span>.
+                                                        </div>
+                                                    </div>
+                                                </SettingInfoPopover>
+                                            </span>
                                             <span className="font-normal text-xs text-muted-foreground">
-                                                Substitui apenas estilo/tabelas do modo selecionado.
+                                                {hearingFormatMode === 'audiencia' || hearingFormatMode === 'reuniao'
+                                                    ? 'Personaliza apenas tabelas/extras do modo selecionado.'
+                                                    : 'Substitui estilo/tabelas do modo selecionado.'}
                                             </span>
                                         </Label>
                                         <Switch
@@ -2650,12 +3891,37 @@ export default function TranscriptionPage() {
                                         />
                                     </div>
                                     {hearingUseCustomPrompt && hearingFormatMode !== 'none' && (
-                                        <textarea
-                                            className="flex min-h-[90px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
-                                            placeholder="Insira instruções de estilo/tabela para o texto formatado..."
-                                            value={hearingCustomPrompt}
-                                            onChange={(e) => setHearingCustomPrompt(e.target.value)}
-                                        />
+                                        <div className="space-y-2">
+                                            {(hearingFormatMode === 'audiencia' || hearingFormatMode === 'reuniao') && (
+                                                <div className="flex flex-wrap gap-2">
+                                                    {(hearingFormatMode === 'audiencia'
+                                                        ? PROMPT_SNIPPETS.hearingAudiencia
+                                                        : PROMPT_SNIPPETS.hearingReuniao
+                                                    ).map((s) => (
+                                                        <Button
+                                                            key={s.id}
+                                                            type="button"
+                                                            variant="outline"
+                                                            size="sm"
+                                                            className="h-7 px-2 text-[11px]"
+                                                            onClick={() => appendHearingCustomPromptSnippet(s.template)}
+                                                        >
+                                                            {s.title}
+                                                        </Button>
+                                                    ))}
+                                                </div>
+                                            )}
+                                            <textarea
+                                                className="flex min-h-[90px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm resize-none"
+                                                placeholder={
+                                                    hearingFormatMode === 'audiencia' || hearingFormatMode === 'reuniao'
+                                                        ? 'Personalize apenas tabelas/extras (ex.: checklist, colunas, anexos após o fechamento)...'
+                                                        : 'Insira instruções de estilo/tabela para o texto formatado...'
+                                                }
+                                                value={hearingCustomPrompt}
+                                                onChange={(e) => setHearingCustomPrompt(e.target.value)}
+                                            />
+                                        </div>
                                     )}
                                 </div>
                                 <div className="border rounded-md p-3 space-y-3">
@@ -2696,21 +3962,63 @@ export default function TranscriptionPage() {
                                         Cadastrar voz
                                     </Button>
                                 </div>
-                            </div>
-                        )}
-
-                        {/* High Accuracy Switch */}
-                        <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
-                            <Label htmlFor="high-accuracy" className="flex flex-col space-y-1">
-                                <span>Alta Precisão (Beam Search)</span>
-                                <span className="font-normal text-xs text-muted-foreground">
-                                    Mais lento, mas ideal para termos jurídicos complexos.
+	                            </div>
+	                        )}
+	                        <Accordion type="single" collapsible className="rounded-md border">
+	                            <AccordionItem value="advanced" className="border-b-0">
+	                                <AccordionTrigger className="px-3 py-3 text-sm">
+	                                    Configurações avançadas
+	                                </AccordionTrigger>
+	                                <AccordionContent className="px-3 pt-0 pb-3">
+	                                    <div className="space-y-4">
+	
+	                                        {/* High Accuracy Switch */}
+	                        <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
+	                            <Label htmlFor="high-accuracy" className="flex flex-col space-y-1">
+	                                <span>Alta Precisão (Beam Search)</span>
+	                                <span className="font-normal text-xs text-muted-foreground">
+	                                    Mais lento, mas ideal para termos jurídicos complexos.
                                 </span>
                             </Label>
                             <Switch
                                 id="high-accuracy"
                                 checked={highAccuracy}
                                 onCheckedChange={setHighAccuracy}
+                            />
+                        </div>
+
+                        {/* Diarization Switch */}
+                        <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
+                            <Label htmlFor="diarization" className="flex flex-col space-y-1">
+                                <span className="flex items-center gap-2">
+                                    Diarização (separar falantes)
+                                    <SettingInfoPopover>
+                                        <div className="space-y-2">
+                                            <div className="font-semibold">O que faz</div>
+                                            <div>Detecta troca de falantes e marca o texto por SPEAKER (melhora quando há troca real de professores/participantes).</div>
+                                            <div className="font-semibold">Quando usar</div>
+                                            <div>✅ Reuniões, audiências e aulas com mais de um professor/falante.</div>
+                                            <div className="font-semibold">Importante</div>
+                                            <div>Requer Pyannote/Torch no backend e <code>HUGGING_FACE_TOKEN</code>. Ao ativar, o backend pode falhar se a diarização não estiver disponível.</div>
+                                            <div className="font-semibold">Padrão</div>
+                                            <div>Em audiências/reuniões: sempre ativa. Em apostilas: opcional.</div>
+                                        </div>
+                                    </SettingInfoPopover>
+                                </span>
+                                <span className="font-normal text-xs text-muted-foreground">
+                                    {isHearing
+                                        ? 'Sempre ativo em audiências/reuniões.'
+                                        : 'Opcional nas apostilas: ativa apenas quando você ligar.'}
+                                </span>
+                            </Label>
+                            <Switch
+                                id="diarization"
+                                checked={isHearing ? true : enableDiarization}
+                                disabled={isHearing}
+                                onCheckedChange={(value) => {
+                                    if (isHearing) return;
+                                    setEnableDiarization(value);
+                                }}
                             />
                         </div>
 
@@ -2882,29 +4190,102 @@ export default function TranscriptionPage() {
                             </select>
                         </div>
 
-                        {!isHearing && (
+                        {!isHearing && !isRawMode && (
                             <div className="space-y-2">
-                                <Label>Prompt Customizado (Opcional)</Label>
+                                <Label className="flex items-center gap-2">
+                                    Prompt Customizado (Opcional)
+                                    <SettingInfoPopover>
+                                        <div className="space-y-3">
+                                            <div className="font-semibold">O que pode ser customizado</div>
+                                            {mode === 'APOSTILA' ? (
+                                                <div>
+                                                    Em <span className="font-medium">APOSTILA</span>, o campo customiza apenas <span className="font-medium">TABELAS/EXTRAS</span> (quadro-síntese,
+                                                    resumo, fluxograma, mapa mental, questionário), sem alterar tom/estilo/estrutura do modo.
+                                                </div>
+                                            ) : (
+                                                <div>
+                                                    Em <span className="font-medium">{mode}</span>, o campo substitui a camada de <span className="font-medium">estilo/tabelas</span>. Evite mexer em estrutura.
+                                                </div>
+                                            )}
+
+                                            <div className="font-semibold">Exemplos rápidos</div>
+                                            <div className="flex flex-wrap gap-2">
+                                                {(mode === 'APOSTILA'
+                                                    ? PROMPT_SNIPPETS.apostila
+                                                    : PROMPT_SNIPPETS.fidelity
+                                                ).map((s) => (
+                                                    <Button
+                                                        key={s.id}
+                                                        type="button"
+                                                        variant="outline"
+                                                        size="sm"
+                                                        className="h-7 px-2 text-[11px]"
+                                                        onClick={() => appendCustomPromptSnippet(s.template)}
+                                                    >
+                                                        {s.title}
+                                                    </Button>
+                                                ))}
+                                            </div>
+
+                                            <div className="text-muted-foreground">
+                                                Dica: evite usar <span className="font-mono">##</span> ou <span className="font-mono">###</span> no custom. Se precisar de anexos, prefira{' '}
+                                                <span className="font-mono">####</span>.
+                                            </div>
+                                        </div>
+                                    </SettingInfoPopover>
+                                </Label>
                                 <p className="text-[10px] text-muted-foreground mt-1 mb-2">
-                                    ⚠️ Nota: Ao customizar, defina apenas <strong>ESTILO e TABELAS</strong>. O sistema preserva automaticamente papéis, estrutura e regras anti-duplicação.
+                                    {mode === 'APOSTILA' ? (
+                                        <>
+                                            Personalize apenas <strong>TABELAS/EXTRAS</strong> (resumo, fluxograma, mapa mental, questionário). O tom e as demais regras do modo são preservados.
+                                        </>
+                                    ) : (
+                                        <>
+                                            ⚠️ Nota: Ao customizar, defina apenas <strong>ESTILO e TABELAS</strong>. Evite mexer em estrutura (títulos/ordem). O sistema preserva regras anti-duplicação.
+                                        </>
+                                    )}
                                 </p>
+                                {mode === 'APOSTILA' && (
+                                    <div className="flex flex-wrap gap-2">
+                                        {PROMPT_SNIPPETS.apostila.map((s) => (
+                                            <Button
+                                                key={s.id}
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-7 px-2 text-[11px]"
+                                                onClick={() => appendCustomPromptSnippet(s.template)}
+                                            >
+                                                {s.title}
+                                            </Button>
+                                        ))}
+                                    </div>
+                                )}
                                 <TranscriptionPromptPicker
                                     onReplace={(tpl) => setCustomPrompt(tpl)}
                                     onAppend={(tpl) => setCustomPrompt((prev) => (prev ? `${prev}\n\n${tpl}` : tpl))}
                                 />
                                 <textarea
-                                    placeholder="Sobrescreva as instruções padrão..."
+                                    placeholder={
+                                        mode === 'APOSTILA'
+                                            ? 'Personalize tabelas/extras (ex.: colunas do quadro-síntese, resumo, fluxograma, mapa mental, questionário)...'
+                                            : 'Sobrescreva as instruções de estilo/tabelas...'
+                                    }
                                     className="flex min-h-[80px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 resize-none h-32"
                                     value={customPrompt}
                                     onChange={(e) => setCustomPrompt(e.target.value)}
-                                />
-                            </div>
-                        )}
-
-                        <Button
-                            className="w-full"
-                            onClick={handleSubmit}
-                            disabled={isProcessing || files.length === 0}
+	                                />
+	                            </div>
+	                        )}
+	                                    </div>
+	                                </AccordionContent>
+	                            </AccordionItem>
+	                        </Accordion>
+	
+	                        <Button
+	                            className="w-full"
+	                            onClick={handleSubmit}
+	                            disabled={isProcessing || files.length === 0}
                         >
                             {isProcessing ? (
                                 <>
@@ -2995,7 +4376,14 @@ export default function TranscriptionPage() {
                                                         <span className="text-[10px] text-muted-foreground">{job.progress}%</span>
                                                     )}
                                                     {canLoad && (
-                                                        <Button size="sm" variant="secondary" onClick={() => handleLoadJobResult(job.job_id)}>
+                                                        <Button
+                                                            size="sm"
+                                                            variant="secondary"
+                                                            onClick={async () => {
+                                                                await handleLoadJobResult(job.job_id);
+                                                                setMainTab('preview');
+                                                            }}
+                                                        >
                                                             Carregar
                                                         </Button>
                                                     )}
@@ -3143,11 +4531,14 @@ export default function TranscriptionPage() {
                             </div>
                         )}
 
-                    </CardContent>
-                </Card>
+                            </CardContent>
+                        </Card>
+                    </DialogContent>
+                </Dialog>
 
+                <TabsContent value="preview" className="mt-4">
                 {/* Resultado */}
-                <Card className="col-span-1 md:col-span-1 lg:col-span-2 flex flex-col min-h-[800px] max-h-[1600px]">
+                <Card className="flex flex-col min-h-[700px]">
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
                         <div className="space-y-1">
                             <CardTitle>Resultado</CardTitle>
@@ -3186,28 +4577,27 @@ export default function TranscriptionPage() {
                                     <TabsList className="w-full justify-start">
                                         <TabsTrigger value="preview">{isHearing ? 'Transcrição' : 'Visualização'}</TabsTrigger>
                                         <TabsTrigger value="export">Exportar</TabsTrigger>
-                                        {!isHearing && result && (
-                                            <TabsTrigger value="hil" className={auditIssues.length > 0 ? "text-orange-600" : "text-green-600"}>
-                                                {auditIssues.length > 0 ? `⚠️ Revisão HIL (${auditIssues.length})` : '✅ Auditoria'}
-                                            </TabsTrigger>
-                                        )}
-                                        {!isHearing && hasPreventiveAudit && (
-                                            <TabsTrigger
-                                                value="preventive"
-                                                className={preventiveShouldBlockDisplay ? "text-orange-600" : (preventiveAudit || preventiveAuditMarkdown) ? "text-green-600" : ""}
-                                            >
-                                                {preventiveShouldBlockDisplay ? '⚠️ Auditoria Preventiva' : 'Auditoria Preventiva'}
-                                            </TabsTrigger>
-                                        )}
-                                        <TabsTrigger value="quality">{isHearing ? 'Qualidade Audiência' : 'Controle de Qualidade'}</TabsTrigger>
-                                        {isHearing && hearingFormatted && <TabsTrigger value="formatted">Texto formatado</TabsTrigger>}
-                                        {isHearing && <TabsTrigger value="speakers">Falantes</TabsTrigger>}
-                                        {isHearing && <TabsTrigger value="evidence">Evidências</TabsTrigger>}
+												{!isHearing && result && (
+													<TabsTrigger value="hil" className={auditIssues.length > 0 ? "text-orange-600" : ""}>
+														{auditIssues.length > 0 ? `Correções (HIL) (${auditIssues.length})` : 'Correções (HIL)'}
+													</TabsTrigger>
+												)}
+										{!isHearing && hasPreventiveAudit && (
+											<TabsTrigger
+												value="preventive"
+												className={preventiveShouldBlockDisplay ? "text-orange-600" : (preventiveAudit || preventiveAuditMarkdown) ? "text-green-600" : ""}
+											>
+												{preventiveShouldBlockDisplay ? '⚠️ Auditoria Preventiva' : 'Auditoria Preventiva'}
+											</TabsTrigger>
+										)}
+										<TabsTrigger value="quality">{isHearing ? 'Qualidade' : 'Qualidade (Resumo)'}</TabsTrigger>
+												{isHearing && hearingFormatted && <TabsTrigger value="formatted">Texto formatado</TabsTrigger>}
+												{isHearing && <TabsTrigger value="speakers">Falantes</TabsTrigger>}
+												{isHearing && <TabsTrigger value="evidence">Evidências</TabsTrigger>}
                                         {isHearing && <TabsTrigger value="validation">Validação</TabsTrigger>}
                                         {isHearing && (hearingPayload?.timeline || []).length > 0 && <TabsTrigger value="timeline">Linha do tempo</TabsTrigger>}
                                         {isHearing && (hearingPayload?.contradictions || []).length > 0 && <TabsTrigger value="contradictions">Contradições</TabsTrigger>}
                                         {isHearing && <TabsTrigger value="json">JSON</TabsTrigger>}
-                                        {!isHearing && report && <TabsTrigger value="report">Relatórios de Auditoria</TabsTrigger>}
                                     </TabsList>
                                 </div>
 
@@ -3230,37 +4620,13 @@ export default function TranscriptionPage() {
                                             onReviewIssue={openIssueAssistant}
                                         />
                                     </TabsContent>
-                                )}
+										)}
 
-                                {!isHearing && hasPreventiveAudit && (
-                                    <TabsContent value="preventive" className="flex-1 overflow-y-auto p-4 m-0 space-y-4">
-                                        <PreventiveAuditPanel
-                                            audit={preventiveAudit}
-                                            auditMarkdown={preventiveAuditMarkdown}
-                                            recommendation={preventiveRecommendation}
-                                            status={preventiveStatus}
-                                            loading={preventiveAuditLoading}
-                                            error={preventiveAuditError}
-                                            isAuditOutdated={isAuditOutdated}
-                                            hasRawForHil={hasRawForHil}
-                                            hasDocument={Boolean(result)}
-                                            onConvertAlerts={handleConvertPreventiveToHil}
-                                            onGoToHil={handleGoToHil}
-                                            onDownloadReport={handleDownloadReport}
-                                            canDownloadMd={Boolean(reportPaths?.preventive_fidelity_md_path)}
-                                            canDownloadJson={Boolean(reportPaths?.preventive_fidelity_json_path)}
-                                            onRecompute={handleRecomputePreventiveAudit}
-                                            canRecompute={Boolean(activeJobId) && !preventiveAuditLoading}
-                                            onReload={() => fetchPreventiveAudit(true)}
-                                        />
-                                    </TabsContent>
-                                )}
-
-                                <TabsContent value="preview" className="flex-1 overflow-hidden p-0 m-0 data-[state=active]:flex flex-col">
-                                    {isHearing ? (
-                                        <div className="flex h-full flex-col">
-                                            <div className="border-b p-4 space-y-3">
-                                                <div className="flex items-center justify-between text-sm">
+										<TabsContent value="preview" className="flex-1 overflow-hidden p-0 m-0 data-[state=active]:flex flex-col">
+											{isHearing ? (
+												<div className="flex h-full flex-col">
+													<div className="border-b p-4 space-y-3">
+														<div className="flex items-center justify-between text-sm">
                                                     <span className="font-medium">Reprodutor de áudio</span>
                                                     <span className="text-xs text-muted-foreground">
                                                         {formatDuration(currentTime)} / {formatDuration(mediaDuration)}
@@ -3379,33 +4745,81 @@ export default function TranscriptionPage() {
                                             )}
                                             <div className="flex-1 p-4 min-h-0">
                                                 {isEditingResult ? (
-                                                    <MarkdownEditorPanel
-                                                        content={draftResult ?? result ?? ''}
-                                                        onChange={setDraftResult}
-                                                        onCancel={() => {
-                                                            setIsEditingResult(false);
-                                                            setDraftResult(null);
-                                                            toast.info('Edição cancelada.');
-                                                        }}
-                                                        onSave={(markdown) => {
-                                                            const next = stripReportBlocks(markdown) || markdown || '';
-                                                            setResult(next);
-                                                            setIsEditingResult(false);
-                                                            setDraftResult(null);
-                                                            setIsAuditOutdated(true);
-                                                            toast.success('Alterações salvas!');
-                                                        }}
-                                                        onDownload={(markdown) => {
-                                                            const content = markdown || '';
-                                                            if (!content) return;
-                                                            triggerMarkdownDownload(content, `transcricao-${new Date().getTime()}.md`);
-                                                            toast.success('Arquivo Markdown baixado!');
-                                                        }}
-                                                        className="h-full"
-                                                    />
+                                                    <div className="h-full flex flex-col gap-2">
+                                                        {activeDocumentLayout.showHeaderFooter && (
+                                                            <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                                                                <span className="font-medium text-foreground">{previewHeaderText}</span>
+                                                                <span>Layout</span>
+                                                            </div>
+                                                        )}
+                                                        <div className="flex-1 min-h-0">
+                                                            <MarkdownEditorPanel
+                                                                content={draftResult ?? result ?? ''}
+                                                                onChange={setDraftResult}
+                                                                onOpenLayout={() => openLayoutDialog('tables')}
+                                                                richContentHtml={richTextHtml}
+                                                                richContentJson={richTextJson}
+                                                                richPreviewHtml={richTextHtml}
+                                                                onRichContentChange={(payload) => {
+                                                                    setRichTextHtml(payload.html);
+                                                                    setRichTextJson(payload.json);
+                                                                    setRichTextMeta(payload.meta);
+                                                                }}
+                                                                onCancel={() => {
+                                                                    setIsEditingResult(false);
+                                                                    setDraftResult(null);
+                                                                    toast.info('Edição cancelada.');
+                                                                }}
+                                                                onSave={async (markdown) => {
+                                                                    const next = stripReportBlocks(markdown) || markdown || '';
+                                                                    setResult(next);
+                                                                    setIsEditingResult(false);
+                                                                    setDraftResult(null);
+                                                                    setIsAuditOutdated(true);
+                                                                    if (activeJobId) {
+                                                                        try {
+                                                                            await apiClient.updateTranscriptionJobContent(activeJobId, {
+                                                                                content: next,
+                                                                            });
+                                                                        } catch (error: any) {
+                                                                            toast.error(error?.message || 'Falha ao salvar conteúdo.');
+                                                                        }
+                                                                    }
+                                                                    toast.success('Alterações salvas!');
+                                                                }}
+                                                                onSaveRich={async (payload) => {
+                                                                    if (!activeJobId) return;
+                                                                    try {
+                                                                        await apiClient.updateTranscriptionJobContent(activeJobId, {
+                                                                            rich_text_html: payload.html,
+                                                                            rich_text_json: payload.json,
+                                                                            rich_text_meta: payload.meta,
+                                                                        });
+                                                                    } catch (error: any) {
+                                                                        console.error(error);
+                                                                    }
+                                                                }}
+                                                                onDownload={(markdown) => {
+                                                                    const content = markdown || '';
+                                                                    if (!content) return;
+                                                                    triggerMarkdownDownload(content, `transcricao-${new Date().getTime()}.md`);
+                                                                    toast.success('Arquivo Markdown baixado!');
+                                                                }}
+	                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
+	                                                                themeClassName={`${documentThemeClass} ${documentLayoutClass}`}
+	                                                                style={documentTypographyStyle}
+	                                                            />
+                                                        </div>
+                                                        {activeDocumentLayout.showHeaderFooter && (
+                                                            <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                                                                <span>{previewFooterText || '—'}</span>
+                                                                <span>Página •</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
                                                 ) : (
                                                     <div className="flex h-full flex-col gap-3">
-                                                        <div className="flex items-center justify-between">
+                                                        <div className="flex items-center justify-between gap-2">
                                                             <div className="flex items-center gap-2">
                                                                 <Button
                                                                     variant={previewMode === 'formatted' ? 'default' : 'outline'}
@@ -3419,40 +4833,131 @@ export default function TranscriptionPage() {
                                                                     variant={previewMode === 'raw' ? 'default' : 'outline'}
                                                                     size="sm"
                                                                     onClick={() => setPreviewMode('raw')}
-                                                                    disabled={!rawResult}
-                                                                    title={!rawResult ? 'Transcrição RAW não disponível' : 'Ver transcrição original'}
+                                                                    disabled={isHearing ? !hearingTranscript : !rawResult}
+                                                                    title={(isHearing ? !hearingTranscript : !rawResult) ? 'Transcrição RAW não disponível' : 'Ver transcrição original'}
                                                                 >
                                                                     <FileText className="mr-2 h-4 w-4" />
                                                                     RAW
                                                                 </Button>
                                                             </div>
-                                                            <Button
-                                                                variant="outline"
-                                                                size="sm"
-                                                                disabled={!hasOutput}
-                                                                onClick={() => {
-                                                                    const initial = stripReportBlocks(result) || result || '';
-                                                                    setDraftResult(initial);
-                                                                    setIsEditingResult(true);
-                                                                }}
-                                                            >
-                                                                <Edit3 className="mr-2 h-4 w-4" />
-                                                                Editar
-                                                            </Button>
+                                                            <div className="flex items-center gap-2">
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={() => openLayoutDialog('page')}
+                                                                    title="Layout da página"
+                                                                >
+                                                                    <LayoutTemplate className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={() => openLayoutDialog('header')}
+                                                                    title="Cabeçalho e rodapé"
+                                                                >
+                                                                    <Heading className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={() => openLayoutDialog('typography')}
+                                                                    title="Fonte e tamanho"
+                                                                >
+                                                                    <Type className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={() => openLayoutDialog('margins')}
+                                                                    title="Margens"
+                                                                >
+                                                                    <ArrowLeftRight className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={() => openLayoutDialog('tables')}
+                                                                    title="Tema / design das tabelas"
+                                                                >
+                                                                    <Table2 className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="icon"
+                                                                    onClick={handleInsertPageBreak}
+                                                                    title="Quebra de página / seções"
+                                                                    disabled={!hasOutput}
+                                                                >
+                                                                    <Scissors className="h-4 w-4" />
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="sm"
+                                                                    onClick={() => openLayoutDialog('tables')}
+                                                                    className="hidden md:inline-flex"
+                                                                    title="Abrir painel completo de layout"
+                                                                >
+                                                                    <SlidersHorizontal className="mr-2 h-4 w-4" />
+                                                                    Layout
+                                                                </Button>
+                                                                <Button
+                                                                    variant="outline"
+                                                                    size="sm"
+                                                                    disabled={!hasOutput}
+                                                                    onClick={() => {
+                                                                        const initial = stripReportBlocks(result) || result || '';
+                                                                        setDraftResult(initial);
+                                                                        setIsEditingResult(true);
+                                                                    }}
+                                                                >
+                                                                    <Edit3 className="mr-2 h-4 w-4" />
+                                                                    Editar
+                                                                </Button>
+                                                            </div>
                                                         </div>
 
                                                         <div className="flex-1 overflow-y-auto">
-                                                            {previewMode === 'raw' && rawResult ? (
+                                                            {previewMode === 'raw' && (isHearing ? hearingTranscript : rawResult) ? (
                                                                 <SyncedTranscriptViewer
-                                                                    rawContent={rawResult}
-                                                                    mediaFiles={files.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))}
+                                                                    rawContent={(isHearing ? hearingTranscript : rawResult) || ''}
+                                                                    mediaUrl={mediaUrl}
+                                                                    mediaFiles={
+                                                                        files.length > 0
+                                                                            ? files.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
+                                                                            : jobMediaFiles
+                                                                    }
                                                                     className="h-full border rounded-md"
                                                                 />
                                                             ) : (
-                                                                <MarkdownPreview
-                                                                    content={stripReportBlocks(result) || result || ''}
-                                                                    className="h-full"
-                                                                />
+                                                                <div className="h-full flex flex-col gap-2">
+                                                                    {activeDocumentLayout.showHeaderFooter && (
+                                                                        <div className="flex items-center justify-between rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                                                                            <span className="font-medium text-foreground">{previewHeaderText}</span>
+                                                                            <span>Preview</span>
+                                                                        </div>
+                                                                    )}
+                                                                    <div className="flex-1 min-h-0">
+                                                                        {richTextHtml ? (
+                                                                            <RichHtmlPreview
+                                                                                html={richTextHtml}
+                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
+                                                                                style={documentTypographyStyle}
+                                                                            />
+                                                                        ) : (
+                                                                            <MarkdownPreview
+                                                                                content={stripReportBlocks(result) || result || ''}
+                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
+                                                                                style={documentTypographyStyle}
+                                                                            />
+                                                                        )}
+                                                                    </div>
+                                                                    {activeDocumentLayout.showHeaderFooter && (
+                                                                        <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                                                                            <span>{previewFooterText || '—'}</span>
+                                                                            <span>Página •</span>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
                                                             )}
                                                         </div>
                                                     </div>
@@ -3519,48 +5024,60 @@ export default function TranscriptionPage() {
                                             Abrir visualização
                                         </Button>
                                     </div>
-                                </TabsContent>
+										</TabsContent>
 
-                                <TabsContent value="quality" className="flex-1 overflow-y-auto p-4 m-0">
-                                    <QualityPanel
-                                        rawContent={rawResult || hearingTranscript || result || ''}
-                                        formattedContent={hearingFormatted || result || ''}
-                                        documentName={files[0]?.name || 'Documento'}
-                                        jobId={activeJobId || undefined}
-                                        initialQuality={jobQuality}
-                                        onContentUpdated={isHearing ? setHearingFormatted : setResult}
-                                        // Hearing-specific props
-                                        contentType={isHearing ? 'hearing' : 'apostila'}
-                                        segments={isHearing ? hearingSegments : undefined}
-                                        speakers={isHearing ? hearingSpeakers : undefined}
-                                        hearingMode={isHearing ? (hearingFormatMode === 'audiencia' ? 'AUDIENCIA' : hearingFormatMode === 'reuniao' ? 'REUNIAO' : 'DEPOIMENTO') : undefined}
-                                        // Synchronization props (unified audit state)
-                                        externalAuditIssues={!isHearing ? auditIssues : undefined}
-                                        isAuditOutdated={isAuditOutdated}
-                                        onIssuesUpdated={!isHearing ? setAuditIssues : undefined}
-                                        onAuditOutdatedChange={setIsAuditOutdated}
-                                    />
-                                </TabsContent>
+										{!isHearing && hasPreventiveAudit && (
+											<TabsContent value="preventive" className="flex-1 overflow-y-auto p-4 m-0 space-y-4">
+												<PreventiveAuditPanel
+													audit={preventiveAudit}
+													auditMarkdown={preventiveAuditMarkdown}
+													recommendation={preventiveRecommendation}
+													status={preventiveStatus}
+													loading={preventiveAuditLoading}
+													error={preventiveAuditError}
+													isAuditOutdated={isAuditOutdated}
+													hasRawForHil={hasRawForHil}
+													hasDocument={Boolean(result)}
+													onConvertAlerts={handleConvertPreventiveToHil}
+													onGoToHil={handleGoToHil}
+													onDownloadReport={handleDownloadReport}
+													canDownloadMd={Boolean(reportPaths?.preventive_fidelity_md_path)}
+													canDownloadJson={Boolean(reportPaths?.preventive_fidelity_json_path)}
+													onRecompute={handleRecomputePreventiveAudit}
+													canRecompute={Boolean(activeJobId) && !preventiveAuditLoading}
+													onReload={() => fetchPreventiveAudit(true)}
+												/>
+											</TabsContent>
+										)}
 
-                                {!isHearing && report && (
-                                    <TabsContent value="report" className="flex-1 overflow-y-auto p-4 m-0">
-                                        {isAuditOutdated && (
-                                            <div className="flex items-start gap-3 p-3 rounded-lg border border-orange-300 bg-orange-100 mb-4">
-                                                <AlertTriangle className="h-5 w-5 text-orange-600 flex-shrink-0 mt-0.5" />
-                                                <div className="text-sm">
-                                                    <p className="font-medium text-orange-800">Relatório de Auditoria Desatualizado</p>
-                                                    <p className="text-orange-700 mt-1">
-                                                        Este relatório refere-se a uma versão anterior do documento.
-                                                        Como você aplicou correções, os apontamentos podem não corresponder mais ao texto atual.
-                                                    </p>
-                                                </div>
-                                            </div>
-                                        )}
-                                        <div className="bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 p-3 rounded-md text-sm font-medium whitespace-pre-wrap">
-                                            {report}
-                                        </div>
-                                    </TabsContent>
-                                )}
+										<TabsContent value="quality" className="flex-1 overflow-y-auto p-4 m-0">
+												<QualityPanel
+													rawContent={isHearing ? (hearingTranscript || '') : (rawResult || '')}
+													formattedContent={isHearing ? (hearingFormatted || '') : (result || '')}
+													documentName={activeDocumentName || 'Documento'}
+													documentMode={!isHearing ? mode : undefined}
+													modelSelection={selectedModel}
+													jobId={activeJobId || undefined}
+													initialQuality={jobQuality}
+													onContentUpdated={isHearing ? setHearingFormatted : (content) => {
+														setResult(content);
+														clearRichContent();
+													}}
+												variant={isHearing ? 'full' : 'dashboard'}
+												// Hearing-specific props
+												contentType={isHearing ? 'hearing' : 'apostila'}
+												segments={isHearing ? hearingSegments : undefined}
+												speakers={isHearing ? hearingSpeakers : undefined}
+												hearingMode={isHearing ? (hearingFormatMode === 'audiencia' ? 'AUDIENCIA' : hearingFormatMode === 'reuniao' ? 'REUNIAO' : 'DEPOIMENTO') : undefined}
+												onHearingUpdated={isHearing ? (payload) => applyHearingPayload(payload) : undefined}
+												// Synchronization props (unified audit state)
+												externalAuditIssues={!isHearing ? auditIssues : undefined}
+												isAuditOutdated={isAuditOutdated}
+												onIssuesUpdated={!isHearing ? setAuditIssues : undefined}
+												onAuditOutdatedChange={setIsAuditOutdated}
+												onConvertContentAlerts={!isHearing ? handleConvertQualityAlertsToHil : undefined}
+											/>
+										</TabsContent>
 
                                 {isHearing && (
                                     <>
@@ -3829,88 +5346,35 @@ export default function TranscriptionPage() {
                                             </span>
                                         </div>
 
-                                        {/* Terminal Logs */}
-                                        <div className="mt-4 text-left font-mono text-xs">
-                                            <div className="bg-black/90 text-green-400 p-3 rounded-md h-48 overflow-y-auto border border-green-900/50 shadow-inner flex flex-col-reverse">
-                                                {logs.length === 0 ? (
-                                                    <span className="opacity-50">AGUARDANDO LOGS...</span>
-                                                ) : (
-                                                    logs.slice().reverse().map((log, i) => (
-                                                        <div key={i} className="whitespace-pre-wrap break-words border-b border-white/5 last:border-0 pb-1 mb-1">
-                                                            <span className="text-gray-500 mr-2">
-                                                                [{log.timestamp}]
-                                                            </span>
-                                                            <span dangerouslySetInnerHTML={{
-                                                                __html: log.message
-                                                                    .replace(/\[(.*?)\]/g, '<span class="text-yellow-400 font-bold">[$1]</span>')
-                                                                    .replace(/(Erro|Falha|Error)/gi, '<span class="text-red-500 font-bold">$1</span>')
-                                                                    .replace(/(Sucesso|Concluído|✅|OK|pronto)/gi, '<span class="text-green-400 font-bold">$1</span>')
-                                                                    .replace(/(🎬 Vídeo)/g, '<span class="text-purple-400 font-bold">$1</span>')
-                                                                    .replace(/(🎵 Áudio)/g, '<span class="text-blue-400 font-bold">$1</span>')
-                                                                    .replace(/(📤 Extraindo|🔧 Convertendo)/g, '<span class="text-cyan-300">$1</span>')
-                                                                    .replace(/(\.\d+MB)/g, '<span class="text-orange-300">$1</span>')
-                                                                    .replace(/(Whisper|FFmpeg|MLX)/gi, '<span class="text-cyan-400">$1</span>')
-                                                            }} />
-                                                        </div>
-                                                    ))
-                                                )}
-                                            </div>
-                                            <p className="text-[10px] text-muted-foreground mt-1 text-right">
-                                                Output em tempo real do servidor
-                                            </p>
-                                        </div>
-                                    </div>
-                                ) : (
+	                                        <div className="mt-4 flex items-center justify-between gap-3">
+	                                            <div className="text-[11px] text-muted-foreground">
+	                                                Logs em tempo real do servidor
+	                                                {logs.length ? ` · ${logs.length} linhas` : ''}
+	                                            </div>
+	                                            <Button
+	                                                type="button"
+	                                                variant="outline"
+	                                                size="sm"
+	                                                className="h-8"
+	                                                onClick={() => setProgressLogsOpen(true)}
+	                                                disabled={logs.length === 0}
+	                                            >
+	                                                Ver logs
+	                                            </Button>
+	                                        </div>
+	                                    </div>
+	                                ) : (
                                     <div className="text-center">
                                         <FileAudio className="h-12 w-12 mx-auto mb-4 opacity-20" />
-                                        <p>Faça upload de um arquivo para começar.</p>
+                                        <p>Selecione um job em “Transcription Jobs” e clique em “Abrir”.</p>
                                     </div>
                                 )}
                             </div>
                         )}
                     </CardContent>
                 </Card>
-
-                <Card className="col-span-1 h-fit">
-                    <CardHeader>
-                        <CardTitle>Dashboard de Casos</CardTitle>
-                        <CardDescription>Histórico recente, status e ações rápidas.</CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-3">
-                        {casesLoading && (
-                            <div className="text-sm text-muted-foreground">Carregando casos...</div>
-                        )}
-                        {!casesLoading && recentCases.length === 0 && (
-                            <div className="text-sm text-muted-foreground">Nenhum caso cadastrado.</div>
-                        )}
-                        {recentCases.map((caseItem: any) => (
-                            <div key={caseItem.id} className="flex items-center justify-between gap-2 rounded-md border p-3">
-                                <div className="space-y-1">
-                                    <div className="text-sm font-medium">{caseItem.title}</div>
-                                    <div className="text-xs text-muted-foreground">
-                                        {caseItem.process_number || 'Sem nº processo'}
-                                    </div>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                    <Badge variant="secondary">{caseItem.status || 'ativo'}</Badge>
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        onClick={() => {
-                                            window.location.href = `/cases/${caseItem.id}`;
-                                        }}
-                                    >
-                                        Abrir
-                                    </Button>
-                                </div>
-                            </div>
-                        ))}
-                        <Button variant="ghost" className="w-full" onClick={() => (window.location.href = '/cases')}>
-                            Ver todos os casos
-                        </Button>
-                    </CardContent>
-                </Card>
-            </div>
+                </TabsContent>
+            </Tabs>
 
             {pendingRevision && (
                 <DiffConfirmDialog
@@ -4110,6 +5574,343 @@ export default function TranscriptionPage() {
                     </DialogFooter>
                 </DialogContent>
             </Dialog>
+
+            <Dialog open={progressLogsOpen} onOpenChange={setProgressLogsOpen}>
+                <DialogContent className="max-w-4xl">
+                    <DialogHeader>
+                        <DialogTitle>Logs do processamento</DialogTitle>
+                        <DialogDescription>
+                            Output em tempo real do servidor (útil para diagnosticar travamentos, falhas de diarização, etc.).
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs text-muted-foreground">
+                            {logs.length ? `${logs.length} linhas` : 'Sem logs ainda'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={async () => {
+                                    try {
+                                        await navigator.clipboard.writeText(plainLogsText || '');
+                                        toast.success('Logs copiados.');
+                                    } catch {
+                                        toast.error('Não foi possível copiar os logs.');
+                                    }
+                                }}
+                                disabled={!plainLogsText}
+                            >
+                                Copiar
+                            </Button>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setLogs([])}
+                                disabled={logs.length === 0}
+                            >
+                                Limpar
+                            </Button>
+                        </div>
+                    </div>
+                    <div className="mt-3 rounded-md border bg-black/95 text-green-200 font-mono text-xs p-3 h-[60vh] overflow-y-auto">
+                        {logs.length === 0 ? (
+                            <div className="opacity-60">AGUARDANDO LOGS...</div>
+                        ) : (
+                            <pre className="whitespace-pre-wrap break-words">{plainLogsText}</pre>
+                        )}
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            {hasActiveProgress && (
+                <div className="fixed bottom-4 left-1/2 z-50 w-[min(960px,calc(100%-2rem))] -translate-x-1/2">
+                    {progressDockMinimized ? (
+                        <div className="flex justify-end">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                className="bg-background/90 backdrop-blur"
+                                onClick={() => setProgressDockMinimized(false)}
+                            >
+                                Progresso · {progressPercent}%
+                            </Button>
+                        </div>
+                    ) : (
+                        <div className="rounded-lg border bg-background/95 backdrop-blur shadow-lg p-3">
+                            <div className="flex items-start gap-3">
+                                <div className="flex-1 min-w-0">
+                                    <div className="flex items-center justify-between gap-2">
+                                        <div className="text-sm font-medium truncate">
+                                            {progressMessage || (isProcessing ? 'Processando...' : 'Processo concluído')}
+                                        </div>
+                                        <div className="text-xs text-muted-foreground tabular-nums">
+                                            {progressPercent}%
+                                        </div>
+                                    </div>
+                                    <div className="mt-2 h-2 rounded-full bg-muted overflow-hidden">
+                                        <div
+                                            className="h-2 bg-primary transition-all duration-300 ease-out"
+                                            style={{ width: `${Math.max(0, Math.min(100, progressPercent))}%` }}
+                                        />
+                                    </div>
+                                    <div className="mt-2 flex items-center justify-between gap-2">
+                                        <div className="text-[11px] text-muted-foreground">
+                                            {progressStage ? `Etapa: ${progressStage}` : 'Etapa: —'}
+                                            {etaSeconds !== null ? ` · ETA ${formatDuration(etaSeconds)}` : ''}
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                size="sm"
+                                                className="h-8"
+                                                onClick={() => setProgressLogsOpen(true)}
+                                                disabled={logs.length === 0}
+                                            >
+                                                Logs
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="icon"
+                                                className="h-8 w-8"
+                                                onClick={() => setProgressDockMinimized(true)}
+                                                title="Minimizar"
+                                            >
+                                                <X className="h-4 w-4" />
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
+
+	        <Dialog open={layoutDialogOpen} onOpenChange={setLayoutDialogOpen}>
+	            <DialogContent className="max-w-2xl">
+	                <DialogHeader>
+	                    <DialogTitle>Layout do documento</DialogTitle>
+	                    <DialogDescription>
+	                        Ajuste tema de tabelas, margens e cabeçalho/rodapé. Essas configurações afetam o preview e a exportação para Word.
+	                    </DialogDescription>
+	                </DialogHeader>
+
+                <Tabs
+                    value={layoutDialogTab}
+                    onValueChange={(value) => setLayoutDialogTab(value as typeof layoutDialogTab)}
+                    className="w-full"
+                >
+                    <TabsList className="grid w-full grid-cols-6">
+                        <TabsTrigger value="page">Página</TabsTrigger>
+                        <TabsTrigger value="header">Cabeçalho</TabsTrigger>
+                        <TabsTrigger value="typography">Tipografia</TabsTrigger>
+                        <TabsTrigger value="margins">Margens</TabsTrigger>
+                        <TabsTrigger value="tables">Tabelas</TabsTrigger>
+                        <TabsTrigger value="breaks">Seções</TabsTrigger>
+                    </TabsList>
+
+	                    <TabsContent value="page" className="mt-5">
+	                        <div className="grid gap-4">
+	                            <div className="flex items-center justify-between space-x-3 rounded-md border p-3">
+	                                <Label htmlFor="doc-page-frame" className="flex flex-col space-y-1">
+	                                    <span>Simular página (A4) no preview</span>
+	                                    <span className="font-normal text-xs text-muted-foreground">
+	                                        Centraliza e limita largura para leitura (apenas visual).
+	                                    </span>
+	                                </Label>
+	                                <Switch
+	                                    id="doc-page-frame"
+	                                    checked={activeDocumentLayout.pageFrame}
+	                                    onCheckedChange={(checked) => updateActiveLayout({ pageFrame: Boolean(checked) })}
+	                                />
+	                            </div>
+	                        </div>
+	                    </TabsContent>
+
+	                    <TabsContent value="header" className="mt-5">
+	                        <div className="grid gap-4">
+	                            <div className="grid gap-3 md:grid-cols-2">
+	                                <div className="grid gap-2">
+	                                    <Label htmlFor="doc-header">Cabeçalho (opcional)</Label>
+	                                    <Input
+	                                        id="doc-header"
+	                                        value={activeDocumentLayout.headerText}
+	                                        onChange={(e) => updateActiveLayout({ headerText: e.target.value })}
+	                                        placeholder="Ex.: Iudex — Apostila"
+	                                    />
+	                                    <p className="text-xs text-muted-foreground">
+	                                        Se vazio, o Word usa automaticamente o nome do documento + modo.
+	                                    </p>
+	                                </div>
+	                                <div className="grid gap-2">
+	                                    <Label htmlFor="doc-footer">Rodapé (opcional)</Label>
+	                                    <Input
+	                                        id="doc-footer"
+	                                        value={activeDocumentLayout.footerText}
+	                                        onChange={(e) => updateActiveLayout({ footerText: e.target.value })}
+	                                        placeholder="Ex.: Confidencial"
+	                                    />
+	                                    <p className="text-xs text-muted-foreground">
+	                                        A paginação é mantida automaticamente no Word.
+	                                    </p>
+	                                </div>
+	                            </div>
+
+	                            <div className="flex items-center justify-between space-x-3 rounded-md border p-3">
+	                                <Label htmlFor="doc-show-hf" className="flex flex-col space-y-1">
+	                                    <span>Mostrar cabeçalho/rodapé no preview</span>
+	                                    <span className="font-normal text-xs text-muted-foreground">
+	                                        Apenas visual; não altera o RAW.
+	                                    </span>
+	                                </Label>
+	                                <Switch
+	                                    id="doc-show-hf"
+	                                    checked={activeDocumentLayout.showHeaderFooter}
+	                                    onCheckedChange={(checked) => updateActiveLayout({ showHeaderFooter: Boolean(checked) })}
+	                                />
+	                            </div>
+	                        </div>
+	                    </TabsContent>
+
+	                    <TabsContent value="typography" className="mt-5">
+	                        <div className="grid gap-4">
+	                            <div className="grid gap-2">
+	                                <Label>Fonte base</Label>
+	                                <select
+	                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                    value={activeDocumentLayout.fontFamily}
+	                                    onChange={(e) => updateActiveLayout({ fontFamily: e.target.value })}
+	                                >
+	                                    <option value="">Padrão do tema</option>
+	                                    <option value="Arial">Arial</option>
+	                                    <option value="Calibri">Calibri</option>
+	                                    <option value="Times New Roman">Times New Roman</option>
+	                                    <option value="Georgia">Georgia</option>
+	                                    <option value="Inter">Inter</option>
+	                                    <option value="Roboto">Roboto</option>
+	                                </select>
+	                            </div>
+	                            <div className="grid gap-3 md:grid-cols-3">
+	                                <div className="grid gap-2">
+	                                    <Label>Tamanho da fonte (px)</Label>
+	                                    <select
+	                                        className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                        value={activeDocumentLayout.fontSize}
+	                                        onChange={(e) => updateActiveLayout({ fontSize: Number(e.target.value) })}
+	                                    >
+	                                        {[11, 12, 13, 14, 15, 16, 18].map((size) => (
+	                                            <option key={size} value={size}>
+	                                                {size}px
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                                <div className="grid gap-2">
+	                                    <Label>Entrelinhas</Label>
+	                                    <select
+	                                        className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                        value={activeDocumentLayout.lineHeight}
+	                                        onChange={(e) => updateActiveLayout({ lineHeight: Number(e.target.value) })}
+	                                    >
+	                                        {[1.15, 1.3, 1.5, 1.8, 2].map((lh) => (
+	                                            <option key={lh} value={lh}>
+	                                                {lh}
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                                <div className="grid gap-2">
+	                                    <Label>Espaçamento entre parágrafos</Label>
+	                                    <select
+	                                        className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                        value={activeDocumentLayout.paragraphSpacing}
+	                                        onChange={(e) => updateActiveLayout({ paragraphSpacing: Number(e.target.value) })}
+	                                    >
+	                                        {[0, 8, 12, 16, 20, 24].map((spacing) => (
+	                                            <option key={spacing} value={spacing}>
+	                                                {spacing}px
+	                                            </option>
+	                                        ))}
+	                                    </select>
+	                                </div>
+	                            </div>
+	                            <p className="text-xs text-muted-foreground">
+	                                Essas opções controlam a tipografia global do preview e do DOCX, sem alterar o RAW.
+	                            </p>
+	                        </div>
+	                    </TabsContent>
+
+	                    <TabsContent value="margins" className="mt-5">
+	                        <div className="grid gap-2">
+	                            <Label>Margens (preview e DOCX)</Label>
+	                            <select
+	                                className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                value={activeDocumentLayout.margins}
+	                                onChange={(e) => updateActiveLayout({ margins: e.target.value as DocumentLayout['margins'] })}
+	                            >
+	                                <option value="compact">Compacta</option>
+	                                <option value="normal">Normal</option>
+	                                <option value="wide">Ampla</option>
+	                            </select>
+	                        </div>
+	                    </TabsContent>
+
+	                    <TabsContent value="tables" className="mt-5">
+	                        <div className="grid gap-2">
+	                            <Label>Tema de tabelas</Label>
+	                            <select
+	                                className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                value={activeDocumentTheme}
+	                                onChange={(e) => setActiveTheme(e.target.value)}
+	                            >
+	                                {DOCUMENT_THEMES.map((theme) => (
+	                                    <option key={theme.id} value={theme.id}>
+	                                        {theme.title}
+	                                    </option>
+	                                ))}
+	                            </select>
+	                            <p className="text-xs text-muted-foreground">
+	                                {DOCUMENT_THEMES.find((t) => t.id === activeDocumentTheme)?.description
+	                                    || 'Define o estilo visual do documento (principalmente tabelas).'}
+	                            </p>
+	                        </div>
+	                    </TabsContent>
+
+	                    <TabsContent value="breaks" className="mt-5">
+	                        <div className="grid gap-3">
+	                            <p className="text-sm text-muted-foreground">
+	                                Use quebras de página para separar seções no Word. Isso não altera o RAW e é
+	                                exportado como nova página.
+	                            </p>
+	                            <div className="flex items-center justify-between rounded-md border p-3">
+	                                <div className="space-y-1">
+	                                    <div className="text-sm font-medium">Quebra de página</div>
+	                                    <div className="text-xs text-muted-foreground">
+	                                        Insere o marcador <code>{'<!-- PAGE_BREAK -->'}</code> no documento.
+	                                    </div>
+	                                </div>
+	                                <Button variant="outline" size="sm" disabled={!hasOutput} onClick={handleInsertPageBreak}>
+	                                    <Scissors className="mr-2 h-4 w-4" />
+	                                    Inserir
+	                                </Button>
+	                            </div>
+	                        </div>
+	                    </TabsContent>
+	                </Tabs>
+
+	                <DialogFooter className="gap-2">
+	                    <Button variant="outline" onClick={() => setLayoutDialogOpen(false)}>
+	                        Fechar
+	                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+        </>
     );
 }

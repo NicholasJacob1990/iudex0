@@ -60,6 +60,7 @@ from app.services.ai.perplexity_config import (
     parse_csv_list,
     normalize_float,
 )
+from app.services.rag.config import get_rag_config
 from app.services.job_manager import job_manager
 from app.services.api_call_tracker import record_api_call, billing_context
 from app.services.ai.audit_service import AuditService
@@ -1383,6 +1384,10 @@ async def _resolve_section_context(
         scope_groups = state.get("rag_scope_groups") or []
         allow_global_scope = bool(state.get("rag_allow_global", False))
         allow_group_scope = bool(state.get("rag_allow_groups", bool(scope_groups)))
+        try:
+            neo4j_only = bool(get_rag_config().neo4j_only)
+        except Exception:
+            neo4j_only = False
 
         if use_graph:
             use_tenant_graph = os.getenv("RAG_GRAPH_TENANT_SCOPED", "false").lower() in ("1", "true", "yes", "on")
@@ -1390,35 +1395,74 @@ async def _resolve_section_context(
             allow_global_scope = bool(state.get("rag_allow_global", False))
             allow_group_scope = bool(state.get("rag_allow_groups", bool(scope_groups)))
             graphs = []
-            private_scope_id = state.get("tenant_id") if use_tenant_graph else None
-            private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
-            if private_graph:
-                graphs.append(("private", private_graph))
-            if allow_global_scope:
-                global_graph = get_scoped_knowledge_graph(scope="global", scope_id=None)
-                if global_graph:
-                    graphs.append(("global", global_graph))
-            if allow_group_scope:
-                for gid in scope_groups:
-                    if not gid:
-                        continue
-                    group_graph = get_scoped_knowledge_graph(scope="group", scope_id=str(gid))
-                    if group_graph:
-                        graphs.append((f"group:{gid}", group_graph))
             hop_count = int(route_config.get("graph_hops") or state.get("graph_hops") or 2)
-            for scope, graph in graphs:
-                graph_context, _ = graph.query_context_from_text(
-                    section_query,
-                    hops=hop_count,
-                )
-                if graph_context:
-                    graph_primary_hit = True
-                    graph_used = graph
-                    graph_used_scope = scope
-                    break
-            if not graph_used and private_graph:
-                graph_used = private_graph
-                graph_used_scope = "private"
+            if neo4j_only:
+                try:
+                    from app.services.rag.core.neo4j_mvp import (
+                        get_neo4j_mvp,
+                        build_graph_context,
+                        LegalEntityExtractor,
+                    )
+                    neo4j = get_neo4j_mvp()
+                    if neo4j.health_check():
+                        query_entities = LegalEntityExtractor.extract(section_query)
+                        entity_ids = [e.get("entity_id") for e in query_entities if e.get("entity_id")]
+                        if entity_ids:
+                            allowed_scopes: List[str] = []
+                            if allow_global_scope:
+                                allowed_scopes.append("global")
+                            if state.get("tenant_id"):
+                                allowed_scopes.append("private")
+                            if allow_group_scope and scope_groups:
+                                allowed_scopes.append("group")
+                            if not allowed_scopes:
+                                allowed_scopes = ["global"]
+                            group_ids = [str(g) for g in (scope_groups or []) if g]
+                            paths = neo4j.find_paths(
+                                entity_ids=entity_ids[:10],
+                                tenant_id=str(state.get("tenant_id") or "default"),
+                                allowed_scopes=allowed_scopes,
+                                group_ids=group_ids,
+                                case_id=str(state.get("case_id")) if state.get("case_id") else None,
+                                user_id=str(state.get("user_id")) if state.get("user_id") else None,
+                                max_hops=hop_count,
+                                limit=15,
+                                include_arguments=False,
+                            )
+                            if paths and build_graph_context is not None:
+                                graph_context = build_graph_context(paths, max_chars=4000)
+                                graph_primary_hit = True
+                except Exception as exc:
+                    logger.warning(f"⚠️ Neo4j-only GraphRAG failed: {exc}")
+            else:
+                private_scope_id = state.get("tenant_id") if use_tenant_graph else None
+                private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
+                if private_graph:
+                    graphs.append(("private", private_graph))
+                if allow_global_scope:
+                    global_graph = get_scoped_knowledge_graph(scope="global", scope_id=None)
+                    if global_graph:
+                        graphs.append(("global", global_graph))
+                if allow_group_scope:
+                    for gid in scope_groups:
+                        if not gid:
+                            continue
+                        group_graph = get_scoped_knowledge_graph(scope="group", scope_id=str(gid))
+                        if group_graph:
+                            graphs.append((f"group:{gid}", group_graph))
+                for scope, graph in graphs:
+                    graph_context, _ = graph.query_context_from_text(
+                        section_query,
+                        hops=hop_count,
+                    )
+                    if graph_context:
+                        graph_primary_hit = True
+                        graph_used = graph
+                        graph_used_scope = scope
+                        break
+                if not graph_used and private_graph:
+                    graph_used = private_graph
+                    graph_used_scope = "private"
 
         # Step 1: Primary search (HyDE if flagged, otherwise hybrid)
         if not graph_primary_hit:
@@ -1504,7 +1548,44 @@ async def _resolve_section_context(
 
         # Step 2: GraphRAG enrichment (v5.8: now uses use_graph flag, not just strategy)
         if use_graph and not graph_context:
-            if graph_used:
+            if neo4j_only:
+                try:
+                    from app.services.rag.core.neo4j_mvp import (
+                        get_neo4j_mvp,
+                        build_graph_context,
+                        LegalEntityExtractor,
+                    )
+                    neo4j = get_neo4j_mvp()
+                    if neo4j.health_check():
+                        query_entities = LegalEntityExtractor.extract(section_query)
+                        entity_ids = [e.get("entity_id") for e in query_entities if e.get("entity_id")]
+                        if entity_ids:
+                            allowed_scopes: List[str] = []
+                            if allow_global_scope:
+                                allowed_scopes.append("global")
+                            if state.get("tenant_id"):
+                                allowed_scopes.append("private")
+                            if allow_group_scope and scope_groups:
+                                allowed_scopes.append("group")
+                            if not allowed_scopes:
+                                allowed_scopes = ["global"]
+                            group_ids = [str(g) for g in (scope_groups or []) if g]
+                            paths = neo4j.find_paths(
+                                entity_ids=entity_ids[:10],
+                                tenant_id=str(state.get("tenant_id") or "default"),
+                                allowed_scopes=allowed_scopes,
+                                group_ids=group_ids,
+                                case_id=str(state.get("case_id")) if state.get("case_id") else None,
+                                user_id=str(state.get("user_id")) if state.get("user_id") else None,
+                                max_hops=int(route_config.get("graph_hops") or state.get("graph_hops") or 2),
+                                limit=15,
+                                include_arguments=False,
+                            )
+                            if paths and build_graph_context is not None:
+                                graph_context = build_graph_context(paths, max_chars=4000)
+                except Exception as exc:
+                    logger.warning(f"⚠️ Neo4j-only GraphRAG enrichment failed: {exc}")
+            elif graph_used:
                 rag_chunks = rag_results or []
                 if not rag_chunks and base_context:
                     rag_chunks = [{"text": base_context[:2000], "metadata": {}}]
@@ -1517,17 +1598,31 @@ async def _resolve_section_context(
     if not use_external_context:
         return "", route_config, safe_mode
 
-    if bool(state.get("argument_graph_enabled")) and graph_used and (graph_used_scope or "").startswith("private"):
-        try:
-            from app.services.argument_pack import ARGUMENT_PACK
-            argument_context = ARGUMENT_PACK.build_debate_context_from_query(
-                graph_used,
-                section_query,
-                hops=int(route_config.get("graph_hops") or state.get("graph_hops") or 2),
-            ) or ""
-        except Exception as exc:
-            logger.warning(f"⚠️ ArgumentRAG failed for section '{section_title}': {exc}")
-            argument_context = ""
+    if bool(state.get("argument_graph_enabled")):
+        if neo4j_only:
+            try:
+                from app.services.rag.core.argument_neo4j import get_argument_neo4j
+                arg_svc = get_argument_neo4j()
+                arg_ctx, _arg_stats = arg_svc.get_debate_context(
+                    results=rag_results or [],
+                    tenant_id=str(state.get("tenant_id") or "default"),
+                    case_id=str(state.get("case_id")) if state.get("case_id") else None,
+                )
+                argument_context = arg_ctx or ""
+            except Exception as exc:
+                logger.warning(f"⚠️ Neo4j ArgumentRAG failed for section '{section_title}': {exc}")
+                argument_context = ""
+        elif graph_used and (graph_used_scope or "").startswith("private"):
+            try:
+                from app.services.argument_pack import ARGUMENT_PACK
+                argument_context = ARGUMENT_PACK.build_debate_context_from_query(
+                    graph_used,
+                    section_query,
+                    hops=int(route_config.get("graph_hops") or state.get("graph_hops") or 2),
+                ) or ""
+            except Exception as exc:
+                logger.warning(f"⚠️ ArgumentRAG failed for section '{section_title}': {exc}")
+                argument_context = ""
 
     section_context = _merge_context_blocks(
         [argument_context, graph_context, section_rag_context, base_context],

@@ -23,6 +23,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.test.yml"
 COMPOSE_NEO4J="$SCRIPT_DIR/docker-compose.neo4j.yml"
 PROJECT_NAME="rag-test"
+PYTHON_BIN="${PYTHON_BIN:-python}"
+
+if [ -x "$SCRIPT_DIR/../../.venv312/bin/python" ]; then
+    PYTHON_BIN="$SCRIPT_DIR/../../.venv312/bin/python"
+elif [ -x "$SCRIPT_DIR/../../.venv/bin/python" ]; then
+    PYTHON_BIN="$SCRIPT_DIR/../../.venv/bin/python"
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    if command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="python3"
+    fi
+fi
 
 # Colors
 RED='\033[0;31m'
@@ -152,11 +165,11 @@ run_tests() {
     case "$test_target" in
         qdrant)
             log_info "Running Qdrant integration tests..."
-            python -m pytest tests/rag/test_qdrant_integration.py -v --tb=short -o "addopts="
+            "$PYTHON_BIN" -m pytest tests/rag/test_qdrant_integration.py -v --tb=short -o "addopts="
             ;;
         opensearch)
             log_info "Running OpenSearch integration tests..."
-            python -m pytest tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
+            "$PYTHON_BIN" -m pytest tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
             ;;
         neo4j)
             log_info "Running Neo4j integration tests..."
@@ -165,11 +178,11 @@ run_tests() {
                 log_warn "Neo4j not running. Starting container..."
                 start_neo4j
             fi
-            python -m pytest tests/rag/test_neo4j_integration.py -v --tb=short -o "addopts="
+            "$PYTHON_BIN" -m pytest tests/rag/test_neo4j_integration.py -v --tb=short -o "addopts="
             ;;
         *)
             log_info "Running all integration tests (Qdrant + OpenSearch)..."
-            python -m pytest tests/rag/test_qdrant_integration.py tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
+            "$PYTHON_BIN" -m pytest tests/rag/test_qdrant_integration.py tests/rag/test_opensearch_integration.py -v --tb=short -o "addopts="
             ;;
     esac
 }

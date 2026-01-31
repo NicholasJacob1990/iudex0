@@ -123,6 +123,18 @@ except ImportError:
     get_colpali_service = None  # type: ignore
     VisualRetrievalResult = None  # type: ignore
 
+# CogGRAG — Cognitive Graph RAG (Phase 2 integration)
+try:
+    from app.services.ai.langgraph.subgraphs.cognitive_rag import (
+        run_cognitive_rag,
+        CognitiveRAGState,
+    )
+    from app.services.rag.core.cograg.nodes.planner import is_complex_query as cograg_is_complex
+except ImportError:
+    run_cognitive_rag = None  # type: ignore
+    CognitiveRAGState = None  # type: ignore
+    cograg_is_complex = None  # type: ignore
+
 trace_event = None  # legacy hook removed; use PipelineResult.trace instead
 TraceEventType = None  # type: ignore
 
@@ -160,6 +172,66 @@ def _truncate_block(text: str, max_chars: int, *, suffix: str = "\n\n...[conteú
 
 
 # =============================================================================
+# Intent Detection (debate vs factual)
+# =============================================================================
+
+# Regex cues that signal a debate/argumentative intent in Portuguese queries.
+_DEBATE_CUES_RE = re.compile(
+    r"""(?ix)                       # case-insensitive, verbose
+    \b(?:
+        argumento[s]?\b             # "argumentos"
+        |tese[s]?\b                 # "teses"
+        |contratese[s]?\b           # "contrateses"
+        |debate\b                   # "debate"
+        |pr[oó]s?\s+e\s+contras?\b # "prós e contras"
+        |defesa\b                   # "defesa"
+        |acusa[çc][ãa]o\b          # "acusação"
+        |alega[çc][ãa]o\b          # "alegação"
+        |contesta[çc][ãa]o\b       # "contestação"
+        |rebat[ei]\b               # "rebate/rebati"
+        |refutar?\b                # "refutar/refuta"
+        |contradit[aó]rio\b        # "contraditório"
+        |impugna[çc][ãa]o\b       # "impugnação"
+        |fundament(?:o|ar|ação)\b  # "fundamento/fundamentar/fundamentação"
+        |posi[çc][ãa]o\s+(?:favor[aá]vel|contr[aá]ria)\b  # "posição favorável/contrária"
+        |quais\s+(?:os\s+)?argumentos\b  # "quais os argumentos"
+        |compare\s+(?:os\s+)?(?:argumentos|teses)\b  # "compare os argumentos"
+    )"""
+)
+
+# Additional phrase patterns that signal debate intent
+_DEBATE_PHRASES = [
+    "a favor e contra",
+    "pontos fortes e fracos",
+    "sustentar a tese",
+    "linha argumentativa",
+    "estratégia de defesa",
+    "estratégia de acusação",
+    "argumentação jurídica",
+]
+
+
+def detect_debate_intent(query: str) -> bool:
+    """
+    Detect whether a query has debate/argumentative intent.
+
+    Returns True if the query contains debate cues (e.g., "argumentos",
+    "tese", "prós e contras"), indicating that ArgumentRAG context should
+    be activated automatically.
+
+    This allows the system to differentiate between:
+    - Factual queries: "O que diz o Art. 5° da CF?" → entity-only graph
+    - Debate queries: "Quais argumentos a favor da tese?" → argument-aware graph
+    """
+    if not query:
+        return False
+    q = query.lower().strip()
+    if _DEBATE_CUES_RE.search(q):
+        return True
+    return any(phrase in q for phrase in _DEBATE_PHRASES)
+
+
+# =============================================================================
 # Enums and Constants
 # =============================================================================
 
@@ -169,6 +241,8 @@ class SearchMode(str, Enum):
     VECTOR_ONLY = "vector_only"
     HYBRID_LEX_VEC = "hybrid_lex+vec"
     HYBRID_EXPANDED = "hybrid_expanded"
+    HYBRID_LEX_VEC_GRAPH = "hybrid_lex+vec+graph"
+    HYBRID_LEX_GRAPH = "hybrid_lex+graph"
 
 
 class PipelineStage(str, Enum):
@@ -177,6 +251,7 @@ class PipelineStage(str, Enum):
     LEXICAL_SEARCH = "lexical_search"
     VECTOR_SEARCH = "vector_search"
     VISUAL_SEARCH = "visual_search"  # ColPali visual retrieval
+    GRAPH_SEARCH = "graph_search"  # Neo4j graph-based chunk retrieval
     MERGE_RRF = "merge_rrf"
     CRAG_GATE = "crag_gate"
     RERANK = "rerank"
@@ -184,6 +259,11 @@ class PipelineStage(str, Enum):
     COMPRESS = "compress"
     GRAPH_ENRICH = "graph_enrich"
     TRACE = "trace"
+    # CogGRAG stages
+    COGRAG_DECOMPOSE = "cograg_decompose"
+    COGRAG_RETRIEVAL = "cograg_retrieval"
+    COGRAG_REFINE = "cograg_refine"
+    COGRAG_VERIFY = "cograg_verify"
 
 
 class CRAGDecision(str, Enum):
@@ -396,6 +476,13 @@ class PipelineTrace:
     # Budget tracking
     budget_usage: Optional[Dict[str, Any]] = None
 
+    # Arbitrary metadata (e.g., cache hits, feature flags)
+    data: Dict[str, Any] = field(default_factory=dict)
+
+    def add_data(self, key: str, value: Any) -> None:
+        """Attach arbitrary metadata to the trace."""
+        self.data[str(key)] = value
+
     def start_stage(self, stage: PipelineStage, input_count: int = 0) -> StageTrace:
         """Start tracking a new stage."""
         trace = StageTrace(
@@ -443,6 +530,7 @@ class PipelineTrace:
             "errors": self.errors,
             "warnings": self.warnings,
             "budget_usage": self.budget_usage,
+            "data": self.data,
         }
 
     def to_metrics(self) -> Dict[str, Any]:
@@ -776,12 +864,15 @@ class RAGPipeline:
                 logger.warning(f"Failed to initialize ChunkExpander: {e}")
 
         # Knowledge Graph (NetworkX-based)
-        if self._graph is None and LegalKnowledgeGraph is not None:
-            try:
-                self._graph = LegalKnowledgeGraph()
-                logger.debug("Knowledge graph initialized")
-            except Exception as e:
-                logger.warning(f"Failed to initialize KnowledgeGraph: {e}")
+        if not getattr(self._base_config, "neo4j_only", False):
+            if self._graph is None and LegalKnowledgeGraph is not None:
+                try:
+                    self._graph = LegalKnowledgeGraph()
+                    logger.debug("Knowledge graph initialized")
+                except Exception as e:
+                    logger.warning(f"Failed to initialize KnowledgeGraph: {e}")
+        else:
+            logger.debug("Neo4j-only mode: skipping NetworkX graph init")
 
         # Neo4j MVP (Graph Database)
         if self._neo4j is None and get_neo4j_mvp is not None:
@@ -858,16 +949,18 @@ class RAGPipeline:
         self,
         lexical_rank: Optional[int],
         vector_rank: Optional[int],
+        graph_rank: Optional[int] = None,
         k: int = 60,
     ) -> float:
         """
         Compute RRF (Reciprocal Rank Fusion) score.
 
-        RRF formula: 1 / (k + rank)
+        RRF formula: weight * 1 / (k + rank) for each source.
 
         Args:
             lexical_rank: Rank in lexical results (1-indexed, None if not present)
             vector_rank: Rank in vector results (1-indexed, None if not present)
+            graph_rank: Rank in graph results (1-indexed, None if not present)
             k: RRF constant (default 60)
 
         Returns:
@@ -881,21 +974,26 @@ class RAGPipeline:
         if vector_rank is not None:
             score += self._base_config.vector_weight * (1.0 / (k + vector_rank))
 
+        if graph_rank is not None:
+            score += self._base_config.graph_weight * (1.0 / (k + graph_rank))
+
         return score
 
     def _merge_results_rrf(
         self,
         lexical_results: List[Dict[str, Any]],
         vector_results: List[Dict[str, Any]],
+        graph_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Merge lexical and vector results using RRF.
+        Merge lexical, vector, and graph results using RRF.
 
         Results are merged by chunk_uid (or generated from content hash).
 
         Args:
             lexical_results: Results from lexical search
             vector_results: Results from vector search
+            graph_results: Results from Neo4j graph search (optional)
 
         Returns:
             Merged and sorted results
@@ -912,6 +1010,7 @@ class RAGPipeline:
                 merged[uid] = result.copy()
                 merged[uid]["_lexical_rank"] = rank
                 merged[uid]["_vector_rank"] = None
+                merged[uid]["_graph_rank"] = None
                 merged[uid]["lexical_score"] = result.get("score", 0.0)
             else:
                 merged[uid]["_lexical_rank"] = rank
@@ -926,10 +1025,27 @@ class RAGPipeline:
                 merged[uid] = result.copy()
                 merged[uid]["_lexical_rank"] = None
                 merged[uid]["_vector_rank"] = rank
+                merged[uid]["_graph_rank"] = None
                 merged[uid]["vector_score"] = result.get("score", 0.0)
             else:
                 merged[uid]["_vector_rank"] = rank
                 merged[uid]["vector_score"] = result.get("score", 0.0)
+
+        # Process graph results
+        if graph_results:
+            for rank, result in enumerate(graph_results, start=1):
+                uid = result.get("chunk_uid") or result.get("id") or hash(result.get("text", ""))
+                uid = str(uid)
+
+                if uid not in merged:
+                    merged[uid] = result.copy()
+                    merged[uid]["_lexical_rank"] = None
+                    merged[uid]["_vector_rank"] = None
+                    merged[uid]["_graph_rank"] = rank
+                    merged[uid]["graph_score"] = result.get("score", 0.0)
+                else:
+                    merged[uid]["_graph_rank"] = rank
+                    merged[uid]["graph_score"] = result.get("score", 0.0)
 
         # Compute RRF scores
         k = self._base_config.rrf_k
@@ -937,6 +1053,7 @@ class RAGPipeline:
             rrf_score = self._compute_rrf_score(
                 result.get("_lexical_rank"),
                 result.get("_vector_rank"),
+                result.get("_graph_rank"),
                 k=k,
             )
             result["final_score"] = rrf_score
@@ -945,6 +1062,7 @@ class RAGPipeline:
             # Clean up internal fields
             result.pop("_lexical_rank", None)
             result.pop("_vector_rank", None)
+            result.pop("_graph_rank", None)
 
         # Sort by final score descending
         sorted_results = sorted(
@@ -1068,6 +1186,68 @@ class RAGPipeline:
 
         return False
 
+    def _should_skip_query_enhancement(
+        self,
+        lexical_preflight_results: List[Dict[str, Any]],
+        trace: PipelineTrace,
+    ) -> bool:
+        """
+        Determine if HyDE/MultiQuery can be skipped based on a quick lexical preflight.
+
+        This implements the Adaptive-RAG idea from rag.md: do a cheap lexical probe
+        before spending LLM calls on query enhancement.
+        """
+        if not getattr(self._base_config, "query_enhancement_preflight", False):
+            return False
+
+        if not lexical_preflight_results:
+            trace.add_data("qe_preflight", {"sufficient": False, "reason": "no_results"})
+            return False
+
+        # Reuse the same thresholds used for lexical-first vector gating.
+        min_results = int(self.config.lexical_min_results_for_skip or 0)
+        if len(lexical_preflight_results) < max(1, min_results):
+            trace.add_data(
+                "qe_preflight",
+                {"sufficient": False, "reason": "too_few_results", "count": len(lexical_preflight_results)},
+            )
+            return False
+
+        best_score = max(float(r.get("score", 0.0) or 0.0) for r in lexical_preflight_results)
+        threshold = float(self.config.lexical_skip_vector_threshold or 0.0)
+        if best_score < threshold:
+            trace.add_data(
+                "qe_preflight",
+                {"sufficient": False, "reason": "low_best_score", "best": best_score, "threshold": threshold},
+            )
+            return False
+
+        top_scores = [float(r.get("score", 0.0) or 0.0) for r in lexical_preflight_results[:5]]
+        avg_score = sum(top_scores) / len(top_scores) if top_scores else 0.0
+
+        if avg_score >= threshold * 0.8:
+            trace.add_data(
+                "qe_preflight",
+                {
+                    "sufficient": True,
+                    "best": best_score,
+                    "avg_top5": avg_score,
+                    "threshold": threshold,
+                    "count": len(lexical_preflight_results),
+                },
+            )
+            trace.add_warning(
+                f"Skipping query enhancement: lexical preflight sufficient "
+                f"(best={best_score:.3f}, avg_top5={avg_score:.3f})"
+            )
+            return True
+
+        trace.add_data(
+            "qe_preflight",
+            {"sufficient": False, "reason": "low_avg_score", "best": best_score, "avg_top5": avg_score},
+        )
+        return False
+
     # =========================================================================
     # Pipeline Stages
     # =========================================================================
@@ -1081,7 +1261,7 @@ class RAGPipeline:
         enable_multiquery: bool,
         multiquery_max: int,
         budget_tracker: Optional[Any] = None,
-    ) -> List[str]:
+    ) -> Dict[str, List[str]]:
         """
         Stage 1: Query Enhancement (HyDE / Multi-query).
 
@@ -1097,61 +1277,154 @@ class RAGPipeline:
             budget_tracker: Optional BudgetTracker for cost control
 
         Returns:
-            List of queries (original + expanded)
+            Dict with:
+                - lexical_queries: list of queries for lexical search (original + multi-query variants)
+                - vector_queries: list of queries for vector search (original + multi-query variants + HyDE doc)
         """
         stage = trace.start_stage(PipelineStage.QUERY_ENHANCEMENT, input_count=1)
-        queries = [query]
+        lexical_queries = [query]
+        vector_queries = [query]
 
         try:
             # Check if expansion is enabled
             if not (enable_hyde or enable_multiquery):
                 stage.skip("Query expansion disabled")
-                return queries
+                return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
 
             # Check if we have an expander
             if self._query_expander is None:
                 stage.skip("Query expander not available")
-                return queries
+                return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
 
             # Don't expand citation-heavy queries (exact match is better)
             if self.is_lexical_heavy(query):
                 stage.skip("Query is citation-heavy, skipping expansion")
-                return queries
+                return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
 
             # Check budget before expansion
             if budget_tracker is not None and BudgetTracker is not None:
                 if not budget_tracker.can_make_llm_call():
                     stage.skip("Budget limit reached, skipping query expansion")
-                    return queries
+                    return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
 
-            # Perform expansion
-            if hasattr(self._query_expander, "expand_async"):
-                expanded = await self._query_expander.expand_async(
-                    query,
-                    use_hyde=enable_hyde,
-                    use_multiquery=enable_multiquery,
-                    max_queries=multiquery_max,
-                    budget_tracker=budget_tracker,
-                )
-            elif hasattr(self._query_expander, "expand"):
-                expanded = self._query_expander.expand(
-                    query,
-                    use_hyde=enable_hyde,
-                    use_multiquery=enable_multiquery,
-                    max_queries=multiquery_max,
-                    budget_tracker=budget_tracker,
-                )
-            else:
-                stage.skip("Query expander has no expand method")
-                return queries
+            # Perform expansion, keeping HyDE only for vector search to avoid
+            # "polluting" lexical queries with long hypothetical docs.
+            expanded_multi: List[str] = []
+            hyde_doc: Optional[str] = None
 
-            if expanded:
-                queries.extend(expanded)
-                trace.enhanced_queries = expanded
+            remaining_calls: Optional[int] = None
+            if budget_tracker is not None and BudgetTracker is not None:
+                try:
+                    remaining_calls = int(budget_tracker.get_remaining_llm_calls())
+                except Exception:
+                    remaining_calls = None
+
+            want_multi = bool(enable_multiquery and multiquery_max and multiquery_max > 0)
+            want_hyde = bool(enable_hyde)
+            if remaining_calls is not None:
+                if remaining_calls <= 0:
+                    want_multi = False
+                    want_hyde = False
+                elif remaining_calls == 1:
+                    # Prefer multiquery (helps both lexical + vector); HyDE is second choice.
+                    if want_multi:
+                        want_hyde = False
+                    else:
+                        want_multi = False
+
+            tasks: List[asyncio.Task] = []
+            kinds: List[str] = []
+            if want_multi and hasattr(self._query_expander, "generate_query_variants"):
+                tasks.append(
+                    asyncio.create_task(
+                        self._query_expander.generate_query_variants(
+                            query=query,
+                            count=int(multiquery_max) + 1,
+                            budget_tracker=budget_tracker,
+                        )
+                    )
+                )
+                kinds.append("multiquery")
+            if want_hyde and hasattr(self._query_expander, "generate_hypothetical_document"):
+                tasks.append(
+                    asyncio.create_task(
+                        self._query_expander.generate_hypothetical_document(
+                            query=query,
+                            budget_tracker=budget_tracker,
+                        )
+                    )
+                )
+                kinds.append("hyde")
+
+            if tasks:
+                expanded = await asyncio.gather(*tasks, return_exceptions=True)
+                for kind, res in zip(kinds, expanded):
+                    if isinstance(res, Exception):
+                        logger.warning(f"Query enhancement {kind} failed: {res}")
+                        continue
+                    if kind == "multiquery":
+                        variants = list(res or [])
+                        # generate_query_variants always includes original first
+                        expanded_multi = [v for v in variants[1:] if v and str(v).strip()]
+                    elif kind == "hyde":
+                        txt = str(res or "").strip()
+                        if txt:
+                            hyde_doc = txt
+
+            # Fallback: older expander API (combined list). Best-effort separation.
+            if (want_multi or want_hyde) and not tasks:
+                expanded = None
+                if hasattr(self._query_expander, "expand_async"):
+                    expanded = await self._query_expander.expand_async(
+                        query,
+                        use_hyde=enable_hyde,
+                        use_multiquery=enable_multiquery,
+                        max_queries=multiquery_max,
+                        budget_tracker=budget_tracker,
+                    )
+                elif hasattr(self._query_expander, "expand"):
+                    expanded = self._query_expander.expand(
+                        query,
+                        use_hyde=enable_hyde,
+                        use_multiquery=enable_multiquery,
+                        max_queries=multiquery_max,
+                        budget_tracker=budget_tracker,
+                    )
+                else:
+                    stage.skip("Query expander has no supported methods")
+                    return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
+
+                expanded = list(expanded or [])
+                if enable_hyde and expanded:
+                    maybe_hyde = str(expanded[-1] or "")
+                    # HyDE docs tend to be longer and multi-line; variants tend to be short.
+                    if len(maybe_hyde) > 200 or "\n" in maybe_hyde:
+                        hyde_doc = maybe_hyde.strip()
+                        expanded_multi = [str(v).strip() for v in expanded[:-1] if v and str(v).strip()]
+                    else:
+                        expanded_multi = [str(v).strip() for v in expanded if v and str(v).strip()]
+                else:
+                    expanded_multi = [str(v).strip() for v in expanded if v and str(v).strip()]
+
+            if expanded_multi:
+                vector_queries.extend(expanded_multi)
+                if getattr(self._base_config, "multiquery_apply_to_lexical", False):
+                    lexical_queries.extend(expanded_multi)
+
+            if hyde_doc:
+                vector_queries.append(hyde_doc)
+
+            # For backward compatibility, keep a flattened list here.
+            trace.enhanced_queries = [*expanded_multi, *( [hyde_doc] if hyde_doc else [] )]
 
             stage.complete(
-                output_count=len(queries),
-                data={"expanded_count": len(queries) - 1},
+                output_count=len(vector_queries),
+                data={
+                    "expanded_multiquery": len(expanded_multi),
+                    "hyde_for_vector": bool(hyde_doc),
+                    "lexical_queries": len(lexical_queries),
+                    "vector_queries": len(vector_queries),
+                },
             )
 
         except QueryExpansionError:
@@ -1178,7 +1451,7 @@ class RAGPipeline:
                     recoverable=True,
                 )
 
-        return queries
+        return {"lexical_queries": lexical_queries, "vector_queries": vector_queries}
 
     async def _stage_lexical_search(
         self,
@@ -1186,6 +1459,9 @@ class RAGPipeline:
         indices: List[str],
         filters: Optional[Dict[str, Any]],
         trace: PipelineTrace,
+        *,
+        top_k_override: Optional[int] = None,
+        purpose: str = "main",
     ) -> List[Dict[str, Any]]:
         """
         Stage 2: Lexical Search (OpenSearch BM25).
@@ -1203,6 +1479,7 @@ class RAGPipeline:
         """
         stage = trace.start_stage(PipelineStage.LEXICAL_SEARCH, input_count=len(queries))
         results: List[Dict[str, Any]] = []
+        top_k = int(top_k_override or self.config.max_results_per_source)
 
         try:
             lexical_backend = os.getenv("RAG_LEXICAL_BACKEND", "opensearch").strip().lower()
@@ -1247,10 +1524,11 @@ class RAGPipeline:
                             for index in indices:
                                 try:
                                     needs = "pecas" in str(index)
-                                    extra = self._opensearch.search_lexical(
+                                    extra = await asyncio.to_thread(
+                                        self._opensearch.search_lexical,
                                         query=query,
                                         indices=[index],
-                                        top_k=self.config.max_results_per_source,
+                                        top_k=top_k,
                                         scope=f.get("scope"),
                                         tenant_id=f.get("tenant_id"),
                                         case_id=f.get("case_id"),
@@ -1264,10 +1542,11 @@ class RAGPipeline:
                                 except Exception as e:
                                     logger.warning(f"Lexical search failed for index '{index}': {e}")
                         else:
-                            query_results = self._opensearch.search_lexical(
+                            query_results = await asyncio.to_thread(
+                                self._opensearch.search_lexical,
                                 query=query,
                                 indices=indices,
-                                top_k=self.config.max_results_per_source,
+                                top_k=top_k,
                                 scope=f.get("scope"),
                                 tenant_id=f.get("tenant_id"),
                                 case_id=f.get("case_id"),
@@ -1281,14 +1560,15 @@ class RAGPipeline:
                         query_results = await self._opensearch.search_async(
                             query=query,
                             indices=indices,
-                            top_k=self.config.max_results_per_source,
+                            top_k=top_k,
                             filters=filters,
                         )
                     elif use_opensearch and hasattr(self._opensearch, "search"):
-                        query_results = self._opensearch.search(
+                        query_results = await asyncio.to_thread(
+                            self._opensearch.search,
                             query=query,
                             indices=indices,
-                            top_k=self.config.max_results_per_source,
+                            top_k=top_k,
                             filters=filters,
                         )
                     elif use_neo4j and hasattr(self._neo4j, "search_chunks_fulltext"):
@@ -1311,14 +1591,15 @@ class RAGPipeline:
                         if not allowed_scopes:
                             allowed_scopes = ["global"]
 
-                        query_results = self._neo4j.search_chunks_fulltext(
+                        query_results = await asyncio.to_thread(
+                            self._neo4j.search_chunks_fulltext,
                             query_text=query,
                             tenant_id=str(f.get("tenant_id") or "default"),
                             allowed_scopes=allowed_scopes,
                             group_ids=group_ids,
                             case_id=str(f.get("case_id")) if f.get("case_id") else None,
                             user_id=str(f.get("user_id")) if f.get("user_id") else None,
-                            limit=self.config.max_results_per_source,
+                            limit=top_k,
                         )
                     else:
                         continue
@@ -1357,6 +1638,8 @@ class RAGPipeline:
                     "backend": "opensearch" if use_opensearch else "neo4j_fulltext",
                     "indices": indices if use_opensearch else [],
                     "queries_count": len(queries),
+                    "purpose": purpose,
+                    "top_k": top_k,
                 },
             )
 
@@ -1435,109 +1718,121 @@ class RAGPipeline:
                 stage.skip("Neo4j vector search not wired (requires embeddings stored in Neo4j)")
                 return results
 
-            # Generate embeddings for queries
-            for query in queries:
-                try:
-                    # Get embedding (run in thread to avoid blocking event loop)
-                    if hasattr(self._embeddings, "embed_query"):
-                        embedding = await asyncio.to_thread(self._embeddings.embed_query, query)
-                    else:
-                        continue
+            # Generate embeddings (batch + cache reuse)
+            try:
+                if hasattr(self._embeddings, "embed_queries"):
+                    embeddings = await asyncio.to_thread(self._embeddings.embed_queries, queries, use_cache=True)
+                else:
+                    embeddings = [await asyncio.to_thread(self._embeddings.embed_query, q) for q in queries]
+            except Exception as e:
+                stage.fail(f"Embedding generation failed: {e}")
+                trace.add_error(f"Embedding generation failed: {e}")
+                return results
+
+            if not hasattr(self._qdrant, "search_multi_collection_async"):
+                stage.skip("Unsupported Qdrant interface for pipeline")
+                return results
+
+            f = filters or {}
+            tenant = str(f.get("tenant_id") or "")
+            user = str(f.get("user_id") or "")
+            group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
+            case_id = f.get("case_id")
+            tipo_peca = f.get("tipo_peca") or f.get("tipo_peca_filter")
+
+            scope = f.get("scope")
+            if scope:
+                scopes = [str(scope)]
+            else:
+                include_global = bool(f.get("include_global", True))
+                scopes = []
+                if include_global:
+                    scopes.append("global")
+                if user:
+                    scopes.append("private")
+                if group_ids:
+                    scopes.append("group")
+                if case_id:
+                    scopes.append("local")
+                scopes = scopes or None
+
+            sigilo = f.get("sigilo")
+            sigilo_levels = [str(sigilo)] if sigilo else None
+
+            max_conc = int(getattr(self._base_config, "vector_query_max_concurrency", 4) or 4)
+            max_conc = max(1, min(max_conc, 16))
+            sem = asyncio.Semaphore(max_conc)
+
+            async def _search_one(query_text: str, embedding: List[float]) -> List[Dict[str, Any]]:
+                q = (query_text or "").strip()
+                if not q:
+                    return []
+                async with sem:
+                    # Apply tipo_peca only to the pecas collection(s) to avoid filtering out other datasets.
+                    pecas_collections = [c for c in collections if "pecas" in str(c)] if tipo_peca else []
+                    other_collections = [c for c in collections if c not in pecas_collections] if pecas_collections else list(collections)
+
+                    multi: Dict[str, Any] = {}
+                    if other_collections:
+                        multi.update(
+                            await self._qdrant.search_multi_collection_async(
+                                collection_types=other_collections,
+                                query_vector=embedding,
+                                tenant_id=tenant,
+                                user_id=user,
+                                top_k=self.config.max_results_per_source,
+                                scopes=scopes,
+                                sigilo_levels=sigilo_levels,
+                                group_ids=group_ids,
+                                case_id=case_id,
+                            )
+                        )
+                    if pecas_collections:
+                        multi.update(
+                            await self._qdrant.search_multi_collection_async(
+                                collection_types=pecas_collections,
+                                query_vector=embedding,
+                                tenant_id=tenant,
+                                user_id=user,
+                                top_k=self.config.max_results_per_source,
+                                scopes=scopes,
+                                sigilo_levels=sigilo_levels,
+                                group_ids=group_ids,
+                                case_id=case_id,
+                                metadata_filters={"tipo_peca": str(tipo_peca)},
+                            )
+                        )
 
                     query_results: List[Dict[str, Any]] = []
-
-                    if hasattr(self._qdrant, "search_multi_collection_async"):
-                        f = filters or {}
-                        tenant = str(f.get("tenant_id") or "")
-                        user = str(f.get("user_id") or "")
-                        group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
-                        case_id = f.get("case_id")
-                        tipo_peca = f.get("tipo_peca") or f.get("tipo_peca_filter")
-
-                        scope = f.get("scope")
-                        if scope:
-                            scopes = [str(scope)]
-                        else:
-                            include_global = bool(f.get("include_global", True))
-                            scopes = []
-                            if include_global:
-                                scopes.append("global")
-                            if user:
-                                scopes.append("private")
-                            if group_ids:
-                                scopes.append("group")
-                            if case_id:
-                                scopes.append("local")
-                            scopes = scopes or None
-
-                        sigilo = f.get("sigilo")
-                        sigilo_levels = [str(sigilo)] if sigilo else None
-
-                        # Apply tipo_peca only to the pecas collection(s) to avoid filtering out other datasets.
-                        pecas_collections = [c for c in collections if "pecas" in str(c)] if tipo_peca else []
-                        other_collections = [c for c in collections if c not in pecas_collections] if pecas_collections else list(collections)
-
-                        multi: Dict[str, Any] = {}
-                        if other_collections:
-                            multi.update(
-                                await self._qdrant.search_multi_collection_async(
-                                    collection_types=other_collections,
-                                    query_vector=embedding,
-                                    tenant_id=tenant,
-                                    user_id=user,
-                                    top_k=self.config.max_results_per_source,
-                                    scopes=scopes,
-                                    sigilo_levels=sigilo_levels,
-                                    group_ids=group_ids,
-                                    case_id=case_id,
-                                )
-                            )
-                        if pecas_collections:
-                            multi.update(
-                                await self._qdrant.search_multi_collection_async(
-                                    collection_types=pecas_collections,
-                                    query_vector=embedding,
-                                    tenant_id=tenant,
-                                    user_id=user,
-                                    top_k=self.config.max_results_per_source,
-                                    scopes=scopes,
-                                    sigilo_levels=sigilo_levels,
-                                    group_ids=group_ids,
-                                    case_id=case_id,
-                                    metadata_filters={"tipo_peca": str(tipo_peca)},
-                                )
-                            )
-                        for coll_type, items in (multi or {}).items():
-                            for item in items or []:
-                                if hasattr(item, "to_dict"):
-                                    as_dict = item.to_dict()
-                                else:
-                                    as_dict = dict(item)
-                                as_dict["collection_type"] = coll_type
-                                query_results.append(as_dict)
-                    else:
-                        # Fallback: unsupported Qdrant interface for pipeline
-                        continue
-
-                    # Mark source
+                    for coll_type, items in (multi or {}).items():
+                        for item in items or []:
+                            if hasattr(item, "to_dict"):
+                                as_dict = item.to_dict()
+                            else:
+                                as_dict = dict(item)
+                            as_dict["collection_type"] = coll_type
+                            query_results.append(as_dict)
                     for r in query_results:
                         r["_source_type"] = "vector"
+                    return query_results
 
-                    results.extend(query_results)
-
-                except EmbeddingError:
-                    # Re-raise embedding errors (might indicate model issues)
-                    raise
-                except Exception as e:
-                    # Per-query failure is non-critical - log with context and continue
+            tasks = [
+                asyncio.create_task(_search_one(q, emb))
+                for q, emb in zip(queries, embeddings)
+            ]
+            vector_batches = await asyncio.gather(*tasks, return_exceptions=True)
+            for q, batch in zip(queries, vector_batches):
+                if isinstance(batch, Exception):
                     logger.warning(
-                        f"Vector search failed for query: {e}",
+                        f"Vector search failed for query: {batch}",
                         extra={
-                            "query": query[:100] if query else None,
+                            "query": q[:100] if q else None,
                             "collections": collections,
-                            "error_type": type(e).__name__,
+                            "error_type": type(batch).__name__,
                         },
                     )
+                    continue
+                results.extend(batch or [])
 
             # Deduplicate by chunk_uid
             seen: Set[str] = set()
@@ -1683,34 +1978,138 @@ class RAGPipeline:
 
         return results
 
+    async def _stage_graph_search(
+        self,
+        query: str,
+        tenant_id: Optional[str],
+        scope: str,
+        case_id: Optional[str],
+        trace: "PipelineTrace",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Stage 3c: Graph-based chunk retrieval via Neo4j.
+
+        Extracts legal entities from the query using regex (no LLM cost),
+        then finds chunks connected to those entities via MENTIONS relationships.
+        Runs in parallel with lexical and vector search.
+
+        Args:
+            query: Search query
+            tenant_id: Tenant identifier
+            scope: Access scope
+            case_id: Case identifier
+            trace: Pipeline trace
+            limit: Maximum chunks to return
+
+        Returns:
+            List of graph-retrieved chunks in pipeline format
+        """
+        stage = trace.start_stage(PipelineStage.GRAPH_SEARCH, input_count=1)
+        results: List[Dict[str, Any]] = []
+
+        try:
+            if self._neo4j is None or Neo4jEntityExtractor is None:
+                stage.skip("Neo4j not available")
+                return results
+
+            # Entity extraction — regex only, run in thread to not block event loop
+            t0 = time.monotonic()
+            entities = await asyncio.to_thread(Neo4jEntityExtractor.extract, query)
+            entity_ids = [e["entity_id"] for e in entities]
+            extraction_ms = (time.monotonic() - t0) * 1000
+
+            if not entity_ids:
+                stage.skip("No entities extracted from query")
+                return results
+
+            # Query Neo4j for chunks — synchronous driver, run in thread
+            graph_chunks = await asyncio.to_thread(
+                self._neo4j.query_chunks_by_entities,
+                entity_ids=entity_ids,
+                tenant_id=tenant_id or "default",
+                scope=scope,
+                case_id=case_id,
+                limit=limit,
+            )
+
+            # Normalize to pipeline result format
+            for gc in graph_chunks:
+                results.append({
+                    "chunk_uid": gc.get("chunk_uid"),
+                    "text": gc.get("text_preview", ""),
+                    "doc_hash": gc.get("doc_hash"),
+                    "doc_title": gc.get("doc_title"),
+                    "source_type": gc.get("source_type", "graph"),
+                    "matched_entities": gc.get("matched_entities", []),
+                    "_source_type": "neo4j_graph",
+                    "score": gc.get("score", 0.5),
+                })
+
+            stage.complete(
+                output_count=len(results),
+                data={
+                    "entities_extracted": entity_ids,
+                    "extraction_ms": round(extraction_ms, 1),
+                    "chunks_found": len(results),
+                },
+            )
+
+            logger.debug(
+                "Graph search: %d entities → %d chunks",
+                len(entity_ids), len(results),
+            )
+
+        except Exception as e:
+            error_msg = f"Graph search failed: {e}"
+            logger.warning(
+                error_msg,
+                extra={
+                    "stage": PipelineStage.GRAPH_SEARCH.value,
+                    "query": query[:100] if query else None,
+                    "tenant_id": tenant_id,
+                    "error_type": type(e).__name__,
+                    "trace_id": trace.trace_id,
+                },
+                exc_info=True,
+            )
+            stage.fail(error_msg)
+            trace.add_warning(error_msg)
+            # Graph search failure is non-critical — fail-open
+
+        return results
+
     async def _stage_merge_rrf(
         self,
         lexical_results: List[Dict[str, Any]],
         vector_results: List[Dict[str, Any]],
         trace: PipelineTrace,
         visual_results: Optional[List[Dict[str, Any]]] = None,
+        graph_results: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Stage 4: Merge (RRF fusion by chunk_uid).
 
-        Combines lexical, vector, and visual results using Reciprocal Rank Fusion.
+        Combines lexical, vector, graph, and visual results using Reciprocal Rank Fusion.
 
         Args:
             lexical_results: Results from lexical search
             vector_results: Results from vector search
             trace: Pipeline trace
             visual_results: Optional results from visual search (ColPali)
+            graph_results: Optional results from Neo4j graph search
 
         Returns:
             Merged and scored results
         """
         visual_count = len(visual_results) if visual_results else 0
-        total_input = len(lexical_results) + len(vector_results) + visual_count
+        graph_count = len(graph_results) if graph_results else 0
+        total_input = len(lexical_results) + len(vector_results) + visual_count + graph_count
         stage = trace.start_stage(PipelineStage.MERGE_RRF, input_count=total_input)
 
         try:
-            # First merge lexical and vector results
-            merged = self._merge_results_rrf(lexical_results, vector_results)
+            # Merge lexical, vector, and graph results via RRF
+            merged = self._merge_results_rrf(lexical_results, vector_results, graph_results)
 
             # Then merge visual results if present
             if visual_results:
@@ -1725,6 +2124,7 @@ class RAGPipeline:
                 data={
                     "lexical_count": len(lexical_results),
                     "vector_count": len(vector_results),
+                    "graph_count": graph_count,
                     "visual_count": visual_count,
                     "merged_count": len(merged),
                 },
@@ -1843,6 +2243,7 @@ class RAGPipeline:
         tenant_id: Optional[str] = None,
         scope: str = "global",
         case_id: Optional[str] = None,
+        budget_tracker: Optional[Any] = None,
         crag_enabled: bool = True,
         crag_min_best_score: float = 0.0,
         crag_min_avg_score: float = 0.0,
@@ -1884,12 +2285,49 @@ class RAGPipeline:
                         continue
                 return 0.0
 
+            already_enhanced = bool(getattr(trace, "enhanced_queries", None))
+
+            def _update_eval_from_results() -> None:
+                """Refresh evaluation scores from current results (cheap, deterministic)."""
+                if self._crag_gate is not None:
+                    try:
+                        cr = self._crag_gate.evaluate(results)
+                        if hasattr(cr, "best_score"):
+                            evaluation.best_score = float(getattr(cr, "best_score") or 0.0)
+                        if hasattr(cr, "avg_score"):
+                            evaluation.avg_score = float(getattr(cr, "avg_score") or 0.0)
+                        elif hasattr(cr, "avg_top3"):
+                            evaluation.avg_score = float(getattr(cr, "avg_top3") or 0.0)
+                        if hasattr(cr, "scores"):
+                            evaluation.scores = list(getattr(cr, "scores") or [])
+                        if hasattr(cr, "passed_count"):
+                            evaluation.passed_count = int(getattr(cr, "passed_count") or 0)
+                        return
+                    except Exception:
+                        # fall back below
+                        pass
+
+                if results:
+                    scores = [_score_of(r) for r in results]
+                    evaluation.best_score = max(scores) if scores else 0.0
+                    top_scores = sorted(scores, reverse=True)[: max(1, min(5, len(scores)))]
+                    evaluation.avg_score = sum(top_scores) / len(top_scores) if top_scores else 0.0
+                else:
+                    evaluation.best_score = 0.0
+                    evaluation.avg_score = 0.0
+
+            def _update_decision() -> None:
+                if evaluation.best_score >= crag_min_best_score or evaluation.avg_score >= crag_min_avg_score:
+                    evaluation.decision = CRAGDecision.ACCEPT
+                else:
+                    evaluation.decision = CRAGDecision.RETRY
+
             # Evaluate results (prefer CRAGGate, but fall back to simple thresholds)
             if self._crag_gate is not None:
                 if hasattr(self._crag_gate, "evaluate_async"):
-                    crag_result = await self._crag_gate.evaluate_async(query, results)
+                    crag_result = await self._crag_gate.evaluate_async(results)
                 elif hasattr(self._crag_gate, "evaluate"):
-                    crag_result = self._crag_gate.evaluate(query, results)
+                    crag_result = self._crag_gate.evaluate(results)
                 else:
                     crag_result = None
 
@@ -1898,6 +2336,9 @@ class RAGPipeline:
                         evaluation.best_score = crag_result.best_score
                     if hasattr(crag_result, "avg_score"):
                         evaluation.avg_score = crag_result.avg_score
+                    elif hasattr(crag_result, "avg_top3"):
+                        # app.services.rag.core.crag_gate.CRAGEvaluation uses avg_top3
+                        evaluation.avg_score = crag_result.avg_top3
                     if hasattr(crag_result, "scores"):
                         evaluation.scores = list(crag_result.scores)
                     if hasattr(crag_result, "passed_count"):
@@ -1913,18 +2354,15 @@ class RAGPipeline:
                     evaluation.best_score = 0.0
                     evaluation.avg_score = 0.0
 
-            # Determine decision
-            if evaluation.best_score >= crag_min_best_score:
-                evaluation.decision = CRAGDecision.ACCEPT
-            elif evaluation.avg_score >= crag_min_avg_score:
-                evaluation.decision = CRAGDecision.ACCEPT
-            else:
-                evaluation.decision = CRAGDecision.RETRY
+            # Determine decision (normalize and prefer deterministic recompute for consistency)
+            _update_eval_from_results()
+            _update_decision()
 
             # Handle retry logic
             if evaluation.decision == CRAGDecision.RETRY:
                 retry_count = 0
-                max_retries = self._base_config.crag_max_retries
+                # If Stage 1 already ran HyDE/MultiQuery, avoid another LLM-driven retry loop.
+                max_retries = 1 if already_enhanced else self._base_config.crag_max_retries
 
                 while retry_count < max_retries and evaluation.decision == CRAGDecision.RETRY:
                     retry_count += 1
@@ -1948,8 +2386,17 @@ class RAGPipeline:
                                     f"{len(results) - original_count} graph chunks"
                                 )
                                 evaluation.retry_improved = True
+                                _update_eval_from_results()
+                                _update_decision()
+                                if evaluation.decision == CRAGDecision.ACCEPT:
+                                    break
                         except Exception as e:
                             logger.warning(f"CRAG Neo4j retry failed: {e}")
+
+                    # If query enhancement already ran, stop here (avoid redundant LLM + requery).
+                    if already_enhanced:
+                        evaluation.decision = CRAGDecision.ACCEPT
+                        break
 
                     # Strategy 2: Try query expansion (slower, uses LLM)
                     if self.config.crag_retry_with_expansion and self._query_expander:
@@ -1961,6 +2408,7 @@ class RAGPipeline:
                                     use_hyde=bool(retry_use_hyde),
                                     use_multiquery=True,
                                     max_queries=max(1, int(retry_max_queries)),
+                                    budget_tracker=budget_tracker,
                                 )
                             elif hasattr(self._query_expander, "expand"):
                                 expanded = self._query_expander.expand(
@@ -1968,10 +2416,22 @@ class RAGPipeline:
                                     use_hyde=bool(retry_use_hyde),
                                     use_multiquery=True,
                                     max_queries=max(1, int(retry_max_queries)),
+                                    budget_tracker=budget_tracker,
                                 )
 
                             if expanded:
-                                evaluation.retry_queries.extend(expanded)
+                                # Keep HyDE hypothetical doc out of lexical requery (it's long/noisy);
+                                # only use it for vector requery embeddings.
+                                expanded_list = [str(x).strip() for x in (expanded or []) if x and str(x).strip()]
+                                expanded_multi = list(expanded_list)
+                                hyde_doc: Optional[str] = None
+                                if retry_use_hyde and expanded_multi:
+                                    maybe_hyde = expanded_multi[-1]
+                                    if len(maybe_hyde) > 200 or "\n" in maybe_hyde:
+                                        hyde_doc = maybe_hyde
+                                        expanded_multi = expanded_multi[:-1]
+
+                                evaluation.retry_queries.extend(expanded_list)
                                 trace.add_warning(
                                     f"CRAG retry {retry_count}: expanded to {len(expanded)} queries"
                                 )
@@ -1984,9 +2444,10 @@ class RAGPipeline:
 
                                     # Lexical requery
                                     if self._opensearch is not None and indices and hasattr(self._opensearch, "search_lexical"):
-                                        for q in expanded[:3]:
+                                        async def _lexical_retry(q: str) -> List[Dict[str, Any]]:
                                             try:
-                                                extra = self._opensearch.search_lexical(
+                                                return await asyncio.to_thread(
+                                                    self._opensearch.search_lexical,
                                                     query=q,
                                                     indices=indices,
                                                     top_k=self.config.max_results_per_source,
@@ -1998,11 +2459,20 @@ class RAGPipeline:
                                                     sigilo=f.get("sigilo"),
                                                     include_global=bool(f.get("include_global", True)),
                                                 )
-                                                for r in extra or []:
-                                                    r["_source_type"] = "lexical_retry"
-                                                new_items.extend(extra or [])
                                             except Exception as exc:
                                                 logger.warning(f"CRAG retry lexical failed: {exc}")
+                                                return []
+
+                                        lexical_lists = await asyncio.gather(
+                                            *[_lexical_retry(q) for q in expanded_multi[:3]],
+                                            return_exceptions=True,
+                                        )
+                                        for extra in lexical_lists:
+                                            if isinstance(extra, Exception):
+                                                continue
+                                            for r in extra or []:
+                                                r["_source_type"] = "lexical_retry"
+                                            new_items.extend(extra or [])
 
                                     # Vector requery
                                     if (
@@ -2012,28 +2482,28 @@ class RAGPipeline:
                                         and hasattr(self._qdrant, "search_multi_collection_async")
                                         and hasattr(self._embeddings, "embed_query")
                                     ):
-                                        for q in expanded[:2]:
-                                            try:
-                                                # Run in thread to avoid blocking event loop
-                                                embedding = await asyncio.to_thread(self._embeddings.embed_query, q)
-                                                tenant = str(f.get("tenant_id") or "")
-                                                user = str(f.get("user_id") or "")
-                                                group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
-                                                cid = f.get("case_id")
-                                                include_global = bool(f.get("include_global", True))
-                                                scopes = []
-                                                if include_global:
-                                                    scopes.append("global")
-                                                if user:
-                                                    scopes.append("private")
-                                                if group_ids:
-                                                    scopes.append("group")
-                                                if cid:
-                                                    scopes.append("local")
-                                                scopes = scopes or None
+                                        tenant = str(f.get("tenant_id") or "")
+                                        user = str(f.get("user_id") or "")
+                                        group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
+                                        cid = f.get("case_id")
+                                        include_global = bool(f.get("include_global", True))
+                                        scopes = []
+                                        if include_global:
+                                            scopes.append("global")
+                                        if user:
+                                            scopes.append("private")
+                                        if group_ids:
+                                            scopes.append("group")
+                                        if cid:
+                                            scopes.append("local")
+                                        scopes = scopes or None
 
-                                                sigilo = f.get("sigilo")
-                                                sigilo_levels = [str(sigilo)] if sigilo else None
+                                        sigilo = f.get("sigilo")
+                                        sigilo_levels = [str(sigilo)] if sigilo else None
+
+                                        async def _vector_retry(q: str) -> List[Dict[str, Any]]:
+                                            try:
+                                                embedding = await asyncio.to_thread(self._embeddings.embed_query, q)
                                                 multi = await self._qdrant.search_multi_collection_async(
                                                     collection_types=collections,
                                                     query_vector=embedding,
@@ -2045,14 +2515,30 @@ class RAGPipeline:
                                                     group_ids=group_ids,
                                                     case_id=cid,
                                                 )
+                                                out: List[Dict[str, Any]] = []
                                                 for coll_type, items in (multi or {}).items():
                                                     for item in items or []:
                                                         as_dict = item.to_dict() if hasattr(item, "to_dict") else dict(item)
                                                         as_dict["collection_type"] = coll_type
                                                         as_dict["_source_type"] = "vector_retry"
-                                                        new_items.append(as_dict)
+                                                        out.append(as_dict)
+                                                return out
                                             except Exception as exc:
                                                 logger.warning(f"CRAG retry vector failed: {exc}")
+                                                return []
+
+                                        vector_qs = list(expanded_multi[:2])
+                                        if hyde_doc:
+                                            vector_qs.append(hyde_doc)
+
+                                        vector_lists = await asyncio.gather(
+                                            *[_vector_retry(q) for q in vector_qs],
+                                            return_exceptions=True,
+                                        )
+                                        for extra in vector_lists:
+                                            if isinstance(extra, Exception):
+                                                continue
+                                            new_items.extend(extra or [])
 
                                     if new_items:
                                         seen: Set[str] = set(
@@ -2072,12 +2558,17 @@ class RAGPipeline:
                                         if added:
                                             evaluation.retry_improved = True
                                             trace.add_warning(f"CRAG retry {retry_count}: added {added} results from requery")
+                                            _update_eval_from_results()
+                                            _update_decision()
+                                            if evaluation.decision == CRAGDecision.ACCEPT:
+                                                break
                                 except Exception as exc:
                                     logger.warning(f"CRAG retry requery failed: {exc}")
                         except Exception as e:
                             logger.warning(f"CRAG retry expansion failed: {e}")
 
-                    # Accept after retries
+                # CRAG is corrective; never block the pipeline if we have any results.
+                if results:
                     evaluation.decision = CRAGDecision.ACCEPT
 
             # Filter results based on scores if we have them
@@ -2415,8 +2906,22 @@ class RAGPipeline:
                 stage.skip("Graph enrichment disabled")
                 return graph_context
 
+            # Auto-detect debate intent from query text.
+            # If the query has argumentative cues, enable ArgumentRAG automatically.
+            query_is_debate = detect_debate_intent(query)
+            if query_is_debate and not argument_graph_enabled:
+                argument_graph_enabled = True
+                logger.debug("Auto-enabled argument_graph via debate intent detection for query: %s", query[:80])
+
+            # Global kill-switch (applies even if request explicitly enables it)
+            if not _env_bool("ARGUMENT_RAG_ENABLED", True):
+                argument_graph_enabled = False
+
             prefer_backend = os.getenv("RAG_GRAPH_ENRICH_BACKEND", "neo4j_mvp").strip().lower()
             prefer_neo4j_mvp = prefer_backend in ("neo4j", "neo4j_mvp", "mvp")
+            neo4j_only = getattr(self._base_config, "neo4j_only", False)
+            if neo4j_only:
+                prefer_neo4j_mvp = True
 
             # Preferred: reuse the same persisted GraphRAG store used by legacy `build_rag_context`.
             # This keeps GraphRAG + ArgumentRAG behavior consistent when running the new pipeline.
@@ -2430,7 +2935,10 @@ class RAGPipeline:
 
             # If Neo4jMVP is preferred and available, skip the legacy GraphRAG context builder.
             # Legacy remains as fallback when Neo4j is unavailable or explicitly requested.
-            use_legacy_first = (not prefer_neo4j_mvp) or (not has_neo4j)
+            use_legacy_first = (not neo4j_only) and ((not prefer_neo4j_mvp) or (not has_neo4j))
+            if neo4j_only and not has_neo4j:
+                stage.skip("Neo4j-only mode: Neo4j backend unavailable")
+                return graph_context
 
             if use_legacy_first and get_scoped_graph is not None:
                 effective_filters: Dict[str, Any] = dict(filters or {})
@@ -2507,32 +3015,57 @@ class RAGPipeline:
                         graph_parts.append(f"[ESCOPO {label} - ENRIQUECIDO]\n{extra}".strip())
 
                     if argument_graph_enabled and (allow_argument_all_scopes or scope_name == "private"):
-                        try:
-                            from app.services.argument_pack import ARGUMENT_PACK
-                            scoped_for_arg = results
+                        arg_backend = os.getenv("RAG_ARGUMENT_BACKEND", "neo4j").strip().lower()
+                        if neo4j_only:
+                            arg_backend = "neo4j"
+                        arg_ctx = ""
+                        arg_ctx_stats: Dict[str, Any] = {}
+
+                        # --- Neo4j ArgumentRAG backend ---
+                        if arg_backend in ("neo4j", "both"):
                             try:
-                                if results:
-                                    scoped_hits = [
-                                        r
-                                        for r in results
-                                        if (r.get("scope") or "").strip().lower() == str(scope_name).strip().lower()
-                                        and (
-                                            (r.get("scope_id") == scope_id_value)
-                                            or (r.get("scope_id") is None and scope_id_value is None)
-                                        )
-                                    ]
-                                    if scoped_hits:
-                                        scoped_for_arg = scoped_hits
-                            except Exception:
+                                from app.services.rag.core.argument_neo4j import get_argument_neo4j
+                                arg_svc = get_argument_neo4j()
+                                arg_ctx, arg_ctx_stats = arg_svc.get_debate_context(
+                                    results=results or [],
+                                    tenant_id=tenant_id or "",
+                                    case_id=case_id,
+                                )
+                            except Exception as e:
+                                logger.debug("Neo4j argument backend failed: %s", e)
+
+                        # --- Legacy NetworkX backend (fallback or dual-write) ---
+                        if arg_backend in ("networkx", "both") and (not arg_ctx or arg_backend == "both"):
+                            try:
+                                from app.services.argument_pack import ARGUMENT_PACK
                                 scoped_for_arg = results
-                            arg_ctx, arg_ctx_stats = ARGUMENT_PACK.build_debate_context_from_results_with_stats(
-                                g,
-                                scoped_for_arg or [],
-                                hops=hop_count,
-                            )
-                        except Exception:
-                            arg_ctx = ""
-                            arg_ctx_stats = {}
+                                try:
+                                    if results:
+                                        scoped_hits = [
+                                            r
+                                            for r in results
+                                            if (r.get("scope") or "").strip().lower() == str(scope_name).strip().lower()
+                                            and (
+                                                (r.get("scope_id") == scope_id_value)
+                                                or (r.get("scope_id") is None and scope_id_value is None)
+                                            )
+                                        ]
+                                        if scoped_hits:
+                                            scoped_for_arg = scoped_hits
+                                except Exception:
+                                    scoped_for_arg = results
+                                legacy_ctx, legacy_stats = ARGUMENT_PACK.build_debate_context_from_results_with_stats(
+                                    g,
+                                    scoped_for_arg or [],
+                                    hops=hop_count,
+                                )
+                                # Use legacy only if neo4j didn't produce results
+                                if not arg_ctx and legacy_ctx:
+                                    arg_ctx = legacy_ctx
+                                    arg_ctx_stats = legacy_stats or {}
+                            except Exception:
+                                pass
+
                         if arg_ctx:
                             argument_parts.append(f"[ESCOPO {label}]\n{arg_ctx}".strip())
                         if isinstance(arg_ctx_stats, dict) and arg_ctx_stats:
@@ -2541,13 +3074,15 @@ class RAGPipeline:
                                     "scope": scope_name,
                                     "scope_id": scope_id_value,
                                     "mode": "results",
+                                    "backend": arg_backend,
                                     "results_seen": arg_ctx_stats.get("results_seen"),
                                     "evidence_nodes": arg_ctx_stats.get("evidence_nodes"),
                                     "seed_nodes": arg_ctx_stats.get("seed_nodes"),
                                     "expanded_nodes": arg_ctx_stats.get("expanded_nodes"),
-                                    "claim_nodes": arg_ctx_stats.get("claim_nodes"),
+                                    "claim_nodes": arg_ctx_stats.get("claim_nodes", arg_ctx_stats.get("claims_found")),
                                     "max_results": arg_ctx_stats.get("max_results"),
                                     "max_seeds": arg_ctx_stats.get("max_seeds"),
+                                    "doc_ids": arg_ctx_stats.get("doc_ids"),
                                 }
                             )
 
@@ -2649,7 +3184,9 @@ class RAGPipeline:
                     if not allowed_scopes:
                         allowed_scopes = ["global"]
 
-                    # Find paths for explainable context
+                    # Find paths for explainable context.
+                    # Use argument-aware traversal only when debate intent is detected,
+                    # keeping entity-only mode as default to avoid contamination.
                     neo4j_paths = self._neo4j.find_paths(
                         entity_ids=entity_ids[:10],  # Limit entities
                         tenant_id=tenant_id or "default",
@@ -2659,6 +3196,7 @@ class RAGPipeline:
                         user_id=str(user_id) if user_id else None,
                         max_hops=hop_count,
                         limit=15,
+                        include_arguments=argument_graph_enabled,
                     )
 
                     # Store raw paths for UI inspection ("Por que?")
@@ -2712,7 +3250,7 @@ class RAGPipeline:
                     logger.warning(f"Neo4j graph enrichment failed: {e}")
 
             # NetworkX fallback/supplement
-            if has_networkx and entities_to_lookup and not neo4j_paths:
+            if has_networkx and (not neo4j_only) and entities_to_lookup and not neo4j_paths:
                 try:
                     if hasattr(self._graph, "get_related_async"):
                         related = await self._graph.get_related_async(
@@ -2844,6 +3382,163 @@ class RAGPipeline:
             stage.fail(error_msg)
 
     # =========================================================================
+    # CogGRAG Pipeline (Cognitive Graph RAG)
+    # =========================================================================
+
+    async def _cograg_pipeline(
+        self,
+        query: str,
+        trace: PipelineTrace,
+        tenant_id: str,
+        scope: str,
+        case_id: Optional[str],
+        indices: List[str],
+        collections: List[str],
+        filters: Optional[Dict[str, Any]],
+        top_k: int,
+    ) -> Dict[str, Any]:
+        """
+        Execute CogGRAG (Cognitive Graph RAG) pipeline for complex queries.
+
+        Uses LangGraph StateGraph to orchestrate:
+          planner → theme_activator → dual_retriever → evidence_refiner →
+          memory_check → reasoner → verifier → integrator → memory_store
+
+        Args:
+            query: Original query
+            trace: Pipeline trace for observability
+            tenant_id: Tenant identifier
+            scope: Access scope
+            case_id: Case identifier for local scope
+            indices: OpenSearch indices
+            collections: Qdrant collections
+            filters: Search filters
+            top_k: Number of final results
+
+        Returns:
+            Dict with:
+                - results: List of result chunks (ready for response)
+                - fallback: bool (True if should use normal pipeline)
+                - mind_map: CognitiveTree serialized
+                - sub_questions: List of leaf sub-questions
+                - evidence_map: Evidence per sub-question
+                - metrics: CogGRAG timing metrics
+        """
+        if run_cognitive_rag is None:
+            logger.warning("[CogGRAG] run_cognitive_rag not available")
+            return {"fallback": True, "results": []}
+
+        stage = trace.start_stage(PipelineStage.COGRAG_DECOMPOSE, input_count=1)
+
+        try:
+            cfg = self._base_config
+
+            user_id = None
+            group_ids = None
+            if isinstance(filters, dict):
+                raw_user_id = filters.get("user_id")
+                if raw_user_id is not None and str(raw_user_id).strip():
+                    user_id = str(raw_user_id).strip()
+                raw_group_ids = filters.get("group_ids")
+                if isinstance(raw_group_ids, list):
+                    group_ids = [str(g) for g in raw_group_ids if g is not None and str(g).strip()]
+
+            # Run the LangGraph CognitiveRAG pipeline
+            cograg_result = await run_cognitive_rag(
+                query=query,
+                tenant_id=tenant_id,
+                case_id=case_id,
+                scope=scope,
+                user_id=user_id,
+                group_ids=group_ids,
+                indices=indices,
+                collections=collections,
+                filters=filters,
+                max_depth=cfg.cograg_max_depth,
+                max_children=cfg.cograg_max_children,
+                similarity_threshold=cfg.cograg_similarity_threshold,
+                max_rethink=cfg.cograg_max_rethink_attempts,
+                memory_enabled=cfg.cograg_memory_enabled,
+                memory_backend=cfg.cograg_memory_backend,
+                memory_similarity_threshold=cfg.cograg_memory_similarity_threshold,
+                verification_enabled=cfg.cograg_verification_enabled,
+                abstain_mode=cfg.cograg_abstain_mode,
+                abstain_threshold=cfg.cograg_abstain_threshold,
+                hallucination_loop=cfg.cograg_hallucination_loop,
+                mindmap_explain_enabled=cfg.cograg_mindmap_explain_enabled,
+                audit_mode=cfg.cograg_audit_mode,
+                mindmap_explain_format=cfg.cograg_mindmap_explain_format,
+                graph_evidence_enabled=cfg.cograg_graph_evidence_enabled,
+                graph_evidence_max_hops=cfg.cograg_graph_evidence_max_hops,
+                graph_evidence_limit=cfg.cograg_graph_evidence_limit,
+                llm_max_concurrency=cfg.cograg_llm_max_concurrency,
+            )
+
+            # Check if decomposition produced meaningful sub-questions
+            sub_questions = cograg_result.get("sub_questions", [])
+            if len(sub_questions) <= 1:
+                # Simple query → fallback to normal pipeline
+                stage.skip("Simple query - no decomposition needed")
+                return {"fallback": True, "results": []}
+
+            # Extract evidence chunks
+            evidence_map = cograg_result.get("evidence_map", {})
+            text_chunks = cograg_result.get("text_chunks", [])
+
+            # Convert evidence to pipeline result format
+            results: List[Dict[str, Any]] = []
+            seen_uids: Set[str] = set()
+
+            for chunk in text_chunks:
+                uid = chunk.get("_content_hash") or chunk.get("chunk_uid") or str(id(chunk))
+                if uid in seen_uids:
+                    continue
+                seen_uids.add(uid)
+
+                results.append({
+                    "chunk_uid": uid,
+                    "text": chunk.get("text") or chunk.get("preview", ""),
+                    "score": float(chunk.get("score", 0.5)),
+                    "source_type": chunk.get("source_type", "graph"),
+                    "metadata": {
+                        **chunk.get("metadata", {}),
+                        "_cograg_source": chunk.get("_source_subquestion"),
+                    },
+                })
+
+            # Sort by score and limit
+            results = sorted(results, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+
+            stage.complete(
+                output_count=len(results),
+                data={
+                    "sub_question_count": len(sub_questions),
+                    "evidence_sets": len(evidence_map),
+                    "unique_chunks": len(results),
+                },
+            )
+
+            logger.info(
+                f"[CogGRAG] Complete: {len(sub_questions)} sub-questions, "
+                f"{len(results)} chunks, {cograg_result.get('metrics', {}).get('cograg_total_latency_ms', 0)}ms"
+            )
+
+            return {
+                "fallback": False,
+                "results": results,
+                "mind_map": cograg_result.get("mind_map"),
+                "sub_questions": sub_questions,
+                "evidence_map": evidence_map,
+                "metrics": cograg_result.get("metrics", {}),
+            }
+
+        except Exception as e:
+            error_msg = f"CogGRAG pipeline failed: {e}"
+            logger.error(error_msg)
+            stage.fail(error_msg)
+            return {"fallback": True, "results": [], "error": str(e)}
+
+    # =========================================================================
     # Main Entry Points
     # =========================================================================
 
@@ -2903,6 +3598,22 @@ class RAGPipeline:
         trace = PipelineTrace(original_query=query)
         result = PipelineResult(trace=trace)
 
+        # Result-level cache check
+        if self._base_config.enable_result_cache:
+            from app.services.rag.core.result_cache import get_result_cache
+            _result_cache = get_result_cache()
+            _cache_key = _result_cache.compute_key(
+                query, tenant_id, case_id, indices, collections, scope,
+            )
+            cached = _result_cache.get(_cache_key)
+            if cached is not None:
+                trace.add_data("cache_hit", True)
+                logger.debug(f"ResultCache HIT for query: {query[:60]}")
+                return cached
+        else:
+            _result_cache = None
+            _cache_key = None
+
         # Initialize budget tracker for cost control
         budget_tracker: Optional[Any] = None
         if BudgetTracker is not None:
@@ -2934,77 +3645,204 @@ class RAGPipeline:
             # Detect query characteristics
             is_citation_query = self.is_lexical_heavy(query)
 
-            # Stage 1: Query Enhancement (with budget tracking)
+            # ══════════════════════════════════════════════════════════════════
+            # CogGRAG Path: Cognitive Graph RAG for complex queries
+            # ══════════════════════════════════════════════════════════════════
+            use_cograg = (
+                self._base_config.enable_cograg
+                and run_cognitive_rag is not None
+                and cograg_is_complex is not None
+                and cograg_is_complex(query)  # Complexity heuristic
+            )
+
+            if use_cograg:
+                logger.info(f"[CogGRAG] Using cognitive pipeline for: '{query[:60]}...'")
+                cograg_result = await self._cograg_pipeline(
+                    query=query,
+                    trace=trace,
+                    tenant_id=tenant_id or "default",
+                    scope=scope,
+                    case_id=case_id,
+                    indices=indices,
+                    collections=collections,
+                    filters=filters,
+                    top_k=final_top_k,
+                )
+
+                # If CogGRAG succeeded, use its results directly
+                if cograg_result and not cograg_result.get("fallback"):
+                    result.results = cograg_result.get("results", [])
+                    result.metadata["cograg"] = {
+                        "enabled": True,
+                        "mind_map": cograg_result.get("mind_map"),
+                        "sub_questions": cograg_result.get("sub_questions"),
+                        "evidence_count": len(cograg_result.get("evidence_map", {})),
+                    }
+                    trace.add_data("cograg_enabled", True)
+                    trace.add_data("cograg_metrics", cograg_result.get("metrics", {}))
+
+                    # Cache the result
+                    if _result_cache is not None and _cache_key:
+                        _result_cache.put(_cache_key, result)
+
+                    return result
+                else:
+                    # Fallback to normal pipeline (simple query or CogGRAG failure)
+                    logger.info("[CogGRAG] Fallback to normal pipeline")
+                    trace.add_data("cograg_fallback", True)
+
+            # Determine if graph retrieval is enabled
+            graph_retrieval_enabled = (
+                self._base_config.enable_graph_retrieval
+                and self._neo4j is not None
+                and Neo4jEntityExtractor is not None
+            )
+
+            cfg = self._base_config
+
+            async def _with_timeout(coro, timeout: float, name: str):
+                try:
+                    return await asyncio.wait_for(coro, timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(f"{name} timeout ({timeout}s)")
+                    trace.add_warning(f"{name} timeout ({timeout}s)")
+                    return []
+
+            # Stage 1: Query Enhancement (Adaptive-RAG: lexical preflight before LLM)
             effective_enable_hyde = self._base_config.enable_hyde if hyde_enabled is None else bool(hyde_enabled)
             effective_enable_multi = self._base_config.enable_multiquery if multi_query is None else bool(multi_query)
             effective_multi_max = self._base_config.multiquery_max if multi_query_max is None else int(multi_query_max)
-            queries = await self._stage_query_enhancement(
-                query,
-                trace,
-                enable_hyde=effective_enable_hyde,
-                enable_multiquery=effective_enable_multi,
-                multiquery_max=effective_multi_max,
-                budget_tracker=budget_tracker,
-            )
 
-            # Stage 2 & 3: Lexical and Vector Search (parallelized - Phase 3)
-            # Use semaphore to limit concurrent operations
+            skip_query_enhancement = False
+            if is_citation_query:
+                skip_query_enhancement = True
+                qe_stage = trace.start_stage(PipelineStage.QUERY_ENHANCEMENT, input_count=1)
+                qe_stage.skip("Query is citation-heavy, skipping expansion")
+            elif not (effective_enable_hyde or effective_enable_multi):
+                qe_stage = trace.start_stage(PipelineStage.QUERY_ENHANCEMENT, input_count=1)
+                qe_stage.skip("Query expansion disabled")
+                skip_query_enhancement = True
+            elif getattr(cfg, "query_enhancement_preflight", False):
+                preflight_k = int(getattr(cfg, "query_enhancement_preflight_top_k", 6) or 6)
+                preflight_k = max(preflight_k, int(self.config.lexical_min_results_for_skip or 1))
+                preflight = await _with_timeout(
+                    self._stage_lexical_search(
+                        [query],
+                        indices,
+                        filters,
+                        trace,
+                        top_k_override=preflight_k,
+                        purpose="qe_preflight",
+                    ),
+                    cfg.lexical_timeout_seconds,
+                    "lexical_preflight",
+                )
+                skip_query_enhancement = self._should_skip_query_enhancement(preflight or [], trace)
+                if skip_query_enhancement:
+                    qe_stage = trace.start_stage(PipelineStage.QUERY_ENHANCEMENT, input_count=1)
+                    qe_stage.skip("Lexical preflight sufficient, skipping expansion")
+
+            # Stage 2 & 3: Retrieval
+            lexical_results: List[Dict[str, Any]] = []
+            vector_results: List[Dict[str, Any]] = []
+            graph_results: List[Dict[str, Any]] = []
+            skip_vector = False
+
             async with self._search_semaphore:
-                # For citation queries, skip vector search entirely
-                if is_citation_query:
-                    lexical_results = await self._stage_lexical_search(
-                        queries, indices, filters, trace
-                    )
-                    vector_results: List[Dict[str, Any]] = []
+                if is_citation_query or skip_query_enhancement:
+                    # Only lexical (+graph) retrieval. Avoid spending vector/LLM budget.
+                    tasks_cite: List[Any] = [
+                        _with_timeout(
+                            self._stage_lexical_search([query], indices, filters, trace, purpose="main"),
+                            cfg.lexical_timeout_seconds,
+                            "lexical",
+                        ),
+                    ]
+                    if graph_retrieval_enabled:
+                        tasks_cite.append(
+                            _with_timeout(
+                                self._stage_graph_search(
+                                    query,
+                                    tenant_id,
+                                    scope,
+                                    case_id,
+                                    trace,
+                                    limit=self._base_config.graph_retrieval_limit,
+                                ),
+                                cfg.graph_search_timeout_seconds,
+                                "graph",
+                            )
+                        )
+                    cite_results = await asyncio.gather(*tasks_cite)
+                    lexical_results = cite_results[0] if cite_results and cite_results[0] else []
+                    if len(cite_results) > 1:
+                        graph_results = cite_results[1] if cite_results[1] else []
                     skip_vector = True
                 else:
-                    # Run lexical and vector search in parallel
-                    lexical_task = self._stage_lexical_search(
-                        queries, indices, filters, trace
+                    qe_task = asyncio.create_task(
+                        self._stage_query_enhancement(
+                            query,
+                            trace,
+                            enable_hyde=effective_enable_hyde,
+                            enable_multiquery=effective_enable_multi,
+                            multiquery_max=effective_multi_max,
+                            budget_tracker=budget_tracker,
+                        )
                     )
-                    vector_task = self._stage_vector_search(
-                        queries, collections, filters, trace
-                    )
+                    tasks_main: List[Any] = [
+                        _with_timeout(
+                            self._stage_lexical_search([query], indices, filters, trace, purpose="main"),
+                            cfg.lexical_timeout_seconds,
+                            "lexical",
+                        ),
+                    ]
+                    if graph_retrieval_enabled:
+                        tasks_main.append(
+                            _with_timeout(
+                                self._stage_graph_search(
+                                    query,
+                                    tenant_id,
+                                    scope,
+                                    case_id,
+                                    trace,
+                                    limit=self._base_config.graph_retrieval_limit,
+                                ),
+                                cfg.graph_search_timeout_seconds,
+                                "graph",
+                            )
+                        )
+                    main_results = await asyncio.gather(*tasks_main)
+                    lexical_results = main_results[0] if main_results and main_results[0] else []
+                    if len(main_results) > 1:
+                        graph_results = main_results[1] if main_results[1] else []
 
-                    results = await asyncio.gather(
-                        lexical_task,
-                        vector_task,
-                        return_exceptions=True
-                    )
+                    query_sets = await qe_task
+                    vector_queries = query_sets.get("vector_queries", [query]) if isinstance(query_sets, dict) else [query]
 
-                    # Handle potential exceptions from parallel execution
-                    lexical_results_raw, vector_results_raw = results
-
-                    if isinstance(lexical_results_raw, Exception):
-                        logger.error(f"Lexical search failed: {lexical_results_raw}")
-                        trace.add_error(f"Lexical search error: {lexical_results_raw}")
-                        lexical_results = []
+                    # If lexical is already sufficient, skip vector to reduce latency/cost.
+                    if self._should_skip_vector_search(lexical_results, trace):
+                        skip_vector = True
                     else:
-                        lexical_results = lexical_results_raw
-
-                    if isinstance(vector_results_raw, Exception):
-                        logger.error(f"Vector search failed: {vector_results_raw}")
-                        trace.add_error(f"Vector search error: {vector_results_raw}")
-                        vector_results = []
-                    else:
-                        vector_results = vector_results_raw
-
-                    # Determine if we should have skipped vector search (for trace info)
-                    skip_vector = self._should_skip_vector_search(lexical_results, trace)
+                        vector_results = await _with_timeout(
+                            self._stage_vector_search(vector_queries, collections, filters, trace),
+                            cfg.vector_timeout_seconds,
+                            "vector",
+                        )
 
             # Set search mode based on results
-            if is_citation_query or (skip_vector and not vector_results):
-                trace.search_mode = SearchMode.LEXICAL_ONLY
-                if is_citation_query or (skip_vector and trace.lexical_was_sufficient):
-                    vector_stage = trace.start_stage(
-                        PipelineStage.VECTOR_SEARCH, input_count=0
-                    )
-                    vector_stage.skip(
-                        "Lexical results sufficient" if trace.lexical_was_sufficient
-                        else "Citation-heavy query"
-                    )
+            has_graph = bool(graph_results)
+            if is_citation_query or skip_query_enhancement or (skip_vector and not vector_results):
+                trace.search_mode = SearchMode.HYBRID_LEX_GRAPH if has_graph else SearchMode.LEXICAL_ONLY
+                if is_citation_query or skip_query_enhancement or (skip_vector and trace.lexical_was_sufficient):
+                    vector_stage = trace.start_stage(PipelineStage.VECTOR_SEARCH, input_count=0)
+                    if is_citation_query:
+                        vector_stage.skip("Citation-heavy query")
+                    elif skip_query_enhancement:
+                        vector_stage.skip("Lexical preflight sufficient")
+                    else:
+                        vector_stage.skip("Lexical results sufficient")
             else:
-                trace.search_mode = SearchMode.HYBRID_LEX_VEC
+                trace.search_mode = SearchMode.HYBRID_LEX_VEC_GRAPH if has_graph else SearchMode.HYBRID_LEX_VEC
 
             # Stage 3b: Visual Search (ColPali) - optional, runs when enabled
             visual_results: List[Dict[str, Any]] = []
@@ -3020,7 +3858,9 @@ class RAGPipeline:
 
             # Stage 4: Merge (RRF)
             merged_results = await self._stage_merge_rrf(
-                lexical_results, vector_results, trace, visual_results=visual_results
+                lexical_results, vector_results, trace,
+                visual_results=visual_results,
+                graph_results=graph_results if graph_results else None,
             )
 
             # Stage 5: CRAG Gate / Corrective RAG
@@ -3047,6 +3887,7 @@ class RAGPipeline:
                 tenant_id=tenant_id,
                 scope=scope,
                 case_id=case_id,
+                budget_tracker=budget_tracker,
                 crag_enabled=effective_crag_enabled,
                 crag_min_best_score=effective_crag_best,
                 crag_min_avg_score=effective_crag_avg,
@@ -3133,6 +3974,22 @@ class RAGPipeline:
                 "top_k": final_top_k,
                 "is_citation_query": is_citation_query,
             }
+
+            # Record latency metrics per stage
+            try:
+                from app.services.rag.core.metrics import get_latency_collector
+                collector = get_latency_collector()
+                for s in trace.stages:
+                    if not s.skipped and s.duration_ms > 0:
+                        collector.record(s.stage.value, s.duration_ms)
+                if trace.total_duration_ms > 0:
+                    collector.record("total", trace.total_duration_ms)
+            except Exception:
+                pass  # metrics are best-effort
+
+            # Cache the result for future identical queries
+            if _result_cache is not None and _cache_key is not None:
+                _result_cache.set(_cache_key, result)
 
             return result
 

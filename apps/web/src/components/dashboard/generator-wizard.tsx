@@ -1159,116 +1159,20 @@ export function GeneratorWizard({
                                         </CardContent>
                                     </Card>
 
-                                    {advancedMode && (
-                                        <>
-                                            <h3 className="text-sm font-semibold uppercase text-muted-foreground mb-4 mt-6 flex items-center gap-2">
-                                                <Sparkles className="h-4 w-4 text-indigo-500" /> Ajustes Avançados de Busca
-                                            </h3>
-                                            <Card className="border-indigo-100 bg-indigo-50/20">
-                                                <CardContent className="p-4 space-y-4">
-                                                    <div className="flex items-center justify-between">
-                                                        <div className="space-y-0.5">
-                                                            <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Estratégia automática</Label>
-                                                                <TooltipProvider>
-                                                                    <Tooltip>
-                                                                        <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
-                                                                        <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>Nome técnico: Adaptive Routing. Escolhe automaticamente a melhor estratégia de busca para cada seção.</p>
-                                                                        </TooltipContent>
-                                                                    </Tooltip>
-                                                                </TooltipProvider>
-                                                            </div>
-                                                            <p className="text-[10px] text-indigo-700">Recomendado para a maioria dos casos</p>
-                                                        </div>
-                                                        <Switch
-                                                            checked={store.adaptiveRouting}
-                                                            onCheckedChange={store.setAdaptiveRouting}
-                                                        />
-                                                    </div>
-
-                                                    <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
-                                                        <div className="space-y-0.5">
-                                                            <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Rascunho inteligente</Label>
-                                                                <TooltipProvider>
-                                                                    <Tooltip>
-                                                                        <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
-                                                                        <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>HyDE (Hypothetical Document Embeddings). Cria um rascunho para recuperar melhor quando o pedido é vago.</p>
-                                                                        </TooltipContent>
-                                                                    </Tooltip>
-                                                                </TooltipProvider>
-                                                            </div>
-                                                            <p className="text-[10px] text-indigo-700">Ajuda quando o pedido é vago</p>
-                                                        </div>
-                                                        <Switch
-                                                            checked={store.hydeEnabled}
-                                                            onCheckedChange={store.setHydeEnabled}
-                                                        />
-                                                    </div>
-
-                                                    <div className="flex items-center justify-between border-t border-indigo-100 pt-3">
-                                                        <div className="space-y-0.5">
-                                                            <div className="flex items-center gap-1">
-                                                                <Label className="text-xs font-semibold text-indigo-900">Verificação extra</Label>
-                                                                <TooltipProvider>
-                                                                    <Tooltip>
-                                                                        <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
-                                                                        <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                            <p>CRAG (Corrective RAG). Reavalia a qualidade das evidências antes de responder.</p>
-                                                                        </TooltipContent>
-                                                                    </Tooltip>
-                                                                </TooltipProvider>
-                                                            </div>
-                                                            <p className="text-[10px] text-indigo-700">Checagem extra das fontes</p>
-                                                        </div>
-                                                        <Switch
-                                                            checked={store.cragGate}
-                                                            onCheckedChange={store.setCragGate}
-                                                        />
-                                                    </div>
-
-                                                    <div className="space-y-3 border-t border-indigo-100 pt-3">
-                                                        <div className="flex items-center justify-between">
-                                                            <div className="space-y-0.5">
-                                                                <div className="flex items-center gap-1">
-                                                                    <Label className="text-xs font-semibold text-indigo-900">Relações entre fatos</Label>
-                                                                    <TooltipProvider>
-                                                                        <Tooltip>
-                                                                            <TooltipTrigger><HelpCircle className="h-3 w-3 text-indigo-400 cursor-help" /></TooltipTrigger>
-                                                                            <TooltipContent side="right" className="max-w-xs text-xs">
-                                                                                <p>GraphRAG. Conecta documentos e conceitos relacionados para ampliar o contexto. Profundidade define os saltos nas relações.</p>
-                                                                            </TooltipContent>
-                                                                        </Tooltip>
-                                                                    </TooltipProvider>
-                                                                </div>
-                                                                <p className="text-[10px] text-indigo-700">Conecta documentos e conceitos relacionados</p>
-                                                            </div>
-                                                            <Switch
-                                                                checked={store.graphRagEnabled}
-                                                                onCheckedChange={store.setGraphRagEnabled}
-                                                            />
-                                                        </div>
-                                                        {store.graphRagEnabled && (
-                                                            <div className="space-y-2 pt-1 animate-in slide-in-from-top-1">
-                                                                <div className="flex justify-between items-center text-[10px]">
-                                                                    <span className="text-indigo-600">Profundidade</span>
-                                                                    <span className="font-mono bg-white px-1 rounded border">{store.graphHops}</span>
-                                                                </div>
-                                                                <Slider
-                                                                    value={[store.graphHops]}
-                                                                    onValueChange={([v]) => store.setGraphHops(v)}
-                                                                    max={3} min={1} step={1}
-                                                                    className="py-2"
-                                                                />
-                                                            </div>
-                                                        )}
-                                                    </div>
-                                                </CardContent>
-                                            </Card>
-                                        </>
-                                    )}
+	                                    {advancedMode && (
+	                                        <>
+	                                            <h3 className="text-sm font-semibold uppercase text-muted-foreground mb-4 mt-6 flex items-center gap-2">
+	                                                <Sparkles className="h-4 w-4 text-indigo-500" /> Ajustes Avançados de Busca
+	                                            </h3>
+	                                            <Card className="border-indigo-100 bg-indigo-50/20">
+	                                                <CardContent className="p-4">
+	                                                    <div className="rounded-lg border border-indigo-100 bg-white/60 px-3 py-2 text-[11px] text-indigo-800">
+	                                                        RAG otimizado: Adaptive Routing, HyDE, CRAG e GraphRAG sempre ativos. Ajuste apenas o escopo de busca no Chat.
+	                                                    </div>
+	                                                </CardContent>
+	                                            </Card>
+	                                        </>
+	                                    )}
                                 </div>
 
                                 {/* Column 3: Audit & Extra */}
@@ -1869,50 +1773,42 @@ export function GeneratorWizard({
 		                                                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
 		                                                                                <div className="space-y-1">
 		                                                                                    <Label className="text-[10px] uppercase text-muted-foreground font-bold">CRAG (melhor fonte)</Label>
-		                                                                                    <Input
-		                                                                                        type="number"
-		                                                                                        min={0}
-		                                                                                        max={1}
-		                                                                                        step={0.05}
-		                                                                                        className="h-8 text-xs"
-		                                                                                        placeholder="Auto (perfil)"
-		                                                                                        value={store.cragMinBestScoreOverride ?? ''}
-		                                                                                        disabled={!store.cragGate}
-		                                                                                        onChange={(e) => {
-		                                                                                            const raw = String(e.target.value || '').trim();
-		                                                                                            if (!raw) return store.setCragMinBestScoreOverride(null);
-		                                                                                            const parsed = Number(raw.replace(',', '.'));
-		                                                                                            if (!Number.isFinite(parsed)) return;
-		                                                                                            store.setCragMinBestScoreOverride(Math.max(0, Math.min(1, parsed)));
-		                                                                                        }}
-		                                                                                    />
-		                                                                                    {!store.cragGate && (
-		                                                                                        <div className="text-[10px] text-muted-foreground">Ative o CRAG para usar.</div>
-		                                                                                    )}
+		                                                                                <Input
+		                                                                                    type="number"
+		                                                                                    min={0}
+		                                                                                    max={1}
+		                                                                                    step={0.05}
+		                                                                                    className="h-8 text-xs"
+		                                                                                    placeholder="Auto (perfil)"
+		                                                                                    value={store.cragMinBestScoreOverride ?? ''}
+		                                                                                    onChange={(e) => {
+		                                                                                        const raw = String(e.target.value || '').trim();
+		                                                                                        if (!raw) return store.setCragMinBestScoreOverride(null);
+		                                                                                        const parsed = Number(raw.replace(',', '.'));
+		                                                                                        if (!Number.isFinite(parsed)) return;
+		                                                                                        store.setCragMinBestScoreOverride(Math.max(0, Math.min(1, parsed)));
+		                                                                                    }}
+		                                                                                />
 		                                                                                </div>
 
 		                                                                                <div className="space-y-1">
 		                                                                                    <Label className="text-[10px] uppercase text-muted-foreground font-bold">CRAG (média top 3)</Label>
-		                                                                                    <Input
-		                                                                                        type="number"
-		                                                                                        min={0}
-		                                                                                        max={1}
-		                                                                                        step={0.05}
-		                                                                                        className="h-8 text-xs"
-		                                                                                        placeholder="Auto (perfil)"
-		                                                                                        value={store.cragMinAvgScoreOverride ?? ''}
-		                                                                                        disabled={!store.cragGate}
-		                                                                                        onChange={(e) => {
-		                                                                                            const raw = String(e.target.value || '').trim();
-		                                                                                            if (!raw) return store.setCragMinAvgScoreOverride(null);
-		                                                                                            const parsed = Number(raw.replace(',', '.'));
-		                                                                                            if (!Number.isFinite(parsed)) return;
-		                                                                                            store.setCragMinAvgScoreOverride(Math.max(0, Math.min(1, parsed)));
-		                                                                                        }}
-		                                                                                    />
-		                                                                                    {!store.cragGate && (
-		                                                                                        <div className="text-[10px] text-muted-foreground">Ative o CRAG para usar.</div>
-		                                                                                    )}
+		                                                                                <Input
+		                                                                                    type="number"
+		                                                                                    min={0}
+		                                                                                    max={1}
+		                                                                                    step={0.05}
+		                                                                                    className="h-8 text-xs"
+		                                                                                    placeholder="Auto (perfil)"
+		                                                                                    value={store.cragMinAvgScoreOverride ?? ''}
+		                                                                                    onChange={(e) => {
+		                                                                                        const raw = String(e.target.value || '').trim();
+		                                                                                        if (!raw) return store.setCragMinAvgScoreOverride(null);
+		                                                                                        const parsed = Number(raw.replace(',', '.'));
+		                                                                                        if (!Number.isFinite(parsed)) return;
+		                                                                                        store.setCragMinAvgScoreOverride(Math.max(0, Math.min(1, parsed)));
+		                                                                                    }}
+		                                                                                />
 		                                                                                </div>
 
 		                                                                                <div className="space-y-1">

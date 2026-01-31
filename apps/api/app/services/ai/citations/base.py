@@ -283,6 +283,44 @@ def append_autos_references_section(
     return body + "\n" + "\n".join(lines).rstrip() + "\n"
 
 
+def format_abnt_full_reference(source: Dict[str, Any]) -> str:
+    """
+    Format a source as a full ABNT reference using the classifier.
+    Delegates to abnt_classifier for type-specific formatting.
+    """
+    try:
+        from app.services.ai.citations.abnt_classifier import format_abnt_full
+        return format_abnt_full(source)
+    except ImportError:
+        # Fallback to simplified format
+        return format_reference_abnt(
+            title=source.get("title", "Fonte"),
+            url=source.get("url", ""),
+        )
+
+
+def build_abnt_references(
+    sources: List[dict],
+    heading: str = "REFERÊNCIAS BIBLIOGRÁFICAS",
+) -> str:
+    """
+    Build a complete ABNT references section.
+    Uses the classifier for type-specific formatting.
+    """
+    try:
+        from app.services.ai.citations.abnt_classifier import build_full_references_section
+        return build_full_references_section(sources, heading=heading)
+    except ImportError:
+        # Fallback to existing append_references_section logic
+        lines = [f"\n---\n\n## {heading}\n"]
+        for i, s in enumerate(sources, 1):
+            n = s.get("number", i)
+            t = s.get("title", f"Fonte {n}")
+            u = s.get("url", "")
+            lines.append(f"[{n}] {format_reference_abnt(title=t, url=u)}")
+        return "\n".join(lines) + "\n"
+
+
 def append_references_section(
     text: str,
     citations: List[dict],

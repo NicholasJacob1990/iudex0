@@ -1,0 +1,167 @@
+'use client';
+
+import React from 'react';
+import { PageHero } from '@/components/vorbium/page-hero';
+import { Footer } from '@/components/vorbium/footer';
+import { VorbiumNav } from '@/components/vorbium/vorbium-nav';
+import { FeatureSection } from '@/components/vorbium/feature-section';
+import { Globe, BookOpen, AlertCircle, FileText, Scale, Database, History, Eye, ListFilter, CheckCircle } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import Link from 'next/link';
+
+export default function ResearchPage() {
+    const mainRef = React.useRef<HTMLElement>(null);
+
+    const capabilities = [
+        {
+            title: "Pesquisa multi-jurisdição",
+            description: "Com filtros claros e abrangentes.",
+            icon: Globe
+        },
+        {
+            title: "Comparação normativa",
+            description: "Por tema e período.",
+            icon: Scale
+        },
+        {
+            title: "Identificação de conflitos",
+            description: "Encontre exceções e divergências.",
+            icon: AlertCircle
+        },
+        {
+            title: "Síntese estruturada",
+            description: "Com fundamentação sólida.",
+            icon: FileText
+        },
+        {
+            title: "Exportação auditável",
+            description: "Em memorando versionado e citável.",
+            icon: History
+        }
+    ];
+
+    const typesOfOutput = [
+        {
+            title: "Memorando de pesquisa",
+            description: "Análise aprofundada de um tema específico.",
+            icon: FileText
+        },
+        {
+            title: "Quadro comparativo regulatório",
+            description: "Visualização lado a lado de normas.",
+            icon: ListFilter
+        },
+        {
+            title: "Resumo executivo",
+            description: "Para tomada de decisão rápida.",
+            icon: Eye
+        },
+        {
+            title: "Insumo para Workflows",
+            description: "Dados estruturados para alimentar automações.",
+            icon: Database
+        }
+    ];
+
+    return (
+        <main
+            ref={mainRef}
+            className="relative h-[100dvh] overflow-y-auto bg-slate-50 dark:bg-[#0a0a0c] text-slate-900 dark:text-white selection:bg-indigo-500/30 snap-y snap-proximity scroll-smooth overscroll-y-contain"
+        >
+            <VorbiumNav scrollRef={mainRef} />
+
+            <PageHero
+                badge="Pesquisa jurídica profunda e governada"
+                title="Pesquisa jurídica com profundidade, contexto e rastreabilidade."
+                description="A VORBIUM Research combina legislação, jurisprudência, regulamentos e documentos internos para produzir insights jurídicos confiáveis, com fontes claras e escopo definido."
+                primaryCtaText="Explorar Research"
+                primaryCtaLink="/demo"
+            />
+
+            {/* Seção: O problema real */}
+            <section className="py-24 relative snap-start">
+                <div className="container mx-auto px-6 max-w-4xl text-center">
+                    <h2 className="text-3xl md:text-5xl font-bold mb-8 text-slate-900 dark:text-white">O problema real da pesquisa jurídica</h2>
+                    <p className="text-xl text-slate-600 dark:text-gray-400 mb-8 leading-relaxed">
+                        Pesquisar direito não é só localizar informação. É interpretar, comparar, contextualizar e justificar.
+                    </p>
+                    <p className="text-xl text-slate-600 dark:text-gray-400 leading-relaxed">
+                        A VORBIUM Research foi projetada para decisões críticas: onde tempo importa, mas confiabilidade importa mais.
+                    </p>
+                </div>
+            </section>
+
+            {/* Seção: O que você consegue fazer */}
+            <FeatureSection
+                title="O que você consegue fazer"
+                features={capabilities}
+                className="bg-white dark:bg-white/5 border-y border-slate-200 dark:border-white/5"
+            />
+
+            {/* Seção: Como a Research funciona */}
+            <section className="py-24 relative snap-start">
+                <div className="container mx-auto px-6">
+                    <div className="mb-16">
+                        <div className="flex items-center gap-2 text-indigo-600 dark:text-indigo-300/80 mb-6 uppercase tracking-[0.3em] text-xs font-semibold">
+                            <span className="h-px w-10 bg-indigo-600/40 dark:bg-indigo-400/40" />
+                            <span>Processo</span>
+                        </div>
+                        <h2 className="text-4xl font-bold mb-6 text-slate-900 dark:text-white">Como a Research funciona</h2>
+                    </div>
+
+                    <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
+                        {[
+                            { step: "1", title: "Escopo explícito", desc: "Jurisdição, área, recorte temporal, hipóteses." },
+                            { step: "2", title: "Fontes autorizadas", desc: "Bases públicas, privadas e memória institucional." },
+                            { step: "3", title: "Orquestração multiagente", desc: "Coleta, análise, verificação e síntese." },
+                            { step: "4", title: "Saída estruturada", desc: "Argumentos, riscos, divergências e citações." },
+                        ].map((item, i) => (
+                            <div key={i} className="relative p-8 rounded-2xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 shadow-sm dark:shadow-none">
+                                <span className="absolute top-6 right-6 text-4xl font-bold text-slate-100 dark:text-white/5 font-display">{item.step}</span>
+                                <h3 className="text-xl font-bold mb-3 text-slate-900 dark:text-white">{item.title}</h3>
+                                <p className="text-slate-600 dark:text-gray-400">{item.desc}</p>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+
+            {/* Seção: Tipos de saída */}
+            <FeatureSection
+                title="Tipos de saída"
+                features={typesOfOutput}
+                className="bg-white dark:bg-white/5 border-y border-slate-200 dark:border-white/5"
+            />
+
+            {/* Seção: Governança da pesquisa */}
+            <section className="py-24 relative snap-start">
+                <div className="container mx-auto px-6 text-center">
+                    <h2 className="text-3xl font-bold mb-12 text-slate-900 dark:text-white">Governança da pesquisa</h2>
+                    <div className="flex flex-wrap justify-center gap-4 md:gap-8 text-slate-600 dark:text-gray-300">
+                        {["Fontes identificadas e citáveis", "Histórico de versões", "Critérios de escopo registrados", "Reaproveitamento institucional"].map((item, i) => (
+                            <div key={i} className="flex items-center gap-2 px-4 py-2 rounded-full border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5">
+                                <CheckCircle className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
+                                <span className="text-sm font-medium">{item}</span>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </section>
+
+
+            {/* CTA Final */}
+            <section className="py-24 relative snap-start text-center">
+                <div className="container mx-auto px-6">
+                    <h2 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900 dark:text-white">Pesquisar é reunir material. Decidir exige interpretação confiável.</h2>
+                    <Link href="/demo">
+                        <Button size="lg" className="h-14 px-12 rounded-full text-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_40px_-10px_rgba(79,70,229,0.5)] transition-all hover:scale-105">
+                            Começar Research
+                        </Button>
+                    </Link>
+                </div>
+            </section>
+
+            <Footer />
+        </main>
+    );
+}

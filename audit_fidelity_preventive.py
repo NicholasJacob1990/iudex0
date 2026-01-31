@@ -22,6 +22,7 @@ except ImportError:
 MAX_CHARS_PER_CHUNK = int(os.getenv("FIDELITY_AUDIT_MAX_CHARS", "100000"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("FIDELITY_AUDIT_CHUNK_OVERLAP", "4000"))
 MAX_LIST_ITEMS = int(os.getenv("FIDELITY_AUDIT_MAX_ITEMS", "200"))
+GEMINI_HTTP_TIMEOUT_MS = int(os.getenv("IUDEx_GEMINI_TIMEOUT_MS", "600000"))
 
 APOSTILA_MIN_RETENTION = 0.70
 FIDELIDADE_MIN_RETENTION = 0.95
@@ -408,9 +409,10 @@ def _extract_dispositivos(text: str):
         r"\b("
         r"(?:art\.?\s*\d+[º°]?(?:\s*,?\s*inciso\s+[IVXLC]+)?)|"
         r"(?:artigo\s*\d+[º°]?)|"
-        r"(?:lei\s+n?º?\s*\d+[\./]\d+)|"
-        r"(?:súmula\s+\d+)|"
-        r"(?:tema\s+\d+)"
+        r"(?:lei\s*(?:complementar\s*)?n?º?\s*\d+(?:[./]\d+)?)|"
+        r"(?:s[úu]mula\s+\d+)|"
+        r"(?:tema\s+\d+)|"
+        r"(?:(?:re|are|adpf|dpf|adi|adc|hc|ms|rms)\s*\d{1,7})"
         r")\b",
         re.IGNORECASE
     )
@@ -438,6 +440,156 @@ def _build_compat_report(resultado: dict):
         "source": "audit_fidelity_preventive",
     }
     return compat
+
+
+def _filter_chunk_boundary_false_positives(
+    raw_text: str,
+    formatted_text: str,
+    estruturais: list,
+    contexto: list,
+):
+    """
+    Remove falsos positivos comuns gerados por limites de chunk:
+    - "o texto termina/continua" inferido por fim de trecho, não por fim real do documento.
+    - referência a um título N quando existem títulos posteriores no formatado.
+    """
+    if not formatted_text:
+        return estruturais, contexto
+
+    # Collect existing H2 numbers in formatted markdown like "## 43."
+    heading_nums: list[int] = []
+    for m in re.finditer(r"^##\s+(\d+)\.", formatted_text, flags=re.MULTILINE):
+        try:
+            heading_nums.append(int(m.group(1)))
+        except Exception:
+            continue
+    max_heading = max(heading_nums) if heading_nums else None
+
+    def _mentions_end(text: str) -> bool:
+        t = (text or "").lower()
+        return any(tok in t for tok in ("termina", "final do documento", "continua no próximo", "continua no proximo"))
+
+    def _extract_quoted_snippet(text: str) -> str | None:
+        if not text:
+            return None
+        # Prefer single quotes, then double quotes
+        for pat in (r"'([^']{6,300})'", r"\"([^\"]{6,300})\""):
+            m = re.search(pat, text)
+            if m:
+                return m.group(1)
+        return None
+
+    def _is_truncation_false_positive(item: dict) -> bool:
+        """
+        Detect common LLM false positives where it thinks the document ends mid-word
+        just because a chunk ended (e.g. "... pa" but the full text contains "paciente").
+        """
+        if not isinstance(item, dict):
+            return False
+        item_type = str(item.get("tipo") or "").lower()
+        if item_type != "truncamento":
+            return False
+        desc = str(item.get("descricao") or "")
+        snippet = _extract_quoted_snippet(desc)
+        if not snippet:
+            return False
+
+        # If the snippet ends with ellipsis, test whether the full formatted text continues it.
+        normalized = snippet.replace("…", "...")
+        if "..." not in normalized:
+            return False
+        prefix = normalized.split("...", 1)[0].rstrip()
+        if len(prefix) < 6:
+            return False
+
+        # If the document truly ends truncated, the full formatted text should end with this prefix (or very near it).
+        tail = (formatted_text or "")[-600:].rstrip()
+        if tail.lower().endswith(prefix.lower()):
+            return False
+
+        # If we find a match where the next char is alphanumeric, it's almost certainly just a chunk boundary.
+        try:
+            for m in re.finditer(re.escape(prefix), formatted_text, flags=re.IGNORECASE):
+                end = m.end()
+                if end < len(formatted_text) and formatted_text[end].isalnum():
+                    return True
+        except re.error:
+            return False
+        return False
+
+    def _extract_heading_number(text: str) -> int | None:
+        if not text:
+            return None
+        m = re.search(r"(?:t[ií]tulo|se[cç][aã]o)\s+'?\"?(\d+)(?:\.)?", text, flags=re.IGNORECASE)
+        if not m:
+            m = re.search(r"##\s+(\d+)\.", text)
+        if not m:
+            return None
+        try:
+            return int(m.group(1))
+        except Exception:
+            return None
+
+    filtered_estruturais = []
+    for item in (estruturais or []):
+        if not isinstance(item, dict):
+            filtered_estruturais.append(item)
+            continue
+        descricao = str(item.get("descricao") or "")
+        if _is_truncation_false_positive(item):
+            continue
+        num = _extract_heading_number(descricao)
+        if _mentions_end(descricao) and num is not None and max_heading is not None and max_heading > num:
+            # There are later headings, so it doesn't "end" at this heading.
+            continue
+        filtered_estruturais.append(item)
+
+    filtered_contexto = []
+    for item in (contexto or []):
+        if not isinstance(item, dict):
+            filtered_contexto.append(item)
+            continue
+        sugestao = str(item.get("sugestao") or "")
+        num = _extract_heading_number(sugestao) or _extract_heading_number(str(item.get("localizacao") or ""))
+        if _mentions_end(sugestao) and num is not None and max_heading is not None and max_heading > num:
+            # Suggestion about "continue/end" is likely chunk-boundary noise when later headings exist.
+            continue
+        filtered_contexto.append(item)
+
+    return filtered_estruturais, filtered_contexto
+
+
+def _filter_ref_based_omission_false_positives(
+    dispositivos_raw: set,
+    dispositivos_fmt: set,
+    omissoes: list,
+):
+    """
+    Remove falsos positivos clássicos de omissão gerados pelo LLM:
+    - Omissões de "Lei/Súmula/Tema/RE/ADPF..." que não aparecem no RAW (alucinação).
+    - Itens marcados como omissão quando o dispositivo já está presente no formatado.
+    """
+    if not isinstance(omissoes, list):
+        return []
+    out = []
+    for item in omissoes:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        trecho_raw = str(item.get("trecho_raw") or "")
+        refs = _extract_dispositivos(trecho_raw)
+        if refs:
+            if not any(ref in dispositivos_raw for ref in refs):
+                # If the referenced device isn't in the RAW at all, this is almost certainly hallucinated.
+                continue
+            if any(ref in dispositivos_fmt for ref in refs):
+                # Already present in formatted; not an omission.
+                continue
+            item["veredito"] = "CONFIRMADO"
+        out.append(item)
+        if len(out) >= MAX_LIST_ITEMS:
+            break
+    return out
 
 
 def auditar_fidelidade_preventiva(
@@ -509,11 +661,13 @@ def auditar_fidelidade_preventiva(
 
     try:
         for chunk in chunks:
+            is_last_chunk = chunk["index"] == len(chunks)
             chunk_info = (
                 f"Trecho {chunk['index']} de {len(chunks)} "
                 f"(RAW {chunk['raw_start']:,}-{chunk['raw_end']:,}, "
                 f"FMT {chunk['fmt_start']:,}-{chunk['fmt_end']:,}). "
-                "Avalie apenas este trecho."
+                f"{'Este é o ÚLTIMO trecho.' if is_last_chunk else 'Este NÃO é o final do documento.'} "
+                "Avalie apenas este trecho e NÃO conclua que o documento terminou apenas porque o trecho acabou."
             )
             prompt = PROMPT_AUDITORIA_FIDELIDADE_PREVENTIVA.format(
                 raw=chunk["raw"],
@@ -528,6 +682,7 @@ def auditar_fidelidade_preventiva(
                     temperature=0.1,
                     max_output_tokens=16000,
                     response_mime_type="application/json",
+                    http_options=types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_MS),
                     thinking_config=types.ThinkingConfig(
                         include_thoughts=False,
                         thinking_level="HIGH"
@@ -544,6 +699,13 @@ def auditar_fidelidade_preventiva(
                     "erro": "JSON inválido para trecho",
                 }
             parsed["_chunk_index"] = chunk["index"]
+            # Attach chunk index to child items to help post-processing avoid "fim do documento" false positives.
+            for key in ("omissoes_criticas", "distorcoes", "problemas_estruturais", "problemas_contexto", "alucinacoes"):
+                items = parsed.get(key)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict):
+                            item.setdefault("_chunk_index", chunk["index"])
             resultados.append(parsed)
             chunk_word_counts.append(len(chunk["raw"].split()))
 
@@ -626,6 +788,23 @@ def auditar_fidelidade_preventiva(
                 "overlap_chars": CHUNK_OVERLAP_CHARS,
             },
         }
+
+        # Filter known chunk-boundary false positives before sources audit and invariants.
+        filtered_estruturais, filtered_contexto = _filter_chunk_boundary_false_positives(
+            raw_text,
+            formatted_text,
+            resultado.get("problemas_estruturais") or [],
+            resultado.get("problemas_contexto") or [],
+        )
+        resultado["problemas_estruturais"] = filtered_estruturais
+        resultado["problemas_contexto"] = filtered_contexto
+
+        # Filter hallucinated/duplicate omissions by deterministic device extraction.
+        resultado["omissoes_criticas"] = _filter_ref_based_omission_false_positives(
+            dispositivos_raw,
+            dispositivos_fmt,
+            resultado.get("omissoes_criticas") or [],
+        )
 
         def _normalize_result_invariants(out: dict) -> dict:
             """

@@ -65,7 +65,7 @@ async def test_multi_query_kb_path(monkeypatch):
 
     assert dummy.multi_called is True
     assert dummy.queries == ["q1", "q2"]
-    assert rag_ctx == "RAG_CTX"
+    assert "docA" in rag_ctx
     assert graph_ctx == ""
     assert results and results[0]["text"] == "docA"
 
@@ -134,7 +134,6 @@ async def test_corrective_fallback_retries_multi_query(monkeypatch):
 
     assert dummy.hybrid_calls >= 1
     assert dummy.multi_calls == 2
-    assert rag_ctx == "RAG_CTX"
+    assert "good" in rag_ctx
     assert graph_ctx == ""
     assert results and results[0]["text"] == "good"
-

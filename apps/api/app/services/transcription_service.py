@@ -377,7 +377,8 @@ class TranscriptionService:
         transcription_text: str,
         video_name: str,
         content_issues: list[dict],
-        model_selection: Optional[str] = None
+        model_selection: Optional[str] = None,
+        mode: Optional[str] = None,
     ) -> tuple[str, bool, list[str]]:
         """Aplica correções de conteúdo automáticas usando LLM (via quality_service)."""
         if not content_issues:
@@ -418,6 +419,7 @@ class TranscriptionService:
                 raw_content=transcription_text,
                 issues=content_issues,
                 model_selection=model_selection,
+                mode=mode,
             )
 
             corrected_text = result.get("content", final_text) if isinstance(result, dict) else final_text
@@ -920,6 +922,8 @@ class TranscriptionService:
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
         high_accuracy: bool = False,
+        diarization: Optional[bool] = None,
+        diarization_strict: bool = False,
         model_selection: Optional[str] = None,
         use_cache: bool = True,
         auto_apply_fixes: bool = True,
@@ -940,6 +944,13 @@ class TranscriptionService:
             apply_fixes = auto_apply_fixes
             vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
             logger.info(f"🎤 Iniciando processamento Vomo: {file_path} [{mode}]")
+            diarization_enabled, diarization_required = (False, False)
+            try:
+                diarization_enabled, diarization_required = vomo.resolve_diarization_policy(
+                    mode, diarization=diarization, diarization_strict=diarization_strict
+                )
+            except Exception:
+                pass
 
             file_ext = Path(file_path).suffix.lower()
             is_text_input = file_ext in [".txt", ".md"]
@@ -947,7 +958,7 @@ class TranscriptionService:
             cache_hash = None
             if use_cache:
                 cache_hash = self._compute_file_hash(file_path)
-                transcription_text = self._load_cached_raw(cache_hash, high_accuracy)
+                transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
 
             if transcription_text:
                 logger.info("♻️ RAW cache hit (pulando transcrição)")
@@ -961,20 +972,37 @@ class TranscriptionService:
                     # 2. Transcrever (MLX Whisper)
                     # Nota: transcribe é síncrono no script original (usa GPU/Metal)
                     # Executamos em threadpool se necessário, mas por enquanto direto pois é CPU/GPU bound
+                    if diarization_enabled:
+                        logger.info(
+                            "🗣️  Diarização habilitada (%s)",
+                            "strict" if diarization_required else "soft",
+                        )
                     if high_accuracy:
                         logger.info("🎯 Usando Beam Search (High Accuracy)")
-                        transcription_text = vomo.transcribe_beam_search(audio_path)
-                    else:
-                        transcription_text = vomo.transcribe(audio_path)
+                    transcription_text = vomo.transcribe_file(
+                        audio_path,
+                        mode=mode,
+                        high_accuracy=high_accuracy,
+                        diarization=diarization,
+                        diarization_strict=diarization_strict,
+                    )
                 if use_cache and cache_hash:
-                    self._save_cached_raw(cache_hash, high_accuracy, transcription_text, Path(file_path).name)
+                    self._save_cached_raw(
+                        cache_hash,
+                        high_accuracy,
+                        diarization_enabled,
+                        transcription_text,
+                        Path(file_path).name,
+                    )
             
             if mode == "RAW":
                 return {"content": transcription_text, "raw_content": transcription_text, "reports": {}}
 
             # 3. Formatar (LLM)
-            # Observação: `custom_prompt` em `mlx_vomo.py` sobrescreve apenas a camada de estilo/tabelas.
-            # Para manter paridade com o CLI, só enviamos `custom_prompt` quando o usuário fornece.
+            # Observação: em `mlx_vomo.py`, `custom_prompt` tem comportamento dependente do modo:
+            # - APOSTILA/AUDIENCIA/REUNIAO: personaliza apenas tabelas/extras (preserva tom/estilo/estrutura do modo).
+            # - Outros modos: substitui STYLE+TABLE (preserva HEAD/STRUCTURE/FOOTER).
+            # Para manter paridade com o CLI/UI, só enviamos `custom_prompt` quando o usuário fornece.
             system_prompt = (custom_prompt or "").strip() or None
             
             # Mapear thinking_level para tokens (simplificado)
@@ -1076,7 +1104,8 @@ class TranscriptionService:
                                     transcription_text=transcription_text,
                                     video_name=video_name,
                                     content_issues=content_only,
-                                    model_selection=model_selection
+                                    model_selection=model_selection,
+                                    mode=mode,
                                 )
                                 if content_applied:
                                     logger.info("🔄 Re-analisando documento após correções de conteúdo...")
@@ -1167,6 +1196,8 @@ class TranscriptionService:
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
         high_accuracy: bool = False,
+        diarization: Optional[bool] = None,
+        diarization_strict: bool = False,
         on_progress: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
         model_selection: Optional[str] = None,
         use_cache: bool = True,
@@ -1192,6 +1223,13 @@ class TranscriptionService:
             apply_fixes = auto_apply_fixes
             vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
             logger.info(f"🎤 Iniciando processamento Vomo com SSE: {file_path} [{mode}]")
+            diarization_enabled, diarization_required = (False, False)
+            try:
+                diarization_enabled, diarization_required = vomo.resolve_diarization_policy(
+                    mode, diarization=diarization, diarization_strict=diarization_strict
+                )
+            except Exception:
+                pass
             
             # Stage 1: Audio Optimization (0-20%)
             from pathlib import Path as PathLib
@@ -1207,7 +1245,7 @@ class TranscriptionService:
             if use_cache:
                 try:
                     cache_hash = self._compute_file_hash(file_path)
-                    transcription_text = self._load_cached_raw(cache_hash, high_accuracy)
+                    transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
                 except Exception as cache_error:
                     logger.warning(f"Falha ao carregar cache RAW: {cache_error}")
                     transcription_text = None
@@ -1220,7 +1258,13 @@ class TranscriptionService:
                 else:
                     transcription_text = PathLib(file_path).read_text(encoding="utf-8", errors="ignore")
                     if use_cache and cache_hash:
-                        self._save_cached_raw(cache_hash, high_accuracy, transcription_text, PathLib(file_path).name)
+                        self._save_cached_raw(
+                            cache_hash,
+                            high_accuracy,
+                            diarization_enabled,
+                            transcription_text,
+                            PathLib(file_path).name,
+                        )
                     await emit("audio_optimization", 20, "✅ Texto carregado")
 
                 await emit("transcription", 25, "Texto bruto carregado (transcrição não necessária)")
@@ -1237,7 +1281,29 @@ class TranscriptionService:
                 if transcription_text:
                     await emit("audio_optimization", 20, "♻️ Cache RAW encontrado — pulando otimização de áudio")
                 else:
-                    audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+                    label = "Extraindo áudio (FFmpeg)" if is_video else "Otimizando áudio (FFmpeg)"
+                    estimated_total = max(90.0, file_size_mb * (4.0 if is_video else 2.0))
+                    done_event = asyncio.Event()
+                    ticker = asyncio.create_task(
+                        self._emit_progress_while_running(
+                            emit,
+                            done_event,
+                            "audio_optimization",
+                            5,
+                            20,
+                            label,
+                            estimated_total,
+                            interval_seconds=3.0,
+                        )
+                    )
+                    try:
+                        audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+                    finally:
+                        done_event.set()
+                        try:
+                            await ticker
+                        except Exception:
+                            pass
                     audio_duration = self._get_wav_duration_seconds(audio_path)
                     duration_str = f"{int(audio_duration // 60)}m{int(audio_duration % 60)}s" if audio_duration > 0 else "estimando..."
                     if is_video:
@@ -1266,11 +1332,21 @@ class TranscriptionService:
                             estimated_total
                         )
                     )
+                    if diarization_enabled:
+                        logger.info(
+                            "🗣️  Diarização habilitada (%s)",
+                            "strict" if diarization_required else "soft",
+                        )
                     if high_accuracy:
                         logger.info("🎯 Usando Beam Search (High Accuracy)")
-                        transcription_text = await asyncio.to_thread(vomo.transcribe_beam_search, audio_path)
-                    else:
-                        transcription_text = await asyncio.to_thread(vomo.transcribe, audio_path)
+                    transcription_text = await asyncio.to_thread(
+                        vomo.transcribe_file,
+                        audio_path,
+                        mode=mode,
+                        high_accuracy=high_accuracy,
+                        diarization=diarization,
+                        diarization_strict=diarization_strict,
+                    )
                     done_event.set()
                     try:
                         await ticker
@@ -1278,7 +1354,13 @@ class TranscriptionService:
                         pass
                     await emit("transcription", 60, "Transcrição concluída ✓")
                     if use_cache and cache_hash:
-                        self._save_cached_raw(cache_hash, high_accuracy, transcription_text, PathLib(file_path).name)
+                        self._save_cached_raw(
+                            cache_hash,
+                            high_accuracy,
+                            diarization_enabled,
+                            transcription_text,
+                            PathLib(file_path).name,
+                        )
             
             if mode == "RAW":
                 return transcription_text
@@ -1339,18 +1421,42 @@ class TranscriptionService:
                     await emit("audit", 96, "Auditando qualidade do documento...")
                     try:
                         from app.services.quality_service import quality_service
-                        analysis_report = await quality_service.analyze_structural_issues(
-                            content=final_text,
-                            document_name=video_name,
-                            raw_content=transcription_text
-                        )
+                        try:
+                            structural_timeout = int(os.getenv("IUDEX_HIL_STRUCTURAL_AUDIT_TIMEOUT_SECONDS", "300"))
+                        except Exception:
+                            structural_timeout = 300
+                        try:
+                            analysis_report = await asyncio.wait_for(
+                                quality_service.analyze_structural_issues(
+                                    content=final_text,
+                                    document_name=video_name,
+                                    raw_content=transcription_text
+                                ),
+                                timeout=structural_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("⏳ Timeout na análise estrutural (audit). Prosseguindo sem relatório completo.")
+                            await emit("audit", 96, "Timeout na análise estrutural; continuando...")
+                            analysis_report = {"total_issues": 0, "cli_issues": {}, "error": "Timeout na análise estrutural"}
                         cli_issues = (analysis_report or {}).get("cli_issues") or analysis_report
-                        validation_report = await quality_service.validate_document_full(
-                            raw_content=transcription_text,
-                            formatted_content=final_text,
-                            document_name=video_name,
-                            mode=mode,
-                        )
+                        try:
+                            audit_timeout = int(os.getenv("IUDEX_HIL_AUDIT_TIMEOUT_SECONDS", "600"))
+                        except Exception:
+                            audit_timeout = 600
+                        try:
+                            validation_report = await asyncio.wait_for(
+                                quality_service.validate_document_full(
+                                    raw_content=transcription_text,
+                                    formatted_content=final_text,
+                                    document_name=video_name,
+                                    mode=mode,
+                                ),
+                                timeout=audit_timeout,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning("⏳ Timeout na validação de fidelidade (audit). Prosseguindo sem relatório completo.")
+                            await emit("audit", 96, "Timeout na validação de fidelidade; continuando...")
+                            validation_report = {"approved": False, "score": 0, "error": "Timeout na validação de fidelidade"}
 
                         if apply_fixes and (analysis_report or {}).get("total_issues", 0) > 0:
                             await emit("audit", 97, "Aplicando correcoes estruturais automaticamente...")
@@ -1399,7 +1505,8 @@ class TranscriptionService:
                                         transcription_text=transcription_text,
                                         video_name=video_name,
                                         content_issues=content_only,
-                                        model_selection=model_selection
+                                        model_selection=model_selection,
+                                        mode=mode,
                                     )
                                     if content_applied:
                                         auto_applied = True
@@ -1531,6 +1638,8 @@ class TranscriptionService:
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
         high_accuracy: bool = False,
+        diarization: Optional[bool] = None,
+        diarization_strict: bool = False,
         on_progress: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
         model_selection: Optional[str] = None,
         use_cache: bool = True,
@@ -1564,6 +1673,13 @@ class TranscriptionService:
             vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
             total_files = len(file_paths)
             all_raw_transcriptions = []
+            diarization_enabled, diarization_required = (False, False)
+            try:
+                diarization_enabled, diarization_required = vomo.resolve_diarization_policy(
+                    mode, diarization=diarization, diarization_strict=diarization_strict
+                )
+            except Exception:
+                pass
             
             logger.info(f"🎤 Iniciando processamento em lote: {total_files} arquivos [{mode}]")
             
@@ -1587,7 +1703,7 @@ class TranscriptionService:
                 if use_cache:
                     try:
                         cache_hash = self._compute_file_hash(file_path)
-                        transcription_text = self._load_cached_raw(cache_hash, high_accuracy)
+                        transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
                     except Exception as cache_error:
                         logger.warning(f"Falha ao carregar cache RAW ({file_name}): {cache_error}")
                         transcription_text = None
@@ -1602,7 +1718,13 @@ class TranscriptionService:
                     else:
                         transcription_text = PathLib(file_path).read_text(encoding="utf-8", errors="ignore")
                         if use_cache and cache_hash:
-                            self._save_cached_raw(cache_hash, high_accuracy, transcription_text, file_name)
+                            self._save_cached_raw(
+                                cache_hash,
+                                high_accuracy,
+                                diarization_enabled,
+                                transcription_text,
+                                file_name,
+                            )
                         await emit("batch", file_progress_base + 5, f"[{file_num}/{total_files}] ✅ Texto carregado: {file_name}")
 
                     transcribe_progress = file_progress_base + int(file_progress_increment * 0.3)
@@ -1646,18 +1768,35 @@ class TranscriptionService:
                             )
                         )
 
+                        if diarization_enabled:
+                            logger.info(
+                                "🗣️  Diarização habilitada (%s) para %s",
+                                "strict" if diarization_required else "soft",
+                                file_name,
+                            )
                         if high_accuracy:
-                            logger.info(f"🎯 Usando Beam Search para {file_name}")
-                            transcription_text = await asyncio.to_thread(vomo.transcribe_beam_search, audio_path)
-                        else:
-                            transcription_text = await asyncio.to_thread(vomo.transcribe, audio_path)
+                            logger.info(f"🎯 Usando Beam Search (High Accuracy) para {file_name}")
+                        transcription_text = await asyncio.to_thread(
+                            vomo.transcribe_file,
+                            audio_path,
+                            mode=mode,
+                            high_accuracy=high_accuracy,
+                            diarization=diarization,
+                            diarization_strict=diarization_strict,
+                        )
                         done_event.set()
                         try:
                             await ticker
                         except Exception:
                             pass
                         if use_cache and cache_hash:
-                            self._save_cached_raw(cache_hash, high_accuracy, transcription_text, file_name)
+                            self._save_cached_raw(
+                                cache_hash,
+                                high_accuracy,
+                                diarization_enabled,
+                                transcription_text,
+                                file_name,
+                            )
                 
                 # Add to collection with part separator
                 part_header = f"## PARTE {file_num}: {file_name}"
@@ -1793,6 +1932,7 @@ class TranscriptionService:
                                         video_name=video_name,
                                         content_issues=content_only,
                                         model_selection=model_selection,
+                                        mode=mode,
                                     )
                                     if content_applied:
                                         auto_applied = True
@@ -1948,21 +2088,42 @@ class TranscriptionService:
         base_dir.mkdir(parents=True, exist_ok=True)
         return base_dir
 
-    def _get_raw_cache_path(self, file_hash: str, high_accuracy: bool) -> Path:
+    def _get_raw_cache_path(self, file_hash: str, high_accuracy: bool, diarization_enabled: bool) -> Path:
+        suffix = "beam" if high_accuracy else "base"
+        diar_suffix = "diar" if diarization_enabled else "nodiar"
+        return self._get_transcription_cache_dir() / file_hash / f"raw_{suffix}_{diar_suffix}.txt"
+
+    def _get_raw_cache_path_legacy(self, file_hash: str, high_accuracy: bool) -> Path:
+        """Compat: caches antigos não diferenciavam diarização."""
         suffix = "beam" if high_accuracy else "base"
         return self._get_transcription_cache_dir() / file_hash / f"raw_{suffix}.txt"
 
-    def _load_cached_raw(self, file_hash: str, high_accuracy: bool) -> Optional[str]:
-        cache_path = self._get_raw_cache_path(file_hash, high_accuracy)
+    def _load_cached_raw(self, file_hash: str, high_accuracy: bool, diarization_enabled: bool) -> Optional[str]:
+        cache_path = self._get_raw_cache_path(file_hash, high_accuracy, diarization_enabled)
         if cache_path.exists():
             try:
                 return cache_path.read_text(encoding="utf-8")
             except Exception:
                 return None
+        # Compat: só faz fallback para cache legado quando diarização está OFF
+        if not diarization_enabled:
+            legacy_path = self._get_raw_cache_path_legacy(file_hash, high_accuracy)
+            if legacy_path.exists():
+                try:
+                    return legacy_path.read_text(encoding="utf-8")
+                except Exception:
+                    return None
         return None
 
-    def _save_cached_raw(self, file_hash: str, high_accuracy: bool, raw_text: str, source_name: str = "") -> None:
-        cache_path = self._get_raw_cache_path(file_hash, high_accuracy)
+    def _save_cached_raw(
+        self,
+        file_hash: str,
+        high_accuracy: bool,
+        diarization_enabled: bool,
+        raw_text: str,
+        source_name: str = "",
+    ) -> None:
+        cache_path = self._get_raw_cache_path(file_hash, high_accuracy, diarization_enabled)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(raw_text or "", encoding="utf-8")
         meta_path = cache_path.parent / "meta.json"
@@ -1970,6 +2131,7 @@ class TranscriptionService:
             meta = {
                 "file_hash": file_hash,
                 "high_accuracy": bool(high_accuracy),
+                "diarization_enabled": bool(diarization_enabled),
                 "source_name": source_name,
                 "updated_at": datetime.utcnow().isoformat(),
             }
@@ -2791,20 +2953,64 @@ Responda APENAS com JSON válido:
         registry["speakers"] = list(speakers_map.values())
         return registry
 
-    def _render_hearing_markdown(self, hearing_payload: dict) -> str:
+    def _render_hearing_markdown(self, hearing_payload: dict, *, include_timestamps: bool = True) -> str:
         speakers = {sp["speaker_id"]: sp for sp in hearing_payload.get("speakers", [])}
-        lines = []
-        for seg in hearing_payload.get("segments", []):
+        segments = hearing_payload.get("segments", []) or []
+        segment_map = {seg.get("id"): seg for seg in segments if seg.get("id")}
+        blocks = hearing_payload.get("blocks", []) or []
+
+        def _render_segment_line(seg: dict) -> str:
             speaker_id = seg.get("speaker_id")
             speaker = speakers.get(speaker_id, {})
             name = speaker.get("name") or seg.get("speaker_label", "SPEAKER")
             role = speaker.get("role")
             label = f"{name} ({role})" if role else name
             ts = seg.get("timestamp_hint")
-            ts_prefix = f"[{ts}] " if ts else ""
-            text = seg.get("text") or ""
-            if text:
-                lines.append(f"**{label}**: {ts_prefix}{text}")
+            ts_prefix = f"[{ts}] " if (include_timestamps and ts) else ""
+            text = (seg.get("text") or "").strip()
+            if not text:
+                return ""
+            return f"**{label}**: {ts_prefix}{text}"
+
+        # Preferir markdown por blocos (chunking natural) quando disponível.
+        if blocks:
+            lines: list[str] = []
+            for idx, block in enumerate(blocks, start=1):
+                act_type = (block.get("act_type") or "turn").strip()
+                speaker_label = (block.get("speaker_label") or "").strip()
+                topics = block.get("topics") or []
+                topic_hint = ""
+                if topics:
+                    topic_hint = f" — {topics[0]}"
+                speaker_hint = f" ({speaker_label})" if speaker_label else ""
+                lines.append(f"## Bloco {idx:02d} — {act_type}{topic_hint}{speaker_hint}")
+
+                rendered_any = False
+                for seg_id in (block.get("segment_ids") or []):
+                    seg = segment_map.get(seg_id)
+                    if not seg:
+                        continue
+                    line = _render_segment_line(seg)
+                    if line:
+                        rendered_any = True
+                        lines.append(line)
+
+                if not rendered_any:
+                    # Fallback: usar texto agregado do bloco se não conseguirmos reconstruir por IDs.
+                    block_text = (block.get("text") or "").strip()
+                    if block_text:
+                        lines.append(block_text)
+
+                lines.append("")
+
+            return "\n\n".join([ln for ln in lines if ln is not None]).strip()
+
+        # Fallback legacy: lista linear por segmentos
+        lines: list[str] = []
+        for seg in segments:
+            line = _render_segment_line(seg)
+            if line:
+                lines.append(line)
         return "\n\n".join(lines)
 
     def enroll_hearing_speaker(self, case_id: str, name: str, role: str, file_path: str) -> dict:
@@ -2885,6 +3091,7 @@ Responda APENAS com JSON válido:
         format_mode: str = "AUDIENCIA",
         custom_prompt: Optional[str] = None,
         format_enabled: bool = True,
+        include_timestamps: bool = True,
         allow_indirect: bool = False,
         allow_summary: bool = False,
         use_cache: bool = True,
@@ -2901,7 +3108,14 @@ Responda APENAS com JSON válido:
 
         vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
         logger.info(f"🎤 Iniciando transcrição de audiência: {file_path} [case_id={case_id}]")
+        diarization_enabled, diarization_required = (False, False)
+        try:
+            diarization_enabled, diarization_required = vomo.resolve_diarization_policy(format_mode)
+            vomo.set_diarization_policy(enabled=diarization_enabled, required=diarization_required)
+        except Exception:
+            pass
 
+        include_timestamps = bool(include_timestamps)
         cache_hash = None
         transcription_text = None
         asr_segments = []
@@ -2909,7 +3123,7 @@ Responda APENAS com JSON válido:
         if use_cache:
             try:
                 cache_hash = self._compute_file_hash(file_path)
-                transcription_text = self._load_cached_raw(cache_hash, high_accuracy)
+                transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
                 cache_hit = bool(transcription_text)
                 if cache_hit:
                     logger.info("♻️ RAW cache hit (pulando transcrição)")
@@ -2918,7 +3132,28 @@ Responda APENAS com JSON válido:
                 transcription_text = None
 
         await emit("audio_optimization", 0, "Otimizando áudio...")
-        audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+        estimated_total = 120.0
+        done_event = asyncio.Event()
+        ticker = asyncio.create_task(
+            self._emit_progress_while_running(
+                emit,
+                done_event,
+                "audio_optimization",
+                0,
+                20,
+                "Otimizando áudio (FFmpeg)",
+                estimated_total,
+                interval_seconds=3.0,
+            )
+        )
+        try:
+            audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+        finally:
+            done_event.set()
+            try:
+                await ticker
+            except Exception:
+                pass
         await emit("audio_optimization", 20, "Áudio otimizado ✓")
 
         if cache_hit:
@@ -2935,14 +3170,34 @@ Responda APENAS com JSON válido:
                 transcription_text = structured.get("text") or ""
                 asr_segments = structured.get("segments") or []
             else:
-                if high_accuracy:
-                    transcription_text = await asyncio.to_thread(vomo.transcribe_beam_search, audio_path)
+                # Fallback (não ideal para AUDIENCIA/REUNIAO): manter compatibilidade
+                transcribe_file_fn = getattr(vomo, "transcribe_file", None)
+                if callable(transcribe_file_fn):
+                    transcription_text = await asyncio.to_thread(
+                        transcribe_file_fn,
+                        audio_path,
+                        mode=format_mode,
+                        high_accuracy=high_accuracy,
+                    )
                 else:
-                    transcription_text = await asyncio.to_thread(vomo.transcribe, audio_path)
+                    transcribe_fn = getattr(vomo, "transcribe", None)
+                    if callable(transcribe_fn):
+                        transcription_text = await asyncio.to_thread(
+                            transcribe_fn,
+                            audio_path,
+                        )
+                    else:
+                        raise AttributeError("Vomo transcriber missing transcribe_file/transcribe")
                 asr_segments = []
 
             if use_cache and cache_hash:
-                self._save_cached_raw(cache_hash, high_accuracy, transcription_text, Path(file_path).name)
+                self._save_cached_raw(
+                    cache_hash,
+                    high_accuracy,
+                    diarization_enabled,
+                    transcription_text,
+                    Path(file_path).name,
+                )
         await emit("transcription", 60, "Transcrição concluída ✓")
 
         await emit("structuring", 70, "Estruturando segmentos, falantes e evidências...")
@@ -2950,6 +3205,21 @@ Responda APENAS com JSON válido:
             segments = self._build_hearing_segments_from_asr(asr_segments)
         else:
             segments = self._build_hearing_segments(vomo, transcription_text)
+
+        segments_no_ts = None
+        if not include_timestamps:
+            ts_leading_re = re.compile(r"^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*")
+            segments_no_ts = []
+            for seg in segments:
+                try:
+                    new_seg = dict(seg)
+                    text = (new_seg.get("text") or "").strip()
+                    if text:
+                        new_seg["text"] = ts_leading_re.sub("", text).strip()
+                    segments_no_ts.append(new_seg)
+                except Exception:
+                    segments_no_ts.append(seg)
+
         speaker_labels = sorted({seg["speaker_label"] for seg in segments})
         registry = self._load_speaker_registry(case_id)
         speakers, label_to_id = self._ensure_registry_speakers(registry, speaker_labels)
@@ -3016,6 +3286,7 @@ Responda APENAS com JSON válido:
             "format_options": {
                 "allow_indirect": allow_indirect,
                 "allow_summary": allow_summary,
+                "include_timestamps": include_timestamps,
             },
             "audit": {
                 "pipeline_version": "hearing_v1",
@@ -3030,12 +3301,36 @@ Responda APENAS com JSON válido:
         structured_path = run_dir / "hearing_structured.json"
         json_path = run_dir / "hearing.json"
         raw_path = run_dir / "transcript_raw.txt"
-        transcript_markdown = self._render_hearing_markdown(hearing_payload)
+        transcript_markdown = self._render_hearing_markdown(hearing_payload, include_timestamps=True)
+        transcript_markdown_no_ts = None
+        if not include_timestamps:
+            payload_no_ts = dict(hearing_payload)
+            if segments_no_ts is not None:
+                payload_no_ts["segments"] = segments_no_ts
+            transcript_markdown_no_ts = self._render_hearing_markdown(payload_no_ts, include_timestamps=False)
+
+            def _strip_timestamps_from_markdown(text: Optional[str]) -> Optional[str]:
+                if not text:
+                    return text
+                # Remove timestamp after speaker label and standalone timestamps.
+                text = re.sub(
+                    r"(?m)^(\\*\\*[^\\n]*\\*\\*:\\s*)\\[\\d{1,2}:\\d{2}(?::\\d{2})?\\]\\s*",
+                    r"\\1",
+                    text,
+                )
+                text = re.sub(r"(?m)^\\[\\d{1,2}:\\d{2}(?::\\d{2})?\\]\\s*", "", text)
+                return text
+
+            transcript_markdown_no_ts = _strip_timestamps_from_markdown(transcript_markdown_no_ts)
 
         hearing_payload["transcript_markdown"] = transcript_markdown
         structured_path.write_text(json.dumps(hearing_payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        format_source_text = transcript_markdown or (transcription_text or "")
-        format_source_label = "transcript_markdown" if transcript_markdown else "raw_transcript"
+        if include_timestamps:
+            format_source_text = transcript_markdown or (transcription_text or "")
+            format_source_label = "transcript_markdown" if transcript_markdown else "raw_transcript"
+        else:
+            format_source_text = transcript_markdown_no_ts or transcript_markdown or (transcription_text or "")
+            format_source_label = "transcript_markdown_no_timestamps" if transcript_markdown_no_ts else ("transcript_markdown" if transcript_markdown else "raw_transcript")
 
         format_mode_normalized = (format_mode or "AUDIENCIA").strip().upper()
         if format_mode_normalized == "CUSTOM":
@@ -3067,6 +3362,10 @@ Responda APENAS com JSON válido:
             format_source_path.write_text(format_source_text, encoding="utf-8")
             report_paths["format_source_path"] = str(format_source_path)
             hearing_payload["format_source"] = format_source_label
+        if not include_timestamps and transcript_markdown_no_ts:
+            clean_transcript_path = run_dir / "hearing_transcript_no_timestamps.md"
+            clean_transcript_path.write_text(transcript_markdown_no_ts, encoding="utf-8")
+            report_paths["transcript_no_timestamps_path"] = str(clean_transcript_path)
 
         if format_enabled:
             await emit("formatting", 75, "Formatando texto da audiência...")
@@ -3083,6 +3382,7 @@ Responda APENAS com JSON válido:
                     skip_audit=skip_legal_audit,
                     skip_fidelity_audit=skip_fidelity_audit,
                     skip_sources_audit=skip_sources_audit,
+                    include_timestamps=bool(include_timestamps),
                     allow_indirect=allow_indirect,
                     allow_summary=allow_summary,
                 )
@@ -3165,7 +3465,8 @@ Responda APENAS com JSON válido:
                                     transcription_text=format_source_text,
                                     video_name=video_name,
                                     content_issues=content_only,
-                                    model_selection=model_selection
+                                    model_selection=model_selection,
+                                    mode=format_mode_normalized,
                                 )
                                 if content_applied:
                                     auto_applied = True

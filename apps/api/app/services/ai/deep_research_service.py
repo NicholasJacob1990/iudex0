@@ -76,14 +76,34 @@ class DeepResearchService:
         self.google_client = None
         self.openai_client = None
         if GENAI_AVAILABLE:
-            api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-            if api_key:
-                try:
-                    self.google_client = genai.Client(api_key=api_key)
-                    logger.info("✅ DeepResearchService: Connected via Google AI Studio (API Key)")
-                except Exception as e:
-                     logger.warning(f"Could not initialize Google GenAI client: {e}")
-                     self.google_client = None
+            try:
+                project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
+                location = os.getenv("VERTEX_AI_LOCATION", "global")
+                auth_mode = (os.getenv("IUDEX_GEMINI_AUTH") or "auto").strip().lower()
+
+                use_vertex = False
+                if auth_mode in ("vertex", "vertexai", "gcp"):
+                    use_vertex = True
+                elif auth_mode in ("apikey", "api_key"):
+                    use_vertex = False
+                else:
+                    use_vertex = bool(project_id)
+
+                if use_vertex and project_id:
+                    self.google_client = genai.Client(
+                        vertexai=True,
+                        project=project_id,
+                        location=location,
+                    )
+                    logger.info(f"✅ DeepResearchService: Connected via Vertex AI ({location})")
+                else:
+                    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+                    if api_key:
+                        self.google_client = genai.Client(api_key=api_key)
+                        logger.info("✅ DeepResearchService: Connected via Google AI Studio (API Key)")
+            except Exception as e:
+                logger.warning(f"Could not initialize Google GenAI client: {e}")
+                self.google_client = None
 
         self.perplexity_api_key = os.getenv("PERPLEXITY_API_KEY") or None
 
@@ -199,20 +219,37 @@ class DeepResearchService:
         return "sonar-deep-research"
 
     def _resolve_google_model(self, config: Optional[Dict[str, Any]] = None) -> str:
-        raw = (config or {}).get("model") or os.getenv("DEEP_RESEARCH_GOOGLE_MODEL", "gemini-3-flash")
+        raw = (config or {}).get("model") or os.getenv("DEEP_RESEARCH_GOOGLE_MODEL", "gemini-2.5-flash")
         model_id = str(raw or "").strip()
         if not model_id:
-            return "gemini-3-flash"
+            return "gemini-2.5-flash"
         lowered = model_id.lower()
         if lowered.startswith("sonar") or lowered == "sonar-deep-research":
-            logger.warning(f"⚠️ Modelo Perplexity recebido em provider=google: '{model_id}'. Usando gemini-3-flash.")
-            return "gemini-3-flash"
+            logger.warning(f"⚠️ Modelo Perplexity recebido em provider=google: '{model_id}'. Usando gemini-2.5-flash.")
+            return "gemini-2.5-flash"
         return model_id
 
     def _resolve_openai_model(self, config: Optional[Dict[str, Any]] = None) -> str:
+        # 1. Explicit model from caller config
         model_id = str((config or {}).get("model") or "").strip()
-        if not model_id:
-            model_id = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research").strip()
+        if model_id:
+            return model_id
+
+        # 2. Tier-based model selection from billing config
+        plan_key = str((config or {}).get("plan_key") or "").strip()
+        if plan_key:
+            try:
+                from app.services.billing_service import load_billing_config
+                bcfg = load_billing_config()
+                tier_map = bcfg.get("deep_research_openai_model_by_plan") or {}
+                tier_model = tier_map.get(plan_key)
+                if tier_model:
+                    return str(tier_model).strip()
+            except Exception:
+                pass
+
+        # 3. Environment variable fallback
+        model_id = os.getenv("OPENAI_DEEP_RESEARCH_MODEL", "o4-mini-deep-research").strip()
         return model_id or "o4-mini-deep-research"
 
     def _iter_url_title_pairs(self, obj: Any) -> Iterable[Tuple[str, str]]:
@@ -485,14 +522,17 @@ class DeepResearchService:
             # Tool type names have changed over time; prefer preview if available, fallback to stable.
             tools = [{"type": "web_search_preview"}]
             reasoning = {"effort": effort, "summary": "auto"} if effort else {"summary": "auto"}
+            # Reasoning models (o1, o3, o4) do not support temperature parameter
+            is_reasoning_model = any(openai_model.startswith(p) for p in ("o1", "o3", "o4"))
+            temp_kwargs = {} if is_reasoning_model else {"temperature": 0.2}
             try:
                 resp = self.openai_client.responses.create(  # type: ignore[union-attr]
                     model=openai_model,
                     input=[{"role": "user", "content": query}],
                     tools=tools,
                     reasoning=reasoning,
-                    temperature=0.2,
                     max_output_tokens=4096,
+                    **temp_kwargs,
                 )
             except Exception:
                 resp = self.openai_client.responses.create(  # type: ignore[union-attr]
@@ -500,8 +540,8 @@ class DeepResearchService:
                     input=[{"role": "user", "content": query}],
                     tools=[{"type": "web_search"}],
                     reasoning=reasoning,
-                    temperature=0.2,
                     max_output_tokens=4096,
+                    **temp_kwargs,
                 )
 
             # "All sources consulted" (best-effort): union of url_citations + tool-result URLs.
@@ -940,6 +980,8 @@ class DeepResearchService:
 
             try:
                 reasoning = {"effort": effort, "summary": "auto"} if effort else {"summary": "auto"}
+                is_reasoning_model = any((model or "").startswith(p) for p in ("o1", "o3", "o4"))
+                temp_kwargs = {} if is_reasoning_model else {"temperature": 0.2}
 
                 # Tool name variants differ across model families; prefer preview tool, fallback to stable.
                 try:
@@ -948,9 +990,9 @@ class DeepResearchService:
                         input=[{"role": "user", "content": query}],
                         tools=[{"type": "web_search_preview"}],
                         reasoning=reasoning,
-                        temperature=0.2,
                         max_output_tokens=4096,
                         stream=True,
+                        **temp_kwargs,
                     )
                 except Exception:
                     stream = self.openai_client.responses.create(  # type: ignore[union-attr]
@@ -958,7 +1000,7 @@ class DeepResearchService:
                         input=[{"role": "user", "content": query}],
                         tools=[{"type": "web_search"}],
                         reasoning=reasoning,
-                        temperature=0.2,
+                        **temp_kwargs,
                         max_output_tokens=4096,
                         stream=True,
                     )

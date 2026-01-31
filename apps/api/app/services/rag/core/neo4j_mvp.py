@@ -14,12 +14,27 @@ Schema:
     - Document (doc_hash, tenant_id, scope, case_id, title, source_type)
     - Chunk (chunk_uid, doc_hash, chunk_index, text_preview)
     - Entity (entity_type, entity_id, name, normalized)
+    - Fact (fact_id, text_preview, doc_hash, tenant_id, scope, case_id)
+    - Claim (claim_id, text, claim_type, polarity, tenant_id, case_id)
+    - Evidence (evidence_id, text, evidence_type, weight, tenant_id)
+    - Actor (actor_id, name, role, tenant_id)
+    - Issue (issue_id, text, domain, tenant_id, case_id)
 
     Relationships:
     - (:Document)-[:HAS_CHUNK]->(:Chunk)
     - (:Chunk)-[:MENTIONS]->(:Entity)
+    - (:Chunk)-[:ASSERTS]->(:Fact)
+    - (:Fact)-[:REFERS_TO]->(:Entity)
     - (:Chunk)-[:NEXT]->(:Chunk)  # sequence for neighbor expansion
     - (:Entity)-[:RELATED_TO]->(:Entity)  # semantic relations
+    - (:Chunk)-[:CONTAINS_CLAIM]->(:Claim)
+    - (:Claim)-[:SUPPORTS]->(:Claim)
+    - (:Claim)-[:OPPOSES]->(:Claim)
+    - (:Evidence)-[:EVIDENCES]->(:Claim)
+    - (:Claim)-[:RAISES]->(:Issue)
+    - (:Actor)-[:ARGUES]->(:Claim)
+    - (:Claim)-[:CITES]->(:Entity)
+    - (:Evidence)-[:CITES]->(:Entity)
 
 Usage:
     from app.services.rag.core.neo4j_mvp import get_neo4j_mvp
@@ -41,6 +56,7 @@ Usage:
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -104,6 +120,7 @@ class Neo4jMVPConfig:
     graph_hybrid_mode: bool = False
     graph_hybrid_auto_schema: bool = True
     graph_hybrid_migrate_on_startup: bool = False
+    max_facts_per_chunk: int = 3
 
     # Phase 2 (optional): Neo4j-based retrieval helpers (no training required)
     enable_fulltext_indexes: bool = False
@@ -126,8 +143,11 @@ class Neo4jMVPConfig:
             user=os.getenv("NEO4J_USER", "neo4j"),
             password=os.getenv("NEO4J_PASSWORD", "password"),
             database=os.getenv("NEO4J_DATABASE", "iudex"),
+            max_connection_pool_size=int(os.getenv("NEO4J_MAX_POOL_SIZE", "50")),
+            connection_timeout=int(os.getenv("NEO4J_CONNECTION_TIMEOUT", "30")),
             max_hops=int(os.getenv("NEO4J_MAX_HOPS", "2")),
             max_chunks_per_query=int(os.getenv("NEO4J_MAX_CHUNKS", "50")),
+            create_indexes=_env_bool("NEO4J_CREATE_INDEXES", True),
             graph_hybrid_mode=_env_bool("RAG_GRAPH_HYBRID_MODE", False),
             graph_hybrid_auto_schema=_env_bool("RAG_GRAPH_HYBRID_AUTO_SCHEMA", True),
             graph_hybrid_migrate_on_startup=_env_bool("RAG_GRAPH_HYBRID_MIGRATE_ON_STARTUP", False),
@@ -136,6 +156,7 @@ class Neo4jMVPConfig:
             vector_dimensions=dim,
             vector_similarity=os.getenv("NEO4J_VECTOR_SIMILARITY", "cosine"),
             vector_property=os.getenv("NEO4J_VECTOR_PROPERTY", "embedding"),
+            max_facts_per_chunk=int(os.getenv("NEO4J_MAX_FACTS_PER_CHUNK", "3")),
         )
 
 
@@ -474,6 +495,88 @@ class LegalEntityExtractor:
 
 
 # =============================================================================
+# FACT EXTRACTOR (Deterministic, no LLM)
+# =============================================================================
+
+
+class FactExtractor:
+    """
+    Extract "fatos" from a chunk of text (deterministic).
+
+    Goal: generate a small set of fact-like snippets to connect local RAG
+    narrative to Normas/Doutrina entities in Neo4j, without calling an LLM.
+    """
+
+    _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
+    _WS = re.compile(r"\s+")
+    _DATE = re.compile(
+        r"\b(\d{1,2}/\d{1,2}/\d{2,4}|\d{1,2}\s+de\s+[a-zçãéíóú]+(?:\s+de)?\s+\d{4})\b",
+        re.IGNORECASE,
+    )
+    _MONEY = re.compile(r"\bR\$\s*\d+[\d.]*,\d{2}\b")
+    _VERB_HINT = re.compile(
+        r"\b(celebr|assin|firm|contrat|pag|inadimpl|rescind|notific|entreg|ocorr|houve|aleg|afirm|requereu|ajuiz)\w*\b",
+        re.IGNORECASE,
+    )
+    _LEGAL_CITATION = re.compile(
+        r"\b(art\.?|lei\s+n|s[úu]mula|tema\s+\d+|stf|stj|tst|trf|tj[a-z]{2})\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def extract(
+        cls,
+        text: str,
+        max_facts: int = 3,
+        min_chars: int = 40,
+        max_chars: int = 320,
+    ) -> List[str]:
+        raw = (text or "").strip()
+        if not raw:
+            return []
+
+        raw = cls._WS.sub(" ", raw)
+        sentences = [s.strip() for s in cls._SENT_SPLIT.split(raw) if s and s.strip()]
+        if not sentences:
+            sentences = [raw]
+
+        scored: List[Tuple[int, str]] = []
+        seen: Set[str] = set()
+
+        for s in sentences:
+            s_clean = s.strip()
+            if len(s_clean) < min_chars:
+                continue
+            s_clean = s_clean[:max_chars].strip()
+
+            key = s_clean.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+
+            score = 0
+            if cls._DATE.search(s_clean):
+                score += 3
+            if cls._MONEY.search(s_clean):
+                score += 2
+            if cls._VERB_HINT.search(s_clean):
+                score += 2
+
+            # Penalize sentences that are mostly legal citations.
+            if cls._LEGAL_CITATION.search(s_clean):
+                score -= 2
+
+            scored.append((score, s_clean))
+
+        if not scored:
+            preview = raw[:max_chars].strip()
+            return [preview] if preview else []
+
+        scored.sort(key=lambda t: (t[0], len(t[1])), reverse=True)
+        return [s for _, s in scored[: max(1, int(max_facts or 1))]]
+
+
+# =============================================================================
 # CYPHER QUERIES
 # =============================================================================
 
@@ -494,15 +597,50 @@ class CypherQueries:
 
     CREATE CONSTRAINT entity_id IF NOT EXISTS
     FOR (e:Entity) REQUIRE e.entity_id IS UNIQUE;
+
+    CREATE CONSTRAINT fact_id IF NOT EXISTS
+    FOR (f:Fact) REQUIRE f.fact_id IS UNIQUE;
+
+    CREATE CONSTRAINT arg_claim_id IF NOT EXISTS
+    FOR (c:Claim) REQUIRE c.claim_id IS UNIQUE;
+
+    CREATE CONSTRAINT arg_evidence_id IF NOT EXISTS
+    FOR (ev:Evidence) REQUIRE ev.evidence_id IS UNIQUE;
+
+    CREATE CONSTRAINT arg_actor_id IF NOT EXISTS
+    FOR (a:Actor) REQUIRE a.actor_id IS UNIQUE;
+
+    CREATE CONSTRAINT arg_issue_id IF NOT EXISTS
+    FOR (i:Issue) REQUIRE i.issue_id IS UNIQUE;
     """
 
     CREATE_INDEXES = """
     CREATE INDEX doc_tenant IF NOT EXISTS FOR (d:Document) ON (d.tenant_id);
     CREATE INDEX doc_scope IF NOT EXISTS FOR (d:Document) ON (d.scope);
     CREATE INDEX doc_case IF NOT EXISTS FOR (d:Document) ON (d.case_id);
+    CREATE INDEX doc_doc_id IF NOT EXISTS FOR (d:Document) ON (d.doc_id);
     CREATE INDEX chunk_doc IF NOT EXISTS FOR (c:Chunk) ON (c.doc_hash);
     CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.entity_type);
     CREATE INDEX entity_normalized IF NOT EXISTS FOR (e:Entity) ON (e.normalized);
+    CREATE INDEX fact_doc IF NOT EXISTS FOR (f:Fact) ON (f.doc_hash);
+    CREATE INDEX fact_doc_id IF NOT EXISTS FOR (f:Fact) ON (f.doc_id);
+    CREATE INDEX fact_tenant IF NOT EXISTS FOR (f:Fact) ON (f.tenant_id);
+    CREATE INDEX fact_case IF NOT EXISTS FOR (f:Fact) ON (f.case_id);
+    CREATE INDEX arg_claim_tenant IF NOT EXISTS FOR (c:Claim) ON (c.tenant_id);
+    CREATE INDEX arg_claim_case IF NOT EXISTS FOR (c:Claim) ON (c.case_id);
+    CREATE INDEX arg_claim_type IF NOT EXISTS FOR (c:Claim) ON (c.claim_type);
+    CREATE INDEX arg_evidence_tenant IF NOT EXISTS FOR (ev:Evidence) ON (ev.tenant_id);
+    CREATE INDEX arg_evidence_doc IF NOT EXISTS FOR (ev:Evidence) ON (ev.doc_id);
+    CREATE INDEX arg_actor_tenant IF NOT EXISTS FOR (a:Actor) ON (a.tenant_id);
+    CREATE INDEX arg_issue_case IF NOT EXISTS FOR (i:Issue) ON (i.case_id);
+
+    # CogRAG meta-cognition / memory (PLANO_COGRAG.md)
+    CREATE INDEX tema_nome IF NOT EXISTS FOR (t:Tema) ON (t.nome);
+    CREATE INDEX tema_tenant IF NOT EXISTS FOR (t:Tema) ON (t.tenant_id);
+    CREATE INDEX consulta_id IF NOT EXISTS FOR (c:Consulta) ON (c.id);
+    CREATE INDEX consulta_tenant IF NOT EXISTS FOR (c:Consulta) ON (c.tenant_id);
+    CREATE INDEX subpergunta_consulta IF NOT EXISTS FOR (s:SubPergunta) ON (s.consulta_id);
+    CREATE INDEX correcao_usuario IF NOT EXISTS FOR (c:Correcao) ON (c.usuario_id);
     """
 
     # -------------------------------------------------------------------------
@@ -515,6 +653,7 @@ class CypherQueries:
         d.tenant_id = $tenant_id,
         d.scope = $scope,
         d.case_id = $case_id,
+        d.doc_id = $doc_id,
         d.group_ids = $group_ids,
         d.title = $title,
         d.source_type = $source_type,
@@ -522,6 +661,7 @@ class CypherQueries:
         d.allowed_users = $allowed_users,
         d.created_at = datetime()
     ON MATCH SET
+        d.doc_id = coalesce(d.doc_id, $doc_id),
         d.updated_at = datetime()
     RETURN d
     """
@@ -572,6 +712,35 @@ class CypherQueries:
     MERGE (e1)-[:RELATED_TO]->(e2)
     """
 
+    MERGE_FACT = """
+    MERGE (f:Fact {fact_id: $fact_id})
+    ON CREATE SET
+        f.text = $text,
+        f.text_preview = $text_preview,
+        f.doc_hash = $doc_hash,
+        f.doc_id = $doc_id,
+        f.tenant_id = $tenant_id,
+        f.scope = $scope,
+        f.case_id = $case_id,
+        f.metadata = $metadata,
+        f.created_at = datetime()
+    ON MATCH SET
+        f.updated_at = datetime()
+    RETURN f
+    """
+
+    LINK_CHUNK_FACT = """
+    MATCH (c:Chunk {chunk_uid: $chunk_uid})
+    MATCH (f:Fact {fact_id: $fact_id})
+    MERGE (c)-[:ASSERTS]->(f)
+    """
+
+    LINK_FACT_ENTITY = """
+    MATCH (f:Fact {fact_id: $fact_id})
+    MATCH (e:Entity {entity_id: $entity_id})
+    MERGE (f)-[:REFERS_TO]->(e)
+    """
+
     # -------------------------------------------------------------------------
     # Query: Find chunks by entities
     # -------------------------------------------------------------------------
@@ -605,10 +774,15 @@ class CypherQueries:
     # Query: Expand with neighbors (NEXT relationship)
     # -------------------------------------------------------------------------
 
+    # NOTE: These templates intentionally avoid Python `.format()` because Cypher
+    # uses `{ ... }` map literals and projections extensively.
+    _WINDOW_TOKEN = "__WINDOW__"
+    _MAX_HOPS_TOKEN = "__MAX_HOPS__"
+
     EXPAND_NEIGHBORS = """
     MATCH (c:Chunk {chunk_uid: $chunk_uid})
-    OPTIONAL MATCH (c)<-[:NEXT*1..{window}]-(prev:Chunk)
-    OPTIONAL MATCH (c)-[:NEXT*1..{window}]->(next:Chunk)
+    OPTIONAL MATCH (c)<-[:NEXT*1..__WINDOW__]-(prev:Chunk)
+    OPTIONAL MATCH (c)-[:NEXT*1..__WINDOW__]->(next:Chunk)
     WITH c, collect(DISTINCT prev) + collect(DISTINCT next) AS neighbors
 
     UNWIND neighbors AS n
@@ -630,18 +804,20 @@ class CypherQueries:
     # Query: Path-based traversal (for explainable RAG)
     # -------------------------------------------------------------------------
 
+    # Entity-only traversal: does NOT cross into Argument nodes (Claim/Evidence/Actor/Issue).
+    # Use this for factual/entity queries where argument contamination is undesirable.
     FIND_PATHS = """
-    // Find paths from query entities to document chunks
+    // Find paths from query entities to document chunks (entity-only mode)
     MATCH (e:Entity)
     WHERE e.entity_id IN $entity_ids
 
-    // Traverse up to N hops through entities and chunks
-    MATCH path = (e)-[:RELATED_TO|MENTIONS*1..{max_hops}]-(target)
+    // Traverse only entity/chunk relationships — no argument edges
+    MATCH path = (e)-[:RELATED_TO|MENTIONS|ASSERTS|REFERS_TO*1..__MAX_HOPS__]-(target)
     WHERE (target:Chunk OR target:Entity)
+      AND NOT (target:Claim OR target:Evidence OR target:Actor OR target:Issue)
 
     // Security trimming: all Chunk nodes in the path must be visible to the caller.
-    // This makes the returned path directly verifiable/auditable.
-    WHERE all(n IN nodes(path) WHERE NOT n:Chunk OR exists {
+    AND all(n IN nodes(path) WHERE NOT (n:Chunk) OR exists {
         MATCH (d:Document)-[:HAS_CHUNK]->(n)
         WHERE d.scope IN $allowed_scopes
           AND (
@@ -662,7 +838,6 @@ class CypherQueries:
             )
     })
 
-    // If target is chunk, get its document (for metadata in the response)
     OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(target)
     WHERE target:Chunk
 
@@ -677,15 +852,87 @@ class CypherQueries:
         [n IN nodes(path) | coalesce(n.entity_id, n.chunk_uid, n.doc_hash)] AS path_ids,
         [n IN nodes(path) | {
             labels: labels(n),
-            // Stable IDs (only one will be present depending on label)
             entity_id: n.entity_id,
             chunk_uid: n.chunk_uid,
             doc_hash: n.doc_hash,
-            // Common fields
             name: n.name,
             entity_type: n.entity_type,
             normalized: n.normalized,
-            // Chunk fields
+            chunk_index: n.chunk_index,
+            text_preview: n.text_preview
+        }] AS path_nodes,
+        [r IN relationships(path) | {
+            type: type(r),
+            from_id: coalesce(startNode(r).entity_id, startNode(r).chunk_uid, startNode(r).doc_hash),
+            to_id: coalesce(endNode(r).entity_id, endNode(r).chunk_uid, endNode(r).doc_hash),
+            properties: properties(r)
+        }] AS path_edges,
+        d.doc_hash AS doc_hash,
+        target.chunk_uid AS chunk_uid
+    ORDER BY path_length
+    LIMIT $limit
+    """
+
+    # Argument-aware traversal: includes Claim/Evidence/Actor/Issue nodes and
+    # argument relationships (SUPPORTS, OPPOSES, etc.).
+    # Includes security trimming for BOTH Chunk AND Claim/Evidence nodes.
+    FIND_PATHS_WITH_ARGUMENTS = """
+    // Find paths including argument graph (debate-aware mode)
+    MATCH (e:Entity)
+    WHERE e.entity_id IN $entity_ids
+
+    // Traverse all relationship types including argument edges
+    MATCH path = (e)-[:RELATED_TO|MENTIONS|ASSERTS|REFERS_TO|SUPPORTS|OPPOSES|EVIDENCES|ARGUES|RAISES|CITES|CONTAINS_CLAIM*1..__MAX_HOPS__]-(target)
+    WHERE (target:Chunk OR target:Entity OR target:Claim OR target:Evidence)
+
+    // Security trimming for Chunk nodes (document-level access control)
+    AND all(n IN nodes(path) WHERE NOT (n:Chunk) OR exists {
+        MATCH (d:Document)-[:HAS_CHUNK]->(n)
+        WHERE d.scope IN $allowed_scopes
+          AND (
+                d.scope = 'global'
+                OR d.tenant_id = $tenant_id
+                OR (
+                    d.scope = 'group'
+                    AND coalesce(size($group_ids), 0) > 0
+                    AND any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))
+                )
+            )
+          AND ($case_id IS NULL OR d.case_id = $case_id)
+          AND (
+                d.sigilo IS NULL
+                OR d.sigilo = false
+                OR $user_id IS NULL
+                OR $user_id IN coalesce(d.allowed_users, [])
+            )
+    })
+
+    // Security trimming for Claim/Evidence nodes (tenant + case isolation)
+    AND all(n IN nodes(path) WHERE NOT (n:Claim OR n:Evidence) OR (
+        n.tenant_id = $tenant_id
+        AND ($case_id IS NULL OR n.case_id IS NULL OR n.case_id = $case_id)
+    ))
+
+    OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(target)
+    WHERE target:Chunk
+
+    RETURN
+        e.name AS start_entity,
+        coalesce(target.name, target.entity_id, target.chunk_uid) AS end_name,
+        coalesce(target.entity_id, target.chunk_uid) AS end_id,
+        labels(target)[0] AS end_type,
+        length(path) AS path_length,
+        [n IN nodes(path) | coalesce(n.name, n.chunk_uid)] AS path_names,
+        [r IN relationships(path) | type(r)] AS path_relations,
+        [n IN nodes(path) | coalesce(n.entity_id, n.chunk_uid, n.doc_hash)] AS path_ids,
+        [n IN nodes(path) | {
+            labels: labels(n),
+            entity_id: n.entity_id,
+            chunk_uid: n.chunk_uid,
+            doc_hash: n.doc_hash,
+            name: n.name,
+            entity_type: n.entity_type,
+            normalized: n.normalized,
             chunk_index: n.chunk_index,
             text_preview: n.text_preview
         }] AS path_nodes,
@@ -801,6 +1048,7 @@ class Neo4jMVPService:
                         self.config.uri,
                         auth=(self.config.user, self.config.password),
                         max_connection_pool_size=self.config.max_connection_pool_size,
+                        connection_timeout=self.config.connection_timeout,
                     )
                     logger.info(f"Neo4j connected: {self.config.uri}")
 
@@ -817,15 +1065,87 @@ class Neo4jMVPService:
             self._driver = None
             logger.info("Neo4j connection closed")
 
+    @staticmethod
+    def _serialize_metadata(value: Any) -> str:
+        """
+        Neo4j properties do not support nested maps/dicts.
+        Persist metadata as JSON string for consistent parsing downstream.
+        """
+        if value is None:
+            return "{}"
+        if isinstance(value, str):
+            return value
+        if isinstance(value, dict):
+            return json.dumps(value, ensure_ascii=True)
+        return str(value)
+
+    def _database_candidates(self) -> List[str]:
+        """
+        Neo4j Community typically exposes only one user database (often called 'neo4j').
+        If the configured database name doesn't exist, retry against 'neo4j'.
+        """
+        configured = (self.config.database or "").strip()
+        candidates: List[str] = []
+        if configured:
+            candidates.append(configured)
+        if "neo4j" not in candidates:
+            candidates.append("neo4j")
+        return candidates
+
     def _execute_read(
         self,
         query: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute read query."""
-        with self.driver.session(database=self.config.database) as session:
-            result = session.run(query, params or {})
-            return [record.data() for record in result]
+        try:
+            from neo4j.exceptions import ClientError
+        except Exception:
+            ClientError = Exception  # type: ignore
+
+        try:
+            from neo4j.exceptions import ServiceUnavailable, SessionExpired
+        except Exception:
+            ServiceUnavailable = Exception  # type: ignore
+            SessionExpired = Exception  # type: ignore
+
+        def _should_reset_driver(exc: Exception) -> bool:
+            if isinstance(exc, (ServiceUnavailable, SessionExpired)):  # type: ignore[arg-type]
+                return True
+            msg = str(exc).lower()
+            return (
+                "defunct connection" in msg
+                or "bolt handshake" in msg
+                or "connection reset" in msg
+                or "couldn't connect to" in msg
+            )
+
+        last_db_not_found: Optional[Exception] = None
+        for db in self._database_candidates():
+            for attempt in (1, 2):
+                try:
+                    with self.driver.session(database=db) as session:
+                        result = session.run(query, params or {})
+                        return [record.data() for record in result]
+                except ClientError as e:  # type: ignore
+                    code = getattr(e, "code", "")
+                    if code == "Neo.ClientError.Database.DatabaseNotFound" and db != "neo4j":
+                        last_db_not_found = e
+                        break
+                    raise
+                except Exception as e:
+                    if attempt == 1 and _should_reset_driver(e):
+                        logger.warning(f"Neo4j transient error, resetting driver and retrying: {e}")
+                        try:
+                            self.close()
+                        except Exception:
+                            pass
+                        continue
+                    raise
+
+        if last_db_not_found:
+            raise last_db_not_found
+        raise RuntimeError("Failed to open Neo4j session for any candidate database")
 
     def _execute_write(
         self,
@@ -833,11 +1153,56 @@ class Neo4jMVPService:
         params: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute write query."""
-        with self.driver.session(database=self.config.database) as session:
-            result = session.execute_write(
-                lambda tx: list(tx.run(query, params or {}))
+        try:
+            from neo4j.exceptions import ClientError
+        except Exception:
+            ClientError = Exception  # type: ignore
+
+        try:
+            from neo4j.exceptions import ServiceUnavailable, SessionExpired
+        except Exception:
+            ServiceUnavailable = Exception  # type: ignore
+            SessionExpired = Exception  # type: ignore
+
+        def _should_reset_driver(exc: Exception) -> bool:
+            if isinstance(exc, (ServiceUnavailable, SessionExpired)):  # type: ignore[arg-type]
+                return True
+            msg = str(exc).lower()
+            return (
+                "defunct connection" in msg
+                or "bolt handshake" in msg
+                or "connection reset" in msg
+                or "couldn't connect to" in msg
             )
-            return [record.data() for record in result]
+
+        last_db_not_found: Optional[Exception] = None
+        for db in self._database_candidates():
+            for attempt in (1, 2):
+                try:
+                    with self.driver.session(database=db) as session:
+                        result = session.execute_write(
+                            lambda tx: list(tx.run(query, params or {}))
+                        )
+                        return [record.data() for record in result]
+                except ClientError as e:  # type: ignore
+                    code = getattr(e, "code", "")
+                    if code == "Neo.ClientError.Database.DatabaseNotFound" and db != "neo4j":
+                        last_db_not_found = e
+                        break
+                    raise
+                except Exception as e:
+                    if attempt == 1 and _should_reset_driver(e):
+                        logger.warning(f"Neo4j transient error, resetting driver and retrying: {e}")
+                        try:
+                            self.close()
+                        except Exception:
+                            pass
+                        continue
+                    raise
+
+        if last_db_not_found:
+            raise last_db_not_found
+        raise RuntimeError("Failed to open Neo4j session for any candidate database")
 
     def _create_schema(self) -> None:
         """Create constraints and indexes."""
@@ -875,8 +1240,14 @@ class Neo4jMVPService:
                         logger.debug(f"Hybrid schema statement skipped: {e}")
 
                 if self.config.graph_hybrid_migrate_on_startup:
-                    with self.driver.session(database=self.config.database) as session:
-                        migrate_hybrid_labels(session)
+                    # Use the same database fallback policy as _execute_*.
+                    for db in self._database_candidates():
+                        try:
+                            with self.driver.session(database=db) as session:
+                                migrate_hybrid_labels(session)
+                            break
+                        except Exception as e:
+                            logger.debug(f"Hybrid migration skipped for database={db}: {e}")
 
             # Optional: Fulltext indexes (Neo4j native lexical search for UI/diagnostics)
             if self.config.enable_fulltext_indexes:
@@ -954,7 +1325,7 @@ class Neo4jMVPService:
                 "entity_type": ent["entity_type"],
                 "name": ent["name"],
                 "normalized": ent["normalized"],
-                "metadata": str(ent.get("metadata", {})),
+                "metadata": self._serialize_metadata(ent.get("metadata", {})),
             },
         )
 
@@ -972,6 +1343,7 @@ class Neo4jMVPService:
         case_id: Optional[str] = None,
         extract_entities: bool = True,
         semantic_extraction: bool = False,
+        extract_facts: bool = False,
     ) -> Dict[str, Any]:
         """
         Ingest a document with its chunks into Neo4j.
@@ -998,9 +1370,21 @@ class Neo4jMVPService:
             "next_rels": 0,
             "semantic_entities": 0,
             "semantic_relations": 0,
+            "facts": 0,
+            "fact_refs": 0,
         }
 
         # Create document node
+        doc_id_value = (
+            (metadata or {}).get("doc_id")
+            or (metadata or {}).get("document_id")
+            or (metadata or {}).get("id")
+        )
+        if not doc_id_value and isinstance(doc_hash, str):
+            # If the caller uses the document UUID as doc_hash, also expose it as doc_id.
+            if re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", doc_hash):
+                doc_id_value = doc_hash
+
         self._execute_write(
             CypherQueries.MERGE_DOCUMENT,
             {
@@ -1008,6 +1392,7 @@ class Neo4jMVPService:
                 "tenant_id": tenant_id,
                 "scope": scope,
                 "case_id": case_id,
+                "doc_id": doc_id_value,
                 "group_ids": metadata.get("group_ids", []),
                 "title": metadata.get("title", ""),
                 "source_type": metadata.get("source_type", ""),
@@ -1060,6 +1445,7 @@ class Neo4jMVPService:
             prev_chunk_uid = chunk_uid
 
             # Extract and link entities
+            chunk_entity_ids: List[str] = []
             if extract_entities and chunk_text:
                 entities = LegalEntityExtractor.extract(chunk_text)
 
@@ -1078,6 +1464,47 @@ class Neo4jMVPService:
                         {"chunk_uid": chunk_uid, "entity_id": entity_id}
                     )
                     stats["mentions"] += 1
+                    chunk_entity_ids.append(entity_id)
+
+            # Extract and link facts (local narrative -> connect to entities)
+            if extract_facts and chunk_text:
+                max_facts = max(1, int(self.config.max_facts_per_chunk or 1))
+                for fact_text in FactExtractor.extract(chunk_text, max_facts=max_facts):
+                    fact_norm = re.sub(r"\s+", " ", fact_text.strip().lower())
+                    fact_hash = hashlib.sha256(
+                        f"{doc_hash}:{chunk_uid}:{fact_norm}".encode()
+                    ).hexdigest()[:24]
+                    fact_id = f"fact_{fact_hash}"
+
+                    self._execute_write(
+                        CypherQueries.MERGE_FACT,
+                        {
+                            "fact_id": fact_id,
+                            "text": fact_text[:2000],
+                            "text_preview": fact_text[:320],
+                            "doc_hash": doc_hash,
+                            "doc_id": doc_id_value,
+                            "tenant_id": tenant_id,
+                            "scope": scope,
+                            "case_id": case_id,
+                            "metadata": self._serialize_metadata(
+                                {"chunk_uid": chunk_uid, "chunk_index": chunk_index}
+                            ),
+                        },
+                    )
+                    stats["facts"] += 1
+
+                    self._execute_write(
+                        CypherQueries.LINK_CHUNK_FACT,
+                        {"chunk_uid": chunk_uid, "fact_id": fact_id},
+                    )
+
+                    for entity_id in chunk_entity_ids:
+                        self._execute_write(
+                            CypherQueries.LINK_FACT_ENTITY,
+                            {"fact_id": fact_id, "entity_id": entity_id},
+                        )
+                        stats["fact_refs"] += 1
 
         # Semantic extraction (LLM-based) for teses, conceitos, princípios
         if semantic_extraction and chunks:
@@ -1138,7 +1565,7 @@ class Neo4jMVPService:
                             break
 
                     if source_id and target_id and source_id != target_id:
-                        self.link_entities(source_id, target_id)
+                        self.link_related_entities(source_id, target_id)
                         stats["semantic_relations"] += 1
 
             except Exception as e:
@@ -1323,7 +1750,8 @@ class Neo4jMVPService:
         if scope in ["private", "group", "local"]:
             allowed_scopes.append(scope)
 
-        query = CypherQueries.EXPAND_NEIGHBORS.format(window=window)
+        w = max(1, min(int(window or 1), 10))
+        query = CypherQueries.EXPAND_NEIGHBORS.replace(CypherQueries._WINDOW_TOKEN, str(w))
 
         return self._execute_read(
             query,
@@ -1346,9 +1774,16 @@ class Neo4jMVPService:
         user_id: Optional[str] = None,
         max_hops: int = 2,
         limit: int = 20,
+        include_arguments: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Find paths from entities to other entities/chunks.
+
+        Args:
+            include_arguments: If True, use argument-aware traversal that
+                crosses into Claim/Evidence nodes (with security trimming).
+                If False (default), use entity-only traversal that stays
+                within Entity/Chunk graph space.
 
         Returns explainable paths for RAG context.
         """
@@ -1357,7 +1792,12 @@ class Neo4jMVPService:
             if scope in ["private", "group", "local"]:
                 allowed_scopes.append(scope)
 
-        query = CypherQueries.FIND_PATHS.format(max_hops=max_hops)
+        hops = max(1, min(int(max_hops or 1), 5))
+        base_query = (
+            CypherQueries.FIND_PATHS_WITH_ARGUMENTS if include_arguments
+            else CypherQueries.FIND_PATHS
+        )
+        query = base_query.replace(CypherQueries._MAX_HOPS_TOKEN, str(hops))
 
         return self._execute_read(
             query,

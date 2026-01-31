@@ -257,7 +257,11 @@
         "medium": 4760,
         "high": 5280
       },
-      "default_effort": "medium"
+      "default_effort": "medium",
+      "model_effort_points": {
+        "o4-mini-deep-research": { "low": 1640, "medium": 4760, "high": 5280 },
+        "o3-deep-research": { "low": 8200, "medium": 23800, "high": 26400 }
+      }
     }
   },
   "perplexity": {
@@ -368,6 +372,14 @@
     "PROFESSIONAL": "pro",
     "ENTERPRISE_PLAN": "ultra",
     "DAILY_BASIC": "starter"
+  },
+  "deep_research_openai_model_by_plan": {
+    "free": "o4-mini-deep-research",
+    "starter": "o4-mini-deep-research",
+    "standard": "o4-mini-deep-research",
+    "pro": "o4-mini-deep-research",
+    "advanced": "o3-deep-research",
+    "ultra": "o3-deep-research"
   },
   "feature_gates": {
     "deep_research": {

@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.security import get_current_user
+from app.core.security import get_current_user, get_org_context, OrgContext, build_tenant_filter
 from app.core.time_utils import utcnow
 from app.models.user import User
 from app.models.document import Document, DocumentType, DocumentStatus
@@ -73,7 +73,7 @@ class ExportLegalDocxRequest(BaseModel):
 @router.post("/export/docx")
 async def export_legal_docx(
     request: ExportLegalDocxRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Converte Markdown em DOCX com formatação jurídica (ABNT/forense) e retorna como download.
@@ -108,18 +108,20 @@ async def list_documents(
     skip: int = 0,
     limit: int = 50,
     search: Optional[str] = None,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Listar documentos do usuário
+    Listar documentos do tenant (org ou usuário)
     """
-    query = select(Document).where(Document.user_id == current_user.id)
-    
+    current_user = ctx.user
+    tenant_filter = build_tenant_filter(ctx, Document)
+    query = select(Document).where(tenant_filter)
+
     if search:
         query = query.where(Document.name.ilike(f"%{search}%"))
-        
-    count_query = select(func.count()).select_from(Document).where(Document.user_id == current_user.id)
+
+    count_query = select(func.count()).select_from(Document).where(tenant_filter)
     if search:
         count_query = count_query.where(Document.name.ilike(f"%{search}%"))
 
@@ -136,14 +138,14 @@ async def list_documents(
 @router.get("/{document_id}")
 async def get_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Obter documento específico
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -155,12 +157,13 @@ async def get_document(
 async def upload_document(
     file: UploadFile = File(...),
     metadata: str | None = Form(default=None),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Upload de documento com processamento automático
     """
+    current_user = ctx.user
     try:
         parsed_metadata = {}
         if metadata:
@@ -237,6 +240,7 @@ async def upload_document(
         document = Document(
             id=file_id,
             user_id=current_user.id,
+            organization_id=ctx.organization_id,
             name=file.filename,
             original_name=file.filename,
             type=doc_type,
@@ -380,12 +384,13 @@ async def create_document_from_text(
     content: str = Form(...),
     tags: str = Form(default=""),
     folder_id: Optional[str] = Form(default=None),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Criar documento a partir de texto inserido manualmente
     """
+    current_user = ctx.user
     try:
         # Parse tags
         tags_list = []
@@ -463,12 +468,13 @@ async def create_document_from_url(
     url: str = Form(...),
     tags: str = Form(default=""),
     folder_id: Optional[str] = Form(default=None),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Criar documento a partir de URL (web scraping)
     """
+    current_user = ctx.user
     try:
         from app.services.url_scraper_service import url_scraper_service
         
@@ -532,14 +538,14 @@ async def create_document_from_url(
 @router.get("/{document_id}")
 async def get_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Obter documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -550,14 +556,14 @@ async def get_document(
 @router.delete("/{document_id}")
 async def delete_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Deletar documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -578,14 +584,14 @@ async def delete_document(
 @router.post("/{document_id}/ocr")
 async def apply_ocr(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Aplicar OCR no documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -608,14 +614,14 @@ async def apply_ocr(
 @router.post("/{document_id}/summary")
 async def generate_summary(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar resumo do documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -628,14 +634,14 @@ async def generate_summary(
 @router.post("/{document_id}/transcribe")
 async def transcribe_audio(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Transcrever áudio
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -658,14 +664,14 @@ async def transcribe_audio(
 @router.post("/{document_id}/podcast")
 async def generate_podcast(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar podcast do documento usando TTS
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -691,14 +697,14 @@ async def generate_podcast(
 async def generate_diagram(
     document_id: str,
     diagram_type: str = "flowchart",
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar diagrama Mermaid a partir do documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -723,14 +729,15 @@ async def generate_diagram(
 async def process_document(
     document_id: str,
     options: Optional[Dict[str, Any]] = None,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Processar documento (normalização, OCR ou IA). Atualiza status para PROCESSING.
     """
+    current_user = ctx.user
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -754,18 +761,19 @@ async def process_document(
 @router.post("/generate", response_model=DocumentGenerationResponse)
 async def generate_document(
     request: DocumentGenerationRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Gerar novo documento jurídico usando IA multi-agente
-    
+
     Suporta:
     - Geração com diferentes níveis de esforço (1-5)
     - Templates personalizados
     - Assinatura automática (individual ou institucional)
     - Contexto de documentos existentes
     """
+    current_user = ctx.user
     try:
         logger.info(f"Requisição de geração de documento: user={current_user.id}, type={request.document_type}")
 
@@ -835,17 +843,18 @@ async def generate_document(
 @router.post("/{document_id}/audit")
 async def audit_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Realizar Auditoria Jurídica no documento (Anti-Alucinação + Requisitos Processuais)
     Gera relatório em Markdown e DOCX.
     """
+    current_user = ctx.user
     try:
         # 1. Buscar documento
         result = await db.execute(
-            select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+            select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
         )
         document = result.scalars().first()
         if not document:
@@ -908,11 +917,12 @@ async def audit_document(
 
 @router.get("/signature", response_model=SignatureResponse)
 async def get_user_signature(
-    current_user: User = Depends(get_current_user)
+    ctx: OrgContext = Depends(get_org_context)
 ):
     """
     Obter dados de assinatura do usuário atual
     """
+    current_user = ctx.user
     return SignatureResponse(
         user_id=current_user.id,
         signature_data=current_user.full_signature_data,
@@ -924,16 +934,17 @@ async def get_user_signature(
 @router.put("/signature", response_model=SignatureResponse)
 async def update_user_signature(
     signature: SignatureRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Atualizar assinatura do usuário
-    
+
     Aceita:
     - signature_image: Imagem em base64
     - signature_text: Texto personalizado da assinatura
     """
+    current_user = ctx.user
     try:
         logger.info(f"Atualizando assinatura do usuário: {current_user.id}")
         
@@ -967,12 +978,13 @@ async def update_user_signature(
 @router.post("/{document_id}/add-signature")
 async def add_signature_to_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Adicionar assinatura a um documento existente
     """
+    current_user = ctx.user
     try:
         logger.info(f"Adicionando assinatura ao documento: {document_id}")
         
@@ -1009,14 +1021,14 @@ async def share_document(
     document_id: str,
     expires_in_days: int = 7,
     access_level: str = "VIEW",
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Compartilhar documento via link público
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:
@@ -1044,14 +1056,14 @@ async def share_document(
 @router.delete("/{document_id}/share")
 async def unshare_document(
     document_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Remover compartilhamento do documento
     """
     result = await db.execute(
-        select(Document).where(Document.id == document_id, Document.user_id == current_user.id)
+        select(Document).where(Document.id == document_id, build_tenant_filter(ctx, Document))
     )
     document = result.scalars().first()
     if not document:

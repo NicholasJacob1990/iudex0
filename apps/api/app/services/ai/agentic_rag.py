@@ -63,6 +63,31 @@ class AgenticRAGRouter:
     def __init__(self, registry: Optional[DatasetRegistry] = None) -> None:
         self.registry = registry or DatasetRegistry()
 
+    def _heuristic_route(self, query: str) -> Dict[str, Any]:
+        q = (query or "").lower()
+        datasets: List[str] = []
+        if any(term in q for term in ("juris", "jurisprud", "súmula", "sumula", "precedente", "acórd", "acord", "stj", "stf", "tst", "trf", "tjsp")):
+            datasets.append("juris")
+        if any(term in q for term in ("lei", "art.", "artigo", "código", "codigo", "constituição", "constituicao", "decreto", "norma")):
+            datasets.append("lei")
+        if any(term in q for term in ("modelo", "petição", "peticao", "contestação", "contestacao", "recurso", "contrato", "cláusula", "clausula")):
+            datasets.append("pecas_modelo")
+        if any(term in q for term in ("doutrina", "autor", "autores", "livro", "manual", "obra", "comentário", "comentario", "artigo acadêmico", "artigo academico")):
+            datasets.append("doutrina")
+        if any(term in q for term in ("sei", "processo interno", "nota técnica", "nota tecnica")):
+            datasets.append("sei")
+
+        if not datasets:
+            datasets = ["lei", "juris", "pecas_modelo"]
+
+        # Keep only datasets that exist in the registry.
+        allowed = {d.name for d in self.registry.list()}
+        datasets = [d for d in datasets if d in allowed]
+        if not datasets:
+            datasets = [d.name for d in self.registry.list()]
+
+        return {"datasets": datasets, "locale": "pt-br", "query": (query or "").strip()}
+
     async def route(
         self,
         query: str,
@@ -89,7 +114,9 @@ class AgenticRAGRouter:
         response = await _call_llm(prompt, max_tokens=220, temperature=0.2)
         data = self._extract_json(response)
         if not isinstance(data, dict):
-            return {}
+            return self._heuristic_route(query)
+        if not data.get("datasets"):
+            return self._heuristic_route(query)
         return data
 
     def _extract_json(self, text: str) -> Dict[str, Any]:

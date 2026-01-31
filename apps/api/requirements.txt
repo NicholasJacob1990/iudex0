@@ -47,9 +47,12 @@ sentence-transformers==3.3.1
 transformers==4.46.3
 rank-bm25==0.2.2
 torch>=2.6.0
-spacy==3.8.2
+# spacy==3.8.2  # Incompatível com Python 3.14 — desabilitado
 nltk==3.9.1
 networkx==3.4.2
+neo4j>=5.20.0
+neo4j-graphrag>=1.0.0
+rapidfuzz>=3.6.0
 
 # Processamento de Documentos
 pypdf==5.1.0
@@ -122,3 +125,5 @@ pre-commit==4.0.1
 # Segurança
 cryptography==43.0.3
 bcrypt==4.2.1
+openai-agents>=0.7.0
+google-adk>=1.23.0

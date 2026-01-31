@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -24,6 +25,11 @@ from openai import OpenAI
 from app.services.rag.config import get_rag_config
 
 logger = logging.getLogger(__name__)
+
+try:
+    from sentence_transformers import SentenceTransformer  # type: ignore
+except Exception:
+    SentenceTransformer = None  # type: ignore
 
 
 @dataclass
@@ -230,7 +236,13 @@ class EmbeddingsService:
     """
     Production-ready embeddings service with caching.
 
-    Uses OpenAI's text-embedding-3-large model with configurable dimensions.
+    Uses OpenAI embeddings by default, but supports a local SentenceTransformer
+    fallback for development and integration tests.
+
+    Provider selection (env `RAG_EMBEDDINGS_PROVIDER`):
+      - `openai`: always use OpenAI (requires API key)
+      - `local`: always use SentenceTransformer
+      - `auto` (default): use OpenAI if key present, else local
     Implements TTL caching for query embeddings and batch processing for ingestion.
     """
 
@@ -254,13 +266,54 @@ class EmbeddingsService:
         """
         config = get_rag_config()
 
+        provider = (os.getenv("RAG_EMBEDDINGS_PROVIDER") or "auto").strip().lower()
+        if provider not in ("auto", "openai", "local"):
+            provider = "auto"
+
+        # Prefer explicit arg, then env, then whatever config provides.
+        api_key = api_key if api_key is not None else (os.getenv("OPENAI_API_KEY") or None)
+        has_openai_key = bool(api_key and str(api_key).strip())
+        if provider == "auto":
+            provider = "openai" if has_openai_key else "local"
+
+        self._provider = provider
+
         self._model = model or config.embedding_model
         self._dimensions = dimensions or config.embedding_dimensions
         self._batch_size = batch_size or config.embedding_batch_size
         cache_ttl_seconds = cache_ttl or config.embedding_cache_ttl_seconds
 
-        # Initialize OpenAI client
-        self._client = OpenAI(api_key=api_key)
+        self._client: Optional[OpenAI] = None
+        self._local_model: Optional["SentenceTransformer"] = None
+
+        if self._provider == "openai":
+            if not has_openai_key:
+                raise ValueError("RAG_EMBEDDINGS_PROVIDER=openai requires OPENAI_API_KEY")
+            self._client = OpenAI(api_key=api_key)
+        else:
+            if SentenceTransformer is None:
+                raise ImportError(
+                    "SentenceTransformer not available. Install: pip install sentence-transformers"
+                )
+            local_model_name = (
+                os.getenv("RAG_LOCAL_EMBEDDING_MODEL")
+                or os.getenv("EMBEDDING_MODEL")
+                or self._model
+                or "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+            )
+            self._local_model = SentenceTransformer(str(local_model_name))
+            try:
+                local_dim = int(self._local_model.get_sentence_embedding_dimension())
+            except Exception:
+                local_dim = self._dimensions
+            if self._dimensions != local_dim:
+                logger.warning(
+                    "EmbeddingsService local dim mismatch: config=%s model=%s; "
+                    "set EMBEDDING_DIMENSIONS to %s for Qdrant compatibility.",
+                    self._dimensions,
+                    local_dim,
+                    local_dim,
+                )
 
         # Initialize cache
         self._cache = TTLCache(ttl_seconds=cache_ttl_seconds)
@@ -271,9 +324,41 @@ class EmbeddingsService:
         self._api_lock = threading.Lock()
 
         logger.info(
-            f"EmbeddingsService initialized: model={self._model}, "
-            f"dimensions={self._dimensions}, cache_ttl={cache_ttl_seconds}s"
+            "EmbeddingsService initialized: provider=%s, model=%s, dimensions=%s, cache_ttl=%ss",
+            self._provider,
+            self._model,
+            self._dimensions,
+            cache_ttl_seconds,
         )
+
+    def _adapt_dimensions(self, vector: List[float]) -> List[float]:
+        if not vector:
+            return [0.0] * int(self._dimensions or 0)
+        dim = int(self._dimensions or len(vector))
+        if len(vector) == dim:
+            return vector
+        if len(vector) > dim:
+            return vector[:dim]
+        return vector + [0.0] * (dim - len(vector))
+
+    def _embed_local(self, texts: List[str]) -> List[List[float]]:
+        if self._local_model is None:
+            raise RuntimeError("Local embedding model not initialized")
+        vectors = self._local_model.encode(
+            texts,
+            batch_size=max(1, int(self._batch_size or 32)),
+            show_progress_bar=False,
+            normalize_embeddings=True,
+        )
+        # sentence-transformers may return a numpy array; normalize to Python lists.
+        out: List[List[float]] = []
+        for v in vectors:
+            try:
+                vec = v.tolist()  # type: ignore[attr-defined]
+            except Exception:
+                vec = list(v)  # type: ignore[arg-type]
+            out.append(self._adapt_dimensions([float(x) for x in vec]))
+        return out
 
     def embed_query(self, text: str, use_cache: bool = True) -> List[float]:
         """
@@ -304,7 +389,10 @@ class EmbeddingsService:
 
         # Generate embedding via API
         try:
-            embedding = self._call_api([text])[0]
+            if self._provider == "openai":
+                embedding = self._call_api([text])[0]
+            else:
+                embedding = self._embed_local([text])[0]
 
             # Store in cache
             if use_cache:
@@ -371,7 +459,7 @@ class EmbeddingsService:
             batch_indices = [t[0] for t in batch]
 
             try:
-                embeddings = self._call_api(batch_texts)
+                embeddings = self._call_api(batch_texts) if self._provider == "openai" else self._embed_local(batch_texts)
 
                 for idx, embedding in zip(batch_indices, embeddings):
                     all_embeddings[idx] = embedding
@@ -399,6 +487,69 @@ class EmbeddingsService:
 
         logger.info(f"Generated {len(processed_texts)} embeddings for {len(texts)} texts")
         return result
+
+    def embed_queries(
+        self,
+        texts: List[str],
+        *,
+        use_cache: bool = True,
+    ) -> List[List[float]]:
+        """
+        Generate embeddings for multiple short queries with optional cache reuse.
+
+        Unlike `embed_many`, this method:
+        - Reuses the TTL cache for already-seen queries (when enabled)
+        - Batches only the cache-misses into a single provider call (when possible)
+
+        Returns embeddings aligned with the input order.
+        """
+        if not texts:
+            return []
+
+        empty_embedding = [0.0] * int(self._dimensions or 0)
+        out: List[List[float]] = [empty_embedding for _ in range(len(texts))]
+
+        # Deduplicate while preserving index mapping
+        misses: Dict[str, List[int]] = {}
+        for idx, raw in enumerate(texts):
+            cleaned = (raw or "").strip()
+            if not cleaned:
+                continue
+
+            if use_cache:
+                cached = self._cache.get(cleaned)
+                if cached is not None:
+                    out[idx] = cached
+                    continue
+
+            misses.setdefault(cleaned, []).append(idx)
+
+        if not misses:
+            return out
+
+        miss_texts = list(misses.keys())
+        try:
+            vectors = self._call_api(miss_texts) if self._provider == "openai" else self._embed_local(miss_texts)
+        except Exception:
+            # Fallback: per-query embedding to avoid failing the whole request
+            vectors = []
+            for t in miss_texts:
+                try:
+                    vectors.append(self.embed_query(t, use_cache=use_cache))
+                except Exception:
+                    vectors.append(empty_embedding)
+
+        for text, vec in zip(miss_texts, vectors):
+            vec = self._adapt_dimensions([float(x) for x in (vec or empty_embedding)])
+            if use_cache and text:
+                try:
+                    self._cache.set(text, vec)
+                except Exception:
+                    pass
+            for idx in misses.get(text, []):
+                out[idx] = vec
+
+        return out
 
     def _call_api(self, texts: List[str]) -> List[List[float]]:
         """

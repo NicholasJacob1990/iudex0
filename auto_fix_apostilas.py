@@ -299,8 +299,8 @@ def extract_legal_references(text: str) -> dict:
         r'\bAcórdão\b\s*(?:TCU|TCE[/-]?\w*)?\s*(?:n[º°]?\s*)?[\d\./-]+',
         # Pareceres (require at least one digit to avoid matching "parecer.")
         r'\bParecer\b(?:\s+[A-Z]{2,15})*\s*(?:n[º°]?\s*)?\d[\d\./-]*',
-        # Temas de Repercussão Geral
-        r'\b(?:Tema|RG)\b\s*(?:n[º°]?\s*)?\d+\s*(?:STF|STJ)?',
+        # Temas de Repercussão Geral (aceita separador de milhar: 1.234)
+        r'\b(?:Tema|RG)\b\s*(?:n[º°]?\s*)?\d{1,4}(?:\.\d{3})*\s*(?:STF|STJ)?',
         # Teses STF/STJ
         r'\bTese\b\s*(?:STF|STJ)\s*(?:n[º°]?\s*)?\d+',
         # Informativos
@@ -316,6 +316,11 @@ def extract_legal_references(text: str) -> dict:
             julgado = re.sub(r'\s+', ' ', julgado)
             # Normalize for case-insensitive comparison (reduces false positives like "Tema 32" vs "tema 32")
             julgado = julgado.lower()
+            # Normalize Tema numbers: "tema 1.234" -> "tema 1234" (avoids false misses from punctuation)
+            if julgado.startswith("tema") or julgado.startswith("rg"):
+                digits = re.sub(r"\D+", "", julgado)
+                if digits:
+                    julgado = f"tema {digits}"
             if len(julgado) > 3:  # Avoid noise
                 references['julgados'].add(julgado)
     
@@ -401,7 +406,38 @@ def analyze_content_issues(formatted_path: str, raw_path: str = None) -> dict:
     issues['missing_laws'] = missing_laws
     issues['missing_sumulas'] = list(raw_refs['sumulas'] - fmt_refs['sumulas'])
     issues['missing_decretos'] = list(raw_refs['decretos'] - fmt_refs['decretos'])
-    issues['missing_julgados'] = list(raw_refs['julgados'] - fmt_refs['julgados'])
+    missing_julgados = list(raw_refs['julgados'] - fmt_refs['julgados'])
+
+    def _tema_digits(value: str) -> str:
+        m = re.search(r"\btema\s+(\d{1,6})\b", value or "", flags=re.IGNORECASE)
+        return m.group(1) if m else ""
+
+    def _is_close_digits(a: str, b: str) -> bool:
+        if not a or not b or len(a) != len(b):
+            return False
+        # Hamming distance <= 1
+        diff = sum(1 for x, y in zip(a, b) if x != y)
+        return diff <= 1
+
+    fmt_temas = { _tema_digits(j) for j in fmt_refs.get("julgados", set()) if isinstance(j, str) and j.startswith("tema") }
+    fmt_temas = { t for t in fmt_temas if t }
+
+    filtered_missing: list[str] = []
+    for ref in missing_julgados:
+        if not isinstance(ref, str):
+            continue
+        if ref.startswith("tema"):
+            digits = _tema_digits(ref)
+            if digits:
+                # Common ASR variant: missing leading '1' for four-digit themes (234 -> 1234)
+                if len(digits) == 3 and (f"1{digits}" in fmt_temas):
+                    continue
+                # Common ASR typo: one digit off (1933 -> 1033, etc.)
+                if len(digits) == 4 and any(_is_close_digits(digits, fmt) for fmt in fmt_temas if len(fmt) == 4):
+                    continue
+        filtered_missing.append(ref)
+
+    issues['missing_julgados'] = filtered_missing
     
     # Count total issues
     issues['total_content_issues'] = (

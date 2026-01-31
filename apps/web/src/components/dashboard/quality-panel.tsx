@@ -21,10 +21,12 @@ import {
     Scale,
     Download,
     FileDown,
+    RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import apiClient from "@/lib/api-client";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { buildQualityHilIssues, type HilIssue } from "@/lib/preventive-hil";
 
 interface HilPatch {
     anchor_text?: string;
@@ -139,10 +141,16 @@ interface QualityPanelProps {
     rawContent: string;
     formattedContent: string;
     documentName: string;
+    /** Mode for validation rules: APOSTILA/FIDELIDADE/AUDIENCIA/REUNIAO/DEPOIMENTO */
+    documentMode?: string;
+    /** Model selection for long-running HIL ops */
+    modelSelection?: string;
     jobId?: string;
     initialQuality?: StoredQualityState | null;
     onContentUpdated?: (newContent: string) => void;
     storageKey?: string;
+    /** UI variant: 'full' (default) or 'dashboard' (read-only summary) */
+    variant?: 'full' | 'dashboard';
     /** Explicitly mark as legal apostila */
     isLegalApostila?: boolean;
     /** Job metadata for auto-detection */
@@ -167,6 +175,11 @@ interface QualityPanelProps {
     onIssuesUpdated?: (issues: PendingFix[]) => void;
     /** Callback when audit becomes outdated */
     onAuditOutdatedChange?: (outdated: boolean) => void;
+    /** Convert content alerts into HIL issues (dashboard summary) */
+    onConvertContentAlerts?: (issues: HilIssue[]) => void;
+
+    /** Hearing/meeting: notify parent after updating hearing payload */
+    onHearingUpdated?: (payload: any) => void;
 }
 
 interface AnalyzeResponse {
@@ -192,6 +205,7 @@ interface StoredQualityState {
     selected_fix_ids?: string[];
     applied_fixes?: string[];
     suggestions?: string | null;
+    needs_revalidate?: boolean;
 }
 
 interface QualityUiState {
@@ -300,10 +314,13 @@ export function QualityPanel({
     rawContent,
     formattedContent,
     documentName,
+    documentMode,
+    modelSelection,
     jobId,
     initialQuality,
     onContentUpdated,
     storageKey,
+    variant = 'full',
     isLegalApostila,
     jobMetadata,
     // Hearing-specific props
@@ -316,7 +333,10 @@ export function QualityPanel({
     isAuditOutdated: externalIsAuditOutdated,
     onIssuesUpdated,
     onAuditOutdatedChange,
+    onConvertContentAlerts,
+    onHearingUpdated,
 }: QualityPanelProps) {
+    const isDashboardVariant = variant === 'dashboard';
     // Determine if this is a hearing/meeting
     const isHearingContent = contentType === 'hearing' || contentType === 'meeting';
 
@@ -347,6 +367,7 @@ export function QualityPanel({
     const [appliedFixes, setAppliedFixes] = useState<string[]>([]);
     const [severityFilter, setSeverityFilter] = useState<"all" | "high" | "medium" | "low">("all");
     const [storedUiState, setStoredUiState] = useState<QualityUiState | null>(null);
+    const [isRevalidating, setIsRevalidating] = useState(false);
     const uiStateRef = useRef<QualityUiState | null>(null);
     const summaryRef = useRef<QualitySummaryState | null>(null);
 
@@ -835,6 +856,119 @@ export function QualityPanel({
         }
     };
 
+    const handleApplyHearingRevisions = async () => {
+        if (!isHearingContent) return;
+        if (!jobId) {
+            toast.error("Abra/seleciona um job para aplicar correções.");
+            return;
+        }
+        if (!pendingFixes.length || selectedFixes.size === 0) {
+            toast.info("Nenhum issue selecionado para aplicar.");
+            return;
+        }
+        const approved = pendingFixes.filter((i) => selectedFixes.has(i.id));
+        if (!approved.length) {
+            toast.info("Nenhum issue selecionado para aplicar.");
+            return;
+        }
+        setIsApplying(true);
+        const toastId = toast.loading(`Aplicando ${approved.length} correção(ões) por IA...`);
+        try {
+            const data = await apiClient.applyHearingRevisions(jobId, {
+                approved_issues: approved,
+                model_selection: modelSelection || undefined,
+                regenerate_formatted: true,
+            });
+            if (!data?.success) {
+                toast.error("Falha ao aplicar correções.", { id: toastId });
+                return;
+            }
+            if (data?.payload) {
+                onHearingUpdated?.(data.payload);
+                if (typeof data.payload?.formatted_text === "string") {
+                    onContentUpdated?.(data.payload.formatted_text);
+                }
+            }
+            const applied = Array.isArray(data?.issues_applied) ? data.issues_applied : [];
+            toast.success(`Correções aplicadas: ${applied.length}`, { id: toastId });
+        } catch (e: any) {
+            toast.error("Erro ao aplicar correções: " + (e?.message || "Desconhecido"), { id: toastId });
+        } finally {
+            setIsApplying(false);
+        }
+    };
+
+    const handleRevalidateQuality = async () => {
+        if (isHearingContent) {
+            toast.info("Use a validação de audiência para reprocessar este conteúdo.");
+            return;
+        }
+        if (!formattedContent) {
+            toast.error("Conteúdo formatado indisponível para revalidação.");
+            return;
+        }
+        setIsRevalidating(true);
+        try {
+            const [validation, analysis] = await Promise.all([
+                rawContent
+                    ? apiClient.validateDocumentQuality({
+                        raw_content: rawContent,
+                        formatted_content: formattedContent,
+                        document_name: documentName,
+                        mode: documentMode,
+                    })
+                    : null,
+                apiClient.analyzeDocumentHIL({
+                    content: formattedContent,
+                    document_name: documentName,
+                    raw_content: rawContent || undefined,
+                }),
+            ]);
+
+            const normalizedReport = validation ? normalizeReport(validation) : null;
+            if (normalizedReport) {
+                setReport(normalizedReport);
+                persistSummary({
+                    validated_at: normalizedReport.validated_at,
+                    score: normalizedReport.score,
+                    approved: normalizedReport.approved,
+                });
+            }
+
+            const normalizedPending = Array.isArray(analysis?.pending_fixes) ? analysis.pending_fixes : [];
+            const totalIssues =
+                typeof analysis?.total_issues === "number" ? analysis.total_issues : normalizedPending.length;
+            const normalizedAnalysis: AnalyzeResponse = {
+                ...(analysis || {}),
+                pending_fixes: normalizedPending,
+                total_issues: totalIssues,
+            };
+            setAnalysisResult(normalizedAnalysis);
+            setPendingFixes(normalizedPending);
+            const nextSelected = new Set(normalizedPending.map((fix) => fix.id));
+            setSelectedFixes(nextSelected);
+            persistSummary({
+                analyzed_at: normalizedAnalysis.analyzed_at,
+                total_issues: normalizedAnalysis.total_issues,
+                total_content_issues: normalizedAnalysis.total_content_issues,
+            });
+
+            await persistQuality({
+                validation_report: normalizedReport || undefined,
+                analysis_result: normalizedAnalysis,
+                selected_fix_ids: Array.from(nextSelected),
+                needs_revalidate: false,
+            });
+
+            onAuditOutdatedChange?.(false);
+            toast.success("Qualidade revalidada com sucesso.");
+        } catch (error: any) {
+            toast.error("Erro ao revalidar: " + (error?.message || "Desconhecido"));
+        } finally {
+            setIsRevalidating(false);
+        }
+    };
+
     /**
      * Copy hearing checklist to clipboard
      */
@@ -1035,6 +1169,25 @@ export function QualityPanel({
             + (analysisResult?.missing_julgados?.length || 0)
             + (analysisResult?.missing_decretos?.length || 0);
 
+    const contentAlertIssues = useMemo(
+        () => buildQualityHilIssues(analysisResult),
+        [analysisResult]
+    );
+    const canConvertContentAlerts =
+        !isHearingContent
+        && isDashboardVariant
+        && typeof onConvertContentAlerts === "function"
+        && contentAlertIssues.length > 0;
+
+    const handleConvertContentAlerts = useCallback(() => {
+        if (!onConvertContentAlerts) return;
+        if (!contentAlertIssues.length) {
+            toast.info("Nenhum alerta disponível para converter.");
+            return;
+        }
+        onConvertContentAlerts(contentAlertIssues);
+    }, [onConvertContentAlerts, contentAlertIssues]);
+
     const filteredPendingFixes = pendingFixes.filter((fix) =>
         severityFilter === "all" ? true : fix.severity === severityFilter
     );
@@ -1072,19 +1225,40 @@ export function QualityPanel({
     return (
         <Card className="w-full rounded-3xl border border-white/80 bg-white/90 shadow-soft">
             <CardHeader className="border-b border-white/70 pb-4">
-                <CardTitle className="flex items-center gap-2 font-display text-lg text-foreground">
-                    <ShieldCheck className="w-5 h-5 text-primary" />
-                    Controle de Qualidade & Auditoria
-                    {externalIsAuditOutdated && (
-                        <Badge variant="outline" className="ml-2 bg-orange-50 text-orange-700 border-orange-200 text-[10px]">
-                            <AlertTriangle className="w-3 h-3 mr-1" />
-                            Desatualizado
-                        </Badge>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                        <CardTitle className="flex items-center gap-2 font-display text-lg text-foreground">
+                            <ShieldCheck className="w-5 h-5 text-primary" />
+                            {isDashboardVariant ? "Controle de Qualidade" : "Controle de Qualidade & Auditoria"}
+                            {externalIsAuditOutdated && (
+                                <Badge variant="outline" className="ml-2 bg-orange-50 text-orange-700 border-orange-200 text-[10px]">
+                                    <AlertTriangle className="w-3 h-3 mr-1" />
+                                    Desatualizado
+                                </Badge>
+                            )}
+                        </CardTitle>
+                        <CardDescription className="text-xs text-muted-foreground">
+                            {isDashboardVariant
+                                ? "Resumo e diagnósticos. Para aplicar correções, use a aba Correções (HIL)."
+                                : "Validação jurídica, análise estrutural e correção assistida"}
+                        </CardDescription>
+                    </div>
+                    {isDashboardVariant && !isHearingContent && (
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={handleRevalidateQuality}
+                            disabled={isRevalidating || !formattedContent}
+                        >
+                            {isRevalidating ? (
+                                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            ) : (
+                                <RefreshCw className="w-4 h-4 mr-2" />
+                            )}
+                            Revalidar Qualidade
+                        </Button>
                     )}
-                </CardTitle>
-                <CardDescription className="text-xs text-muted-foreground">
-                    Validação jurídica, análise estrutural e correção assistida
-                </CardDescription>
+                </div>
             </CardHeader>
             <CardContent className="space-y-6">
                 {/* Audit Outdated Warning */}
@@ -1172,6 +1346,7 @@ export function QualityPanel({
                 </div>
 
                 {/* Actions Toolbar */}
+                {!isDashboardVariant && (
                 <div className="flex flex-wrap gap-2">
                     {isHearingContent ? (
                         /* Hearing/Meeting specific actions */
@@ -1240,6 +1415,7 @@ export function QualityPanel({
                         </>
                     )}
                 </div>
+                )}
 
                 {/* Validation Report Card */}
                 {report && (
@@ -1620,12 +1796,27 @@ export function QualityPanel({
                                                 </div>
                                             </div>
                                         )}
+                                        {canConvertContentAlerts && (
+                                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                                                <Button
+                                                    variant="outline"
+                                                    size="sm"
+                                                    onClick={handleConvertContentAlerts}
+                                                    className="border-yellow-300 text-yellow-800 hover:bg-yellow-100"
+                                                >
+                                                    Enviar alertas para Correções (HIL)
+                                                </Button>
+                                                <span className="text-[11px] text-muted-foreground">
+                                                    Os alertas serão adicionados na aba Correções (HIL).
+                                                </span>
+                                            </div>
+                                        )}
                                     </AccordionContent>
                                 </AccordionItem>
                             </Accordion>
                         )}
 
-                        {pendingFixes.length > 0 && (
+                        {!isDashboardVariant && pendingFixes.length > 0 && (
                             <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
                                 <span className="font-medium text-muted-foreground">Filtro:</span>
                                 <Button
@@ -1802,13 +1993,13 @@ export function QualityPanel({
                             </div>
                         )}
 
-                        {analysisResult.total_issues === 0 && !hasContentAlerts && (
+                        {!isDashboardVariant && analysisResult.total_issues === 0 && !hasContentAlerts && (
                             <div className="text-sm text-slate-500">
                                 Nenhuma correção estrutural pendente.
                             </div>
                         )}
 
-                        {appliedFixes.length > 0 && (
+                        {!isDashboardVariant && appliedFixes.length > 0 && (
                             <div className="border border-green-200 bg-green-50/70 rounded-md p-3 text-sm">
                                 <div className="font-medium text-green-700 mb-2">Correções aplicadas</div>
                                 <ul className="list-disc pl-5 space-y-1 text-green-800">
@@ -1820,6 +2011,7 @@ export function QualityPanel({
                         )}
 
                         {/* Action Footer */}
+                        {!isDashboardVariant && (
                         <div className="flex justify-end gap-3 pt-4 border-t">
                             <Button
                                 variant="ghost"
@@ -1829,6 +2021,23 @@ export function QualityPanel({
                                 Cancelar
                             </Button>
                             {pendingFixes.length > 0 && (() => {
+                                if (isHearingContent) {
+                                    return (
+                                        <Button
+                                            onClick={handleApplyHearingRevisions}
+                                            disabled={isApplying || selectedFixes.size === 0}
+                                            size="sm"
+                                            className="bg-indigo-600 hover:bg-indigo-700 text-white"
+                                        >
+                                            {isApplying ? (
+                                                <Loader2 className="w-3 h-3 mr-2 animate-spin" />
+                                            ) : (
+                                                <CheckCircle className="w-3 h-3 mr-2" />
+                                            )}
+                                            Aplicar {selectedFixes.size} Correções (IA)
+                                        </Button>
+                                    );
+                                }
                                 const hasSemanticFixes = pendingFixes.some(
                                     (f) => f.type === "omission" || f.type === "distortion"
                                 );
@@ -1861,11 +2070,12 @@ export function QualityPanel({
                                 );
                             })()}
                         </div>
+                        )}
                     </div>
                 )}
 
                 {/* AI Suggestions Result */}
-                {suggestions && (
+                {!isDashboardVariant && suggestions && (
                     <div className="p-4 border border-indigo-100 bg-indigo-50/50 rounded-md">
                         <h4 className="font-semibold text-indigo-900 mb-2 flex items-center gap-2">
                             <span className="text-lg">✨</span> Sugestões de Correção
@@ -1880,7 +2090,7 @@ export function QualityPanel({
                 )}
 
                 {/* Legal Checklist Panel */}
-                {legalChecklist && (
+                {!isDashboardVariant && legalChecklist && (
                     <div className="rounded-2xl border border-emerald-200/70 bg-emerald-50/50 p-4 shadow-soft animate-in fade-in slide-in-from-top-2 dark:bg-emerald-900/20 dark:border-emerald-800">
                         <div className="flex items-center justify-between mb-4">
                             <h3 className="font-semibold flex items-center gap-2 text-emerald-800 dark:text-emerald-200">

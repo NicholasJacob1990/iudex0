@@ -189,7 +189,9 @@ def init_vertex_client():
         
     project_id = os.getenv("GOOGLE_CLOUD_PROJECT")
     region = os.getenv("VERTEX_AI_LOCATION", "global")
-    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    # Prefer the dedicated Gemini key when both are present.
+    # `GOOGLE_API_KEY` is commonly used for other Google APIs and may have different quotas.
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     force_direct = os.getenv("GEMINI_FORCE_DIRECT", "false").lower() == "true"
     
     # We prioritize Vertex AI (GCP) if project_id is available AND not forced direct

@@ -8,6 +8,7 @@ from app.services.ai.agent_clients import (
     get_gpt_client,
     get_claude_client,
     get_gemini_client,
+    get_openrouter_client,
 )
 from app.services.ai.genai_utils import extract_genai_text
 from app.services.ai.json_utils import extract_first_json_object
@@ -47,7 +48,7 @@ async def _call_llm(
     temperature: float,
     preferred: Optional[List[str]] = None,
 ) -> str:
-    preferred = preferred or ["gemini", "gpt", "claude"]
+    preferred = preferred or ["gemini", "openrouter", "gpt", "claude"]
     for provider in preferred:
         if provider == "gemini":
             client = get_gemini_client()
@@ -79,10 +80,39 @@ async def _call_llm(
                 return text.strip()
 
             try:
-                return await asyncio.to_thread(_sync_call)
+                out = await asyncio.to_thread(_sync_call)
+                if out:
+                    return out
             except Exception as exc:
                 logger.warning(f"Gemini helper failed: {exc}")
                 continue
+            continue
+
+        if provider == "openrouter":
+            client = get_openrouter_client()
+            if not client:
+                continue
+
+            def _sync_call() -> str:
+                model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini")
+                resp = client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                )
+                if not getattr(resp, "choices", None):
+                    return ""
+                return (resp.choices[0].message.content or "").strip()
+
+            try:
+                out = await asyncio.to_thread(_sync_call)
+                if out:
+                    return out
+            except Exception as exc:
+                logger.warning(f"OpenRouter helper failed: {exc}")
+                continue
+            continue
 
         if provider == "gpt":
             client = get_gpt_client()
@@ -101,10 +131,13 @@ async def _call_llm(
                 return (resp.choices[0].message.content or "").strip()
 
             try:
-                return await asyncio.to_thread(_sync_call)
+                out = await asyncio.to_thread(_sync_call)
+                if out:
+                    return out
             except Exception as exc:
                 logger.warning(f"GPT helper failed: {exc}")
                 continue
+            continue
 
         if provider == "claude":
             client = get_claude_client()
@@ -120,10 +153,13 @@ async def _call_llm(
                 return "".join(getattr(b, "text", "") for b in resp.content).strip()
 
             try:
-                return await asyncio.to_thread(_sync_call)
+                out = await asyncio.to_thread(_sync_call)
+                if out:
+                    return out
             except Exception as exc:
                 logger.warning(f"Claude helper failed: {exc}")
                 continue
+            continue
 
     return ""
 

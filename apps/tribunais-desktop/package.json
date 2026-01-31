@@ -6,9 +6,9 @@
   "license": "MIT",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
+    "dev": "env -u ELECTRON_RUN_AS_NODE ESBUILD_BINARY_PATH=./node_modules/esbuild/bin/esbuild electron-vite dev --outDir dist",
+    "build": "env -u ELECTRON_RUN_AS_NODE ESBUILD_BINARY_PATH=./node_modules/esbuild/bin/esbuild electron-vite build --outDir dist",
+    "preview": "env -u ELECTRON_RUN_AS_NODE ESBUILD_BINARY_PATH=./node_modules/esbuild/bin/esbuild electron-vite preview --outDir dist",
     "package": "electron-builder",
     "package:mac": "electron-builder --mac",
     "package:win": "electron-builder --win",

@@ -105,7 +105,7 @@ async def register(
     # Gerar tokens
     access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": db_user.id, "type": "access", "role": db_user.role.value, "plan": db_user.plan.value},
+        data={"sub": db_user.id, "type": "access", "role": db_user.role.value, "plan": db_user.plan.value, "org_id": db_user.organization_id},
         expires_delta=access_token_expires
     )
     
@@ -158,7 +158,7 @@ async def login(
     # Gerar tokens
     access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value},
+        data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value, "org_id": user.organization_id},
         expires_delta=access_token_expires
     )
     
@@ -251,7 +251,7 @@ async def login_test(
         print("[Login Test] Gerando tokens...")
         access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value},
+            data={"sub": user.id, "type": "access", "role": user.role.value, "plan": user.plan.value, "org_id": user.organization_id},
             expires_delta=access_token_expires
         )
         
@@ -313,10 +313,10 @@ async def refresh_token_endpoint(
     
     access_token_expires = timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": current_user.id, "type": "access", "role": current_user.role.value, "plan": current_user.plan.value},
+        data={"sub": current_user.id, "type": "access", "role": current_user.role.value, "plan": current_user.plan.value, "org_id": current_user.organization_id},
         expires_delta=access_token_expires
     )
-    
+
     # Opcional: Rotacionar refresh token também
     refresh_token = create_refresh_token(
         data={"sub": current_user.id, "type": "refresh"}

@@ -5,6 +5,60 @@
 
 ---
 
+## 2026-01-27 — OpenAI Reasoning Models nao suportam temperature
+
+### Problema
+- Chamadas ao OpenAI `o4-mini-deep-research` falhavam com 400: "Unsupported parameter: 'temperature' is not supported with this model"
+
+### Causa Raiz
+- `deep_research_service.py` passava `temperature=0.2` hardcoded em todas as chamadas OpenAI
+- Modelos reasoning (o1, o3, o4) nao aceitam temperature
+
+### Solucao
+- Detectar modelo reasoning por prefixo (`o1`, `o3`, `o4`)
+- Omitir `temperature` para esses modelos em ambos os paths (sync e streaming)
+
+### Prevencao
+- Sempre verificar compatibilidade de parametros por familia de modelo
+- OpenAI reasoning models: sem temperature, sem top_p, effort minimo "medium"
+
+### Arquivos Relacionados
+- `apps/api/app/services/ai/deep_research_service.py` (linhas ~487, ~950)
+- `apps/api/app/services/ai/deep_research_hard_service.py` (effort "low" -> "medium" para OpenAI)
+
+---
+
+## 2026-01-29 — Falsos positivos de “Tema XXXX” por erro de ASR (Whisper)
+
+### Problema
+- Auditoria/Qualidade geravam alerts do tipo `missing_julgado` para “Tema 234”/“Tema 1933”, que não faziam sentido (ou eram variantes erradas do ASR).
+- Em alguns casos, a extração de referências não reconhecia `Tema 1.234` (com separador) e produzia diferenças artificiais RAW vs formatado.
+
+### Causa Raiz
+- O texto RAW pode conter números “Tema” inconsistentes por erro de ASR (ex.: perda do dígito inicial `234` vs `1234`, ou erro em um dígito `1933` vs `1033`).
+- A comparação de referências era sensível à pontuação (`1.234` vs `1234`) e/ou não filtrava variações típicas de ASR.
+
+### Solução
+- Normalização de “Tema” na extração de referências (ex.: `Tema 1.234` → `tema 1234`) para comparar por dígitos.
+- Filtro conservador em `missing_julgados` para não levantar alertas quando há evidência interna no formatado:
+  - `234` é tratado como variante de `1234` se `1234` já aparece.
+  - Um `tema` 4-dígitos é ignorado como “missing” quando existe outro tema 4-dígitos muito próximo (Hamming ≤ 1) no formatado.
+- Sanitização final do markdown para remover/normalizar variantes erradas quando a forma canônica já está no documento.
+- Normalização opcional no texto RAW (ASR) + overrides configuráveis.
+
+### Prevenção
+- Preferir normalização por dígitos (não por string literal) ao comparar referências numéricas.
+- Para confusões conhecidas, usar overrides via:
+  - `VOMO_ASR_NORMALIZE_TEMAS` (default: `true`)
+  - `VOMO_ASR_TEMA_OVERRIDES` (ex.: `"1933=1033,234=1234"`)
+
+### Arquivos Relacionados
+- `mlx_vomo.py`
+- `auto_fix_apostilas.py`
+- `apps/api/app/services/quality_service.py`
+
+---
+
 ## Template de Entrada
 
 ```markdown
@@ -25,6 +79,31 @@
 ### Arquivos Relacionados
 - `caminho/arquivo.ts`
 ```
+
+---
+
+## 2026-01-26 — load_dotenv timing bug desabilitava diarização
+
+### Problema
+- Diarização de áudio (pyannote) nunca executava apesar de estar instalada
+- `HF_TOKEN` sempre era `None` mesmo com valor no `.env`
+
+### Causa Raiz
+- Variável `HF_TOKEN` era lida no nível de módulo (linha 195): `HF_TOKEN = os.getenv("HUGGING_FACE_TOKEN")`
+- `load_dotenv()` só era chamado depois, dentro do `__init__` de uma classe (linha 4137)
+- Quando o módulo é importado, o código no nível de módulo executa primeiro → `HF_TOKEN = None`
+- Quando `__init__` chama `load_dotenv()`, já é tarde — a variável global já foi definida
+
+### Solução
+- Mover `load_dotenv()` para o início do módulo, antes de qualquer `os.getenv()`
+
+### Prevenção
+- **Regra**: Sempre chamar `load_dotenv()` no início absoluto do módulo, antes de qualquer `os.getenv()`
+- Se uma variável de ambiente é usada no nível de módulo, garantir que `.env` já foi carregado
+- Ou usar lazy loading: `HF_TOKEN = None` no módulo e `HF_TOKEN = HF_TOKEN or os.getenv(...)` quando precisar
+
+### Arquivos Relacionados
+- `mlx_vomo.py`
 
 ---
 
