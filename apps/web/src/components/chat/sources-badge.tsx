@@ -323,10 +323,9 @@ export function SourcesBadge() {
     })();
   }, [open, regionalSources.length]);
 
-  // Load org teams
+  // Load org teams (try even without organization_id — API returns empty if none)
   useEffect(() => {
     if (!open) return;
-    if (!user?.organization_id) return;
     if (myTeams.length > 0) return;
 
     setTeamsLoading(true);
@@ -345,7 +344,7 @@ export function SourcesBadge() {
       })
       .catch(() => setMyTeams([]))
       .finally(() => setTeamsLoading(false));
-  }, [open, user?.organization_id, myTeams.length]);
+  }, [open, myTeams.length]);
 
   // Load private corpus projects
   useEffect(() => {
@@ -918,12 +917,11 @@ export function SourcesBadge() {
                           setRagAllowGroups(Boolean(checked));
                           if (!checked) clearRagSelectedGroups();
                         }}
-                        disabled={!user?.organization_id}
                       />
                     </div>
 
                     {/* Teams list */}
-                    {ragAllowGroups && user?.organization_id && (
+                    {ragAllowGroups && (
                       <div className="space-y-2">
                         {teamsLoading ? (
                           <p className="text-xs text-slate-400">Carregando departamentos...</p>
