@@ -1772,6 +1772,8 @@ interface ChatState {
   ragScope: 'case_only' | 'case_and_global' | 'global_only';
   /** Optional narrowing: subset of user's org teams to search within (empty = all teams user belongs to). */
   ragSelectedGroups: string[];
+  /** Explicit allow/deny for organization private corpus. */
+  ragAllowPrivate: boolean;
   /** Explicit allow/deny for department-scoped corpus (group scope). */
   ragAllowGroups: boolean;
   setRagGlobalJurisdictions: (jurisdictions: string[]) => void;
@@ -1908,6 +1910,7 @@ interface ChatState {
   setRagSelectedGroups: (groupIds: string[]) => void;
   toggleRagSelectedGroup: (groupId: string) => void;
   clearRagSelectedGroups: () => void;
+  setRagAllowPrivate: (allow: boolean) => void;
   setRagAllowGroups: (allow: boolean) => void;
 
   // Source Selection Actions
@@ -2450,6 +2453,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   graphHops: 2,
   ragScope: 'case_and_global', // case_only, case_and_global, global_only
   ragSelectedGroups: loadRagSelectedGroups(),
+  ragAllowPrivate: true,
   ragAllowGroups: loadRagAllowGroups(),
   sourceSelection: loadSourceSelection(),
   chatPersonality: loadChatPersonality(), // Default to persisted or legal
@@ -3203,6 +3207,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
       .filter(Boolean);
     persistRagSelectedGroups(normalized);
     set({ ragSelectedGroups: normalized });
+  },
+  setRagAllowPrivate: (allow) => {
+    set({ ragAllowPrivate: Boolean(allow) });
+    if (!allow) {
+      // Desligar corpus privado também desliga departamentos
+      persistRagAllowGroups(false);
+      set({ ragAllowGroups: false, ragSelectedGroups: [] });
+    }
   },
   setRagAllowGroups: (allow) => {
     persistRagAllowGroups(Boolean(allow));
@@ -3974,6 +3986,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         graph_hops: graphHops,
         rag_scope: get().ragScope,
         rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_private: get().ragAllowPrivate,
         rag_allow_groups: get().ragAllowGroups,
         rag_jurisdictions:
           (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
@@ -5174,7 +5187,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           graph_hops: get().graphHops,
           rag_scope: get().ragScope,
           rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
-          rag_allow_groups: get().ragAllowGroups,
+          rag_allow_private: get().ragAllowPrivate,
+        rag_allow_groups: get().ragAllowGroups,
         },
       } as any);
 
@@ -5414,6 +5428,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         graph_hops: get().graphHops,
         rag_scope: get().ragScope,
         rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_private: get().ragAllowPrivate,
         rag_allow_groups: get().ragAllowGroups,
         rag_jurisdictions:
           (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
@@ -5597,6 +5612,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         graph_hops: get().graphHops,
         rag_scope: get().ragScope,
         rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_private: get().ragAllowPrivate,
         rag_allow_groups: get().ragAllowGroups,
 
         // Context Caching (v3.4)

@@ -215,6 +215,8 @@ export function SourcesBadge() {
     setRagSelectedGroups,
     toggleRagSelectedGroup,
     clearRagSelectedGroups,
+    ragAllowPrivate,
+    setRagAllowPrivate,
     ragAllowGroups,
     setRagAllowGroups,
     ragGlobalJurisdictions,
@@ -397,7 +399,7 @@ export function SourcesBadge() {
     [privateProjects]
   );
 
-  const privateCount = selectablePrivateProjects.filter((p) => p.enabled).length + (ragAllowGroups ? 1 : 0);
+  const privateCount = (ragAllowPrivate ? 1 : 0) + selectablePrivateProjects.filter((p) => p.enabled).length + (ragAllowGroups ? 1 : 0);
   const connectorsCount = mcpToolCalling ? (mcpUseAllServers ? mcpServers.length : mcpServers.filter((m) => m.enabled).length) : 0;
 
   // Active icons for badge
@@ -407,10 +409,10 @@ export function SourcesBadge() {
     if (attachmentItems.some((a) => a.enabled)) icons.push(SOURCE_ICONS.attachments);
     if (corpusSources.some((c) => c.id === 'legislacao' && c.enabled)) icons.push(SOURCE_ICONS.legislacao);
     if (corpusSources.some((c) => c.id === 'jurisprudencia' && c.enabled)) icons.push(SOURCE_ICONS.jurisprudencia);
-    if (selectablePrivateProjects.some((p) => p.enabled) || ragAllowGroups) icons.push(SOURCE_ICONS.private);
+    if (ragAllowPrivate || selectablePrivateProjects.some((p) => p.enabled) || ragAllowGroups) icons.push(SOURCE_ICONS.private);
     if (mcpToolCalling) icons.push(SOURCE_ICONS.mcp);
     return icons.slice(0, 5);
-  }, [webSearch, attachmentItems, corpusSources, selectablePrivateProjects, ragAllowGroups, mcpToolCalling]);
+  }, [webSearch, attachmentItems, corpusSources, selectablePrivateProjects, ragAllowPrivate, ragAllowGroups, mcpToolCalling]);
 
   // Sync corpus from store
   useEffect(() => {
@@ -875,17 +877,22 @@ export function SourcesBadge() {
                   </div>
                 ) : (
                   <>
-                    {/* Organization base */}
-                    <div className="p-3 rounded-lg border border-slate-200 bg-slate-50/50">
-                      <div className="flex items-center gap-2">
-                        <Building2 className="h-4 w-4 text-slate-500" />
-                        <div className="flex-1">
-                          <p className="text-sm font-medium text-slate-700">Organização (Base)</p>
-                          <p className="text-[10px] text-slate-500">Sempre incluído nas buscas</p>
+                    {/* Organization corpus toggle */}
+                    <div className="p-3 rounded-lg border border-slate-200">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Building2 className="h-4 w-4 text-slate-500" />
+                          <div>
+                            <p className="text-sm font-medium text-slate-700">Corpus Privado (Organização)</p>
+                            <p className="text-[10px] text-slate-500">Incluir documentos da organização</p>
+                          </div>
                         </div>
-                        <Check className="h-4 w-4 text-emerald-500" />
+                        <Switch
+                          checked={ragAllowPrivate}
+                          onCheckedChange={(checked) => setRagAllowPrivate(Boolean(checked))}
+                        />
                       </div>
-                      {organizationKbProjects.length > 0 && (
+                      {ragAllowPrivate && organizationKbProjects.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {organizationKbProjects.slice(0, 6).map((p) => (
                             <span
@@ -917,6 +924,7 @@ export function SourcesBadge() {
                           setRagAllowGroups(Boolean(checked));
                           if (!checked) clearRagSelectedGroups();
                         }}
+                        disabled={!ragAllowPrivate}
                       />
                     </div>
 
