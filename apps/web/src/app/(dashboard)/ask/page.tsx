@@ -1,9 +1,8 @@
 'use client';
 
 import React from 'react';
-import { useAskPageState, type GenerationMode } from '@/hooks/use-ask-page-state';
+import { useAskPageState } from '@/hooks/use-ask-page-state';
 import { ChatInterface, ChatInput } from '@/components/chat';
-import { SourcesBadge } from '@/components/chat/sources-badge';
 import { CanvasContainer, OutlineApprovalModal, MinutaSettingsDrawer } from '@/components/dashboard';
 import { AskSourcesPanel, AskStreamingStatus, AskModeToggle } from '@/components/ask';
 import { Button } from '@/components/ui/button';
@@ -32,8 +31,6 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
-  PanelLeftClose,
-  PanelLeftOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useChatStore } from '@/stores';
@@ -474,42 +471,10 @@ export default function AskPage() {
                   <ChatInput
                     onSend={s.handleSend}
                     extraActions={
-                      <div className="flex items-center gap-1">
-                        {/* Canvas toggle */}
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (s.canvasState === 'hidden') {
-                              s.showCanvas();
-                              s.setCanvasState('normal');
-                            } else {
-                              s.hideCanvas();
-                            }
-                          }}
-                          className={cn(
-                            "flex items-center justify-center h-7 w-7 rounded-lg transition-colors",
-                            s.canvasState !== 'hidden'
-                              ? "bg-indigo-500/15 text-indigo-600 border border-indigo-300"
-                              : "text-muted-foreground/60 hover:text-muted-foreground hover:bg-slate-100 border border-transparent"
-                          )}
-                          title={s.canvasState !== 'hidden' ? 'Fechar editor' : 'Abrir editor'}
-                        >
-                          {s.canvasState !== 'hidden' ? (
-                            <PanelLeftClose className="h-3.5 w-3.5" />
-                          ) : (
-                            <PanelLeftOpen className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-
-                        {/* Sources badge */}
-                        <SourcesBadge />
-
-                        {/* Mode toggle */}
-                        <AskModeToggle
-                          mode={s.queryMode}
-                          onChange={s.setQueryMode}
-                        />
-                      </div>
+                      <AskModeToggle
+                        mode={s.queryMode}
+                        onChange={s.setQueryMode}
+                      />
                     }
                   />
                 </div>

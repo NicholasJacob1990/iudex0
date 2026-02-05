@@ -12,7 +12,8 @@ import {
   Globe,
   Brain,
   BookOpen,
-  PanelRight,
+  PanelLeftClose,
+  PanelLeftOpen,
   FileText,
   ShieldCheck,
   SlidersHorizontal,
@@ -850,9 +851,8 @@ export function ChatInput({ onSend, disabled, placeholder, extraActions }: ChatI
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
+                  <button
+                    type="button"
                     onClick={() => {
                       const canvas = useCanvasStore.getState();
                       if (canvas.state === 'hidden') {
@@ -863,17 +863,21 @@ export function ChatInput({ onSend, disabled, placeholder, extraActions }: ChatI
                       }
                     }}
                     className={cn(
-                      'h-7 w-7 rounded-full transition-colors',
+                      'flex items-center justify-center h-7 w-7 rounded-lg transition-colors',
                       useCanvasStore((s) => s.state) !== 'hidden'
-                        ? 'text-emerald-600 bg-emerald-500/10'
-                        : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                        ? 'bg-indigo-500/15 text-indigo-600 border border-indigo-300'
+                        : 'text-muted-foreground/60 hover:text-muted-foreground hover:bg-slate-100 border border-transparent'
                     )}
                   >
-                    <PanelRight className="h-3.5 w-3.5" />
-                  </Button>
+                    {useCanvasStore((s) => s.state) !== 'hidden' ? (
+                      <PanelLeftClose className="h-3.5 w-3.5" />
+                    ) : (
+                      <PanelLeftOpen className="h-3.5 w-3.5" />
+                    )}
+                  </button>
                 </TooltipTrigger>
                 <TooltipContent side="top" className="text-xs">
-                  Abrir/fechar o painel de edição do documento
+                  {useCanvasStore((s) => s.state) !== 'hidden' ? 'Fechar editor' : 'Abrir editor'}
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
