@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Search, FileText, BookOpen, Scale, Link as LinkIcon, Mic, ArrowLeft, Loader2, Bot } from 'lucide-react';
+import { Search, FileText, BookOpen, Link as LinkIcon, Mic, ArrowLeft, Loader2, Bot } from 'lucide-react';
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@/components/ui/command';
 import { apiClient } from '@/lib/api-client';
 
@@ -23,7 +23,7 @@ const CONTEXT_OPTIONS: ContextOption[] = [
     { id: 'models', label: 'Modelos de IA', icon: Bot, description: 'Mencionar um modelo específico', hasSubmenu: true },
     { id: 'files', label: 'Arquivos', icon: FileText, description: 'Buscar PDFs e DOCX', hasSubmenu: true },
     { id: 'library', label: 'Biblioteca', icon: BookOpen, description: 'Buscar modelos e peças', hasSubmenu: true },
-    { id: 'juris', label: 'Jurisprudência', icon: Scale, description: 'Buscar jurisprudência' },
+    { id: 'juris', label: 'Jurisprudência', icon: BookOpen, description: 'Buscar jurisprudência' },
     { id: 'link', label: 'Link', icon: LinkIcon, description: 'Adicionar URL da web' },
     { id: 'audio', label: 'Áudio', icon: Mic, description: 'Gravar ou enviar áudio' },
 ];
@@ -50,36 +50,51 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
     const [isLoading, setIsLoading] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
 
-    const fetchItems = useCallback(async (query: string) => {
+    const fetchSeqRef = useRef(0);
+    const fetchItems = useCallback(async (category: string | null, query: string) => {
+        if (!category) return;
+        const seq = ++fetchSeqRef.current;
         setIsLoading(true);
         try {
-            if (activeCategory === 'models') {
+            if (category === 'models') {
                 // Local filtering for models
                 const filtered = AI_MODELS.filter(m =>
                     m.name.toLowerCase().includes(query.toLowerCase()) ||
                     m.description.toLowerCase().includes(query.toLowerCase())
                 );
-                setItems(filtered);
-            } else if (activeCategory === 'files') {
+                if (seq === fetchSeqRef.current) {
+                    setItems(filtered);
+                }
+                return;
+            }
+            if (category === 'files') {
                 const res = await apiClient.getDocuments(0, 10, query);
-                setItems(res.documents);
-            } else if (activeCategory === 'library') {
+                if (seq === fetchSeqRef.current) {
+                    setItems(Array.isArray(res?.documents) ? res.documents : []);
+                }
+                return;
+            }
+            if (category === 'library') {
                 const res = await apiClient.getLibraryItems(0, 10, query);
-                setItems(res.items);
+                if (seq === fetchSeqRef.current) {
+                    setItems(Array.isArray(res?.items) ? res.items : []);
+                }
             }
         } catch (error) {
             console.error(error);
         } finally {
-            setIsLoading(false);
+            if (seq === fetchSeqRef.current) {
+                setIsLoading(false);
+            }
         }
-    }, [activeCategory]);
+    }, []);
 
     // Debounce search for submenus
     useEffect(() => {
         if (!activeCategory) return;
 
         const timer = setTimeout(() => {
-            fetchItems(search);
+            fetchItems(activeCategory, search);
         }, 300);
 
         return () => clearTimeout(timer);
@@ -117,7 +132,6 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
             setActiveCategory(option.id);
             setSearch('');
             setItems([]);
-            fetchItems('');
         } else {
             onSelect(option.id, option.label);
             onClose();
@@ -125,14 +139,15 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
     };
 
     const handleSelectItem = (item: any) => {
+        const itemName = item?.name ?? item?.title ?? item?.label ?? 'Item';
         // Formato: @[Nome](id:type)
         if (activeCategory === 'models') {
             // For models: @Claude or @GPT-5.2
-            const format = `@${item.name}`;
-            onSelect(format, item.name);
+            const format = `@${itemName}`;
+            onSelect(format, itemName);
         } else {
-            const format = `@[${item.name}](${item.id}:${activeCategory === 'files' ? 'doc' : 'lib'})`;
-            onSelect(format, item.name);
+            const format = `@[${itemName}](${item.id}:${activeCategory === 'files' ? 'doc' : 'lib'})`;
+            onSelect(format, itemName);
         }
         onClose();
     };
@@ -208,21 +223,24 @@ export function AtCommandMenu({ onSelect, onClose, position }: AtCommandMenuProp
                                 </CommandEmpty>
                             ) : (
                                 <CommandGroup heading="Resultados">
-                                    {items.map((item) => (
+                                    {items.map((item, index) => {
+                                        const itemId = item?.id ?? `${activeCategory}-${index}`;
+                                        const itemName = item?.name ?? item?.title ?? item?.label ?? 'Item';
+                                        return (
                                         <CommandItem
-                                            key={item.id}
-                                            value={item.id}
+                                            key={String(itemId)}
+                                            value={String(itemId)}
                                             onSelect={() => handleSelectItem(item)}
                                             className="flex items-center gap-3 px-4 py-2 cursor-pointer aria-selected:bg-accent"
                                         >
                                             <div className="flex flex-col truncate">
-                                                <span className="font-medium text-sm text-foreground truncate">{item.name}</span>
+                                                <span className="font-medium text-sm text-foreground truncate">{itemName}</span>
                                                 <span className="text-xs text-muted-foreground truncate">
                                                     {new Date(item.created_at || Date.now()).toLocaleDateString()}
                                                 </span>
                                             </div>
                                         </CommandItem>
-                                    ))}
+                                    )})}
                                 </CommandGroup>
                             )}
                         </div>

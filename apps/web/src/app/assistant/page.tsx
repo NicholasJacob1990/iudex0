@@ -78,6 +78,9 @@ export default function AssistantPage() {
                 description="O Assistente da VORBIUM interpreta documentos, normas e precedentes para produzir análises jurídicas fundamentadas, sempre com rastreabilidade e contexto."
                 primaryCtaText="Ver demonstração do Assistente"
                 primaryCtaLink="/demo"
+                worklet="nebula-flow"
+                workletColor="#8b5cf6"
+                workletSeed={47}
             />
 
             {/* Seção: O que o Assistente é */}

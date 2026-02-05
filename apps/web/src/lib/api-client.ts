@@ -130,6 +130,54 @@ interface Message {
   created_at: string;
 }
 
+interface AgentTask {
+  task_id: string;
+  user_id: string;
+  prompt: string;
+  status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
+  result: string | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  model: string;
+  metadata: Record<string, any>;
+}
+
+interface WorkflowResponse {
+  id: string;
+  user_id: string;
+  name: string;
+  description: string | null;
+  graph_json: { nodes: any[]; edges: any[] };
+  is_active: boolean;
+  is_template: boolean;
+  tags: string[];
+  status: string;
+  published_version: number | null;
+  submitted_at: string | null;
+  approved_at: string | null;
+  rejection_reason: string | null;
+  published_slug: string | null;
+  published_config: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface WorkflowRunResponse {
+  id: string;
+  workflow_id: string;
+  status: string;
+  input_data: Record<string, any>;
+  output_data: Record<string, any> | null;
+  current_node: string | null;
+  logs: Array<Record<string, any>>;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+}
+
 interface GenerateDocumentRequest {
   prompt: string;
   context?: any;
@@ -209,6 +257,8 @@ interface GenerateDocumentRequest {
 
   rag_sources?: string[];
   rag_top_k?: number;
+  rag_jurisdictions?: string[];
+  rag_source_ids?: string[];
 
   // Local RAG
   processo_local_path?: string;
@@ -236,6 +286,9 @@ interface GenerateDocumentRequest {
   argument_graph_enabled?: boolean;
   graph_hops?: number;
   rag_scope?: 'case_only' | 'case_and_global' | 'global_only';
+  rag_selected_groups?: string[];
+  rag_allow_private?: boolean;
+  rag_allow_groups?: boolean;
   include_signature?: boolean;
   language?: string;
   tone?: string;
@@ -412,6 +465,28 @@ class ApiClient {
     }
   }
 
+  /**
+   * Generic request method for any API endpoint.
+   * Usage: apiClient.request('/marketplace?page=1') or apiClient.request('/marketplace/123/install', { method: 'POST' })
+   */
+  async request(path: string, options?: { method?: string; body?: unknown }): Promise<any> {
+    const method = (options?.method || 'GET').toUpperCase();
+    const config: Record<string, any> = {};
+    if (options?.body) {
+      config.data = options.body;
+      // When sending FormData, let the browser set Content-Type with boundary
+      if (typeof FormData !== 'undefined' && options.body instanceof FormData) {
+        config.headers = { 'Content-Type': undefined };
+      }
+    }
+    const response = await this.axios.request({
+      url: path,
+      method,
+      ...config,
+    });
+    return response.data;
+  }
+
   private async extractFetchErrorMessage(response: Response): Promise<string> {
     try {
       const contentType = response.headers.get('content-type') || '';
@@ -484,9 +559,9 @@ class ApiClient {
           body: buildBody(),
         });
         if (directResponse.ok) return directResponse;
-        console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
+        if (process.env.NODE_ENV === 'development') console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
       } catch (err) {
-        console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
+        if (process.env.NODE_ENV === 'development') console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
       }
     }
 
@@ -534,9 +609,9 @@ class ApiClient {
           headers,
         });
         if (directResponse.ok) return directResponse;
-        console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
+        if (process.env.NODE_ENV === 'development') console.warn(`[Streaming] Direct connection failed with ${directResponse.status}, falling back to proxy`);
       } catch (err) {
-        console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
+        if (process.env.NODE_ENV === 'development') console.warn('[Streaming] Direct connection failed, falling back to proxy:', err);
       }
     }
 
@@ -625,28 +700,57 @@ class ApiClient {
   }
 
   async loginTest(): Promise<AuthResponse> {
-    console.log('[API Client] Login Test - Base URL:', this.axios.defaults.baseURL);
-    try {
-      const response = await this.axios.post<AuthResponse>('/auth/login-test');
-      console.log('[API Client] Login Test - Success:', response.status);
-      const { access_token, refresh_token } = response.data;
-
-      this.setAccessToken(access_token);
-      this.setRefreshToken(refresh_token);
-
-      return response.data;
-    } catch (error: any) {
-      console.error('[API Client] Login Test - Error:', error.response?.status, error.response?.data);
-      console.error('[API Client] Login Test - Full URL:', this.axios.defaults.baseURL + '/auth/login-test');
-      throw error;
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[API Client] Login Test - Base URL:', this.axios.defaults.baseURL);
     }
+
+    // Retry logic for when API is still starting up
+    const maxRetries = 3;
+    const retryDelay = 2000; // 2 seconds
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const response = await this.axios.post<AuthResponse>('/auth/login-test');
+        if (process.env.NODE_ENV === 'development') {
+          console.log('[API Client] Login Test - Success:', response.status);
+        }
+        const { access_token, refresh_token } = response.data;
+
+        this.setAccessToken(access_token);
+        this.setRefreshToken(refresh_token);
+
+        return response.data;
+      } catch (error: any) {
+        const isNetworkError = !error.response || error.code === 'ERR_NETWORK' || error.message === 'Network Error';
+
+        if (process.env.NODE_ENV === 'development') {
+          console.error(`[API Client] Login Test - Attempt ${attempt}/${maxRetries} Error:`, error.response?.status || error.message);
+        }
+
+        // Retry on network errors (API not ready yet)
+        if (isNetworkError && attempt < maxRetries) {
+          console.log(`[API Client] API not ready, retrying in ${retryDelay/1000}s... (${attempt}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+          continue;
+        }
+
+        if (process.env.NODE_ENV === 'development') {
+          console.error('[API Client] Login Test - Full URL:', this.axios.defaults.baseURL + '/auth/login-test');
+        }
+        throw error;
+      }
+    }
+
+    throw new Error('API não disponível após várias tentativas');
   }
 
   async logout(): Promise<void> {
     try {
       await this.axios.post('/auth/logout');
     } catch (error) {
-      console.error('Logout error:', error);
+      if (process.env.NODE_ENV === 'development') {
+        console.error('Logout error:', error);
+      }
     } finally {
       this.clearTokens();
     }
@@ -675,6 +779,29 @@ class ApiClient {
 
   async getProfile(): Promise<User> {
     const response = await this.axios.get<User>('/auth/me');
+    return response.data;
+  }
+
+  async loginAsGuest(shareToken: string, displayName?: string): Promise<any> {
+    const response = await this.axios.post(`/auth/guest/from-share/${shareToken}`, {
+      display_name: displayName || undefined,
+    });
+    const { access_token } = response.data;
+    this.setAccessToken(access_token);
+    return response.data;
+  }
+
+  async createGuestSession(displayName?: string): Promise<any> {
+    const response = await this.axios.post('/auth/guest', {
+      display_name: displayName || undefined,
+    });
+    const { access_token } = response.data;
+    this.setAccessToken(access_token);
+    return response.data;
+  }
+
+  async getGuestInfo(): Promise<any> {
+    const response = await this.axios.get('/auth/guest/me');
     return response.data;
   }
 
@@ -806,7 +933,7 @@ class ApiClient {
                 onError(event.error);
               }
             } catch (e) {
-              console.error('Failed to parse SSE event:', line);
+              if (process.env.NODE_ENV === 'development') console.error('Failed to parse SSE event:', line);
             }
           }
         }
@@ -900,12 +1027,6 @@ class ApiClient {
   }
 
   async uploadDocument(file: File, metadata?: any): Promise<any> {
-    const formData = new FormData();
-    formData.append('file', file);
-    if (metadata) {
-      formData.append('metadata', JSON.stringify(metadata));
-    }
-
     const token = this.getAccessToken();
     const response = await this.postFormDataWithFallback(
       '/documents/upload',
@@ -997,7 +1118,7 @@ class ApiClient {
     if (data.folder_id) formData.append('folder_id', data.folder_id);
 
     const response = await this.axios.post('/documents/from-url', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1233,6 +1354,40 @@ class ApiClient {
     return response.data;
   }
 
+  // ── User MCP Servers ──────────────────────────────────
+
+  async getUserMcpServers(): Promise<{ servers: any[] }> {
+    const response = await this.axios.get('/mcp/user-servers');
+    return response.data;
+  }
+
+  async addUserMcpServer(data: {
+    label: string;
+    url: string;
+    allowed_tools?: string[];
+    auth_type?: string | null;
+    auth_token?: string | null;
+    auth_header_name?: string | null;
+  }): Promise<{ status: string; label: string }> {
+    const response = await this.axios.post('/mcp/user-servers', data);
+    return response.data;
+  }
+
+  async removeUserMcpServer(label: string): Promise<{ status: string }> {
+    const response = await this.axios.delete(`/mcp/user-servers/${label}`);
+    return response.data;
+  }
+
+  async testUserMcpServer(label: string): Promise<{
+    status: string;
+    tools_count?: number;
+    tools?: string[];
+    message?: string;
+  }> {
+    const response = await this.axios.post(`/mcp/user-servers/${label}/test`);
+    return response.data;
+  }
+
 
   async getLibrarians(skip = 0, limit = 50): Promise<any> {
     const response = await this.axios.get('/library/librarians', {
@@ -1357,7 +1512,7 @@ class ApiClient {
     if (options.paths?.length) formData.append('paths', JSON.stringify(options.paths));
 
     const response = await this.axios.post('/rag/index', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1366,7 +1521,7 @@ class ApiClient {
     const formData = new FormData();
     formData.append('file', file);
     const response = await this.axios.post('/templates/extract-variables', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1376,7 +1531,7 @@ class ApiClient {
     formData.append('file', file);
     formData.append('variables', JSON.stringify(variables));
     const response = await this.axios.post('/templates/apply', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1488,11 +1643,10 @@ class ApiClient {
     if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
 
     const response = await this.axios.post('/transcription/vomo', formData, {
-      headers: {
-        'Content-Type': 'multipart/form-data',
-      },
       // Aumentar timeout para transcrições longas (10 min)
       timeout: 600000,
+      // Remove Content-Type to let axios set multipart/form-data with boundary
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1503,6 +1657,7 @@ class ApiClient {
       mode: string;
       thinking_level: string;
       custom_prompt?: string;
+      disable_tables?: boolean;
       document_theme?: string;
       document_header?: string;
       document_footer?: string;
@@ -1511,10 +1666,13 @@ class ApiClient {
       document_show_header_footer?: boolean;
       document_font_family?: string;
       document_font_size?: number;
+      document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
       model_selection?: string;
       high_accuracy?: boolean;
+      diarization?: boolean;
+      diarization_strict?: boolean;
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1522,13 +1680,31 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      language?: string;
+      output_language?: string;
+      speaker_roles?: string[];
+      speakers_expected?: number;
+      subtitle_format?: 'srt' | 'vtt' | 'both';
+      area?: string;
+      custom_keyterms?: string;
     }
   ): Promise<{ job_id: string; status: string }> {
+    console.log('[API-CLIENT] startTranscriptionJob called with', files.length, 'files');
+    console.log('[API-CLIENT] Files:', files.map(f => ({ name: f.name, size: f.size, type: f.type })));
     const formData = new FormData();
-    files.forEach((f) => formData.append('files', f));
+    files.forEach((f) => {
+      console.log('[API-CLIENT] Appending file:', f.name, f.size, 'bytes');
+      formData.append('files', f);
+    });
     formData.append('mode', options.mode);
     formData.append('thinking_level', options.thinking_level);
+    if (options.language) formData.append('language', options.language);
+    if (options.output_language) formData.append('output_language', options.output_language);
     if (options.custom_prompt) formData.append('custom_prompt', options.custom_prompt);
+    if (options.disable_tables !== undefined) {
+      formData.append('disable_tables', options.disable_tables ? 'true' : 'false');
+    }
     if (options.document_theme) formData.append('document_theme', options.document_theme);
     if (options.document_header) formData.append('document_header', options.document_header);
     if (options.document_footer) formData.append('document_footer', options.document_footer);
@@ -1551,7 +1727,10 @@ class ApiClient {
     }
     if (options.model_selection) formData.append('model_selection', options.model_selection);
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
+    if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
+    if (options.diarization_strict) formData.append('diarization_strict', 'true');
     if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
+    if (options.transcription_engine) formData.append('transcription_engine', options.transcription_engine);
     if (options.auto_apply_fixes !== undefined) {
       formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
     }
@@ -1562,9 +1741,50 @@ class ApiClient {
     if (options.skip_audit) formData.append('skip_audit', 'true');
     if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
     if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+    if (options.speaker_roles?.length) {
+      formData.append('speaker_roles', JSON.stringify(options.speaker_roles));
+    }
+    if (options.speakers_expected) {
+      formData.append('speakers_expected', String(options.speakers_expected));
+    }
+    if (options.subtitle_format) {
+      formData.append('subtitle_format', options.subtitle_format);
+    }
+    if (options.area) {
+      formData.append('area', options.area);
+    }
+    if (options.custom_keyterms) {
+      formData.append('custom_keyterms', options.custom_keyterms);
+    }
 
+    // For large files (>100MB), send directly to backend to avoid proxy memory issues
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const thresholdEnv = Number.parseFloat(process.env.NEXT_PUBLIC_DIRECT_UPLOAD_THRESHOLD_MB || '');
+    const thresholdMb = Number.isFinite(thresholdEnv) && thresholdEnv > 0 ? thresholdEnv : 25;
+    const LARGE_FILE_THRESHOLD = thresholdMb * 1024 * 1024;
+    const forceDirect = options.transcription_engine === 'whisper';
+
+    if (totalSize > LARGE_FILE_THRESHOLD || forceDirect) {
+      const reason = totalSize > LARGE_FILE_THRESHOLD ? 'large_file' : 'whisper_engine';
+      console.log(`[API-CLIENT] Direct upload (${reason}) ${(totalSize / 1024 / 1024).toFixed(1)}MB`);
+      // Use direct backend URL to avoid Next.js proxy buffering issues
+      const directUrl = process.env.NEXT_PUBLIC_API_DIRECT_URL || 'http://127.0.0.1:8000/api';
+      const token = this.getAccessToken();
+      const response = await fetch(`${directUrl}/transcription/vomo/jobs`, {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        body: formData,
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(error.detail || `Request failed with status ${response.status}`);
+      }
+      return response.json();
+    }
+
+    // Remove Content-Type to let axios set multipart/form-data with boundary
     const response = await this.axios.post('/transcription/vomo/jobs', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1575,6 +1795,7 @@ class ApiClient {
       mode: string;
       thinking_level: string;
       custom_prompt?: string;
+      disable_tables?: boolean;
       document_theme?: string;
       document_header?: string;
       document_footer?: string;
@@ -1583,6 +1804,7 @@ class ApiClient {
       document_show_header_footer?: boolean;
       document_font_family?: string;
       document_font_size?: number;
+      document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
       model_selection?: string;
@@ -1596,6 +1818,14 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      language?: string;
+      output_language?: string;
+      speaker_roles?: string[];
+      speakers_expected?: number;
+      subtitle_format?: 'srt' | 'vtt' | 'both';
+      area?: string;
+      custom_keyterms?: string;
     }
   ): Promise<{ job_id: string; status: string }> {
     const payload: any = {
@@ -1604,8 +1834,12 @@ class ApiClient {
       thinking_level: options.thinking_level,
       model_selection: options.model_selection || 'gemini-3-flash-preview',
       high_accuracy: !!options.high_accuracy,
+      language: options.language || 'pt',
+      output_language: options.output_language || '',
     };
+    if (options.transcription_engine) payload.transcription_engine = options.transcription_engine;
     if (options.custom_prompt) payload.custom_prompt = options.custom_prompt;
+    if (options.disable_tables !== undefined) payload.disable_tables = options.disable_tables;
     if (options.document_theme) payload.document_theme = options.document_theme;
     if (options.document_header) payload.document_header = options.document_header;
     if (options.document_footer) payload.document_footer = options.document_footer;
@@ -1625,6 +1859,11 @@ class ApiClient {
     if (options.skip_audit !== undefined) payload.skip_audit = options.skip_audit;
     if (options.skip_fidelity_audit !== undefined) payload.skip_fidelity_audit = options.skip_fidelity_audit;
     if (options.skip_sources_audit !== undefined) payload.skip_sources_audit = options.skip_sources_audit;
+    if (options.speaker_roles?.length) payload.speaker_roles = JSON.stringify(options.speaker_roles);
+    if (options.speakers_expected) payload.speakers_expected = options.speakers_expected;
+    if (options.subtitle_format) payload.subtitle_format = options.subtitle_format;
+    if (options.area) payload.area = options.area;
+    if (options.custom_keyterms) payload.custom_keyterms = options.custom_keyterms;
 
     const response = await this.axios.post('/transcription/vomo/jobs/url', payload);
     return response.data;
@@ -1648,6 +1887,7 @@ class ApiClient {
       document_show_header_footer?: boolean;
       document_font_family?: string;
       document_font_size?: number;
+      document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
       format_enabled?: boolean;
@@ -1660,11 +1900,23 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      language?: string;
+      output_language?: string;
+      speaker_roles?: string[];
+      speakers_expected?: number;
+      speaker_id_type?: 'name' | 'role';
+      speaker_id_values?: string;
+      area?: string;
+      custom_keyterms?: string;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
     }
   ): Promise<{ job_id: string; status: string }> {
     const formData = new FormData();
     formData.append('file', file);
     formData.append('case_id', payload.case_id);
+    if (payload.language) formData.append('language', payload.language);
+    if (payload.transcription_engine) formData.append('transcription_engine', payload.transcription_engine);
+    if (payload.output_language) formData.append('output_language', payload.output_language);
     formData.append('goal', payload.goal);
     formData.append('thinking_level', payload.thinking_level);
     if (payload.model_selection) formData.append('model_selection', payload.model_selection);
@@ -1709,9 +1961,49 @@ class ApiClient {
     if (payload.skip_legal_audit) formData.append('skip_legal_audit', 'true');
     if (payload.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
     if (payload.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+    if (payload.speaker_roles?.length) {
+      formData.append('speaker_roles', JSON.stringify(payload.speaker_roles));
+    }
+    if (payload.speakers_expected) {
+      formData.append('speakers_expected', String(payload.speakers_expected));
+    }
+    if (payload.speaker_id_type) {
+      formData.append('speaker_id_type', payload.speaker_id_type);
+    }
+    if (payload.speaker_id_values) {
+      formData.append('speaker_id_values', payload.speaker_id_values);
+    }
+    if (payload.area) {
+      formData.append('area', payload.area);
+    }
+    if (payload.custom_keyterms) {
+      formData.append('custom_keyterms', payload.custom_keyterms);
+    }
 
+    // For large files (>100MB), send directly to backend to avoid proxy memory issues
+    const fileSize = file.size;
+    const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024; // 100MB
+
+    if (fileSize > LARGE_FILE_THRESHOLD) {
+      console.log(`[API-CLIENT] Large hearing file upload (${(fileSize / 1024 / 1024).toFixed(1)}MB), using direct backend URL`);
+      // Use direct backend URL to avoid Next.js proxy buffering issues
+      const directUrl = process.env.NEXT_PUBLIC_API_DIRECT_URL || 'http://127.0.0.1:8000/api';
+      const token = this.getAccessToken();
+      const response = await fetch(`${directUrl}/transcription/hearing/jobs`, {
+        method: 'POST',
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+        body: formData,
+      });
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(error.detail || `Request failed with status ${response.status}`);
+      }
+      return response.json();
+    }
+
+    // Remove Content-Type to let axios set multipart/form-data with boundary
     const response = await this.axios.post('/transcription/hearing/jobs', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: { 'Content-Type': undefined },
     });
     return response.data;
   }
@@ -1734,6 +2026,7 @@ class ApiClient {
       document_show_header_footer?: boolean;
       document_font_family?: string;
       document_font_size?: number;
+      document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
       format_enabled?: boolean;
@@ -1746,6 +2039,15 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      language?: string;
+      output_language?: string;
+      speaker_roles?: string[];
+      speakers_expected?: number;
+      speaker_id_type?: 'name' | 'role';
+      speaker_id_values?: string;
+      area?: string;
+      custom_keyterms?: string;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
     }
   ): Promise<{ job_id: string; status: string }> {
     const body: any = {
@@ -1760,6 +2062,9 @@ class ApiClient {
       include_timestamps: payload.include_timestamps !== undefined ? payload.include_timestamps : true,
       allow_indirect: !!payload.allow_indirect,
       allow_summary: !!payload.allow_summary,
+      language: payload.language || 'pt',
+      output_language: payload.output_language || '',
+      transcription_engine: payload.transcription_engine || 'whisper',
     };
     if (payload.custom_prompt) body.custom_prompt = payload.custom_prompt;
     if (payload.document_theme) body.document_theme = payload.document_theme;
@@ -1778,6 +2083,12 @@ class ApiClient {
     if (payload.skip_legal_audit !== undefined) body.skip_legal_audit = payload.skip_legal_audit;
     if (payload.skip_fidelity_audit !== undefined) body.skip_fidelity_audit = payload.skip_fidelity_audit;
     if (payload.skip_sources_audit !== undefined) body.skip_sources_audit = payload.skip_sources_audit;
+    if (payload.speaker_roles?.length) body.speaker_roles = JSON.stringify(payload.speaker_roles);
+    if (payload.speakers_expected) body.speakers_expected = payload.speakers_expected;
+    if (payload.speaker_id_type) body.speaker_id_type = payload.speaker_id_type;
+    if (payload.speaker_id_values) body.speaker_id_values = payload.speaker_id_values;
+    if (payload.area) body.area = payload.area;
+    if (payload.custom_keyterms) body.custom_keyterms = payload.custom_keyterms;
 
     const response = await this.axios.post('/transcription/hearing/jobs/url', body);
     return response.data;
@@ -1795,6 +2106,11 @@ class ApiClient {
 
   async cancelTranscriptionJob(jobId: string): Promise<any> {
     const response = await this.axios.post(`/transcription/jobs/${jobId}/cancel`);
+    return response.data;
+  }
+
+  async retryTranscriptionJob(jobId: string): Promise<any> {
+    const response = await this.axios.post(`/transcription/vomo/jobs/${jobId}/retry`);
     return response.data;
   }
 
@@ -1853,7 +2169,7 @@ class ApiClient {
 
         const reader = response.body?.getReader();
         if (!reader) {
-          console.warn('[SSE] Response body is not readable');
+          if (process.env.NODE_ENV === 'development') console.warn('[SSE] Response body is not readable');
           return false;
         }
 
@@ -1884,7 +2200,7 @@ class ApiClient {
                 return true; // Don't retry on explicit errors
               }
             } catch (parseError) {
-              console.warn('[SSE] Failed to parse SSE data:', line);
+              if (process.env.NODE_ENV === 'development') console.warn('[SSE] Failed to parse SSE data:', line);
             }
           }
         }
@@ -1902,14 +2218,14 @@ class ApiClient {
               return true;
             }
           } catch (parseError) {
-            console.warn('[SSE] Failed to parse final SSE data:', buffer);
+            if (process.env.NODE_ENV === 'development') console.warn('[SSE] Failed to parse final SSE data:', buffer);
           }
         }
 
         // Stream ended without completion - might need retry
         return completed;
       } catch (error: any) {
-        console.warn(`[SSE] Stream error (attempt ${retryCount + 1}/${maxRetries}):`, error.message);
+        if (process.env.NODE_ENV === 'development') console.warn(`[SSE] Stream error (attempt ${retryCount + 1}/${maxRetries}):`, error.message);
         return false;
       }
     };
@@ -1921,7 +2237,7 @@ class ApiClient {
 
       retryCount++;
       if (retryCount < maxRetries) {
-        console.log(`[SSE] Retrying in ${retryCount * 2}s... (attempt ${retryCount + 1}/${maxRetries})`);
+        if (process.env.NODE_ENV === 'development') console.log(`[SSE] Retrying in ${retryCount * 2}s... (attempt ${retryCount + 1}/${maxRetries})`);
         onProgress('reconnecting', lastProgress, `Reconectando... (tentativa ${retryCount + 1}/${maxRetries})`);
         await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
       }
@@ -1929,7 +2245,7 @@ class ApiClient {
 
     // SSE failed - fall back to polling
     if (!completed) {
-      console.log('[SSE] Falling back to polling...');
+      if (process.env.NODE_ENV === 'development') console.log('[SSE] Falling back to polling...');
       onProgress('polling', lastProgress, 'Conexão SSE perdida, verificando status...');
 
       const pollForResult = async (): Promise<void> => {
@@ -1954,7 +2270,7 @@ class ApiClient {
               onProgress('processing', jobStatus.progress, jobStatus.message || 'Processando...');
             }
           } catch (pollError: any) {
-            console.warn('[Polling] Error:', pollError.message);
+            if (process.env.NODE_ENV === 'development') console.warn('[Polling] Error:', pollError.message);
           }
           await new Promise(resolve => setTimeout(resolve, 5000));
         }
@@ -1979,14 +2295,14 @@ class ApiClient {
           const resultResponse = await this.axios.get(`/transcription/jobs/${jobId}/result`);
           return { ...jobStatus, ...resultResponse.data };
         } catch (resultError: any) {
-          console.warn('[getTranscriptionJobResult] Could not fetch full result:', resultError.message);
+          if (process.env.NODE_ENV === 'development') console.warn('[getTranscriptionJobResult] Could not fetch full result:', resultError.message);
           return jobStatus;
         }
       }
 
       return jobStatus;
     } catch (error: any) {
-      console.warn('[getTranscriptionJobResult] Error:', error.message);
+      if (process.env.NODE_ENV === 'development') console.warn('[getTranscriptionJobResult] Error:', error.message);
       return null;
     }
   }
@@ -1999,9 +2315,12 @@ class ApiClient {
 
   /**
    * Get the URL for a job's media file (audio/video)
+   * Includes auth token as query param since <audio>/<video> elements can't set headers
    */
   getJobMediaUrl(jobId: string, index: number = 0): string {
-    return `${this.baseUrl}/transcription/jobs/${jobId}/media?index=${index}`;
+    const token = this.getAccessToken();
+    const tokenParam = token ? `&token=${encodeURIComponent(token)}` : '';
+    return `${this.baseUrl}/transcription/jobs/${jobId}/media?index=${index}${tokenParam}`;
   }
 
   /**
@@ -2045,6 +2364,8 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      language?: string;
+      output_language?: string;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
     onComplete: (payload: { content: string; raw_content?: string | null; reports?: any }) => void,
@@ -2073,6 +2394,8 @@ class ApiClient {
       if (options.skip_audit) formData.append('skip_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.language) formData.append('language', options.language);
+      if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
     };
 
@@ -2106,11 +2429,9 @@ class ApiClient {
         buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
         for (const line of lines) {
-          console.log('[SSE Raw Line]', line);
           if (line.startsWith('data:')) {
             try {
               const data = JSON.parse(line.slice(5).trim());
-              console.log('[SSE Parsed]', data);
 
               if (data.stage !== undefined) {
                 // Progress event
@@ -2127,7 +2448,7 @@ class ApiClient {
                 onError(data.error);
               }
             } catch (parseError) {
-              console.warn('Failed to parse SSE data:', line);
+              if (process.env.NODE_ENV === 'development') console.warn('Failed to parse SSE data:', line);
             }
           }
         }
@@ -2147,7 +2468,7 @@ class ApiClient {
             onError(data.error);
           }
         } catch (parseError) {
-          console.warn('Failed to parse final SSE data:', buffer);
+          if (process.env.NODE_ENV === 'development') console.warn('Failed to parse final SSE data:', buffer);
         }
       }
     } catch (error: any) {
@@ -2175,6 +2496,8 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      language?: string;
+      output_language?: string;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
     onComplete: (payload: { content: string; raw_content?: string | null; filenames: string[]; total_files: number; reports?: any }) => void,
@@ -2203,6 +2526,8 @@ class ApiClient {
       if (options.skip_audit) formData.append('skip_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.language) formData.append('language', options.language);
+      if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
     };
 
@@ -2254,7 +2579,7 @@ class ApiClient {
                 onError(data.error);
               }
             } catch (parseError) {
-              console.warn('Failed to parse SSE data:', line);
+              if (process.env.NODE_ENV === 'development') console.warn('Failed to parse SSE data:', line);
             }
           }
         }
@@ -2276,7 +2601,7 @@ class ApiClient {
             onError(data.error);
           }
         } catch (parseError) {
-          console.warn('Failed to parse final SSE data:', buffer);
+          if (process.env.NODE_ENV === 'development') console.warn('Failed to parse final SSE data:', buffer);
         }
       }
     } catch (error: any) {
@@ -2294,6 +2619,7 @@ class ApiClient {
       document_margins?: string;
       document_font_family?: string;
       document_font_size?: number;
+      document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
     }
@@ -2308,6 +2634,7 @@ class ApiClient {
         document_margins: options?.document_margins,
         document_font_family: options?.document_font_family,
         document_font_size: options?.document_font_size,
+        document_table_font_size: options?.document_table_font_size,
         document_line_height: options?.document_line_height,
         document_paragraph_spacing: options?.document_paragraph_spacing,
       },
@@ -2340,6 +2667,8 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      language?: string;
+      output_language?: string;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
     onComplete: (payload: any) => void,
@@ -2368,6 +2697,8 @@ class ApiClient {
       if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.language) formData.append('language', options.language);
+      if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
     };
 
@@ -2412,7 +2743,7 @@ class ApiClient {
                 onError(data.error);
               }
             } catch (parseError) {
-              console.warn('Failed to parse SSE data:', line);
+              if (process.env.NODE_ENV === 'development') console.warn('Failed to parse SSE data:', line);
             }
           }
         }
@@ -2427,7 +2758,7 @@ class ApiClient {
             onError(data.error);
           }
         } catch (parseError) {
-          console.warn('Failed to parse final SSE data:', buffer);
+          if (process.env.NODE_ENV === 'development') console.warn('Failed to parse final SSE data:', buffer);
         }
       }
     } catch (error: any) {
@@ -2443,20 +2774,7 @@ class ApiClient {
     return response.data;
   }
 
-  async enrollHearingSpeaker(
-    file: File,
-    payload: { case_id: string; name: string; role: string }
-  ): Promise<any> {
-    const formData = new FormData();
-    formData.append('file', file);
-    formData.append('case_id', payload.case_id);
-    formData.append('name', payload.name);
-    formData.append('role', payload.role);
-    const response = await this.axios.post('/transcription/hearing/enroll', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
-    return response.data;
-  }
+  // REMOVIDO: enrollHearingSpeaker (substituído por inferência automática de papéis via LLM)
 
   async exportLegalDocx(content: string, filename: string, modo: string = 'GENERICO'): Promise<Blob> {
     const response = await this.axios.post(
@@ -2487,7 +2805,9 @@ class ApiClient {
   }
 
   async healthCheck(): Promise<{ status: string; version: string; environment: string }> {
-    const response = await axios.get(`${API_URL.replace('/api', '')}/health`);
+    // Use the same-origin proxy (`/api/*`) so dev works across ports and avoids CORS/IPv6 issues.
+    // The Next proxy maps `/api/health` to the backend root `/health`.
+    const response = await this.axios.get('/health');
     return response.data;
   }
 
@@ -3023,6 +3343,7 @@ class ApiClient {
     groups?: string;
     max_nodes?: number;
     include_relationships?: boolean;
+    include_global?: boolean;
   }): Promise<{
     nodes: Array<{
       id: string;
@@ -3049,7 +3370,14 @@ class ApiClient {
   /**
    * Get entity details with neighbors and chunks
    */
-  async getGraphEntity(entityId: string): Promise<{
+  async getGraphEntity(
+    entityId: string,
+    params?: {
+      include_global?: boolean;
+      document_ids?: string;
+      case_ids?: string;
+    }
+  ): Promise<{
     id: string;
     name: string;
     type: string;
@@ -3069,14 +3397,21 @@ class ApiClient {
       source_type: string;
     }>;
   }> {
-    const response = await this.axios.get(`/graph/entity/${entityId}`);
+    const response = await this.axios.get(`/graph/entity/${entityId}`, { params });
     return response.data;
   }
 
   /**
    * Get remissões (cross-references) for an entity
    */
-  async getGraphRemissoes(entityId: string): Promise<{
+  async getGraphRemissoes(
+    entityId: string,
+    params?: {
+      include_global?: boolean;
+      document_ids?: string;
+      case_ids?: string;
+    }
+  ): Promise<{
     entity_id: string;
     total_remissoes: number;
     legislacao: Array<{
@@ -3094,14 +3429,22 @@ class ApiClient {
       sample_text?: string;
     }>;
   }> {
-    const response = await this.axios.get(`/graph/remissoes/${entityId}`);
+    const response = await this.axios.get(`/graph/remissoes/${entityId}`, { params });
     return response.data;
   }
 
   /**
    * Get semantic neighbors for an entity
    */
-  async getGraphSemanticNeighbors(entityId: string, limit = 30): Promise<{
+  async getGraphSemanticNeighbors(
+    entityId: string,
+    params: {
+      limit?: number;
+      include_global?: boolean;
+      document_ids?: string;
+      case_ids?: string;
+    } = {}
+  ): Promise<{
     entity_id: string;
     total: number;
     neighbors: Array<{
@@ -3119,8 +3462,9 @@ class ApiClient {
       source_docs: string[];
     }>;
   }> {
+    const { limit = 30, ...rest } = params;
     const response = await this.axios.get(`/graph/semantic-neighbors/${entityId}`, {
-      params: { limit }
+      params: { limit, ...rest },
     });
     return response.data;
   }
@@ -3128,21 +3472,34 @@ class ApiClient {
   /**
    * Get graph statistics
    */
-  async getGraphStats(): Promise<{
+  async getGraphStats(params?: {
+    include_global?: boolean;
+    document_ids?: string;
+    case_ids?: string;
+  }): Promise<{
     total_entities: number;
     total_chunks: number;
     total_documents: number;
     entities_by_type: Record<string, number>;
     relationships_count: number;
   }> {
-    const response = await this.axios.get('/graph/stats');
+    const response = await this.axios.get('/graph/stats', { params });
     return response.data;
   }
 
   /**
    * Find path between two entities
    */
-  async getGraphPath(sourceId: string, targetId: string, maxLength = 4): Promise<{
+  async getGraphPath(
+    sourceId: string,
+    targetId: string,
+    params: {
+      max_length?: number;
+      include_global?: boolean;
+      document_ids?: string;
+      case_ids?: string;
+    } = {}
+  ): Promise<{
     found: boolean;
     source?: string;
     target?: string;
@@ -3171,8 +3528,9 @@ class ApiClient {
     }>;
     message?: string;
   }> {
+    const { max_length = 4, ...rest } = params;
     const response = await this.axios.get('/graph/path', {
-      params: { source_id: sourceId, target_id: targetId, max_length: maxLength }
+      params: { source_id: sourceId, target_id: targetId, max_length, ...rest },
     });
     return response.data;
   }
@@ -3182,6 +3540,7 @@ class ApiClient {
    */
   async searchGraphEntities(params: {
     query?: string;
+    include_global?: boolean;
     types?: string;
     group?: string;
     limit?: number;
@@ -3224,6 +3583,7 @@ class ApiClient {
     matchMode?: 'any' | 'all';
     types?: string[];
     limit?: number;
+    includeGlobal?: boolean;
   }): Promise<Array<{
     id: string;
     name: string;
@@ -3240,6 +3600,7 @@ class ApiClient {
       match_mode: params.matchMode || 'any',
       types: params.types || ['lei', 'artigo', 'sumula', 'jurisprudencia', 'tema', 'tribunal'],
       limit: params.limit || 100,
+      include_global: params.includeGlobal ?? true,
     });
     return response.data;
   }
@@ -3354,6 +3715,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getMyOrgTeams(): Promise<any[]> {
+    const response = await this.axios.get('/organizations/teams/mine');
+    return response.data;
+  }
+
   async createTeam(data: { name: string; description?: string }): Promise<any> {
     const response = await this.axios.post('/organizations/teams', data);
     return response.data;
@@ -3366,6 +3732,873 @@ class ApiClient {
 
   async removeTeamMember(teamId: string, userId: string): Promise<void> {
     await this.axios.delete(`/organizations/teams/${teamId}/members/${userId}`);
+  }
+
+  // =========================================================================
+  // Agent Tasks (Background Agents)
+  // =========================================================================
+
+  async spawnAgentTask(data: {
+    prompt: string;
+    model?: string;
+    system_prompt?: string;
+    context?: string;
+    metadata?: Record<string, any>;
+  }): Promise<{ task_id: string; status: string }> {
+    const response = await this.axios.post('/agent/spawn', data);
+    return response.data;
+  }
+
+  async listAgentTasks(): Promise<AgentTask[]> {
+    const response = await this.axios.get<AgentTask[]>('/agent/tasks');
+    return response.data;
+  }
+
+  async getAgentTask(taskId: string): Promise<AgentTask> {
+    const response = await this.axios.get<AgentTask>(`/agent/tasks/${taskId}`);
+    return response.data;
+  }
+
+  async cancelAgentTask(taskId: string): Promise<{ task_id: string; status: string }> {
+    const response = await this.axios.delete(`/agent/tasks/${taskId}`);
+    return response.data;
+  }
+
+  // =========================================================================
+  // Context Bridge (Cross-layer transfers)
+  // =========================================================================
+
+  async promoteToAgent(data: {
+    chat_id?: string;
+    messages: Array<{ role: string; content: string }>;
+    prompt: string;
+    model?: string;
+    system_prompt?: string;
+  }): Promise<{ task_id: string; session_id: string; status: string }> {
+    const response = await this.axios.post('/context/promote-to-agent', data);
+    return response.data;
+  }
+
+  async exportToWorkflow(data: {
+    agent_task_id: string;
+    workflow_id?: string;
+  }): Promise<{ session_id: string; agent_result: string | null; status: string }> {
+    const response = await this.axios.post('/context/export-to-workflow', data);
+    return response.data;
+  }
+
+  async getContextSession(sessionId: string): Promise<{
+    session_id: string;
+    items: Array<Record<string, any>>;
+    meta: Record<string, any> | null;
+  }> {
+    const response = await this.axios.get(`/context/session/${sessionId}`);
+    return response.data;
+  }
+
+  // =========================================================================
+  // Workflows (Visual Workflow Builder)
+  // =========================================================================
+
+  async createWorkflow(data: {
+    name: string;
+    description?: string;
+    graph_json: { nodes: any[]; edges: any[] };
+    tags?: string[];
+    is_template?: boolean;
+  }): Promise<WorkflowResponse> {
+    const response = await this.axios.post('/workflows', data);
+    return response.data;
+  }
+
+  async generateWorkflowFromNL(description: string, model: string = 'claude'): Promise<{ graph_json: { nodes: any[]; edges: any[] } }> {
+    const response = await this.axios.post('/workflows/generate-from-nl', { description, model });
+    return response.data;
+  }
+
+  async listWorkflows(): Promise<WorkflowResponse[]> {
+    const response = await this.axios.get<WorkflowResponse[]>('/workflows');
+    return response.data;
+  }
+
+  async getWorkflow(workflowId: string): Promise<WorkflowResponse> {
+    const response = await this.axios.get<WorkflowResponse>(`/workflows/${workflowId}`);
+    return response.data;
+  }
+
+  async updateWorkflow(workflowId: string, data: {
+    name?: string;
+    description?: string;
+    graph_json?: { nodes: any[]; edges: any[] };
+    tags?: string[];
+    is_active?: boolean;
+  }): Promise<WorkflowResponse> {
+    const response = await this.axios.put(`/workflows/${workflowId}`, data);
+    return response.data;
+  }
+
+  async deleteWorkflow(workflowId: string): Promise<void> {
+    await this.axios.delete(`/workflows/${workflowId}`);
+  }
+
+  async runWorkflow(workflowId: string, data: {
+    input_data?: Record<string, any>;
+    context_session_id?: string;
+  }): Promise<Response> {
+    const token = this.getAccessToken();
+    return fetch(`${API_URL}/workflows/${workflowId}/run`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async resumeWorkflowRun(runId: string, data: {
+    approved: boolean;
+    human_edits?: Record<string, any>;
+  }): Promise<Response> {
+    const token = this.getAccessToken();
+    return fetch(`${API_URL}/workflows/runs/${runId}/resume`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(data),
+    });
+  }
+
+  async listWorkflowRuns(workflowId: string): Promise<WorkflowRunResponse[]> {
+    const response = await this.axios.get<WorkflowRunResponse[]>(`/workflows/${workflowId}/runs`);
+    return response.data;
+  }
+
+  // ── Admin Monitoring Dashboard ────────────────────────────
+
+  async getAdminDashboard(): Promise<{
+    workflows: Array<{
+      id: string;
+      name: string;
+      status: string;
+      category: string | null;
+      run_count: number;
+      created_by: string;
+      updated_at: string | null;
+    }>;
+    total: number;
+    by_status: Record<string, number>;
+  }> {
+    const response = await this.axios.get('/workflows/admin/dashboard');
+    return response.data;
+  }
+
+  async getApprovalQueue(): Promise<{
+    pending: Array<{
+      id: string;
+      name: string;
+      submitted_by: string | null;
+      submitted_at: string | null;
+      description: string | null;
+    }>;
+    count: number;
+  }> {
+    const response = await this.axios.get('/workflows/admin/approval-queue');
+    return response.data;
+  }
+
+  // ── Publishing & Approval ──────────────────────────────────
+
+  async submitWorkflowForApproval(workflowId: string, notes?: string): Promise<{ status: string; submitted_at: string }> {
+    const response = await this.axios.post(`/workflows/${workflowId}/submit`, { notes });
+    return response.data;
+  }
+
+  async approveWorkflow(workflowId: string, approved: boolean, reason?: string): Promise<{ status: string }> {
+    const response = await this.axios.post(`/workflows/${workflowId}/approve`, { approved, reason });
+    return response.data;
+  }
+
+  async publishWorkflow(workflowId: string): Promise<{ status: string; version: number }> {
+    const response = await this.axios.post(`/workflows/${workflowId}/publish`);
+    return response.data;
+  }
+
+  async archiveWorkflow(workflowId: string): Promise<{ status: string }> {
+    const response = await this.axios.post(`/workflows/${workflowId}/archive`);
+    return response.data;
+  }
+
+  // ── Follow-up & Sharing ──────────────────────────────────
+
+  async followUpRun(runId: string, question: string): Promise<Response> {
+    const token = this.getAccessToken();
+    return fetch(`${API_URL}/workflows/runs/${runId}/follow-up`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ question }),
+    });
+  }
+
+  async shareRun(runId: string, userIds: string[], message?: string): Promise<{ status: string; shared_with: string[] }> {
+    const response = await this.axios.post(`/workflows/runs/${runId}/share`, {
+      user_ids: userIds,
+      message,
+    });
+    return response.data;
+  }
+
+  async shareRunWithOrg(runId: string, message?: string): Promise<{ status: string; organization_id: string }> {
+    const response = await this.axios.post(`/workflows/runs/${runId}/share-org`, { message });
+    return response.data;
+  }
+
+  async getWorkflowCatalog(params?: { category?: string; output_type?: string; search?: string }): Promise<any[]> {
+    const searchParams = new URLSearchParams();
+    if (params?.category) searchParams.set('category', params.category);
+    if (params?.output_type) searchParams.set('output_type', params.output_type);
+    if (params?.search) searchParams.set('search', params.search);
+    const response = await this.axios.get(`/workflows/catalog?${searchParams.toString()}`);
+    return response.data;
+  }
+
+  async cloneWorkflowTemplate(templateId: string): Promise<WorkflowResponse> {
+    const response = await this.axios.post(`/workflows/${templateId}/clone`);
+    return response.data;
+  }
+
+  async improveWorkflow(workflowId: string): Promise<{ suggestions: any[]; summary: string }> {
+    const response = await this.axios.post(`/workflows/${workflowId}/improve`);
+    return response.data;
+  }
+
+  // ===========================================================================
+  // Corpus
+  // ===========================================================================
+
+  async getCorpusStats(): Promise<any> {
+    const response = await this.axios.get('/corpus/stats');
+    return response.data;
+  }
+
+  async getCorpusCollections(): Promise<any[]> {
+    const response = await this.axios.get('/corpus/collections');
+    return response.data;
+  }
+
+  async getCorpusDocuments(params?: {
+    scope?: string;
+    group_id?: string;
+    collection?: string;
+    status?: string;
+    search?: string;
+    page?: number;
+    per_page?: number;
+  }): Promise<any> {
+    const response = await this.axios.get('/corpus/documents', { params });
+    return response.data;
+  }
+
+  async ingestCorpusDocuments(data: {
+    document_ids: string[];
+    collection: string;
+    scope: string;
+    jurisdiction?: string;
+    source_id?: string;
+    group_ids?: string[];
+  }): Promise<any> {
+    const response = await this.axios.post('/corpus/ingest', data);
+    return response.data;
+  }
+
+  async getCorpusRegionalSources(): Promise<{
+    sources: Array<{
+      id: string;
+      label: string;
+      jurisdiction: string;
+      collections: string[];
+      domains: string[];
+      description?: string | null;
+      status?: string | null;
+      sync?: string | null;
+    }>;
+    jurisdictions: string[];
+    updated_at?: string | null;
+  }> {
+    const response = await this.axios.get('/corpus/sources/regional');
+    return response.data;
+  }
+
+  async deleteCorpusDocument(documentId: string): Promise<any> {
+    const response = await this.axios.delete(`/corpus/documents/${documentId}`);
+    return response.data;
+  }
+
+  async promoteCorpusDocument(documentId: string): Promise<any> {
+    const response = await this.axios.post(`/corpus/documents/${documentId}/promote`);
+    return response.data;
+  }
+
+  async extendCorpusDocumentTTL(documentId: string, days: number): Promise<any> {
+    const response = await this.axios.post(`/corpus/documents/${documentId}/extend-ttl`, { days });
+    return response.data;
+  }
+
+  // ===========================================================================
+  // Corpus Projects
+  // ===========================================================================
+
+  async createCorpusProject(data: {
+    name: string;
+    description?: string;
+    is_knowledge_base?: boolean;
+    scope?: string;
+    max_documents?: number;
+    retention_days?: number | null;
+    metadata?: Record<string, any>;
+  }): Promise<any> {
+    const response = await this.axios.post('/corpus/projects', data);
+    return response.data;
+  }
+
+  async getCorpusProjects(params?: {
+    scope?: string;
+    is_knowledge_base?: boolean;
+    search?: string;
+    page?: number;
+    per_page?: number;
+  }): Promise<any> {
+    const response = await this.axios.get('/corpus/projects', { params });
+    return response.data;
+  }
+
+  async getCorpusProject(projectId: string): Promise<any> {
+    const response = await this.axios.get(`/corpus/projects/${projectId}`);
+    return response.data;
+  }
+
+  async updateCorpusProject(projectId: string, data: {
+    name?: string;
+    description?: string;
+    is_knowledge_base?: boolean;
+    max_documents?: number;
+    retention_days?: number | null;
+    metadata?: Record<string, any>;
+  }): Promise<any> {
+    const response = await this.axios.put(`/corpus/projects/${projectId}`, data);
+    return response.data;
+  }
+
+  async deleteCorpusProject(projectId: string): Promise<any> {
+    const response = await this.axios.delete(`/corpus/projects/${projectId}`);
+    return response.data;
+  }
+
+  async addDocumentsToCorpusProject(projectId: string, documentIds: string[], folderPath?: string): Promise<any> {
+    const response = await this.axios.post(`/corpus/projects/${projectId}/documents`, {
+      document_ids: documentIds,
+      folder_path: folderPath,
+    });
+    return response.data;
+  }
+
+  async removeDocumentFromCorpusProject(projectId: string, documentId: string): Promise<any> {
+    const response = await this.axios.delete(`/corpus/projects/${projectId}/documents/${documentId}`);
+    return response.data;
+  }
+
+  async getCorpusProjectFolders(projectId: string): Promise<any> {
+    const response = await this.axios.get(`/corpus/projects/${projectId}/folders`);
+    return response.data;
+  }
+
+  async createCorpusProjectFolder(projectId: string, folderPath: string): Promise<any> {
+    const response = await this.axios.post(`/corpus/projects/${projectId}/folders`, {
+      folder_path: folderPath,
+    });
+    return response.data;
+  }
+
+  async getCorpusProjectDocuments(projectId: string, params?: {
+    folder?: string;
+    status?: string;
+    sort?: string;
+    page?: number;
+    per_page?: number;
+  }): Promise<any> {
+    const response = await this.axios.get(`/corpus/projects/${projectId}/documents`, { params });
+    return response.data;
+  }
+
+  async moveCorpusProjectDocument(projectId: string, documentId: string, folderPath: string | null): Promise<any> {
+    const response = await this.axios.patch(`/corpus/projects/${projectId}/documents/${documentId}/move`, {
+      folder_path: folderPath,
+    });
+    return response.data;
+  }
+
+  async shareCorpusProject(projectId: string, data: {
+    shared_with_user_id?: string;
+    shared_with_org_id?: string;
+    permission?: string;
+  }): Promise<any> {
+    const response = await this.axios.post(`/corpus/projects/${projectId}/share`, data);
+    return response.data;
+  }
+
+  async unshareCorpusProject(projectId: string, shareId: string): Promise<any> {
+    const response = await this.axios.delete(`/corpus/projects/${projectId}/share/${shareId}`);
+    return response.data;
+  }
+
+  async transferCorpusProject(projectId: string, newOwnerId: string): Promise<any> {
+    const response = await this.axios.post(`/corpus/projects/${projectId}/transfer`, {
+      new_owner_id: newOwnerId,
+    });
+    return response.data;
+  }
+
+  // ===========================================================================
+  // Corpus Admin
+  // ===========================================================================
+
+  async getCorpusAdminOverview(): Promise<any> {
+    const response = await this.axios.get('/corpus/admin/overview');
+    return response.data;
+  }
+
+  async getCorpusAdminUsers(params?: { skip?: number; limit?: number }): Promise<any> {
+    const response = await this.axios.get('/corpus/admin/users', { params });
+    return response.data;
+  }
+
+  async getCorpusAdminUserDocuments(
+    userId: string,
+    params?: { scope?: string; collection?: string; status?: string; skip?: number; limit?: number }
+  ): Promise<any> {
+    const response = await this.axios.get(`/corpus/admin/users/${userId}/documents`, { params });
+    return response.data;
+  }
+
+  async transferCorpusDocument(documentId: string, newOwnerId: string): Promise<any> {
+    const response = await this.axios.post(`/corpus/admin/transfer/${documentId}`, {
+      new_owner_id: newOwnerId,
+    });
+    return response.data;
+  }
+
+  async getCorpusAdminActivity(params?: {
+    skip?: number;
+    limit?: number;
+    user_id?: string;
+    action?: string;
+  }): Promise<any> {
+    const response = await this.axios.get('/corpus/admin/activity', { params });
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // DMS (Document Management System)
+  // ---------------------------------------------------------------------------
+
+  async getDMSProviders(): Promise<any> {
+    const response = await this.axios.get('/dms/providers');
+    return response.data;
+  }
+
+  async startDMSConnect(provider: string, displayName?: string, redirectUrl?: string): Promise<any> {
+    const response = await this.axios.post('/dms/connect', {
+      provider,
+      display_name: displayName || '',
+      redirect_url: redirectUrl,
+    });
+    return response.data;
+  }
+
+  async getDMSIntegrations(): Promise<any> {
+    const response = await this.axios.get('/dms/integrations');
+    return response.data;
+  }
+
+  async disconnectDMS(integrationId: string): Promise<void> {
+    await this.axios.delete(`/dms/integrations/${integrationId}`);
+  }
+
+  async getDMSFiles(
+    integrationId: string,
+    params?: { folder_id?: string; page_token?: string; query?: string }
+  ): Promise<any> {
+    const response = await this.axios.get(`/dms/integrations/${integrationId}/files`, { params });
+    return response.data;
+  }
+
+  async importDMSFiles(
+    integrationId: string,
+    body: { file_ids: string[]; target_corpus_project_id?: string }
+  ): Promise<any> {
+    const response = await this.axios.post(`/dms/integrations/${integrationId}/import`, body);
+    return response.data;
+  }
+
+  async triggerDMSSync(integrationId: string, folderIds?: string[]): Promise<any> {
+    const response = await this.axios.post(`/dms/integrations/${integrationId}/sync`, {
+      folder_ids: folderIds || null,
+    });
+    return response.data;
+  }
+
+  // ── Dashboard ────────────────────────────────────────────────────────
+
+  async getDashboardRecentActivity(): Promise<{
+    recent_playbooks: Array<{ id: string; name: string; updated_at: string; rule_count: number }>;
+    recent_corpus_projects: Array<{ id: string; name: string; document_count: number; updated_at: string }>;
+    recent_chats: Array<{ id: string; title: string; updated_at: string }>;
+    recent_review_tables: Array<{ id: string; name: string; status: string; processed_documents: number; total_documents: number }>;
+    stats: { total_playbooks: number; total_corpus_docs: number; total_chats: number; total_review_tables: number };
+  }> {
+    const response = await this.axios.get('/dashboard/recent-activity');
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Audit Logs (Admin)
+  // ---------------------------------------------------------------------------
+
+  async getAuditLogs(params?: {
+    user_id?: string;
+    action?: string;
+    resource_type?: string;
+    resource_id?: string;
+    date_from?: string;
+    date_to?: string;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<{
+    items: Array<{
+      id: string;
+      user_id: string;
+      user_name: string | null;
+      user_email: string | null;
+      action: string;
+      resource_type: string;
+      resource_id: string | null;
+      details: Record<string, unknown> | null;
+      ip_address: string | null;
+      created_at: string;
+    }>;
+    total: number;
+    limit: number;
+    offset: number;
+  }> {
+    const response = await this.axios.get('/audit-logs', { params });
+    return response.data;
+  }
+
+  async exportAuditLogsCsv(params?: {
+    user_id?: string;
+    action?: string;
+    resource_type?: string;
+    date_from?: string;
+    date_to?: string;
+  }): Promise<Blob> {
+    const response = await this.axios.get('/audit-logs/export', {
+      params,
+      responseType: 'blob',
+    });
+    return response.data;
+  }
+
+  async getAuditLogStats(days?: number): Promise<{
+    period_days: number;
+    total: number;
+    by_action: Record<string, number>;
+    by_resource_type: Record<string, number>;
+    top_users: Array<{ user_id: string; name: string; count: number }>;
+  }> {
+    const response = await this.axios.get('/audit-logs/stats', {
+      params: { days: days || 30 },
+    });
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Enhanced DMS (provider-level endpoints)
+  // ---------------------------------------------------------------------------
+
+  async connectDMSProvider(provider: string, params?: {
+    display_name?: string;
+    redirect_url?: string;
+    server_url?: string;
+    library?: string;
+  }): Promise<{ auth_url: string; state: string }> {
+    const response = await this.axios.post(`/dms/connect/${provider}`, {
+      provider,
+      ...params,
+    });
+    return response.data;
+  }
+
+  async getDMSFilesByProvider(
+    provider: string,
+    params?: { path?: string; page_token?: string; query?: string }
+  ): Promise<any> {
+    const response = await this.axios.get(`/dms/${provider}/files`, { params });
+    return response.data;
+  }
+
+  async importDMSFilesByProvider(
+    provider: string,
+    body: { file_ids: string[]; target_corpus_project_id?: string }
+  ): Promise<any> {
+    const response = await this.axios.post(`/dms/${provider}/import`, body);
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Review Tables API
+  // ---------------------------------------------------------------------------
+
+  // Table operations
+  async getReviewTable(tableId: string): Promise<any> {
+    const response = await this.axios.get(`/review-tables/${tableId}`);
+    return response.data;
+  }
+
+  async listReviewTables(skip = 0, limit = 50): Promise<{ tables: any[]; total: number }> {
+    const response = await this.axios.get('/review-tables/', {
+      params: { skip, limit },
+    });
+    // Backend returns { items: [...], total } but we normalize to { tables: [...], total }
+    const data = response.data;
+    return {
+      tables: data.items || data.tables || [],
+      total: data.total || 0,
+    };
+  }
+
+  async createReviewTable(data: {
+    name: string;
+    description?: string;
+    document_ids?: string[];
+  }): Promise<any> {
+    const response = await this.axios.post('/review-tables/', data);
+    return response.data;
+  }
+
+  async deleteReviewTable(tableId: string): Promise<void> {
+    await this.axios.delete(`/review-tables/${tableId}`);
+  }
+
+  async getReviewTableDocuments(tableId: string): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/documents`);
+    return response.data;
+  }
+
+  async addDocumentsToReviewTable(
+    tableId: string,
+    documentIds: string[]
+  ): Promise<any> {
+    const response = await this.axios.post(`/review-tables/${tableId}/documents`, {
+      document_ids: documentIds,
+    });
+    return response.data;
+  }
+
+  async removeDocumentFromReviewTable(
+    tableId: string,
+    documentId: string
+  ): Promise<void> {
+    await this.axios.delete(`/review-tables/${tableId}/documents/${documentId}`);
+  }
+
+  // Dynamic Columns
+  async createDynamicColumn(
+    tableId: string,
+    prompt: string,
+    name?: string,
+    extractionType?: string
+  ): Promise<any> {
+    const response = await this.axios.post(`/review-tables/${tableId}/dynamic-columns`, {
+      prompt,
+      name,
+      extraction_type: extractionType,
+    });
+    return response.data;
+  }
+
+  async listDynamicColumns(tableId: string): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/dynamic-columns`);
+    return response.data?.items ?? response.data ?? [];
+  }
+
+  async updateDynamicColumn(
+    tableId: string,
+    columnId: string,
+    data: { name?: string; is_visible?: boolean; order_index?: number }
+  ): Promise<any> {
+    const response = await this.axios.patch(
+      `/review-tables/${tableId}/dynamic-columns/${columnId}`,
+      data
+    );
+    return response.data;
+  }
+
+  async deleteDynamicColumn(tableId: string, columnId: string): Promise<void> {
+    await this.axios.delete(`/review-tables/${tableId}/dynamic-columns/${columnId}`);
+  }
+
+  async reprocessColumn(tableId: string, columnId: string): Promise<any> {
+    const response = await this.axios.post(
+      `/review-tables/${tableId}/dynamic-columns/${columnId}/reprocess`
+    );
+    return response.data;
+  }
+
+  async reorderColumns(tableId: string, columnIds: string[]): Promise<void> {
+    await this.axios.post(`/review-tables/${tableId}/dynamic-columns/reorder`, {
+      column_ids: columnIds,
+    });
+  }
+
+  // Cell operations
+  async getReviewTableCells(
+    tableId: string,
+    options?: { column_id?: string; document_id?: string }
+  ): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/cells`, {
+      params: options,
+    });
+    return response.data;
+  }
+
+  async verifyCell(
+    tableId: string,
+    cellId: string,
+    verified: boolean,
+    correction?: string
+  ): Promise<any> {
+    const response = await this.axios.patch(`/review-tables/${tableId}/cells/${cellId}/verify`, {
+      verified,
+      correction,
+    });
+    return response.data;
+  }
+
+  async bulkVerifyCells(
+    tableId: string,
+    cellIds: string[],
+    verified: boolean
+  ): Promise<number> {
+    const response = await this.axios.post(`/review-tables/${tableId}/cells/bulk-verify`, {
+      cell_ids: cellIds,
+      verified,
+    });
+    return response.data.count;
+  }
+
+  async getVerificationStats(tableId: string): Promise<any> {
+    const response = await this.axios.get(`/review-tables/${tableId}/verification-stats`);
+    return response.data;
+  }
+
+  async getLowConfidenceCells(tableId: string, threshold = 0.5): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/cells/low-confidence`, {
+      params: { threshold },
+    });
+    return response.data;
+  }
+
+  // Ask Table (Chat)
+  async askTable(
+    tableId: string,
+    question: string,
+    includeSources = true
+  ): Promise<any> {
+    const response = await this.axios.post(`/review-tables/${tableId}/ask`, {
+      question,
+      include_sources: includeSources,
+    });
+    return response.data;
+  }
+
+  async getTableChatHistory(tableId: string, limit = 50): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/chat-history`, {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  async clearTableChatHistory(tableId: string): Promise<void> {
+    await this.axios.delete(`/review-tables/${tableId}/chat-history`);
+  }
+
+  // Extraction Jobs
+  async startExtraction(
+    tableId: string,
+    columnIds?: string[]
+  ): Promise<any> {
+    const response = await this.axios.post(`/review-tables/${tableId}/extract`, {
+      column_ids: columnIds,
+    });
+    return response.data;
+  }
+
+  async getExtractionJob(tableId: string, jobId: string): Promise<any> {
+    const response = await this.axios.get(`/review-tables/${tableId}/jobs/${jobId}`);
+    return response.data;
+  }
+
+  async listExtractionJobs(tableId: string, limit = 10): Promise<any[]> {
+    const response = await this.axios.get(`/review-tables/${tableId}/jobs`, {
+      params: { limit },
+    });
+    return response.data;
+  }
+
+  async pauseExtractionJob(tableId: string, jobId: string): Promise<void> {
+    await this.axios.post(`/review-tables/${tableId}/jobs/${jobId}/pause`);
+  }
+
+  async resumeExtractionJob(tableId: string, jobId: string): Promise<void> {
+    await this.axios.post(`/review-tables/${tableId}/jobs/${jobId}/resume`);
+  }
+
+  async cancelExtractionJob(tableId: string, jobId: string): Promise<void> {
+    await this.axios.post(`/review-tables/${tableId}/jobs/${jobId}/cancel`);
+  }
+
+  // Column preview (for testing extraction on sample)
+  async previewColumnExtraction(
+    tableId: string,
+    prompt: string,
+    sampleDocumentId?: string
+  ): Promise<{ suggested_name: string; extraction_type: string; sample_value: any }> {
+    const response = await this.axios.post(`/review-tables/${tableId}/columns/preview`, {
+      prompt,
+      sample_document_id: sampleDocumentId,
+    });
+    return response.data;
+  }
+
+  // Export
+  async exportReviewTable(
+    tableId: string,
+    format: 'csv' | 'xlsx' | 'json' = 'csv'
+  ): Promise<Blob> {
+    const response = await this.axios.get(`/review-tables/${tableId}/export`, {
+      params: { format },
+      responseType: 'blob',
+    });
+    return response.data;
   }
 }
 

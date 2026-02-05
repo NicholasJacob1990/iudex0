@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Pesquise jurisprudência sobre... jurisprudência",
+  "total": 5,
+  "results": [
+    {
+      "title": "Jurisprudência | Pesquisar e Consultar no Jusbrasil",
+      "url": "https://www.jusbrasil.com.br/jurisprudencia/",
+      "snippet": "Ao pesquisarjurisprudência, cada minuto conta. Em vez de acessar tribunal por tribunal, use a busca do Jusbrasil e encontre milhões de decisões já reunidas em um só lugar. São julgados do STF, STJ, Tribunais de Justiça, TRFs, TRTs e até órgãos administrativos, todos acessíveis em segundos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Pesquisa de Jurisprudência",
+      "url": "https://www.stj.jus.br/sites/portalp/paginas/Sob-medida/Advogado/Jurisprudencia/Pesquisa-de-Jurisprudencia.aspx",
+      "snippet": "Aqui você encontra ajurisprudênciado STJ disponível nas bases de acórdãos, súmulas, decisões monocráticas e Informativo deJurisprudência. Também é possível consultar alguns acórdãos do extinto Tribunal Federal de Recursos - TFR.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Jurisprudência | Portal TCU",
+      "url": "https://portal.tcu.gov.br/jurisprudencia",
+      "snippet": "JurisprudênciaJurisprudênciaAqui você encontrará informaçõessobrea Pesquisa e Publicações deJurisprudência. As Publicações apresentam em enunciado direto e conciso, o entendimento das decisões do TCU.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Jurisprudência - TST",
+      "url": "https://www.tst.jus.br/jurisprudencia",
+      "snippet": "Este site utiliza cookies para melhorar sua experiência. Saiba maissobrecookies e nossa política de privacidade, clicando aqui.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Pesquisar Jurisprudência do STJ (Superior Tribunal de Justiça)",
+      "url": "https://www.jusbrasil.com.br/jurisprudencia/stj/",
+      "snippet": "Você pode consultar e pesquisar aJurisprudênciade mais de 96 tribunais, inclusive do Supremo Tribunal Federal (STF) e dos Tribunais Superiores (STJ, TST, TSE, TSM), em uma busca unificada, diretamente no campo Jusbrasil.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-02-05T03:18:14.091596"
+}

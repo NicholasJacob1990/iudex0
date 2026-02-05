@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.time_utils import utcnow
 from app.models.user import User
+from app.models.guest_session import GuestSession
 
 # Contexto para hashing de senhas
 #
@@ -162,6 +163,175 @@ async def get_current_user(
         )
         
     return user
+
+
+async def get_current_user_optional(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> Optional[User]:
+    """
+    Dependency que retorna o usuário atual se autenticado, ou None caso contrário.
+    Usado em endpoints que aceitam acesso público opcionalmente.
+    """
+    if credentials is None:
+        return None
+    try:
+        token = credentials.credentials
+        payload = jwt.decode(
+            token,
+            settings.JWT_SECRET_KEY,
+            algorithms=[settings.JWT_ALGORITHM],
+        )
+        if payload.get("type") != "access":
+            return None
+        user_id = payload.get("sub")
+        if not user_id:
+            return None
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user or not user.is_active:
+            return None
+        return user
+    except JWTError:
+        return None
+
+
+def create_guest_token(guest_session: GuestSession) -> str:
+    """
+    Cria token JWT para sessao guest com claims especificos.
+    """
+    expire = guest_session.expires_at
+    to_encode = {
+        "sub": guest_session.id,
+        "type": "access",
+        "is_guest": True,
+        "space_id": guest_session.space_id,
+        "permissions": guest_session.permissions.get("permissions", ["read"]),
+        "exp": expire,
+    }
+    encoded_jwt = jwt.encode(
+        to_encode,
+        settings.JWT_SECRET_KEY,
+        algorithm=settings.JWT_ALGORITHM,
+    )
+    return encoded_jwt
+
+
+@dataclass
+class UserOrGuest:
+    """Wrapper que pode conter um User autenticado ou uma GuestSession."""
+    user: Optional[User] = None
+    guest: Optional[GuestSession] = None
+
+    @property
+    def is_guest(self) -> bool:
+        return self.guest is not None
+
+    @property
+    def is_authenticated(self) -> bool:
+        return self.user is not None
+
+    @property
+    def display_name(self) -> str:
+        if self.user:
+            return self.user.name
+        if self.guest:
+            return self.guest.display_name
+        return "Desconhecido"
+
+    @property
+    def subject_id(self) -> str:
+        """ID do sujeito (user_id ou guest_session_id)."""
+        if self.user:
+            return self.user.id
+        if self.guest:
+            return self.guest.id
+        return ""
+
+
+async def get_current_user_or_guest(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> UserOrGuest:
+    """
+    Dependency que aceita tanto JWT de usuario regular quanto JWT de guest.
+    Retorna UserOrGuest para que endpoints possam distinguir.
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Autenticacao necessaria",
+        )
+
+    token = credentials.credentials
+    payload = decode_token(token)
+
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Tipo de token invalido",
+        )
+
+    subject_id = payload.get("sub")
+    if not subject_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalido",
+        )
+
+    # Verificar se e token de guest
+    if payload.get("is_guest"):
+        result = await db.execute(
+            select(GuestSession).where(
+                GuestSession.id == subject_id,
+                GuestSession.is_active == True,  # noqa: E712
+            )
+        )
+        guest = result.scalar_one_or_none()
+        if not guest:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sessao de visitante nao encontrada",
+            )
+        if guest.is_expired:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Sessao de visitante expirada",
+            )
+        # Atualizar last_accessed_at
+        guest.last_accessed_at = utcnow()
+        return UserOrGuest(guest=guest)
+
+    # Token de usuario regular
+    result = await db.execute(select(User).where(User.id == subject_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Usuario nao encontrado",
+        )
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Usuario inativo",
+        )
+    return UserOrGuest(user=user)
+
+
+async def require_authenticated_user(
+    auth: UserOrGuest = Depends(get_current_user_or_guest),
+) -> User:
+    """
+    Dependency que rejeita guests — somente usuarios autenticados.
+    Use em endpoints de escrita ou operacoes que exigem conta real.
+    """
+    if auth.is_guest:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Esta operacao requer uma conta autenticada. Visitantes nao tem permissao.",
+        )
+    assert auth.user is not None
+    return auth.user
 
 
 async def get_current_user_from_refresh_token(

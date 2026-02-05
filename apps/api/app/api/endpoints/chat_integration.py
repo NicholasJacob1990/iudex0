@@ -1,5 +1,6 @@
 
 from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
@@ -55,7 +56,8 @@ async def chat_message(
         )
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Erro no chat: {str(e)}")
+        logger.error(f"Erro no processamento do chat: {e}")
+        raise HTTPException(status_code=500, detail="Erro no processamento do chat")
 
 @router.post("/export-to-case")
 async def export_to_case(

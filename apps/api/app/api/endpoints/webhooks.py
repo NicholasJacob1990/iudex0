@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request, status
 from loguru import logger
 
+from app.core.config import settings
 from app.schemas.tribunais import WebhookEvent, WebhookResponse
 
 router = APIRouter()
@@ -104,13 +105,20 @@ async def tribunais_webhook(
 
     O processamento é feito em background para não bloquear a resposta.
     """
-    # TODO: Validar webhook secret em produção
-    # expected_secret = settings.TRIBUNAIS_WEBHOOK_SECRET
-    # if expected_secret and x_webhook_secret != expected_secret:
-    #     raise HTTPException(
-    #         status_code=status.HTTP_401_UNAUTHORIZED,
-    #         detail="Invalid webhook secret",
-    #     )
+    # Validate webhook secret
+    expected_secret = getattr(settings, "TRIBUNAIS_WEBHOOK_SECRET", None)
+    if expected_secret:
+        if x_webhook_secret != expected_secret:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid webhook secret",
+            )
+    else:
+        logger.warning(
+            "TRIBUNAIS_WEBHOOK_SECRET not configured. "
+            "Webhook requests are not being validated. "
+            "Set TRIBUNAIS_WEBHOOK_SECRET in production."
+        )
 
     logger.info(
         f"Webhook tribunais recebido: job={event.job_id}, "

@@ -78,6 +78,9 @@ export default function ResearchPage() {
                 description="A VORBIUM Research combina legislação, jurisprudência, regulamentos e documentos internos para produzir insights jurídicos confiáveis, com fontes claras e escopo definido."
                 primaryCtaText="Explorar Research"
                 primaryCtaLink="/demo"
+                worklet="grid-pulse"
+                workletColor="#3b82f6"
+                workletSeed={71}
             />
 
             {/* Seção: O problema real */}

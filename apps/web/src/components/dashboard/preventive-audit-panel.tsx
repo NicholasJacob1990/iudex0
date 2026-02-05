@@ -25,6 +25,9 @@ interface PreventiveAuditPanelProps {
     onRecompute?: () => void;
     canRecompute?: boolean;
     onReload?: () => void;
+    // Consolidated audit data (from audit_summary.json)
+    consolidatedScore?: number | null;
+    consolidatedStatus?: string | null;
 }
 
 const formatCount = (value?: number | null) => {
@@ -55,6 +58,8 @@ export function PreventiveAuditPanel({
     onRecompute,
     canRecompute = false,
     onReload,
+    consolidatedScore,
+    consolidatedStatus,
 }: PreventiveAuditPanelProps) {
     const effectiveRecommendation = recommendation ?? audit?.recomendacao_hil ?? null;
     const resolvedStatus = useMemo(

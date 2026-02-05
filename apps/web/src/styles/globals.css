@@ -225,6 +225,17 @@
 }
 
 @layer components {
+  /* Tipografia cinematográfica — Harvey.ai style */
+  .heading-display {
+    letter-spacing: -0.02em;
+    line-height: 0.95;
+  }
+
+  .heading-section {
+    letter-spacing: -0.015em;
+    line-height: 1.1;
+  }
+
   .glass-panel {
     @apply bg-card/85 border border-white/60 shadow-soft backdrop-blur-xl;
   }
@@ -238,7 +249,7 @@
   }
 
   .panel-card {
-    @apply rounded-3xl bg-card p-6 shadow-soft border border-white/70;
+    @apply rounded-3xl bg-card p-6 shadow-soft border border-white/70 dark:border-slate-700/70;
   }
 
   .chip {
@@ -246,7 +257,7 @@
   }
 
   .chat-markdown {
-    @apply text-[16px] md:text-[17px] leading-[1.85] text-slate-900;
+    @apply text-[16px] md:text-[17px] leading-[1.85] text-slate-900 dark:text-slate-100;
   }
 
   .chat-markdown p {
@@ -270,36 +281,61 @@
   }
 
   .chat-markdown blockquote {
-    @apply mb-3 border-l-2 border-slate-300 pl-3 text-slate-700;
+    @apply mb-3 border-l-2 border-slate-300 dark:border-slate-600 pl-3 text-slate-700 dark:text-slate-300;
   }
 
-  .chat-markdown pre {
-    @apply my-3 overflow-auto rounded-md bg-slate-100 p-4 text-[12px] leading-relaxed;
+  .chat-markdown .code-block-wrapper {
+    @apply my-3 rounded-lg overflow-hidden border border-slate-200 dark:border-slate-700;
+  }
+
+  .chat-markdown .code-block-header {
+    @apply flex items-center justify-between px-4 py-1.5 bg-slate-800 dark:bg-slate-900 text-slate-400;
+  }
+
+  .chat-markdown .code-block-lang {
+    @apply text-[11px] font-medium uppercase tracking-wide;
+  }
+
+  .chat-markdown .code-block-copy {
+    @apply flex items-center gap-1 text-[11px] text-slate-400 hover:text-white transition-colors cursor-pointer bg-transparent border-0 p-1 rounded;
+  }
+
+  .chat-markdown .code-block-wrapper pre {
+    @apply m-0 overflow-auto rounded-none bg-slate-900 dark:bg-slate-950 p-4 text-[12px] leading-relaxed text-slate-100;
+  }
+
+  .chat-markdown .code-block-wrapper pre code {
+    @apply bg-transparent p-0 text-[12px] text-slate-100;
+  }
+
+  /* Fallback for code blocks without wrapper (e.g. inline) */
+  .chat-markdown pre:not(.code-block-wrapper pre) {
+    @apply my-3 overflow-auto rounded-md bg-slate-900 dark:bg-slate-950 p-4 text-[12px] leading-relaxed text-slate-100;
   }
 
   .chat-markdown code {
-    @apply rounded bg-slate-100 px-1 py-0.5 text-[12px];
+    @apply rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[12px];
   }
 
   .chat-markdown pre code {
-    @apply bg-transparent p-0 text-[12px];
+    @apply bg-transparent p-0 text-[12px] text-slate-100;
   }
 
   .chat-markdown table {
-    @apply my-3 w-full border-collapse border border-slate-200 text-[12px];
+    @apply my-3 w-full border-collapse border border-slate-200 dark:border-slate-700 text-[12px];
   }
 
   .chat-markdown th,
   .chat-markdown td {
-    @apply border border-slate-200 px-2 py-1 align-top;
+    @apply border border-slate-200 dark:border-slate-700 px-2 py-1 align-top;
   }
 
   .chat-markdown th {
-    @apply bg-slate-100 font-semibold;
+    @apply bg-slate-100 dark:bg-slate-800 font-semibold;
   }
 
   .chat-markdown hr {
-    @apply my-4 border-slate-200;
+    @apply my-4 border-slate-200 dark:border-slate-700;
   }
 
   .chat-markdown strong {
@@ -311,11 +347,11 @@
   }
 
   .chat-markdown a {
-    @apply text-blue-600 underline underline-offset-2;
+    @apply text-blue-600 dark:text-blue-400 underline underline-offset-2;
   }
 
   .chat-markdown .citation-inline {
-    @apply align-super text-[10px] ml-0.5 px-1 py-0.5 rounded border border-slate-200 bg-slate-100 text-slate-600;
+    @apply align-super text-[10px] ml-0.5 px-1 py-0.5 rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400;
   }
 
   .chat-markdown h1 {
@@ -341,7 +377,7 @@
   }
 
   .tiptap-code-block-pre {
-    @apply overflow-auto rounded-md bg-slate-100 p-3;
+    @apply overflow-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3;
   }
 
   .tiptap-code-block-content {
@@ -349,23 +385,23 @@
   }
 
   .tiptap-mermaid-block {
-    @apply my-3 rounded-md border border-slate-200 bg-slate-50 p-3 shadow-sm;
+    @apply my-3 rounded-md border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 p-3 shadow-sm;
   }
 
   .tiptap-mermaid-preview {
-    @apply rounded-md bg-white p-2;
+    @apply rounded-md bg-white dark:bg-slate-900 p-2;
   }
 
   .tiptap-mermaid-toolbar {
-    @apply mb-2 flex items-center justify-between text-[11px] text-slate-600;
+    @apply mb-2 flex items-center justify-between text-[11px] text-slate-600 dark:text-slate-400;
   }
 
   .tiptap-mermaid-label {
-    @apply rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-semibold text-slate-700;
+    @apply rounded-full bg-slate-200 dark:bg-slate-700 px-2 py-0.5 text-[10px] font-semibold text-slate-700 dark:text-slate-300;
   }
 
   .tiptap-mermaid-toggle {
-    @apply rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100;
+    @apply rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-700;
   }
 }
 
@@ -385,11 +421,11 @@
 }
 
 .ProseMirror {
-  @apply min-h-[300px] p-4 focus:outline-none overflow-x-auto text-[12px] leading-relaxed text-black;
+  @apply min-h-[300px] p-4 focus:outline-none overflow-x-auto text-[12px] leading-relaxed text-black dark:text-slate-100;
 }
 
 .editor-output {
-  @apply overflow-x-auto text-[12px] leading-relaxed text-black;
+  @apply overflow-x-auto text-[12px] leading-relaxed text-black dark:text-slate-100;
 }
 
 .ProseMirror p.is-editor-empty:first-child::before {
@@ -427,12 +463,12 @@
 
 .ProseMirror pre,
 .editor-output pre {
-  @apply my-3 overflow-auto rounded-md bg-slate-100 p-3 text-[11px] leading-relaxed;
+  @apply my-3 overflow-auto rounded-md bg-slate-100 dark:bg-slate-800 p-3 text-[11px] leading-relaxed;
 }
 
 .ProseMirror code,
 .editor-output code {
-  @apply rounded bg-slate-100 px-1 py-0.5 text-[11px];
+  @apply rounded bg-slate-100 dark:bg-slate-800 px-1 py-0.5 text-[11px];
 }
 
 .ProseMirror pre code,
@@ -442,19 +478,19 @@
 
 .ProseMirror blockquote,
 .editor-output blockquote {
-  @apply mb-3 border-l-2 border-slate-300 pl-3 text-slate-700;
+  @apply mb-3 border-l-2 border-slate-300 dark:border-slate-600 pl-3 text-slate-700 dark:text-slate-300;
 }
 
 .ProseMirror table,
 .editor-output table {
-  @apply w-full border-collapse border border-slate-200 text-[12px];
+  @apply w-full border-collapse border border-slate-200 dark:border-slate-700 text-[12px];
 }
 
 .ProseMirror th,
 .ProseMirror td,
 .editor-output th,
 .editor-output td {
-  @apply border border-slate-200 px-3 py-2 align-top;
+  @apply border border-slate-200 dark:border-slate-700 px-3 py-2 align-top;
 }
 
 .ProseMirror th,
@@ -471,25 +507,25 @@
 .ProseMirror table.table-style-compact,
 .editor-output table.table-style-compact,
 .prose table.table-style-compact {
-  @apply text-[11px] border-slate-300;
+  @apply text-[11px] border-slate-300 dark:border-slate-600;
 }
 
 .ProseMirror table.table-style-compact th,
 .editor-output table.table-style-compact th,
 .prose table.table-style-compact th {
-  @apply bg-slate-100 uppercase tracking-wide text-[10px];
+  @apply bg-slate-100 dark:bg-slate-800 uppercase tracking-wide text-[10px];
 }
 
 .ProseMirror table.table-style-grid,
 .editor-output table.table-style-grid,
 .prose table.table-style-grid {
-  @apply border-2 border-slate-400;
+  @apply border-2 border-slate-400 dark:border-slate-500;
 }
 
 .ProseMirror table.table-style-grid th,
 .editor-output table.table-style-grid th,
 .prose table.table-style-grid th {
-  @apply bg-slate-200 text-slate-800;
+  @apply bg-slate-200 dark:bg-slate-700 text-slate-800 dark:text-slate-200;
 }
 
 .ProseMirror table.table-style-minimal,
@@ -501,19 +537,19 @@
 .ProseMirror table.table-style-minimal th,
 .editor-output table.table-style-minimal th,
 .prose table.table-style-minimal th {
-  @apply bg-transparent text-slate-700;
+  @apply bg-transparent text-slate-700 dark:text-slate-300;
 }
 
 .ProseMirror table.table-style-minimal td,
 .editor-output table.table-style-minimal td,
 .prose table.table-style-minimal td {
-  @apply border-slate-200;
+  @apply border-slate-200 dark:border-slate-700;
 }
 
 .ProseMirror table.table-style-zebra tr:nth-child(even) td,
 .editor-output table.table-style-zebra tr:nth-child(even) td,
 .prose table.table-style-zebra tr:nth-child(even) td {
-  @apply bg-slate-50;
+  @apply bg-slate-50 dark:bg-slate-800/50;
 }
 
 /* ============================
@@ -545,8 +581,15 @@
 .doc-typography {
   --doc-font-family: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --doc-font-size: 15px;
+  --doc-table-font-size: 15px;
   --doc-line-height: 1.6;
   --doc-paragraph-spacing: 16px;
+  --doc-table-header-bg: #f1f5f9;
+  --doc-table-header-text: #1e293b;
+  --doc-table-row-even-bg: #f8fafc;
+  --doc-table-row-odd-bg: #ffffff;
+  --doc-table-cell-text: #334155;
+  --doc-table-border-color: #e2e8f0;
 }
 
 .doc-typography.prose,
@@ -624,7 +667,7 @@
 .doc-typography.prose table,
 .doc-typography .ProseMirror table,
 .doc-typography .editor-output table {
-  font-size: var(--doc-font-size);
+  font-size: var(--doc-table-font-size);
   line-height: var(--doc-line-height);
   width: 100%;
   border-collapse: collapse;
@@ -644,7 +687,7 @@
 .doc-theme-classic .editor-output table,
 .doc-theme-classic .prose table,
 .doc-theme-classic.prose table {
-  @apply border-slate-200;
+  @apply border-slate-200 dark:border-slate-700;
 }
 
 .doc-theme-classic.prose {
@@ -655,28 +698,28 @@
 .doc-theme-classic .editor-output th,
 .doc-theme-classic .prose th,
 .doc-theme-classic.prose th {
-  @apply bg-slate-100 text-slate-800;
+  @apply bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200;
 }
 
 .doc-theme-classic .ProseMirror td,
 .doc-theme-classic .editor-output td,
 .doc-theme-classic .prose td,
 .doc-theme-classic.prose td {
-  @apply text-slate-700;
+  @apply text-slate-700 dark:text-slate-300;
 }
 
 .doc-theme-classic .ProseMirror table tr:nth-child(even) td,
 .doc-theme-classic .editor-output table tr:nth-child(even) td,
 .doc-theme-classic .prose table tr:nth-child(even) td,
 .doc-theme-classic.prose table tr:nth-child(even) td {
-  @apply bg-slate-50;
+  @apply bg-slate-50 dark:bg-slate-800/50;
 }
 
 .doc-theme-minimal .ProseMirror table,
 .doc-theme-minimal .editor-output table,
 .doc-theme-minimal .prose table,
 .doc-theme-minimal.prose table {
-  @apply border-slate-200;
+  @apply border-slate-200 dark:border-slate-700;
 }
 
 .doc-theme-minimal.prose {
@@ -694,7 +737,7 @@
 .doc-theme-minimal .editor-output td,
 .doc-theme-minimal .prose td,
 .doc-theme-minimal.prose td {
-  @apply text-slate-700;
+  @apply text-slate-700 dark:text-slate-300;
 }
 
 .doc-theme-minimal .ProseMirror th,
@@ -705,7 +748,7 @@
 .doc-theme-minimal .prose td,
 .doc-theme-minimal.prose th,
 .doc-theme-minimal.prose td {
-  @apply border-slate-200;
+  @apply border-slate-200 dark:border-slate-700;
 }
 
 .doc-theme-minimal .ProseMirror table tr:nth-child(even) td,
@@ -719,7 +762,7 @@
 .doc-theme-executive .editor-output table,
 .doc-theme-executive .prose table,
 .doc-theme-executive.prose table {
-  @apply border-slate-300;
+  @apply border-slate-300 dark:border-slate-600;
 }
 
 .doc-theme-executive.prose {
@@ -730,28 +773,28 @@
 .doc-theme-executive .editor-output th,
 .doc-theme-executive .prose th,
 .doc-theme-executive.prose th {
-  @apply bg-slate-900 text-white uppercase tracking-wide text-[11px];
+  @apply bg-slate-900 dark:bg-slate-950 text-white uppercase tracking-wide text-[11px];
 }
 
 .doc-theme-executive .ProseMirror td,
 .doc-theme-executive .editor-output td,
 .doc-theme-executive .prose td,
 .doc-theme-executive.prose td {
-  @apply text-slate-800;
+  @apply text-slate-800 dark:text-slate-200;
 }
 
 .doc-theme-executive .ProseMirror table tr:nth-child(even) td,
 .doc-theme-executive .editor-output table tr:nth-child(even) td,
 .doc-theme-executive .prose table tr:nth-child(even) td,
 .doc-theme-executive.prose table tr:nth-child(even) td {
-  @apply bg-slate-50;
+  @apply bg-slate-50 dark:bg-slate-800/50;
 }
 
 .doc-theme-academic .ProseMirror table,
 .doc-theme-academic .editor-output table,
 .doc-theme-academic .prose table,
 .doc-theme-academic.prose table {
-  @apply border-slate-200;
+  @apply border-slate-200 dark:border-slate-700;
 }
 
 .doc-theme-academic.prose {
@@ -762,26 +805,113 @@
 .doc-theme-academic .editor-output th,
 .doc-theme-academic .prose th,
 .doc-theme-academic.prose th {
-  @apply bg-slate-50 text-slate-700;
+  @apply bg-slate-50 dark:bg-slate-800 text-slate-700 dark:text-slate-300;
 }
 
 .doc-theme-academic .ProseMirror td,
 .doc-theme-academic .editor-output td,
 .doc-theme-academic .prose td,
 .doc-theme-academic.prose td {
-  @apply text-slate-700;
+  @apply text-slate-700 dark:text-slate-300;
 }
 
 .doc-theme-academic .ProseMirror table tr:nth-child(even) td,
 .doc-theme-academic .editor-output table tr:nth-child(even) td,
 .doc-theme-academic .prose table tr:nth-child(even) td,
 .doc-theme-academic.prose table tr:nth-child(even) td {
-  @apply bg-white;
+  @apply bg-white dark:bg-slate-900;
+}
+
+/* Tema Compacto Legal - texto 12px, tabelas 11px */
+.doc-theme-legal .ProseMirror table,
+.doc-theme-legal .editor-output table,
+.doc-theme-legal .prose table,
+.doc-theme-legal.prose table {
+  @apply border-slate-300 dark:border-slate-600;
+}
+
+.doc-theme-legal.prose {
+  padding: 2rem;
+}
+
+.doc-theme-legal .ProseMirror th,
+.doc-theme-legal .editor-output th,
+.doc-theme-legal .prose th,
+.doc-theme-legal.prose th {
+  @apply bg-slate-200 dark:bg-slate-700 text-slate-900 dark:text-slate-100 font-semibold;
+}
+
+.doc-theme-legal .ProseMirror td,
+.doc-theme-legal .editor-output td,
+.doc-theme-legal .prose td,
+.doc-theme-legal.prose td {
+  @apply text-slate-800 dark:text-slate-200;
+}
+
+.doc-theme-legal .ProseMirror th,
+.doc-theme-legal .ProseMirror td,
+.doc-theme-legal .editor-output th,
+.doc-theme-legal .editor-output td,
+.doc-theme-legal .prose th,
+.doc-theme-legal .prose td,
+.doc-theme-legal.prose th,
+.doc-theme-legal.prose td {
+  @apply border-slate-300 dark:border-slate-600;
+  padding: 5px 7px;
+}
+
+.doc-theme-legal .ProseMirror table tr:nth-child(even) td,
+.doc-theme-legal .editor-output table tr:nth-child(even) td,
+.doc-theme-legal .prose table tr:nth-child(even) td,
+.doc-theme-legal.prose table tr:nth-child(even) td {
+  @apply bg-slate-100 dark:bg-slate-800/60;
+}
+
+/* Cores customizáveis de tabela via CSS variables */
+.doc-table-colors .ProseMirror table,
+.doc-table-colors .editor-output table,
+.doc-table-colors .prose table,
+.doc-table-colors.prose table {
+  border-color: var(--doc-table-border-color);
+}
+
+.doc-table-colors .ProseMirror th,
+.doc-table-colors .editor-output th,
+.doc-table-colors .prose th,
+.doc-table-colors.prose th {
+  background-color: var(--doc-table-header-bg);
+  color: var(--doc-table-header-text);
+}
+
+.doc-table-colors .ProseMirror td,
+.doc-table-colors .editor-output td,
+.doc-table-colors .prose td,
+.doc-table-colors.prose td {
+  color: var(--doc-table-cell-text);
+  background-color: var(--doc-table-row-odd-bg);
+}
+
+.doc-table-colors .ProseMirror th,
+.doc-table-colors .ProseMirror td,
+.doc-table-colors .editor-output th,
+.doc-table-colors .editor-output td,
+.doc-table-colors .prose th,
+.doc-table-colors .prose td,
+.doc-table-colors.prose th,
+.doc-table-colors.prose td {
+  border-color: var(--doc-table-border-color);
+}
+
+.doc-table-colors .ProseMirror table tr:nth-child(even) td,
+.doc-table-colors .editor-output table tr:nth-child(even) td,
+.doc-table-colors .prose table tr:nth-child(even) td,
+.doc-table-colors.prose table tr:nth-child(even) td {
+  background-color: var(--doc-table-row-even-bg);
 }
 
 .ProseMirror img,
 .editor-output img {
-  @apply max-w-full rounded-lg border border-slate-200 shadow-sm;
+  @apply max-w-full rounded-lg border border-slate-200 dark:border-slate-700 shadow-sm;
 }
 
 ::-webkit-scrollbar {
@@ -943,6 +1073,146 @@
   transform: translateY(-2px);
   box-shadow: 0 35px 120px rgba(15, 23, 42, 0.18);
   border-color: rgba(99, 102, 241, 0.2);
+}
+
+/* ============================
+   Scroll-Driven Animations
+   (Cinematográficas — antigravity.google style)
+   ============================ */
+
+/* Keyframes for scroll-driven animations */
+@keyframes s-fade-up {
+  from { opacity: 0; transform: translateY(40px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes s-scale-in {
+  from { opacity: 0; transform: scale(0.85); filter: blur(8px); }
+  to { opacity: 1; transform: scale(1); filter: blur(0); }
+}
+
+@keyframes s-blur-in {
+  from { opacity: 0; filter: blur(12px); }
+  to { opacity: 1; filter: blur(0); }
+}
+
+@keyframes s-slide-left {
+  from { opacity: 0; transform: translateX(-60px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes s-slide-right {
+  from { opacity: 0; transform: translateX(60px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+/* Chrome/Edge: CSS scroll-driven nativo */
+@supports (animation-timeline: view()) {
+  .scroll-fade-up {
+    animation: s-fade-up linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 80%;
+  }
+
+  .scroll-scale-in {
+    animation: s-scale-in linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 90%;
+  }
+
+  .scroll-blur-in {
+    animation: s-blur-in linear both;
+    animation-timeline: view();
+    animation-range: entry 10% entry 70%;
+  }
+
+  .scroll-slide-left {
+    animation: s-slide-left linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 80%;
+  }
+
+  .scroll-slide-right {
+    animation: s-slide-right linear both;
+    animation-timeline: view();
+    animation-range: entry 0% entry 80%;
+  }
+
+  /* Stagger delays via animation-range offset */
+  .scroll-stagger-1 { animation-range: entry 5% entry 65%; }
+  .scroll-stagger-2 { animation-range: entry 15% entry 75%; }
+  .scroll-stagger-3 { animation-range: entry 25% entry 85%; }
+  .scroll-stagger-4 { animation-range: entry 35% entry 95%; }
+}
+
+/* Fallback for Safari/Firefox — IntersectionObserver adds .in-view */
+@supports not (animation-timeline: view()) {
+  .scroll-fade-up {
+    opacity: 0;
+    transform: translateY(40px);
+    transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+  }
+  .scroll-fade-up.in-view {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .scroll-scale-in {
+    opacity: 0;
+    transform: scale(0.85);
+    filter: blur(8px);
+    transition: opacity 0.7s ease-out, transform 0.7s ease-out, filter 0.7s ease-out;
+  }
+  .scroll-scale-in.in-view {
+    opacity: 1;
+    transform: scale(1);
+    filter: blur(0);
+  }
+
+  .scroll-blur-in {
+    opacity: 0;
+    filter: blur(12px);
+    transition: opacity 0.6s ease-out, filter 0.6s ease-out;
+  }
+  .scroll-blur-in.in-view {
+    opacity: 1;
+    filter: blur(0);
+  }
+
+  .scroll-slide-left {
+    opacity: 0;
+    transform: translateX(-60px);
+    transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+  }
+  .scroll-slide-left.in-view {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .scroll-slide-right {
+    opacity: 0;
+    transform: translateX(60px);
+    transition: opacity 0.6s ease-out, transform 0.6s ease-out;
+  }
+  .scroll-slide-right.in-view {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  /* Stagger delays for IntersectionObserver fallback */
+  .scroll-stagger-1 { transition-delay: 0.1s; }
+  .scroll-stagger-2 { transition-delay: 0.2s; }
+  .scroll-stagger-3 { transition-delay: 0.3s; }
+  .scroll-stagger-4 { transition-delay: 0.4s; }
+}
+
+/* Logo carousel infinite scroll */
+@keyframes logo-scroll {
+  to { transform: translateX(-50%); }
+}
+
+.animate-logo-scroll {
+  animation: logo-scroll 30s linear infinite;
 }
 
 /* ============================

@@ -9,16 +9,15 @@ import {
   Sparkles,
   ChevronDown,
   Paperclip,
-  AtSign,
-  Hash,
   Globe,
   Brain,
-  Zap,
   BookOpen,
   PanelRight,
   FileText,
   ShieldCheck,
   SlidersHorizontal,
+  Columns2,
+  Bookmark,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
@@ -44,6 +43,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { ModelSelector } from './model-selector';
 import { Slider } from '@/components/ui/slider';
 import { useModelAttachmentLimits } from '@/lib/use-model-attachment-limits';
+import { SourcesBadge } from '@/components/chat/sources-badge';
+import { DeepResearchButton } from '@/components/chat/deep-research-button';
+import { ContextUsageBar } from '@/components/chat/context-usage-bar';
 
 type AnyPrompt = PredefinedPrompt | CustomPrompt | SystemCommand;
 
@@ -61,7 +63,6 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { setActiveTab, addItem, items: contextItems } = useContextStore();
-  const [attachmentAdvanced, setAttachmentAdvanced] = useState(false);
   const {
     chatMode,
     selectedModels,
@@ -74,6 +75,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     setMcpServerLabels,
     webSearch,
     setWebSearch,
+    // DEPRECATED: UI moved to SourcesBadge - kept for derived state calculations
     multiQuery,
     setMultiQuery,
     breadthFirst,
@@ -126,6 +128,7 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
     setPerplexityReturnImages,
     perplexityReturnVideos,
     setPerplexityReturnVideos,
+    // DEPRECATED: UI moved to SourcesBadge - kept for derived state
     researchPolicy,
     setResearchPolicy,
     denseResearch,
@@ -171,10 +174,10 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
 	    setSelectedModels,
 	    setChatMode,
     setShowMultiModelComparator,
+    // DEPRECATED: UI moved to SourcesBadge with granular checkboxes
     ragScope,
     setRagScope,
     attachmentMode,
-    setAttachmentMode,
 	    setPendingCanvasContext,
     thesis,
     setThesis,
@@ -292,10 +295,14 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   );
   const isSonarProSelected = primaryModelId === 'sonar-pro';
   const isPerplexityDeepSelected = primaryModelId === 'sonar-deep-research';
+  // Detecta se qualquer modelo Perplexity está selecionado
+  const isAnyPerplexitySelected = isPerplexitySonarSelected || isPerplexityDeepSelected || primaryModelId.includes('sonar');
   const isSharedSearchMode = webSearch && (searchMode === 'shared' || searchMode === 'perplexity');
-  const enableDeepResearchParams = denseResearch && deepResearchProvider === 'perplexity';
+  // Deep Research params: quando modelo sonar-deep-research OU Deep Research ativo com provider Perplexity
+  const enableDeepResearchParams = isPerplexityDeepSelected || (denseResearch && deepResearchProvider === 'perplexity');
   const showPerplexitySonarParams = webSearch && isPerplexitySonarSelected && !isSharedSearchMode;
-  const showPerplexitySearchApiParams = webSearch && isSharedSearchMode && !isPerplexityDeepSelected;
+  // Search API params só para modelos Perplexity (não Deep Research)
+  const showPerplexitySearchApiParams = webSearch && isSharedSearchMode && isAnyPerplexitySelected && !isPerplexityDeepSelected;
   const showSearchFocusInSearchApi = showPerplexitySearchApiParams && !showPerplexitySonarParams;
   const hasModelParamOptions =
     showPerplexitySonarParams || showPerplexitySearchApiParams || enableDeepResearchParams;
@@ -311,10 +318,6 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
   const showThinkingParams = hasSingleModel && !isPerplexitySonarSelected && !isPerplexityDeepSelected;
   const showPerplexitySettings = advancedRagMode && showPerplexitySonarParams;
   const perplexitySettingsEnabled = showPerplexitySonarParams;
-  const contextChipBase =
-    'inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors';
-  const contextChipActive = 'border-emerald-200 bg-emerald-500/10 text-emerald-600';
-  const contextChipInactive = 'border-slate-200 text-slate-500 hover:bg-slate-100';
   const attachmentChipLabel =
     attachmentMode === 'auto'
       ? 'Auto'
@@ -636,64 +639,6 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
             </div>
           </div>
         )}
-        <div className="flex flex-col gap-2 px-2">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setAttachmentMode('rag_local')}
-              className={cn(
-                contextChipBase,
-                attachmentChipActiveState ? contextChipActive : contextChipInactive
-              )}
-            >
-              <BookOpen className="h-3 w-3" />
-              {attachmentChipLabel}
-              <span className="text-[9px] text-muted-foreground/70">({contextCount})</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setWebSearch(!webSearch)}
-              className={cn(contextChipBase, webSearch ? contextChipActive : contextChipInactive)}
-            >
-              <Globe className="h-3 w-3" />
-              Web
-            </button>
-            <button
-              type="button"
-              onClick={() => setDenseResearch(!denseResearch)}
-              className={cn(
-                contextChipBase,
-                denseResearch ? contextChipActive : contextChipInactive
-              )}
-            >
-              <Brain className="h-3 w-3" />
-              Deep research
-            </button>
-            <button
-              type="button"
-              onClick={() => setMcpToolCalling(!mcpToolCalling)}
-              className={cn(
-                contextChipBase,
-                mcpToolCalling ? contextChipActive : contextChipInactive
-              )}
-              title="Permite que o modelo execute ferramentas via conectores MCP"
-            >
-              <Zap className="h-3 w-3" />
-              MCP
-            </button>
-          </div>
-          <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1">
-            <span className="text-[10px] font-semibold uppercase text-muted-foreground">
-              Objetivo
-            </span>
-            <input
-              value={thesis}
-              onChange={(e) => setThesis(e.target.value)}
-              placeholder="Defina a tese/objetivo"
-              className="flex-1 bg-transparent text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none"
-            />
-          </div>
-        </div>
         <textarea
           ref={textareaRef}
           value={content}
@@ -711,20 +656,28 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
 
         <div className="flex flex-wrap items-center gap-2 px-2 pb-1">
           <div className="flex flex-wrap items-center gap-1 min-w-0">
-            {/* Visible toggle (low-friction discovery) */}
-            <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1">
-              <Switch
-                checked={chatMode === 'multi-model'}
-                onCheckedChange={(v) => handleCompareToggle(!!v)}
-                className="scale-75"
-              />
-              <span className="text-[10px] font-semibold text-muted-foreground">
-                Comparar modelos
-              </span>
-              <span className="hidden sm:inline text-[9px] text-muted-foreground/70">
-                2–3 respostas em paralelo
-              </span>
-            </div>
+            {/* Compare models toggle - minimal icon */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => handleCompareToggle(chatMode !== 'multi-model')}
+                    className={cn(
+                      'flex items-center justify-center h-7 w-7 rounded-lg transition-colors',
+                      chatMode === 'multi-model'
+                        ? 'bg-amber-500/15 text-amber-600 border border-amber-300'
+                        : 'text-muted-foreground/60 hover:text-muted-foreground hover:bg-slate-100 border border-transparent'
+                    )}
+                  >
+                    <Columns2 className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs">
+                  {chatMode === 'multi-model' ? 'Desativar comparação' : 'Comparar modelos (2–3 respostas)'}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
 
             <ModelSelector />
 
@@ -732,19 +685,16 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               <PopoverTrigger asChild>
                 <Button
                   variant="ghost"
-                  size="sm"
+                  size="icon"
+                  title={templateName ? `Template: ${templateName}` : 'Selecionar template'}
                   className={cn(
-                    'h-7 gap-1 rounded-full px-2 text-[10px] font-medium transition-colors',
+                    'h-7 w-7 rounded-full transition-colors',
                     templateId
                       ? 'text-emerald-600 bg-emerald-500/10'
                       : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                   )}
                 >
-                  <FileText className="h-3 w-3" />
-                  <span className="max-w-[140px] truncate">
-                    {templateName ? `Template: ${templateName}` : 'Template'}
-                  </span>
-                  <ChevronDown className="h-3 w-3 opacity-50" />
+                  <FileText className="h-3.5 w-3.5" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent className="w-80 p-3 space-y-3" align="start">
@@ -912,14 +862,13 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
                       }
                     }}
                     className={cn(
-                      'h-7 gap-1 rounded-full px-2 text-[10px] font-medium transition-colors',
+                      'h-7 w-7 rounded-full transition-colors',
                       useCanvasStore((s) => s.state) !== 'hidden'
                         ? 'text-emerald-600 bg-emerald-500/10'
                         : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                     )}
                   >
                     <PanelRight className="h-3.5 w-3.5" />
-                    <span className="hidden sm:inline">Canvas</span>
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent side="top" className="text-xs">
@@ -928,977 +877,14 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               </Tooltip>
             </TooltipProvider>
 
-            {/* AI Controls */}
+            {/* Sources & Research Controls - New unified components */}
             <div className="h-4 w-[1px] bg-slate-200 mx-1" />
 
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className={cn(
-                    'h-7 gap-1 rounded-full px-2 text-[10px] font-medium transition-colors',
-                    webSearch || denseResearch
-                      ? 'text-emerald-600 bg-emerald-500/10'
-                      : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                  )}
-                >
-                  {denseResearch ? <Brain className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
-                  {denseResearch ? 'Deep Research' : webSearch ? 'Web Search' : 'Sem Web'}
-                  <ChevronDown className="h-3 w-3 opacity-50" />
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent
-                className="w-80 max-h-[70vh] overflow-y-auto p-4 pr-3 space-y-4 overscroll-contain"
-                align="start"
-                sideOffset={8}
-                collisionPadding={12}
-              >
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex flex-col gap-0.5">
-                        <Label className="text-sm font-medium">Decisão de pesquisa</Label>
-                        <span className="text-xs text-muted-foreground">
-                          Auto pode ativar Web/Deep quando necessário
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setResearchPolicy('auto')}
-                          className={cn(
-                            'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                            researchPolicy === 'auto'
-                              ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                          )}
-                        >
-                          Auto
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setResearchPolicy('force')}
-                          className={cn(
-                            'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                            researchPolicy === 'force'
-                              ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                          )}
-                        >
-                          Manual
-                        </button>
-                      </div>
-                    </div>
-                  </div>
+            {/* SourcesBadge - unified source selector (replaces web search toggle, MCP, RAG scope) */}
+            <SourcesBadge />
 
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-0.5">
-                      <Label className="text-sm font-medium">Web Search</Label>
-                      <span className="text-xs text-muted-foreground">
-                        Contexto de ate 20 fontes (Rápido)
-                      </span>
-                    </div>
-                    <Switch checked={webSearch} onCheckedChange={setWebSearch} />
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-0.5">
-                      <Label className="text-sm font-medium">MCP tools</Label>
-                      <span className="text-xs text-muted-foreground">
-                        Conectores para tools externas (estilo ChatGPT/Claude)
-                      </span>
-                    </div>
-                    <Switch checked={mcpToolCalling} onCheckedChange={setMcpToolCalling} />
-                  </div>
-                  {mcpToolCalling && (
-                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold">Conectores</span>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 px-2 text-[11px]"
-                          onClick={refreshMcpServers}
-                          disabled={mcpServersLoading}
-                        >
-                          {mcpServersLoading ? 'Carregando...' : 'Atualizar'}
-                        </Button>
-                      </div>
-                      {mcpServersLoading ? (
-                        <div className="text-muted-foreground">Carregando conectores...</div>
-                      ) : mcpServers.length > 0 ? (
-                        <div className="space-y-2">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex flex-col">
-                              <span className="font-medium">Usar todos</span>
-                              <span className="text-[11px] text-muted-foreground">
-                                Desative para escolher conectores específicos
-                              </span>
-                            </div>
-                            <Switch checked={mcpUseAllServers} onCheckedChange={setMcpUseAllServers} />
-                          </div>
-
-                          {!mcpUseAllServers && (
-                            <div className="space-y-1">
-                              {mcpServers.map((s) => {
-                                const checked = (mcpServerLabels || []).includes(s.label);
-                                return (
-                                  <div key={s.label} className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <Checkbox
-                                        checked={checked}
-                                        onCheckedChange={(v) => toggleMcpServerLabel(s.label, Boolean(v))}
-                                      />
-                                      <span className="truncate font-medium">{s.label}</span>
-                                    </div>
-                                    <span className="truncate text-[11px] text-muted-foreground">{s.url}</span>
-                                  </div>
-                                );
-                              })}
-                              {(mcpServerLabels || []).length === 0 && (
-                                <div className="text-[11px] text-amber-700">
-                                  Se nenhum conector for selecionado, o MCP fica desativado para esta mensagem.
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      ) : (
-                        <div className="text-muted-foreground">
-                          Nenhum MCP server configurado no backend.
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className={cn('space-y-2', !webSearch && 'opacity-50')}>
-                    <div className="flex items-center gap-2">
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <Label
-                          className={cn('text-sm font-medium', advancedRagMode && 'cursor-help')}
-                        >
-                          Modo de busca
-                        </Label>,
-                        'Define como a busca web é executada no Modo Chat e no Modo Minuta. Compartilhada usa o WebSearchService (Perplexity Search API quando disponível) e repassa o mesmo contexto para todos.',
-                        'right'
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <button
-                          type="button"
-                          disabled={!webSearch}
-                          onClick={() => setSearchMode('shared')}
-                          className={cn(
-                            'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                            searchMode === 'shared'
-                              ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                            !webSearch && 'pointer-events-none'
-                          )}
-                        >
-                          Compartilhada
-                        </button>,
-                        'Uma única busca alimenta todos os modelos. Perplexity Search API quando disponível (com fallback). Mais rápida e consistente.',
-                        'right'
-                      )}
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <button
-                          type="button"
-                          disabled={!webSearch}
-                          onClick={() => setSearchMode('native')}
-                          className={cn(
-                            'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                            searchMode === 'native'
-                              ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                            !webSearch && 'pointer-events-none'
-                          )}
-                        >
-                          Nativa por modelo
-                        </button>,
-                        'Cada modelo usa a busca do próprio provedor. Maior cobertura, mais custo e latência.',
-                        'right'
-                      )}
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <button
-                          type="button"
-                          disabled={!webSearch}
-                          onClick={() => setSearchMode('hybrid')}
-                          className={cn(
-                            'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                            searchMode === 'hybrid'
-                              ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                            !webSearch && 'pointer-events-none'
-                          )}
-                        >
-                          Híbrida
-                        </button>,
-                        'Usa busca compartilhada quando necessário; se todos suportarem nativo, usa nativa.',
-                        'right'
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-0.5">
-                      <div className="flex items-center gap-2">
-                        {wrapTooltip(
-                          advancedRagMode,
-                          <Label
-                            className={cn('text-sm font-medium', advancedRagMode && 'cursor-help')}
-                          >
-                            Multi-query
-                          </Label>,
-                          'Gera variações da pergunta para aumentar o recall. Afeta Web Search e RAG (KB/anexos).',
-                          'right'
-                        )}
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        Reformula a pergunta automaticamente
-                      </span>
-                    </div>
-                    <Switch checked={multiQuery} onCheckedChange={setMultiQuery} />
-                  </div>
-
-                  <div
-                    className={cn('flex items-center justify-between', !webSearch && 'opacity-50')}
-                  >
-                    <div className="flex flex-col gap-0.5">
-                      <div className="flex items-center gap-2">
-                        {wrapTooltip(
-                          advancedRagMode,
-                          <Label
-                            className={cn('text-sm font-medium', advancedRagMode && 'cursor-help')}
-                          >
-                            Breadth-first
-                          </Label>,
-                          'Ativa um fluxo com subagentes para perguntas amplas. Mais cobertura, mais lento.',
-                          'right'
-                        )}
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        Indicado para questões longas/complexas
-                      </span>
-                    </div>
-                    <Switch
-                      checked={breadthFirst}
-                      onCheckedChange={setBreadthFirst}
-                      disabled={!webSearch}
-                    />
-                  </div>
-
-                  {showPerplexitySettings && (
-                    <div
-                      className={cn(
-                        'space-y-3 rounded-2xl border border-slate-200 bg-white/70 p-3',
-                        !perplexitySettingsEnabled && 'opacity-50 pointer-events-none'
-                      )}
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="flex flex-col gap-0.5">
-                          <Label className="text-sm font-medium">Perplexity Sonar (Chat)</Label>
-                          <span className="text-xs text-muted-foreground">
-                            Ajustes do chat web-grounded
-                          </span>
-                        </div>
-                        <span className="rounded-full bg-slate-100 px-2 py-1 text-[9px] font-semibold text-slate-600">
-                          ADV
-                        </span>
-                      </div>
-
-                      <div className="space-y-2">
-                        <Label className="text-xs font-semibold uppercase text-slate-500">
-                          Escopo da busca
-                        </Label>
-                        <div className="flex flex-wrap gap-1">
-                          <button
-                            type="button"
-                            onClick={() => setPerplexitySearchMode('web')}
-                            className={cn(
-                              'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                              perplexitySearchMode === 'web'
-                                ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                            )}
-                          >
-                            <Globe className="h-3 w-3" />
-                            Web
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setPerplexitySearchMode('academic')}
-                            className={cn(
-                              'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                              perplexitySearchMode === 'academic'
-                                ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                            )}
-                          >
-                            <BookOpen className="h-3 w-3" />
-                            Acadêmico
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setPerplexitySearchMode('sec')}
-                            className={cn(
-                              'inline-flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                              perplexitySearchMode === 'sec'
-                                ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                            )}
-                          >
-                            <ShieldCheck className="h-3 w-3" />
-                            SEC
-                          </button>
-                        </div>
-                      </div>
-
-                      {isSonarProSelected && (
-                        <div className="space-y-2">
-                          <Label className="text-xs font-semibold uppercase text-slate-500">
-                            Search type (Sonar Pro)
-                          </Label>
-                          <div className="flex flex-wrap gap-1">
-                            {(['fast', 'pro', 'auto'] as const).map((mode) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => setPerplexitySearchType(mode)}
-                                className={cn(
-                                  'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                                  perplexitySearchType === mode
-                                    ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                    : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                                )}
-                              >
-                                {mode === 'fast' ? 'Fast' : mode === 'pro' ? 'Pro' : 'Auto'}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {isPerplexitySonarSelected && (
-                        <div className="space-y-2">
-                          <Label className="text-xs font-semibold uppercase text-slate-500">
-                            Search context size
-                          </Label>
-                          <div className="flex flex-wrap gap-1">
-                            {(['low', 'medium', 'high'] as const).map((size) => (
-                              <button
-                                key={size}
-                                type="button"
-                                onClick={() => setPerplexitySearchContextSize(size)}
-                                className={cn(
-                                  'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                                  perplexitySearchContextSize === size
-                                    ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                    : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                                )}
-                              >
-                                {size === 'low' ? 'Low' : size === 'medium' ? 'Medium' : 'High'}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-
-                      {isPerplexitySonarSelected && (
-                        <div className="grid grid-cols-1 gap-2">
-                          {isSonarProSelected && (
-                            <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                              <div>
-                                <p className="text-[11px] font-semibold text-slate-700">
-                                  Classificador automático
-                                </p>
-                                <p className="text-[10px] text-slate-500">
-                                  Habilita roteamento Fast/Pro
-                                </p>
-                              </div>
-                              <Switch
-                                checked={perplexitySearchClassifier}
-                                onCheckedChange={setPerplexitySearchClassifier}
-                              />
-                            </div>
-                          )}
-                          <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                            <div>
-                              <p className="text-[11px] font-semibold text-slate-700">
-                                Desativar busca
-                              </p>
-                              <p className="text-[10px] text-slate-500">
-                                Resposta sem pesquisa web
-                              </p>
-                            </div>
-                            <Switch
-                              checked={perplexityDisableSearch}
-                              onCheckedChange={setPerplexityDisableSearch}
-                            />
-                          </div>
-                        </div>
-                      )}
-
-                      {isPerplexitySonarSelected && (
-                        <div className="space-y-2">
-                          <Label className="text-xs font-semibold uppercase text-slate-500">
-                            Stream mode
-                          </Label>
-                          <div className="flex flex-wrap gap-1">
-                            {(['full', 'concise'] as const).map((mode) => (
-                              <button
-                                key={mode}
-                                type="button"
-                                onClick={() => setPerplexityStreamMode(mode)}
-                                className={cn(
-                                  'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                                  perplexityStreamMode === mode
-                                    ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                    : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                                )}
-                              >
-                                {mode === 'full' ? 'Full' : 'Concise'}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-0.5">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-sm font-medium">Deep Research</Label>
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-700 text-[9px] font-bold">
-                          ALPHA
-                        </span>
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        Agente Autônomo (Lento, +Custos)
-                      </span>
-                    </div>
-                    <Switch checked={denseResearch} onCheckedChange={setDenseResearch} />
-                  </div>
-
-                  {/* Seletor de Modo: Standard / Hard */}
-                  {denseResearch && (
-                    <div className="space-y-3 mt-3">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-xs font-medium">Modo</Label>
-                      </div>
-                      <div className="flex gap-1">
-                        <button
-                          type="button"
-                          disabled={!denseResearch}
-                          onClick={() => setDeepResearchMode('standard')}
-                          className={cn(
-                            'rounded-full border px-3 py-1 text-[10px] font-semibold transition-colors',
-                            deepResearchMode === 'standard'
-                              ? 'border-indigo-300 bg-indigo-500/15 text-indigo-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                            !denseResearch && 'pointer-events-none'
-                          )}
-                        >
-                          Standard
-                        </button>
-                        <button
-                          type="button"
-                          disabled={!denseResearch}
-                          onClick={() => setDeepResearchMode('hard')}
-                          className={cn(
-                            'rounded-full border px-3 py-1 text-[10px] font-semibold transition-colors',
-                            deepResearchMode === 'hard'
-                              ? 'border-red-300 bg-red-500/15 text-red-700'
-                              : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                            !denseResearch && 'pointer-events-none'
-                          )}
-                        >
-                          Hard (Multi-Provider)
-                        </button>
-                      </div>
-
-                      {/* Seletor de Fontes — visível apenas no modo Hard */}
-                      {deepResearchMode === 'hard' && (
-                        <div className="space-y-2 rounded-lg border border-red-200/50 bg-red-500/5 p-3">
-                          <div className="flex items-center justify-between">
-                            <Label className="text-xs font-medium text-red-800">
-                              Fontes da Pesquisa
-                            </Label>
-                            <div className="flex gap-1.5">
-                              <button
-                                type="button"
-                                onClick={() => setAllHardResearchProviders(true)}
-                                className="text-[10px] text-slate-500 hover:text-slate-700 underline"
-                              >
-                                Todas
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => setAllHardResearchProviders(false)}
-                                className="text-[10px] text-slate-500 hover:text-slate-700 underline"
-                              >
-                                Nenhuma
-                              </button>
-                            </div>
-                          </div>
-
-                          <div className="space-y-1.5">
-                            {[
-                              { id: 'gemini', label: 'Gemini Deep Research', desc: 'Google — busca web profunda', icon: '\u2726' },
-                              { id: 'perplexity', label: 'Perplexity Sonar', desc: 'Web + Academic search', icon: '\u229B' },
-                              { id: 'openai', label: 'ChatGPT Deep Research', desc: 'OpenAI — análise profunda', icon: '\u25C9' },
-                              { id: 'rag_global', label: 'RAG Global', desc: 'Legislação, jurisprudência, súmulas', icon: '\u2696' },
-                              { id: 'rag_local', label: 'RAG Local', desc: 'Documentos do caso/processo', icon: '\u25A4' },
-                            ].map((source) => (
-                              <label
-                                key={source.id}
-                                className={cn(
-                                  'flex items-center gap-2.5 rounded-md border px-2.5 py-1.5 cursor-pointer transition-colors',
-                                  hardResearchProviders[source.id] !== false
-                                    ? 'border-red-300/50 bg-red-500/10 text-slate-800'
-                                    : 'border-slate-200 bg-white text-slate-400'
-                                )}
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={hardResearchProviders[source.id] !== false}
-                                  onChange={() => toggleHardResearchProvider(source.id)}
-                                  className="h-3.5 w-3.5 rounded border-slate-300 text-red-600 focus:ring-red-500"
-                                />
-                                <span className="text-sm">{source.icon}</span>
-                                <div className="flex-1 min-w-0">
-                                  <span className="text-xs font-medium">{source.label}</span>
-                                  <span className="text-[10px] text-muted-foreground ml-1.5">{source.desc}</span>
-                                </div>
-                              </label>
-                            ))}
-                          </div>
-
-                          <p className="text-[10px] text-red-600/60 mt-1">
-                            Mais fontes = pesquisa mais completa, porém mais lenta e custosa
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Provider selector — only visible in standard mode */}
-                  {denseResearch && deepResearchMode === 'standard' && (
-                  <div className={cn('space-y-2', !denseResearch && 'opacity-50')}>
-                    <div className="flex items-center gap-2">
-                      {wrapTooltip(
-                        advancedRagMode,
-                        <Label
-                          className={cn('text-sm font-medium', advancedRagMode && 'cursor-help')}
-                        >
-                          Backend do Deep Research
-                        </Label>,
-                        'Escolhe qual provedor executa o Deep Research no fluxo LangGraph. Auto usa o melhor disponível; Perplexity usa Sonar Deep Research; Google usa o agente Deep Research do Gemini. (Os outros modelos Sonar são para Chat/answers web-grounded, não para este modo Deep Research.)',
-                        'right'
-                      )}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      <button
-                        type="button"
-                        disabled={!denseResearch}
-                        onClick={() => setDeepResearchProvider('auto')}
-                        className={cn(
-                          'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                          deepResearchProvider === 'auto'
-                            ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                            : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                          !denseResearch && 'pointer-events-none'
-                        )}
-                      >
-                        Auto
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!denseResearch}
-                        onClick={() => setDeepResearchProvider('perplexity')}
-                        className={cn(
-                          'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                          deepResearchProvider === 'perplexity'
-                            ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                            : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                          !denseResearch && 'pointer-events-none'
-                        )}
-                      >
-                        Perplexity
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!denseResearch}
-                        onClick={() => setDeepResearchProvider('google')}
-                        className={cn(
-                          'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                          deepResearchProvider === 'google'
-                            ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                            : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                          !denseResearch && 'pointer-events-none'
-                        )}
-                      >
-                        Google
-                      </button>
-                    </div>
-
-                    {deepResearchProvider === 'perplexity' && (
-                      <div className={cn('space-y-1', !denseResearch && 'pointer-events-none')}>
-                        <Label className="text-xs font-medium text-muted-foreground">
-                          Modelo (Perplexity Deep Research)
-                        </Label>
-                        <div className="flex flex-wrap gap-1">
-                          <button
-                            type="button"
-                            disabled={!denseResearch}
-                            onClick={() => setDeepResearchModel('sonar-deep-research')}
-                            className={cn(
-                              'rounded-full border px-2 py-1 text-[10px] font-semibold transition-colors',
-                              deepResearchModel === 'sonar-deep-research'
-                                ? 'border-emerald-200 bg-emerald-500/15 text-emerald-700'
-                                : 'border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-700',
-                              !denseResearch && 'pointer-events-none'
-                            )}
-                            title="sonar-deep-research"
-                          >
-                            Sonar Deep Research
-                          </button>
-                        </div>
-                        <span className="text-[10px] text-muted-foreground">
-                          Este backend usa apenas{' '}
-                          <span className="font-mono">sonar-deep-research</span>.
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  )}
-
-                  <div className="h-[1px] bg-slate-200" />
-
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium">Nível de Raciocínio (Thinking)</Label>
-                    <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
-                      {(['low', 'medium', 'high'] as const).map((level) => (
-                        <button
-                          key={level}
-                          onClick={() => setReasoningLevel(level)}
-                          className={cn(
-                            'flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all',
-                            reasoningLevel === level
-                              ? 'bg-emerald-600/15 text-emerald-700 shadow-sm'
-                              : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                          )}
-                        >
-                          {level === 'low' ? 'Rápido' : level === 'medium' ? 'Médio' : 'Profundo'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium">Verbosidade</Label>
-                    <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
-                      {(['low', 'medium', 'high'] as const).map((level) => (
-                        <button
-                          key={level}
-                          onClick={() => setVerbosity(level)}
-                          className={cn(
-                            'flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all',
-                            verbosity === level
-                              ? 'bg-emerald-600/15 text-emerald-700 shadow-sm'
-                              : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                          )}
-                        >
-                          {level === 'low' ? 'Baixa' : level === 'medium' ? 'Media' : 'Alta'}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {showPerModelOverrides && (
-                    <div className="space-y-2">
-                      <Label className="text-sm font-medium">Overrides por modelo</Label>
-                      <div className="space-y-2">
-                        {activeModelIds.map((modelId) => {
-                          const cfg = getModelConfig(modelId as ModelId);
-                          const override = modelOverrides?.[modelId] || {};
-                          const overrideVerbosity = override.verbosity || '';
-                          const overrideBudget = override.thinkingBudget ?? '';
-                          const isSonnet = String(modelId).includes('claude-4.5-sonnet');
-                          const budgetHint = isSonnet ? '0-31999' : '0-63999';
-                          return (
-                            <div key={modelId} className="rounded-md border p-2 text-[11px] space-y-2">
-                              <div className="font-semibold">{cfg?.label || modelId}</div>
-                              <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
-                                {(['auto', 'low', 'medium', 'high'] as const).map((level) => (
-                                  <button
-                                    key={level}
-                                    onClick={() =>
-                                      setModelOverride(modelId, {
-                                        verbosity: level === 'auto' ? undefined : level,
-                                      })
-                                    }
-                                    className={cn(
-                                      'flex-1 px-2 py-1 text-[10px] font-medium rounded-md transition-all',
-                                      (level === 'auto' ? !overrideVerbosity : overrideVerbosity === level)
-                                        ? 'bg-emerald-600/15 text-emerald-700 shadow-sm'
-                                        : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                                    )}
-                                  >
-                                    {level === 'auto'
-                                      ? 'Auto'
-                                      : level === 'low'
-                                        ? 'Baixa'
-                                        : level === 'medium'
-                                          ? 'Media'
-                                          : 'Alta'}
-                                  </button>
-                                ))}
-                              </div>
-                              <Input
-                                value={overrideBudget}
-                                onChange={(e) =>
-                                  setModelOverride(modelId, { thinkingBudget: e.target.value })
-                                }
-                                placeholder={`Auto (${budgetHint})`}
-                                inputMode="numeric"
-                                className="h-8 text-xs"
-                              />
-                            </div>
-                          );
-                        })}
-                      </div>
-                      <span className="text-[10px] text-muted-foreground">
-                        Overrides so se aplicam no modo Comparar modelos.
-                      </span>
-                    </div>
-                  )}
-
-                  <div className="h-[1px] bg-slate-200" />
-
-                  <div className="flex items-center justify-between">
-                    <div className="flex flex-col gap-0.5">
-                      <div className="flex items-center gap-2">
-                        <Label className="text-sm font-medium">Comparar modelos (Chat)</Label>
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[9px] font-bold">
-                          ON
-                        </span>
-                      </div>
-                      <span className="text-xs text-muted-foreground">
-                        Respostas paralelas; não é o Modo Minuta (Agentes)
-                      </span>
-                    </div>
-                    <Switch
-                      checked={chatMode === 'multi-model'}
-                      onCheckedChange={(value) => handleCompareToggle(!!value)}
-                    />
-                  </div>
-
-                  <div className="h-[1px] bg-slate-200" />
-
-                  {/* RAG Scope Selector */}
-                  <div className="space-y-2">
-                    <div className="flex flex-col gap-2">
-                      <Label className="text-xs font-bold uppercase text-muted-foreground flex items-center gap-2">
-                        <Zap className="h-3 w-3" /> Escopo de Busca
-                      </Label>
-                      <p className="text-[10px] text-muted-foreground">
-                        Define quais documentos a IA pode consultar. RAG otimizado com HyDE, CRAG, GraphRAG e Adaptive Routing sempre ativos.
-                      </p>
-                      <div className="grid grid-cols-3 gap-1">
-                        <button
-                          type="button"
-                          onClick={() => setRagScope('case_only')}
-                          className={cn(
-                            'px-2 py-1.5 text-xs rounded-md transition-colors',
-                            ragScope === 'case_only'
-                              ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          )}
-                        >
-                          Só Caso
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setRagScope('case_and_global')}
-                          className={cn(
-                            'px-2 py-1.5 text-xs rounded-md transition-colors',
-                            ragScope === 'case_and_global'
-                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          )}
-                        >
-                          Caso + Global
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setRagScope('global_only')}
-                          className={cn(
-                            'px-2 py-1.5 text-xs rounded-md transition-colors',
-                            ragScope === 'global_only'
-                              ? 'bg-blue-100 text-blue-800 border border-blue-300'
-                              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                          )}
-                        >
-                          Só Global
-                        </button>
-                      </div>
-                      <span className="text-[10px] text-muted-foreground">
-                        {ragScope === 'case_only' && 'Busca apenas nos documentos anexados ao caso'}
-                        {ragScope === 'case_and_global' && 'Busca nos anexos do caso e na base global (leis, jurisprudência)'}
-                        {ragScope === 'global_only' && 'Ignora anexos, busca apenas na base global'}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 pt-3 border-t border-slate-200">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        {wrapTooltip(
-                          attachmentAdvanced,
-                          <Label
-                            className={cn(
-                              'text-xs font-bold uppercase text-muted-foreground',
-                              attachmentAdvanced && 'cursor-help'
-                            )}
-                          >
-                            Anexos no contexto
-                          </Label>,
-                          'Escolha como os anexos serao usados pela IA: busca (RAG) ou injecao direta do texto.',
-                          'right'
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] text-muted-foreground">Auto</span>
-                        <Switch
-                          checked={attachmentAdvanced}
-                          onCheckedChange={setAttachmentAdvanced}
-                        />
-                        <span className="text-[10px] text-muted-foreground">Avançado</span>
-                      </div>
-                    </div>
-
-                    <div className="grid gap-2">
-                      <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                        <div className="flex items-center gap-2">
-                          {wrapTooltip(
-                            attachmentAdvanced,
-                            <button
-                              type="button"
-                              onClick={() => setAttachmentMode('auto')}
-                              className={cn(
-                                'h-6 px-2 rounded-md text-[10px] font-semibold transition-all',
-                                attachmentMode === 'auto'
-                                  ? 'bg-emerald-200 text-slate-900'
-                                  : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
-                              )}
-                            >
-                              Auto (recomendado)
-                            </button>,
-                            'Usa injecao direta para poucos arquivos curtos; caso contrario, usa RAG local.',
-                            'left'
-                          )}
-                          <span className="text-[10px] text-muted-foreground">
-                            Decide por tamanho e tipo
-                          </span>
-                        </div>
-                      </div>
-
-                      {attachmentAdvanced && (
-                        <>
-                          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              {wrapTooltip(
-                                attachmentAdvanced,
-                                <button
-                                  type="button"
-                                  onClick={() => setAttachmentMode('rag_local')}
-                                  className={cn(
-                                    'h-6 px-2 rounded-md text-[10px] font-semibold transition-all',
-                                    attachmentMode === 'rag_local'
-                                      ? 'bg-emerald-200 text-slate-900'
-                                      : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
-                                  )}
-                                >
-                                  RAG Local
-                                </button>,
-                                'Pros: recupera trechos relevantes e reduz alucinacao. Contras: pode ser mais lento e depende de indexacao.',
-                                'left'
-                              )}
-                              <span className="text-[10px] text-muted-foreground">
-                                Mais preciso para fatos/citações
-                              </span>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
-                            <div className="flex items-center gap-2">
-                              {wrapTooltip(
-                                attachmentAdvanced,
-                                <button
-                                  type="button"
-                                  onClick={() => setAttachmentMode('prompt_injection')}
-                                  className={cn(
-                                    'h-6 px-2 rounded-md text-[10px] font-semibold transition-all',
-                                    attachmentMode === 'prompt_injection'
-                                      ? 'bg-emerald-200 text-slate-900'
-                                      : 'bg-slate-200 text-slate-600 hover:bg-slate-300'
-                                  )}
-                                >
-                                  Injecao direta
-                                </button>,
-                                'Pros: simples e imediato. Contras: consome muitos tokens e pode truncar documentos grandes.',
-                                'left'
-                              )}
-                              <span className="text-[10px] text-muted-foreground">
-                                Rápido para poucos arquivos
-                              </span>
-                            </div>
-                          </div>
-                        </>
-                      )}
-                    </div>
-
-                    <div className="rounded-lg border border-dashed border-slate-200 bg-white/80 px-3 py-2 text-[10px] text-muted-foreground">
-                      <div className="font-semibold text-slate-600">
-                        {hasAttachmentModel
-                          ? attachmentModels.length > 1
-                            ? 'Limites por modelo'
-                            : `Limites do ${attachmentModels[0].label}`
-                          : 'Limites de anexos'}
-                      </div>
-                      {hasAttachmentModel ? (
-                        <div className="mt-1 space-y-1">
-                          {attachmentModels.map((model) => (
-                            <div key={model.id}>
-                              {model.label}: até {model.maxLabel} / arquivo
-                            </div>
-                          ))}
-                          {attachmentModels.length > 1 && (
-                            <div className="text-[10px] text-muted-foreground">
-                              Limite efetivo (multi-modelo): {attachmentLimits.effectiveMaxLabel} /
-                              arquivo
-                            </div>
-                          )}
-                          <div>Quantidade: {attachmentCountLabel}</div>
-                          <div>Tipos: {attachmentLimits.typesLabel}</div>
-                        </div>
-                      ) : (
-                        <div className="mt-1">Selecione um modelo para ver os limites.</div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </PopoverContent>
-            </Popover>
+            {/* DeepResearchButton - deep research controls */}
+            <DeepResearchButton />
 
             <Popover>
               <PopoverTrigger asChild>
@@ -2175,37 +1161,6 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
                       </div>
                     </div>
                   )}
-                </div>
-
-                <div className="space-y-3 rounded-2xl border border-slate-200 bg-white/70 p-3">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="flex flex-col gap-0.5">
-                      <Label className="text-sm font-medium">Verbosidade</Label>
-                      <span className="text-xs text-muted-foreground">
-                        Controla o nível de detalhe da resposta
-                      </span>
-                    </div>
-                    <span className="rounded-full bg-slate-100 px-2 py-1 text-[9px] font-semibold text-slate-600">
-                      STYLE
-                    </span>
-                  </div>
-
-                  <div className="flex gap-1 rounded-lg bg-slate-100 p-1">
-                    {(['low', 'medium', 'high'] as const).map((level) => (
-                      <button
-                        key={level}
-                        onClick={() => setVerbosity(level)}
-                        className={cn(
-                          'flex-1 px-2 py-1.5 text-xs font-medium rounded-md transition-all',
-                          verbosity === level
-                            ? 'bg-emerald-600/15 text-emerald-700 shadow-sm'
-                            : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
-                        )}
-                      >
-                        {level === 'low' ? 'Baixa' : level === 'medium' ? 'Media' : 'Alta'}
-                      </button>
-                    ))}
-                  </div>
                 </div>
 
                 {!hasModelParamOptions && (
@@ -3014,26 +1969,40 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
               onClick={handleAttachClick}
               type="button"
+              title="Anexar arquivo"
             >
               <Paperclip className="h-3.5 w-3.5" />
             </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-            >
-              <AtSign className="h-3.5 w-3.5" />
-            </Button>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 rounded-full text-slate-500 hover:bg-slate-100 hover:text-slate-700"
-            >
-              <Hash className="h-3.5 w-3.5" />
-            </Button>
+
+            {/* Prompts salvos */}
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn(
+                      'h-7 w-7 rounded-full transition-colors',
+                      showSlashMenu
+                        ? 'text-amber-600 bg-amber-500/10'
+                        : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                    )}
+                    onClick={() => setShowSlashMenu(!showSlashMenu)}
+                    type="button"
+                  >
+                    <Bookmark className="h-3.5 w-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="top" className="text-xs">
+                  Prompts salvos (ou digite /)
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
           </div>
 
-          <div className="ml-auto flex items-center">
+          {/* Context bar compacta + Send */}
+          <div className="ml-auto flex items-center gap-2">
+            <ContextUsageBar compact />
             <Button
               onClick={handleSend}
               disabled={!content.trim() || disabled}

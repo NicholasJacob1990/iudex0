@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gere um exemplo de minuta",
+  "total": 5,
+  "results": [
+    {
+      "title": "Canva: um Kit de Criação Visual para todo mundo",
+      "url": "https://www.canva.com/pt_br/",
+      "snippet": "OCanvaé uma ferramenta gratuitadedesign gráfico online que você pode usar para criar posts para redes sociais, apresentações, cartazes, vídeos, logotipos e muito mais.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Canva Docs — Editor de documentos online grátis e fácil de usar",
+      "url": "https://www.canva.com/pt_br/documentos/",
+      "snippet": "OCanvaDocs é um editordedocumentosonline otimizado paraconteúdovisual que permite criardocumentoscontendo vídeos, imagens, gráficos e elementosdedesign.Escrevasem esforço usando ferramentas poderosasdeIA e faça com que seusdocumentosonline se destaquem comoeditordetexto doCanva.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Editor online e gratuito de documentos - Crie e edite ... - Canva",
+      "url": "https://www.canva.com/pt_br/criar/documentos/",
+      "snippet": "Crie relatórios, propostas comerciais e outrosdocumentoscom um visual chamativo usandooCanvaDocs, nosso editor online e gratuitodedocumentos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Google Tradutor",
+      "url": "https://translate.google.com.br/",
+      "snippet": "Oserviço do Google, oferecido sem custo financeiro, traduz instantaneamente palavras, frases e páginas da Web do português para maisdecem outros idiomas.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Reescrever Texto - Reescritor com IA Gratuito e Instantâneo",
+      "url": "https://smodin.io/pt/automaticamente-reescreva-texto-em-portugues-gratuitamente",
+      "snippet": "Reescreva texto instantaneamente e melhore a qualidade e a exclusividade da sua escrita comoreescritordeparágrafos gratuito do Smodin! Perfeito para estudantes, escritores e profissionais.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-02-04T02:54:58.192615"
+}

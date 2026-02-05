@@ -30,6 +30,7 @@ from app.models.user import User
 from app.services.chat_service import chat_service
 from app.services.api_call_tracker import usage_context, billing_context
 from app.services.token_budget_service import TokenBudgetService
+from app.core.security import get_org_context, OrgContext
 from app.services.rag_policy import resolve_rag_scope
 from app.services.billing_service import (
     get_points_summary,
@@ -190,7 +191,8 @@ async def _load_attachment_docs(
 
 @router.post("/threads")
 async def create_thread(
-    title: str = Body("Nova Conversa", embed=True)
+    title: str = Body("Nova Conversa", embed=True),
+    current_user: User = Depends(get_current_user),
 ):
     """Create a new chat thread"""
     try:
@@ -200,12 +202,12 @@ async def create_thread(
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/threads")
-async def list_threads(limit: int = 20):
+async def list_threads(limit: int = 20, current_user: User = Depends(get_current_user)):
     """List recent threads"""
     return chat_service.thread_manager.list_threads(limit)
 
 @router.get("/threads/{thread_id}")
-async def get_thread(thread_id: str):
+async def get_thread(thread_id: str, current_user: User = Depends(get_current_user)):
     """Get full thread history"""
     thread = chat_service.thread_manager.get_thread(thread_id)
     if not thread:
@@ -257,6 +259,8 @@ async def send_message(
     perplexity_return_images: bool = Body(False),
     perplexity_return_videos: bool = Body(False),
     rag_sources: Optional[List[str]] = Body(None),
+    rag_jurisdictions: Optional[List[str]] = Body(default=None),
+    rag_source_ids: Optional[List[str]] = Body(default=None),
     rag_top_k: int = Body(8),
     adaptive_routing: bool = Body(False),
     crag_gate: bool = Body(False),
@@ -268,6 +272,9 @@ async def send_message(
     graph_hops: int = Body(1),
     dense_research: bool = Body(False),
     rag_scope: str = Body("case_and_global"),  # case_only, case_and_global, global_only
+    rag_selected_groups: Optional[List[str]] = Body(default=None),
+    rag_allow_private: Optional[bool] = Body(default=None),
+    rag_allow_groups: Optional[bool] = Body(default=None),
     deep_research_effort: Optional[str] = Body(None),
     deep_research_provider: Optional[str] = Body(None),
     deep_research_model: Optional[str] = Body(None),
@@ -516,19 +523,21 @@ async def send_message(
     # Unify RAG scope behavior with `/chats` and `/jobs`:
     # - Prefer DB policy (per tenant/user).
     # - Fallback to env defaults if no policy exists (keeps prior multichat behavior).
-    raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
-    env_groups = [g.strip() for g in raw_groups.split(",") if g.strip()]
+    # Departments/teams come from OrgContext.team_ids; keep env flag only for global.
+    # (RAG_SCOPE_GROUPS is legacy; group visibility is now driven by org membership + policy.)
     env_allow_global = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
-    env_allow_groups = True if env_groups else False
+    org_ctx: OrgContext = await get_org_context(current_user=current_user, db=db)
     scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
         db,
-        tenant_id=str(current_user.id),
-        user_id=str(current_user.id),
+        tenant_id=str(org_ctx.tenant_id),
+        user_id=str(org_ctx.user.id),
         user_role=current_user.role,
         chat_context={
-            "rag_groups": env_groups,
+            "rag_groups": list(org_ctx.team_ids or []),
+            "rag_selected_groups": rag_selected_groups,
             "rag_allow_global": env_allow_global,
-            "rag_allow_groups": env_allow_groups,
+            "rag_allow_private": rag_allow_private,
+            "rag_allow_groups": rag_allow_groups,
         },
     )
 
@@ -565,7 +574,7 @@ async def send_message(
                         models,
                         attachment_docs=attachment_docs,
                         attachment_mode=attachment_mode,
-                        tenant_id=current_user.id,
+                        tenant_id=org_ctx.tenant_id,
                         chat_personality=chat_personality,
                         reasoning_level=reasoning_level,
                         temperature=temperature,
@@ -599,6 +608,8 @@ async def send_message(
                         perplexity_return_images=perplexity_return_images,
                         perplexity_return_videos=perplexity_return_videos,
                         rag_sources=rag_sources,
+                        rag_jurisdictions=rag_jurisdictions,
+                        rag_source_ids=rag_source_ids,
                         rag_top_k=rag_top_k,
                         adaptive_routing=adaptive_routing,
                         crag_gate=crag_gate,
@@ -630,6 +641,7 @@ async def send_message(
                         per_model_overrides=per_model_overrides_payload,
                         scope_groups=scope_groups,
                         allow_global_scope=allow_global_scope,
+                        allow_private_scope=rag_allow_private,
                         allow_group_scope=allow_group_scope,
                     ):
                         if isinstance(event, dict):

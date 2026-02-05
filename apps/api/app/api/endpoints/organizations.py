@@ -475,6 +475,45 @@ async def list_teams(
     return responses
 
 
+@router.get("/teams/mine", response_model=List[TeamResponse])
+async def list_my_teams(
+    ctx: OrgContext = Depends(get_org_context),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lista equipes da organização em que o usuário é membro."""
+    if not ctx.is_org_member:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Sem organização")
+
+    result = await db.execute(
+        select(Team)
+        .join(TeamMember, TeamMember.team_id == Team.id)
+        .where(
+            Team.organization_id == ctx.organization_id,
+            TeamMember.user_id == ctx.user.id,
+        )
+        .order_by(Team.created_at)
+    )
+    teams = result.scalars().all()
+
+    responses = []
+    for team in teams:
+        count_result = await db.execute(
+            select(func.count()).select_from(TeamMember).where(TeamMember.team_id == team.id)
+        )
+        member_count = count_result.scalar() or 0
+        responses.append(
+            TeamResponse(
+                id=team.id,
+                name=team.name,
+                description=team.description,
+                member_count=member_count,
+                created_at=team.created_at,
+            )
+        )
+
+    return responses
+
+
 @router.post("/teams/{team_id}/members", status_code=status.HTTP_201_CREATED)
 async def add_team_member(
     team_id: str,

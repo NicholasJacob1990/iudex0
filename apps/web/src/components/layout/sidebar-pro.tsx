@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import {
   Home,
   Folder,
@@ -21,13 +21,42 @@ import {
   ChevronsRight,
   EyeOff,
   Network,
+  Workflow,
+  Store,
+  Database,
+  BookCheck,
+  BarChart3,
+  Shield,
+  Sparkles,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn, formatDate } from '@/lib/utils';
 import { useUIStore, useChatStore, useAuthStore, useOrgStore } from '@/stores';
 import { RichTooltip } from '@/components/ui/rich-tooltip';
+import { BackgroundTasks } from '@/components/chat/background-tasks';
 import { Building2 } from 'lucide-react';
 import { springTransition } from '@/components/ui/motion';
+import { usePrefetchOnHover, prefetchFns } from '@/lib/prefetch';
+
+// =============================================================================
+// PREFETCH CONFIGS — mapeia href de navegacao para funcoes de prefetch
+// =============================================================================
+
+const NAV_PREFETCH_MAP: Record<string, (qc: any) => void> = {
+  '/corpus': (qc) => {
+    prefetchFns.corpusStats(qc);
+    prefetchFns.corpusCollections(qc);
+  },
+  '/playbooks': (qc) => {
+    prefetchFns.playbooksList(qc);
+  },
+  '/workflows': (qc) => {
+    prefetchFns.workflowsList(qc);
+  },
+  '/library': (qc) => {
+    prefetchFns.libraryItems(qc);
+  },
+};
 
 const resourceShortcuts = [
   { id: 'podcasts', label: 'Podcasts', description: 'Resumo em áudio de decisões', icon: 'Mic' },
@@ -38,6 +67,7 @@ const resourceShortcuts = [
 
 const mainNav = [
   { href: '/dashboard', label: 'Início', icon: Home },
+  { href: '/ask', label: 'Ask', icon: Sparkles },
   { href: '/cases', label: 'Casos', icon: Folder },
   { href: '/transcription', label: 'Transcrição', icon: Mic },
   { href: '/minuta', label: 'Minuta', icon: PenTool },
@@ -47,9 +77,16 @@ const mainNav = [
   { href: '/jurisprudence', label: 'Jurisprudência', icon: Gavel },
   { href: '/cnj', label: 'Metadados CNJ + DJEN', icon: Newspaper },
   { href: '/web', label: 'Web', icon: Globe },
+  { href: '/corpus', label: 'Corpus', icon: Database },
   { href: '/library', label: 'Biblioteca', icon: Library },
   { href: '/graph', label: 'Grafos', icon: Network },
+  { href: '/workflows', label: 'Workflows', icon: Workflow },
+  { href: '/playbooks', label: 'Playbooks', icon: BookCheck },
+  { href: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { href: '/marketplace', label: 'Marketplace', icon: Store },
+  { href: '/spaces', label: 'Spaces', icon: Share2 },
   { href: '/bibliotecarios', label: 'Bibliotecários', icon: Users },
+  { href: '/admin/audit-logs', label: 'Audit Logs', icon: Shield },
 ];
 
 const resourceIcons: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -58,6 +95,26 @@ const resourceIcons: Record<string, React.ComponentType<{ className?: string }>>
   Compartilhamentos: Users,
   'Metadados CNJ e Comunicacoes DJEN': Newspaper,
 };
+
+/**
+ * Wrapper que adiciona prefetch on hover para links de navegacao.
+ * Se nao houver prefetch configurado para o href, renderiza sem handlers extras.
+ */
+function PrefetchableNavItem({ href, children }: { href: string; children: React.ReactNode }) {
+  const prefetchFn = NAV_PREFETCH_MAP[href];
+  const stableFn = useCallback((qc: any) => prefetchFn?.(qc), [prefetchFn]);
+  const handlers = usePrefetchOnHover(stableFn, 200);
+
+  if (!prefetchFn) {
+    return <span className="contents">{children}</span>;
+  }
+
+  return (
+    <span className="contents" {...handlers}>
+      {children}
+    </span>
+  );
+}
 
 export function SidebarPro() {
   const pathname = usePathname();
@@ -206,9 +263,9 @@ export function SidebarPro() {
           }
 
           return (
-            <span key={item.href} className="contents">
+            <PrefetchableNavItem key={item.href} href={item.href}>
               {link}
-            </span>
+            </PrefetchableNavItem>
           );
         })}
 
@@ -255,6 +312,9 @@ export function SidebarPro() {
           </div>
         </div>
       </nav>
+
+      {/* Background Agents */}
+      {!isCollapsed && <BackgroundTasks />}
 
       {/* User / Footer */}
       <div className={cn('border-t border-white/5 p-4', isCollapsed && 'lg:hidden')}>

@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Folder, FolderOpen, ChevronRight, ChevronDown, Plus, MoreVertical, Share2, Users } from 'lucide-react';
+import { Folder, FolderOpen, ChevronRight, ChevronDown, Plus, MoreVertical, Share2, Users, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
@@ -127,6 +127,10 @@ export function LibrarySidebar() {
                             <DropdownMenuItem onClick={() => handleFolderAction('Compartilhar', folder.name)}>
                                 <Share2 className="mr-2 h-4 w-4" />
                                 Compartilhar
+                            </DropdownMenuItem>
+                            <DropdownMenuItem onClick={() => handleFolderAction('Executar workflow', folder.name)}>
+                                <Play className="mr-2 h-4 w-4" />
+                                Executar workflow
                             </DropdownMenuItem>
                             <DropdownMenuItem
                                 onClick={() => handleFolderAction('Excluir', folder.name)}

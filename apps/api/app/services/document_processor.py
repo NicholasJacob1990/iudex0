@@ -143,6 +143,7 @@ class DocumentChunker:
                     **metadata,
                     "page_start": i,
                     "page_end": min(i + pages_per_chunk, len(pages)),
+                    "page_number": i + 1,
                     "num_pages": len(chunk_pages),
                 }
             ))
@@ -460,6 +461,15 @@ import os
 
 # Funções auxiliares para extração de texto de diferentes formatos
 
+@dataclass
+class PageText:
+    """Texto extraído com metadados de página."""
+    page_number: int
+    text: str
+    line_start: int = 0
+    line_end: int = 0
+
+
 async def extract_text_from_pdf(file_path: str) -> str:
     """
     Extrai texto de PDF usando pdfplumber
@@ -467,17 +477,91 @@ async def extract_text_from_pdf(file_path: str) -> str:
     """
     logger.info(f"Extraindo texto de PDF: {file_path}")
     text_content = []
-    
+
     try:
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
                 text = page.extract_text() or ""
                 text_content.append(text)
-        
+
         return "\n\n".join(text_content)
     except Exception as e:
         logger.error(f"Erro ao extrair texto do PDF {file_path}: {e}")
         # Fallback para pypdf se necessário ou re-raise
+        raise
+
+
+async def extract_pages_from_pdf(file_path: str) -> List[PageText]:
+    """
+    Extrai texto de PDF com metadados de página e linha.
+    Retorna lista de PageText com page_number, line_start e line_end.
+    """
+    logger.info(f"Extraindo páginas de PDF com metadados: {file_path}")
+    pages: List[PageText] = []
+    global_line = 0
+
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                line_count = text.count("\n") + 1 if text.strip() else 0
+                pages.append(PageText(
+                    page_number=page.page_number,
+                    text=text,
+                    line_start=global_line,
+                    line_end=global_line + line_count - 1 if line_count > 0 else global_line,
+                ))
+                global_line += line_count
+
+        logger.info(f"PDF extraído: {len(pages)} páginas, {global_line} linhas totais")
+        return pages
+    except Exception as e:
+        logger.error(f"Erro ao extrair páginas do PDF {file_path}: {e}")
+        raise
+
+
+async def extract_paragraphs_from_docx(file_path: str) -> List[PageText]:
+    """
+    Extrai parágrafos de DOCX com índice de parágrafo como referência de linha.
+    Retorna lista de PageText (page_number = índice do parágrafo).
+    """
+    logger.info(f"Extraindo parágrafos de DOCX com metadados: {file_path}")
+    paragraphs: List[PageText] = []
+
+    try:
+        doc = DocxDocument(file_path)
+        line_offset = 0
+
+        for idx, paragraph in enumerate(doc.paragraphs):
+            text = paragraph.text.strip()
+            if not text:
+                continue
+            line_count = text.count("\n") + 1
+            paragraphs.append(PageText(
+                page_number=idx + 1,  # índice do parágrafo como referência
+                text=text,
+                line_start=line_offset,
+                line_end=line_offset + line_count - 1,
+            ))
+            line_offset += line_count
+
+        # Tabelas
+        for table in doc.tables:
+            for row in table.rows:
+                row_text = " | ".join(cell.text for cell in row.cells)
+                if row_text.strip():
+                    line_offset += 1
+                    paragraphs.append(PageText(
+                        page_number=len(doc.paragraphs) + 1,
+                        text=row_text,
+                        line_start=line_offset,
+                        line_end=line_offset,
+                    ))
+
+        logger.info(f"DOCX extraído: {len(paragraphs)} blocos de texto")
+        return paragraphs
+    except Exception as e:
+        logger.error(f"Erro ao extrair parágrafos do DOCX {file_path}: {e}")
         raise
 
 async def extract_text_from_docx(file_path: str) -> str:
@@ -651,6 +735,176 @@ async def extract_text_from_odt(file_path: str) -> str:
         return f"[Erro na extração ODT: {str(e)}]"
 
 
+async def extract_text_from_pptx(file_path: str) -> str:
+    """
+    Extrai texto de PPTX (PowerPoint) usando python-pptx
+    Extrai texto de slides, notas e tabelas, mantendo ordem dos slides
+    """
+    logger.info(f"Extraindo texto de PPTX: {file_path}")
+    try:
+        from pptx import Presentation
+
+        prs = Presentation(file_path)
+        text_content: List[str] = []
+
+        for slide_num, slide in enumerate(prs.slides, 1):
+            slide_texts: List[str] = []
+
+            # Extrair texto de todas as shapes com text_frame
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for paragraph in shape.text_frame.paragraphs:
+                        para_text = paragraph.text.strip()
+                        if para_text:
+                            slide_texts.append(para_text)
+
+                # Extrair texto de tabelas
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        row_text = " | ".join(
+                            cell.text.strip() for cell in row.cells
+                        )
+                        if row_text.strip():
+                            slide_texts.append(row_text)
+
+            # Extrair notas do slide
+            if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                notes_text = slide.notes_slide.notes_text_frame.text.strip()
+                if notes_text:
+                    slide_texts.append(f"[Notas] {notes_text}")
+
+            # Pular slides vazios
+            if slide_texts:
+                text_content.append(
+                    f"--- Slide {slide_num} ---\n" + "\n".join(slide_texts)
+                )
+
+        result = "\n\n".join(text_content)
+        logger.info(f"PPTX extraído: {len(prs.slides)} slides, {len(result)} chars")
+        return result
+    except ImportError:
+        logger.error("Biblioteca python-pptx não instalada. Instale com: pip install python-pptx")
+        return "[Erro: biblioteca python-pptx não instalada]"
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do PPTX {file_path}: {e}")
+        return f"[Erro na extração PPTX: {str(e)}]"
+
+
+async def extract_text_from_xlsx(file_path: str) -> str:
+    """
+    Extrai texto de XLSX (Excel) usando openpyxl
+    Formata com cabeçalhos de planilha e separadores de célula
+    """
+    logger.info(f"Extraindo texto de XLSX: {file_path}")
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(file_path, read_only=True, data_only=True)
+        text_content: List[str] = []
+
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            sheet_lines: List[str] = []
+
+            for row_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                # Converter células para string, tratar None como vazio
+                cell_values = [
+                    str(cell) if cell is not None else ""
+                    for cell in row
+                ]
+                # Pular linhas completamente vazias
+                if not any(v.strip() for v in cell_values):
+                    continue
+                row_text = " | ".join(cell_values)
+                sheet_lines.append(row_text)
+
+            if sheet_lines:
+                text_content.append(
+                    f"=== Sheet: {sheet_name} ===\n" + "\n".join(sheet_lines)
+                )
+
+        num_sheets = len(wb.sheetnames)
+        wb.close()
+        result = "\n\n".join(text_content)
+        logger.info(f"XLSX extraído: {num_sheets} planilhas, {len(result)} chars")
+        return result
+    except ImportError:
+        logger.error("Biblioteca openpyxl não instalada. Instale com: pip install openpyxl")
+        return "[Erro: biblioteca openpyxl não instalada]"
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do XLSX {file_path}: {e}")
+        return f"[Erro na extração XLSX: {str(e)}]"
+
+
+async def extract_text_from_csv(file_path: str) -> str:
+    """
+    Extrai texto de CSV usando módulo csv padrão
+    Auto-detecta delimitador com csv.Sniffer
+    """
+    logger.info(f"Extraindo texto de CSV: {file_path}")
+    try:
+        import csv
+
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            # Ler amostra para detectar delimitador
+            sample = f.read(8192)
+            f.seek(0)
+
+            try:
+                dialect = csv.Sniffer().sniff(sample)
+            except csv.Error:
+                # Fallback para delimitador padrão (vírgula)
+                dialect = csv.excel
+
+            reader = csv.reader(f, dialect)
+            lines: List[str] = []
+
+            for row in reader:
+                cell_values = [cell.strip() for cell in row]
+                if any(cell_values):
+                    lines.append(" | ".join(cell_values))
+
+        result = "\n".join(lines)
+        logger.info(f"CSV extraído: {len(lines)} linhas, {len(result)} chars")
+        return result
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do CSV {file_path}: {e}")
+        return f"[Erro na extração CSV: {str(e)}]"
+
+
+async def extract_text_from_rtf(file_path: str) -> str:
+    """
+    Extrai texto de RTF usando regex para strip de control words
+    Não requer dependências externas
+    """
+    logger.info(f"Extraindo texto de RTF: {file_path}")
+    try:
+        import re
+
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            content = f.read()
+
+        # Remover grupos de controle {\*...}
+        text = re.sub(r'\{\\\*[^}]*\}', '', content)
+        # Remover control words com argumentos (ex: \fs24, \par)
+        text = re.sub(r'\\[a-zA-Z]+\d*\s?', ' ', text)
+        # Remover caracteres de escape RTF (ex: \', \\)
+        text = re.sub(r'\\[^a-zA-Z]', '', text)
+        # Remover chaves restantes
+        text = re.sub(r'[{}]', '', text)
+        # Limpar espaços múltiplos
+        text = re.sub(r'[ \t]+', ' ', text)
+        # Limpar linhas em branco múltiplas
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+
+        result = text.strip()
+        logger.info(f"RTF extraído: {len(result)} chars")
+        return result
+    except Exception as e:
+        logger.error(f"Erro ao extrair texto do RTF {file_path}: {e}")
+        return f"[Erro na extração RTF: {str(e)}]"
+
+
 async def extract_text_from_zip(file_path: str) -> dict:
     """
     Extrai e processa arquivos de um ZIP
@@ -705,6 +959,18 @@ async def extract_text_from_zip(file_path: str) -> dict:
                             all_text.append(f"=== {file_name} ===\n{text}")
                         elif ext == '.odt':
                             text = await extract_text_from_odt(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext == '.pptx':
+                            text = await extract_text_from_pptx(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext in ['.xlsx', '.xls']:
+                            text = await extract_text_from_xlsx(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext == '.csv':
+                            text = await extract_text_from_csv(extracted_path)
+                            all_text.append(f"=== {file_name} ===\n{text}")
+                        elif ext == '.rtf':
+                            text = await extract_text_from_rtf(extracted_path)
                             all_text.append(f"=== {file_name} ===\n{text}")
                         elif ext == '.txt':
                             with open(extracted_path, 'r', encoding='utf-8', errors='ignore') as f:

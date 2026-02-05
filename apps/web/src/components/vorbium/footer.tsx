@@ -26,7 +26,7 @@ export function Footer() {
                         <div className="flex flex-col gap-4 text-sm text-slate-600 dark:text-gray-400">
                             <Link href="/assistant" className="hover:text-indigo-600 dark:hover:text-vorbium-accent transition-colors">Assistant</Link>
                             <Link href="/research" className="hover:text-indigo-600 dark:hover:text-vorbium-accent transition-colors">Research</Link>
-                            <Link href="/workflows" className="hover:text-indigo-600 dark:hover:text-vorbium-accent transition-colors">Workflows</Link>
+                            <Link href="/solucoes/workflows" className="hover:text-indigo-600 dark:hover:text-vorbium-accent transition-colors">Workflows</Link>
                             <Link href="/collaboration" className="hover:text-indigo-600 dark:hover:text-vorbium-accent transition-colors">Collaboration</Link>
                         </div>
                     </AnimatedContainer>

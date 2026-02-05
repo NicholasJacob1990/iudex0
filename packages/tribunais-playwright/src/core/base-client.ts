@@ -21,8 +21,13 @@ import type {
   SemanticSelector,
   CaptchaInfo,
   CaptchaSolution,
+  ResilienceConfig,
+  AgentFallbackConfig,
 } from '../types/index.js';
 import { CaptchaHandler } from './captcha-handler.js';
+import { failFast, resolveResilienceConfig, type ErrorKind } from './resilience.js';
+import { SelectorStore } from './selector-store.js';
+import { createAgentFallback } from './agent-fallback.js';
 
 export abstract class BaseTribunalClient extends EventEmitter<TribunalEvents> {
   protected config: TribunalClientConfig;
@@ -32,6 +37,13 @@ export abstract class BaseTribunalClient extends EventEmitter<TribunalEvents> {
   protected isInitialized = false;
   protected isLoggedIn = false;
   protected captchaHandler: CaptchaHandler | null = null;
+
+  /** Configuração de resiliência resolvida */
+  protected resilience: Required<ResilienceConfig>;
+  /** Store de seletores self-healing */
+  protected selectorStore: SelectorStore | null = null;
+  /** Cliente de agent fallback */
+  protected agentFallback: ReturnType<typeof createAgentFallback> = null;
 
   /** Seletores específicos do tribunal - implementar nas subclasses */
   protected abstract selectors: TribunalSelectors;
@@ -46,6 +58,17 @@ export abstract class BaseTribunalClient extends EventEmitter<TribunalEvents> {
     // Inicializa handler de captcha se configurado
     if (config.captcha) {
       this.captchaHandler = new CaptchaHandler(config.captcha);
+    }
+
+    // Inicializa resiliência
+    this.resilience = resolveResilienceConfig(config.resilience);
+
+    // Inicializa selector store (sempre ativo para self-healing)
+    this.selectorStore = new SelectorStore();
+
+    // Inicializa agent fallback se configurado
+    if (config.agentFallback) {
+      this.agentFallback = createAgentFallback(config.agentFallback);
     }
   }
 
@@ -611,80 +634,251 @@ export abstract class BaseTribunalClient extends EventEmitter<TribunalEvents> {
   // Helpers de Navegação com Seletores Semânticos
   // ============================================
 
-  /** Encontra elemento usando seletor semântico */
-  protected async findSmart(selector: SemanticSelector, timeout?: number): Promise<ReturnType<Page['$']>> {
+  /**
+   * Gera chave única para o selector store.
+   * Formato: "tribunal|context|role:name"
+   */
+  protected getSelectorKey(selector: SemanticSelector, context?: string): string {
+    const nameStr = selector.name instanceof RegExp ? selector.name.source : (selector.name ?? 'unknown');
+    return `${this.tribunalName}|${context ?? 'default'}|${selector.role}:${nameStr}`;
+  }
+
+  /**
+   * Encontra elemento via ARIA role.
+   */
+  private async findByAria(selector: SemanticSelector, timeout: number): Promise<ReturnType<Page['$']>> {
     const page = this.getPage();
+    const locator = page.getByRole(selector.role as Parameters<Page['getByRole']>[0], {
+      name: selector.name,
+    });
+    await locator.first().waitFor({ timeout, state: 'visible' });
+    return await locator.first().elementHandle();
+  }
 
+  /**
+   * Encontra elemento via CSS selector.
+   */
+  private async findByCss(cssSelector: string, timeout: number): Promise<ReturnType<Page['$']>> {
+    const page = this.getPage();
+    return await page.waitForSelector(cssSelector, { timeout, state: 'visible' });
+  }
+
+  /**
+   * Descreve o selector para o agent fallback.
+   */
+  private describeSelector(selector: SemanticSelector): string {
+    const nameStr = selector.name instanceof RegExp ? selector.name.source : (selector.name ?? '');
+    return `${selector.role} com texto "${nameStr}"`;
+  }
+
+  /**
+   * Tenta encontrar elemento sequencialmente: ARIA → CSS → Store → Agent.
+   */
+  private async findSmartSequential(
+    selector: SemanticSelector,
+    timeout: number,
+    context?: string,
+  ): Promise<ReturnType<Page['$']>> {
+    const t = timeout;
+    const storeKey = this.getSelectorKey(selector, context);
+
+    // 1. ARIA (fail-fast)
     try {
-      // Tenta primeiro pelo role ARIA
-      const locator = page.getByRole(selector.role as Parameters<Page['getByRole']>[0], {
-        name: selector.name,
-      });
-
-      await locator.first().waitFor({ timeout: timeout ?? 5000, state: 'visible' });
-      return await locator.first().elementHandle();
+      const el = await failFast(() => this.findByAria(selector, t), t);
+      this.selectorStore?.recordSuccess(storeKey);
+      return el;
     } catch {
-      // Fallback para CSS
-      if (selector.fallback) {
-        const el = await page.waitForSelector(selector.fallback, { timeout: timeout ?? 5000 });
+      // continua
+    }
+
+    // 2. CSS fallback (fail-fast)
+    if (selector.fallback) {
+      try {
+        const el = await failFast(() => this.findByCss(selector.fallback!, t), t);
         return el;
+      } catch {
+        // continua
       }
-      return null;
     }
+
+    // 3. Self-healing: tenta selector do store
+    const cached = this.selectorStore?.get(storeKey);
+    if (cached) {
+      try {
+        const el = await failFast(() => this.findByCss(cached, t), t);
+        this.selectorStore!.recordSuccess(storeKey);
+        this.log(`[SELF-HEALING] Usando seletor do cache: ${cached}`);
+        return el;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent fallback (se habilitado)
+    if (this.agentFallback) {
+      const description = this.describeSelector(selector);
+      const discovered = await this.agentFallback.askForSelector(
+        this.getPage(),
+        description,
+        context ?? 'default',
+        selector,
+      );
+      if (discovered) {
+        try {
+          const el = await this.findByCss(discovered, t);
+          if (el) {
+            this.selectorStore?.set(storeKey, discovered);
+            this.log(`[SELF-HEALING] Novo seletor descoberto pelo agent: ${discovered}`);
+            return el;
+          }
+        } catch {
+          // agent sugeriu selector inválido
+        }
+      }
+    }
+
+    return null;
   }
 
-  /** Clica usando seletor semântico */
+  /**
+   * Tenta encontrar elemento via agent diretamente (para speculative execution).
+   */
+  private async findSmartViaAgent(
+    selector: SemanticSelector,
+    context?: string,
+  ): Promise<ReturnType<Page['$']>> {
+    if (!this.agentFallback) return null;
+
+    const storeKey = this.getSelectorKey(selector, context);
+    const description = this.describeSelector(selector);
+
+    const discovered = await this.agentFallback.askForSelector(
+      this.getPage(),
+      description,
+      context ?? 'default',
+      selector,
+    );
+
+    if (discovered) {
+      try {
+        const el = await this.findByCss(discovered, this.resilience.failFastTimeout);
+        if (el) {
+          this.selectorStore?.set(storeKey, discovered);
+          this.log(`[SPECULATIVE] Agent encontrou seletor: ${discovered}`);
+          return el;
+        }
+      } catch {
+        // selector inválido
+      }
+    }
+
+    return null;
+  }
+
+  /** Encontra elemento usando seletor semântico com resiliência */
+  protected async findSmart(selector: SemanticSelector, timeout?: number): Promise<ReturnType<Page['$']>> {
+    const t = timeout ?? this.resilience.failFastTimeout;
+
+    // Execução especulativa: script e agent em paralelo
+    if (this.resilience.speculative && this.agentFallback) {
+      const scriptPath = this.findSmartSequential(selector, t);
+      const agentPath = this.findSmartViaAgent(selector);
+
+      const [scriptResult, agentResult] = await Promise.all([
+        scriptPath.catch(() => null),
+        agentPath.catch(() => null),
+      ]);
+
+      // Retorna o primeiro resultado não-null
+      return scriptResult ?? agentResult;
+    }
+
+    // Execução sequencial padrão
+    return this.findSmartSequential(selector, t);
+  }
+
+  /** Clica usando seletor semântico com resiliência */
   protected async clickSmart(selector: SemanticSelector): Promise<void> {
-    const page = this.getPage();
-
-    try {
-      const locator = page.getByRole(selector.role as Parameters<Page['getByRole']>[0], {
-        name: selector.name,
-      });
-      await locator.first().click();
-    } catch {
-      if (selector.fallback) {
-        await page.click(selector.fallback);
-      } else {
-        throw new Error(`Elemento não encontrado: ${JSON.stringify(selector)}`);
-      }
+    const el = await this.findSmart(selector);
+    if (el) {
+      await el.click();
+      return;
     }
+    throw new Error(`Elemento não encontrado: ${JSON.stringify(selector)}`);
   }
 
-  /** Preenche campo usando seletor semântico */
+  /** Preenche campo usando seletor semântico com resiliência */
   protected async fillSmart(selector: SemanticSelector, value: string): Promise<void> {
     const page = this.getPage();
+    const el = await this.findSmart(selector);
 
-    try {
-      const locator = page.getByRole(selector.role as Parameters<Page['getByRole']>[0], {
-        name: selector.name,
-      });
-      await locator.first().fill(value);
-    } catch {
-      if (selector.fallback) {
-        await page.fill(selector.fallback, value);
-      } else {
-        throw new Error(`Campo não encontrado: ${JSON.stringify(selector)}`);
-      }
+    if (el) {
+      await el.fill(value);
+      return;
     }
+    throw new Error(`Campo não encontrado: ${JSON.stringify(selector)}`);
   }
 
-  /** Seleciona opção usando seletor semântico */
+  /** Seleciona opção usando seletor semântico com resiliência */
   protected async selectSmart(selector: SemanticSelector, option: { label?: string; value?: string }): Promise<void> {
     const page = this.getPage();
+    const t = this.resilience.failFastTimeout;
 
+    // findSmart retorna ElementHandle, mas selectOption precisa de locator.
+    // Tenta a cascata diretamente com selectOption.
+    const storeKey = this.getSelectorKey(selector);
+
+    // 1. ARIA
     try {
       const locator = page.getByRole(selector.role as Parameters<Page['getByRole']>[0], {
         name: selector.name,
       });
-      await locator.first().selectOption(option);
+      await failFast(() => locator.first().selectOption(option), t);
+      this.selectorStore?.recordSuccess(storeKey);
+      return;
     } catch {
-      if (selector.fallback) {
-        await page.selectOption(selector.fallback, option);
-      } else {
-        throw new Error(`Select não encontrado: ${JSON.stringify(selector)}`);
+      // continua
+    }
+
+    // 2. CSS fallback
+    if (selector.fallback) {
+      try {
+        await failFast(() => page.selectOption(selector.fallback!, option), t);
+        return;
+      } catch {
+        // continua
       }
     }
+
+    // 3. Self-healing store
+    const cached = this.selectorStore?.get(storeKey);
+    if (cached) {
+      try {
+        await failFast(() => page.selectOption(cached, option), t);
+        this.selectorStore!.recordSuccess(storeKey);
+        return;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent fallback
+    if (this.agentFallback) {
+      const description = this.describeSelector(selector);
+      const discovered = await this.agentFallback.askForSelector(this.getPage(), description, 'select', selector);
+      if (discovered) {
+        try {
+          await page.selectOption(discovered, option);
+          this.selectorStore?.set(storeKey, discovered);
+          this.log(`[SELF-HEALING] Novo seletor de select descoberto: ${discovered}`);
+          return;
+        } catch {
+          // falhou
+        }
+      }
+    }
+
+    throw new Error(`Select não encontrado: ${JSON.stringify(selector)}`);
   }
 
   /** Aguarda carregamento da página */

@@ -405,9 +405,15 @@ def run_audit_pipeline(
             
             # Valida apenas issues de conteúdo (não estruturais)
             if issue.get("category") in ("omissao", "alucinacao", "distorcao"):
-                validated = FidelityMatcher.validate_issue(
-                    enriched, ctx.raw_text, ctx.formatted_text
-                )
+                # Para alucinações, usa validação específica que verifica nomes de pessoas
+                if issue.get("category") == "alucinacao":
+                    validated = FidelityMatcher.validate_hallucination_issue(
+                        enriched, ctx.raw_text, ctx.formatted_text
+                    )
+                else:
+                    validated = FidelityMatcher.validate_issue(
+                        enriched, ctx.raw_text, ctx.formatted_text
+                    )
                 if validated.get("is_false_positive"):
                     false_positives_count += 1
                     logger.info(

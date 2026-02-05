@@ -4,7 +4,7 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health, mcp, tribunais, webhooks, graph, organizations
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health, mcp, mcp_bnp, tribunais, webhooks, graph, graph_ask, organizations, agent_tasks, context_bridge, workflows, marketplace, playbooks, corpus, corpus_projects, review_tables, extraction_jobs, assistant, analytics, spaces, word_addin, guest_auth, dms, dashboard, audit_logs, models
 
 api_router = APIRouter()
 
@@ -34,7 +34,27 @@ api_router.include_router(admin_rag.router, tags=["admin-rag"])
 api_router.include_router(advanced.router, prefix="/advanced", tags=["advanced"])
 api_router.include_router(djen.router, prefix="/djen", tags=["djen"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
+api_router.include_router(mcp_bnp.router, tags=["mcp-bnp"])
 api_router.include_router(tribunais.router, prefix="/tribunais", tags=["tribunais"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(graph.router, prefix="/graph", tags=["graph"])
+api_router.include_router(graph_ask.router, prefix="/graph", tags=["graph-ask"])
 api_router.include_router(organizations.router, prefix="/organizations", tags=["organizations"])
+api_router.include_router(agent_tasks.router, prefix="/agent", tags=["agent-tasks"])
+api_router.include_router(context_bridge.router, prefix="/context", tags=["context-bridge"])
+api_router.include_router(workflows.router, prefix="/workflows", tags=["workflows"])
+api_router.include_router(marketplace.router, prefix="/marketplace", tags=["marketplace"])
+api_router.include_router(playbooks.router, prefix="/playbooks", tags=["playbooks"])
+api_router.include_router(review_tables.router, prefix="/review-tables", tags=["review-tables"])
+api_router.include_router(extraction_jobs.router, prefix="/review-tables", tags=["extraction-jobs"])
+api_router.include_router(corpus.router, prefix="/corpus", tags=["corpus"])
+api_router.include_router(corpus_projects.router, prefix="/corpus/projects", tags=["corpus-projects"])
+api_router.include_router(assistant.router, prefix="/assistant", tags=["assistant"])
+api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
+api_router.include_router(spaces.router, prefix="/spaces", tags=["spaces"])
+api_router.include_router(word_addin.router, prefix="/word-addin", tags=["word-addin"])
+api_router.include_router(guest_auth.router, prefix="/auth", tags=["guest-auth"])
+api_router.include_router(dms.router, prefix="/dms", tags=["dms"])
+api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
+api_router.include_router(models.router, prefix="/models", tags=["model-routing"])

@@ -270,6 +270,16 @@ export function HilHistoryPanel({ metadata, events, className }: HilHistoryPanel
         return { approved, rejected, edited, total: history.length };
     }, [history]);
 
+    // Sort by timestamp descending (most recent first)
+    const sortedHistory = useMemo(() => {
+        if (!history.length) return [];
+        return [...history].sort((a, b) => {
+            const dateA = new Date(a.timestamp).getTime();
+            const dateB = new Date(b.timestamp).getTime();
+            return dateB - dateA;
+        });
+    }, [history]);
+
     if (!history.length) {
         return (
             <div className={cn("rounded-xl border border-outline/20 bg-card p-6 text-center", className)}>
@@ -283,15 +293,6 @@ export function HilHistoryPanel({ metadata, events, className }: HilHistoryPanel
             </div>
         );
     }
-
-    // Sort by timestamp descending (most recent first)
-    const sortedHistory = useMemo(() => {
-        return [...history].sort((a, b) => {
-            const dateA = new Date(a.timestamp).getTime();
-            const dateB = new Date(b.timestamp).getTime();
-            return dateB - dateA;
-        });
-    }, [history]);
 
     return (
         <div className={cn("space-y-4", className)}>

@@ -15,10 +15,12 @@ import {
   Settings,
   FolderOpen,
   Mic,
+  Sparkles,
 } from 'lucide-react';
 
 const navItems = [
   { href: '/dashboard', label: 'Início', icon: Home },
+  { href: '/ask', label: 'Ask', icon: Sparkles },
   { href: '/minuta', label: 'Nova Minuta', icon: FileText },
   { href: '/transcription', label: 'Transcrições', icon: Mic },
   { href: '/cases', label: 'Casos', icon: FolderOpen },

@@ -10,6 +10,9 @@ import os
 import re
 import json
 import math
+import time
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from google import genai
 from google.genai import types
 try:
@@ -23,6 +26,50 @@ MAX_CHARS_PER_CHUNK = int(os.getenv("FIDELITY_AUDIT_MAX_CHARS", "100000"))
 CHUNK_OVERLAP_CHARS = int(os.getenv("FIDELITY_AUDIT_CHUNK_OVERLAP", "4000"))
 MAX_LIST_ITEMS = int(os.getenv("FIDELITY_AUDIT_MAX_ITEMS", "200"))
 GEMINI_HTTP_TIMEOUT_MS = int(os.getenv("IUDEx_GEMINI_TIMEOUT_MS", "600000"))
+PARALLEL_AUDIT_WORKERS = int(os.getenv("IUDEX_PARALLEL_AUDIT", "3"))
+
+
+def _call_gemini_with_retry(client, prompt: str, config, max_retries: int = 5) -> str:
+    """
+    Chama Gemini com backoff exponencial para lidar com 429 RESOURCE_EXHAUSTED.
+
+    Args:
+        client: Cliente Gemini
+        prompt: Prompt a enviar
+        config: Configuração do GenerateContentConfig
+        max_retries: Número máximo de tentativas
+
+    Returns:
+        Texto da resposta
+
+    Raises:
+        Exception: Se todas as tentativas falharem
+    """
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model='gemini-3-flash-preview',
+                contents=prompt,
+                config=config
+            )
+            return response.text or ""
+        except Exception as e:
+            last_error = e
+            error_str = str(e).lower()
+            # Check if it's a rate limit error (429)
+            if "429" in str(e) or "resource_exhausted" in error_str or "quota" in error_str:
+                # Exponential backoff: 4s, 8s, 16s, 32s, 64s + jitter
+                wait_time = (2 ** (attempt + 2)) + random.uniform(0, 2)
+                print(f"    ⏳ Rate limit (429), aguardando {wait_time:.1f}s antes de retry {attempt + 1}/{max_retries}...")
+                time.sleep(wait_time)
+            else:
+                # For other errors, shorter wait
+                wait_time = 2 + random.uniform(0, 1)
+                print(f"    ⚠️ Erro Gemini: {str(e)[:100]}, retry {attempt + 1}/{max_retries} em {wait_time:.1f}s...")
+                time.sleep(wait_time)
+
+    raise last_error or Exception("Todas as tentativas falharam")
 
 APOSTILA_MIN_RETENTION = 0.70
 FIDELIDADE_MIN_RETENTION = 0.95
@@ -44,6 +91,12 @@ Você é um auditor sênior especializado em validação de transcrições jurí
 Este documento foi gerado a partir de uma transcrição de aula jurídica.
 Você está fazendo a auditoria ANTES da geração do documento final (DOCX).
 É sua última chance de detectar problemas CRÍTICOS.
+
+## MÉTRICAS REAIS DO DOCUMENTO (JÁ CALCULADAS - USE ESTES VALORES)
+{metricas_info}
+
+**IMPORTANTE:** As métricas acima foram calculadas de forma determinística pelo sistema.
+NÃO invente ou estime outros valores. Use EXATAMENTE estes números nas suas observações.
 
 ## CONTEXTO DO TRECHO
 {chunk_info}
@@ -226,8 +279,8 @@ Retorne APENAS JSON válido (sem markdown, sem comentários):
     "dispositivos_legais_formatado": 0,
     "taxa_preservacao_dispositivos": 0.0
   }},
-  
-  "observacoes_gerais": "Comentários sobre a qualidade geral",
+
+  "observacoes_gerais": "IMPORTANTE: Use APENAS os valores da seção MÉTRICAS REAIS DO DOCUMENTO. Se taxa > 100%, mencione EXPANSÃO (não compressão). Exemplo: 'Taxa de retenção de 108.1% indica expansão de 8.1%'. NÃO invente números.",
   
   "recomendacao_hil": {{
     "pausar_para_revisao": true/false,
@@ -240,36 +293,29 @@ Retorne APENAS JSON válido (sem markdown, sem comentários):
 
 ## ANÁLISE AUTOMÁTICA DE MÉTRICAS
 
-Antes de começar a análise qualitativa, calcule:
+**IMPORTANTE:** As métricas do documento JÁ FORAM CALCULADAS pelo sistema e estão na seção "MÉTRICAS REAIS DO DOCUMENTO" acima.
+NÃO calcule novamente. NÃO invente números. USE EXATAMENTE os valores fornecidos.
 
-1. **Taxa de Compressão:**
-   ```
-   palavras_formatado / palavras_raw = X%
-   
-   Se X < 70%: ⚠️ ALERTA - Compressão excessiva
-   Se X ≥ 70%: ✅ OK (APOSTILA)
-   Se 95% ≤ X ≤ 115%: ✅ OK (FIDELIDADE)
-   ```
+1. **Taxa de Retenção (já calculada acima):**
+   - Se < 70%: Compressão (texto ficou menor que o original)
+   - Se = 100%: Tamanho igual ao original
+   - Se > 100%: Expansão (texto ficou maior que o original)
 
-2. **Preservação de Dispositivos Legais:**
-   ```
-   Contar no RAW: artigos, súmulas, leis mencionadas
-   Contar no FORMATADO: mesmos elementos
-   
-   Taxa = dispositivos_formatado / dispositivos_raw
-   
-   Se < 90%: 🔴 CRÍTICO
-   Se 90-95%: ⚠️ ATENÇÃO
-   Se > 95%: ✅ OK
-   ```
+   Interpretação:
+   - Taxa 108% = EXPANSÃO de 8% (texto formatado é 8% MAIOR que o RAW)
+   - Taxa 70% = COMPRESSÃO de 30% (texto formatado é 30% menor que o RAW)
+   - Taxa 95% = COMPRESSÃO de 5% (texto formatado é 5% menor que o RAW)
+
+2. **Nas observações_gerais:**
+   - SEMPRE cite os valores EXATOS fornecidos na seção de métricas
+   - Se taxa > 100%: mencione que houve EXPANSÃO (não compressão)
+   - Se taxa < 100%: mencione que houve COMPRESSÃO
+   - NUNCA invente porcentagens ou números diferentes dos fornecidos
 
 3. **Nomes de Pessoas:**
-   ```
    Extrair do RAW: nomes de examinadores, autores, procuradores
    Verificar no FORMATADO: mesmos nomes aparecem corretamente?
-   
    Marcar como distorção qualquer troca.
-   ```
 
 ---
 
@@ -592,6 +638,88 @@ def _filter_ref_based_omission_false_positives(
     return out
 
 
+def _extract_names_from_text(text: str) -> set:
+    """
+    Extrai nomes próprios de um texto (sequências de 2+ palavras capitalizadas).
+    """
+    if not text:
+        return set()
+    names = set()
+    # Padrão: 2+ palavras começando com maiúscula (ex: "Nelson Rosenwald", "Gustavo Tepedino")
+    pattern = re.compile(r'\b([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇ][a-záàâãéèêíïóôõöúç]+(?:\s+[A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇ][a-záàâãéèêíïóôõöúç]+)+)\b')
+    for match in pattern.findall(text):
+        name = match.strip()
+        # Ignorar nomes muito curtos ou genéricos
+        if len(name) > 6 and len(name.split()) >= 2:
+            names.add(name.lower())
+    return names
+
+
+def _filter_hallucination_false_positives(
+    raw_text: str,
+    alucinacoes: list,
+) -> list:
+    """
+    Remove falsos positivos de alucinações:
+    - Quando o LLM reporta um nome como alucinação mas o nome existe no RAW completo
+      (apenas não estava no chunk correspondente).
+
+    Args:
+        raw_text: Texto RAW completo (não apenas o chunk)
+        alucinacoes: Lista de alucinações reportadas pelo LLM
+
+    Returns:
+        Lista filtrada de alucinações reais
+    """
+    if not isinstance(alucinacoes, list) or not raw_text:
+        return alucinacoes or []
+
+    raw_lower = raw_text.lower()
+    raw_names = _extract_names_from_text(raw_text)
+
+    out = []
+    for item in alucinacoes:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+
+        trecho = str(item.get("trecho_formatado") or "")
+        if not trecho:
+            out.append(item)
+            continue
+
+        # Extrair nomes do trecho reportado como alucinação
+        trecho_names = _extract_names_from_text(trecho)
+
+        # Se todos os nomes do trecho existem no RAW, é falso positivo
+        if trecho_names:
+            all_names_in_raw = all(name in raw_names or name in raw_lower for name in trecho_names)
+            if all_names_in_raw:
+                # O nome existe no RAW - falso positivo por chunk boundary
+                continue
+
+        # Verificação adicional: o trecho inteiro ou partes significativas estão no RAW?
+        trecho_lower = trecho.lower().strip()
+        if len(trecho_lower) > 10:
+            # Se o trecho exato existe no RAW, é falso positivo
+            if trecho_lower in raw_lower:
+                continue
+            # Verificar partes do trecho (palavras-chave)
+            keywords = [w for w in trecho_lower.split() if len(w) > 4]
+            if keywords:
+                keywords_found = sum(1 for kw in keywords if kw in raw_lower)
+                if keywords_found / len(keywords) >= 0.7:
+                    # 70%+ das palavras-chave estão no RAW - provável falso positivo
+                    item["confianca"] = "BAIXA"
+                    item["veredito"] = "SUSPEITO"
+
+        out.append(item)
+        if len(out) >= MAX_LIST_ITEMS:
+            break
+
+    return out
+
+
 def auditar_fidelidade_preventiva(
     client,
     raw_text: str,
@@ -657,57 +785,116 @@ def auditar_fidelidade_preventiva(
     resultados = []
     chunk_word_counts = []
 
+    # Preparar string de métricas para incluir no prompt
+    # Importante: Informar claramente se houve expansão ou compressão
+    if taxa_compressao > 1.0:
+        tipo_variacao = f"EXPANSÃO de {(taxa_compressao - 1.0) * 100:.1f}% (texto formatado é MAIOR que o RAW)"
+    elif taxa_compressao < 1.0:
+        tipo_variacao = f"COMPRESSÃO de {(1.0 - taxa_compressao) * 100:.1f}% (texto formatado é menor que o RAW)"
+    else:
+        tipo_variacao = "TAMANHO IGUAL (sem variação)"
+
+    metricas_info = f"""
+- **Modo:** {modo}
+- **Palavras no RAW (original):** {palavras_raw:,}
+- **Palavras no Formatado:** {palavras_fmt:,}
+- **Taxa de Retenção:** {taxa_compressao * 100:.1f}% → {tipo_variacao}
+- **Dispositivos Legais no RAW:** {len(dispositivos_raw)}
+- **Dispositivos Legais no Formatado:** {len(dispositivos_fmt)}
+- **Taxa de Preservação de Dispositivos:** {taxa_preservacao * 100:.1f}%
+"""
+
     print("\n🤖 Executando análise via LLM...")
 
+    def _process_audit_chunk(chunk: dict, total_chunks: int, metricas_info_str: str) -> tuple:
+        """Processa um único chunk de auditoria. Retorna (index, parsed, word_count)."""
+        is_last_chunk = chunk["index"] == total_chunks
+        chunk_info = (
+            f"Trecho {chunk['index']} de {total_chunks} "
+            f"(RAW {chunk['raw_start']:,}-{chunk['raw_end']:,}, "
+            f"FMT {chunk['fmt_start']:,}-{chunk['fmt_end']:,}). "
+            f"{'Este é o ÚLTIMO trecho.' if is_last_chunk else 'Este NÃO é o final do documento.'} "
+            "Avalie apenas este trecho e NÃO conclua que o documento terminou apenas porque o trecho acabou."
+        )
+        prompt = PROMPT_AUDITORIA_FIDELIDADE_PREVENTIVA.format(
+            raw=chunk["raw"],
+            formatted=chunk["formatted"],
+            chunk_info=chunk_info,
+            metricas_info=metricas_info_str,
+        )
+
+        config = types.GenerateContentConfig(
+            temperature=0.1,
+            max_output_tokens=16000,
+            response_mime_type="application/json",
+            http_options=types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_MS),
+            thinking_config=types.ThinkingConfig(
+                include_thoughts=False,
+                thinking_level="HIGH"
+            ),
+        )
+        response_text = _call_gemini_with_retry(client, prompt, config)
+
+        parsed = _safe_json_parse(response_text)
+        if not isinstance(parsed, dict):
+            parsed = {
+                "aprovado": False,
+                "nota_fidelidade": 0,
+                "gravidade_geral": "CRÍTICA",
+                "erro": "JSON inválido para trecho",
+            }
+        parsed["_chunk_index"] = chunk["index"]
+        # Attach chunk index to child items
+        for key in ("omissoes_criticas", "distorcoes", "problemas_estruturais", "problemas_contexto", "alucinacoes"):
+            items = parsed.get(key)
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, dict):
+                        item.setdefault("_chunk_index", chunk["index"])
+
+        word_count = len(chunk["raw"].split())
+        return (chunk["index"], parsed, word_count)
+
+    # Processar chunks em paralelo usando ThreadPoolExecutor
+    total_chunks = len(chunks)
     try:
-        for chunk in chunks:
-            is_last_chunk = chunk["index"] == len(chunks)
-            chunk_info = (
-                f"Trecho {chunk['index']} de {len(chunks)} "
-                f"(RAW {chunk['raw_start']:,}-{chunk['raw_end']:,}, "
-                f"FMT {chunk['fmt_start']:,}-{chunk['fmt_end']:,}). "
-                f"{'Este é o ÚLTIMO trecho.' if is_last_chunk else 'Este NÃO é o final do documento.'} "
-                "Avalie apenas este trecho e NÃO conclua que o documento terminou apenas porque o trecho acabou."
-            )
-            prompt = PROMPT_AUDITORIA_FIDELIDADE_PREVENTIVA.format(
-                raw=chunk["raw"],
-                formatted=chunk["formatted"],
-                chunk_info=chunk_info,
-            )
-
-            response = client.models.generate_content(
-                model='gemini-3-flash-preview',
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    max_output_tokens=16000,
-                    response_mime_type="application/json",
-                    http_options=types.HttpOptions(timeout=GEMINI_HTTP_TIMEOUT_MS),
-                    thinking_config=types.ThinkingConfig(
-                        include_thoughts=False,
-                        thinking_level="HIGH"
-                    ),
-                )
-            )
-
-            parsed = _safe_json_parse(response.text or "")
-            if not isinstance(parsed, dict):
-                parsed = {
-                    "aprovado": False,
-                    "nota_fidelidade": 0,
-                    "gravidade_geral": "CRÍTICA",
-                    "erro": "JSON inválido para trecho",
+        if total_chunks <= 1 or PARALLEL_AUDIT_WORKERS <= 1:
+            # Modo sequencial para poucos chunks
+            for chunk in chunks:
+                idx, parsed, wc = _process_audit_chunk(chunk, total_chunks, metricas_info)
+                resultados.append(parsed)
+                chunk_word_counts.append(wc)
+                print(f"   ✅ Chunk {idx}/{total_chunks} processado")
+        else:
+            # Modo paralelo
+            print(f"   🚀 Processando {total_chunks} chunks em paralelo (max {PARALLEL_AUDIT_WORKERS} workers)...")
+            with ThreadPoolExecutor(max_workers=PARALLEL_AUDIT_WORKERS) as executor:
+                futures = {
+                    executor.submit(_process_audit_chunk, chunk, total_chunks, metricas_info): chunk["index"]
+                    for chunk in chunks
                 }
-            parsed["_chunk_index"] = chunk["index"]
-            # Attach chunk index to child items to help post-processing avoid "fim do documento" false positives.
-            for key in ("omissoes_criticas", "distorcoes", "problemas_estruturais", "problemas_contexto", "alucinacoes"):
-                items = parsed.get(key)
-                if isinstance(items, list):
-                    for item in items:
-                        if isinstance(item, dict):
-                            item.setdefault("_chunk_index", chunk["index"])
-            resultados.append(parsed)
-            chunk_word_counts.append(len(chunk["raw"].split()))
+                results_map = {}
+                for future in as_completed(futures):
+                    chunk_idx = futures[future]
+                    try:
+                        idx, parsed, wc = future.result()
+                        results_map[idx] = (parsed, wc)
+                        print(f"   ✅ Chunk {idx}/{total_chunks} concluído")
+                    except Exception as e:
+                        print(f"   ❌ Erro no chunk {chunk_idx}: {e}")
+                        results_map[chunk_idx] = ({
+                            "aprovado": False,
+                            "nota_fidelidade": 0,
+                            "gravidade_geral": "CRÍTICA",
+                            "erro": str(e),
+                            "_chunk_index": chunk_idx,
+                        }, 0)
+
+            # Ordenar resultados por índice
+            for i in range(1, total_chunks + 1):
+                parsed, wc = results_map.get(i, ({}, 0))
+                resultados.append(parsed)
+                chunk_word_counts.append(wc)
 
         aprovado = True
         gravidade = "BAIXA"
@@ -804,6 +991,12 @@ def auditar_fidelidade_preventiva(
             dispositivos_raw,
             dispositivos_fmt,
             resultado.get("omissoes_criticas") or [],
+        )
+
+        # Filter hallucination false positives (names/content that exist in full RAW but not in chunk).
+        resultado["alucinacoes"] = _filter_hallucination_false_positives(
+            raw_text,
+            resultado.get("alucinacoes") or [],
         )
 
         def _normalize_result_invariants(out: dict) -> dict:

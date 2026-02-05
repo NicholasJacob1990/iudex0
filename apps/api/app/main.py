@@ -7,8 +7,10 @@ import asyncio
 import os
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pathlib import Path
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
@@ -18,6 +20,7 @@ from app.api.routes import api_router
 from app.core.config import settings
 from app.core.database import init_db
 from app.core.logging import setup_logging
+from app.middleware.cache_headers import CacheHeadersMiddleware
 from app.services.api_call_tracker import set_background_loop
 
 
@@ -182,6 +185,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Validation error handler - log detalhado para debug 422
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"[422 VALIDATION ERROR] URL: {request.url}")
+    logger.error(f"[422 VALIDATION ERROR] Method: {request.method}")
+    logger.error(f"[422 VALIDATION ERROR] Errors: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
@@ -191,8 +205,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Compressão
+# Compressão (respostas > 1KB são comprimidas com gzip)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# Cache headers (Cache-Control + ETag) para respostas da API
+app.add_middleware(CacheHeadersMiddleware)
 
 # Arquivos estáticos (podcasts, diagramas)
 storage_root = Path(settings.LOCAL_STORAGE_PATH)

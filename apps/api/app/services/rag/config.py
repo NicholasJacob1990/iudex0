@@ -183,7 +183,10 @@ class RAGConfig:
     qdrant_collection_local: str = "local_chunks"
 
     # ==========================================================================
-    # Embeddings
+    # Embeddings — Provider primário (OpenAI) usado pelo pipeline RAG
+    # Dimensão 3072 corresponde ao modelo text-embedding-3-large.
+    # NOTA: O provider local/fallback (SentenceTransformers, 768d) é configurado
+    # em app/core/config.py → Settings.EMBEDDING_DIMENSION.
     # ==========================================================================
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int = 3072

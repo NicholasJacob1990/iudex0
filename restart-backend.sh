@@ -10,9 +10,34 @@ echo "⏳ Aguardando 2 segundos..."
 sleep 2
 
 echo "🚀 Iniciando servidor backend..."
-cd "$ROOT_DIR/apps/api"
-if [ -x "$ROOT_DIR/.venv/bin/python" ]; then
-  "$ROOT_DIR/.venv/bin/python" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-else
-  python3.12 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+API_DIR="$ROOT_DIR/apps/api"
+cd "$API_DIR"
+
+PYTHON_BIN=""
+for candidate in \
+  "$API_DIR/.venv312/bin/python" \
+  "$API_DIR/venv/bin/python" \
+  "$API_DIR/.venv/bin/python" \
+  "$ROOT_DIR/.venv/bin/python"
+do
+  if [ -x "$candidate" ]; then
+    PYTHON_BIN="$candidate"
+    break
+  fi
+done
+
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3.12 >/dev/null 2>&1; then
+    PYTHON_BIN="python3.12"
+  elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  fi
 fi
+
+if [ -z "$PYTHON_BIN" ]; then
+  echo "❌ Python não encontrado. Ative a venv em apps/api."
+  exit 1
+fi
+
+echo "🐍 Usando Python: $PYTHON_BIN"
+"$PYTHON_BIN" -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

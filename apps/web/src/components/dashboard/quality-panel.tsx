@@ -180,6 +180,9 @@ interface QualityPanelProps {
 
     /** Hearing/meeting: notify parent after updating hearing payload */
     onHearingUpdated?: (payload: any) => void;
+    // Consolidated audit data (from audit_summary.json)
+    consolidatedScore?: number | null;
+    consolidatedStatus?: string | null;
 }
 
 interface AnalyzeResponse {
@@ -335,6 +338,9 @@ export function QualityPanel({
     onAuditOutdatedChange,
     onConvertContentAlerts,
     onHearingUpdated,
+    // Consolidated audit data
+    consolidatedScore,
+    consolidatedStatus,
 }: QualityPanelProps) {
     const isDashboardVariant = variant === 'dashboard';
     // Determine if this is a hearing/meeting
@@ -475,6 +481,7 @@ export function QualityPanel({
         return <XCircle className="w-5 h-5 text-red-600" />;
     };
 
+    // Use ref to avoid dependency cycle: initialQuality -> setSelectedFixes -> persistUiState -> storedUiState -> loop
     useEffect(() => {
         if (!initialQuality) {
             setReport(null);
@@ -507,7 +514,8 @@ export function QualityPanel({
             };
             setAnalysisResult(normalizedAnalysis);
             setPendingFixes(normalizedPending);
-            const storedSelection = storedUiState?.selectedFixIds ?? [];
+            // Use ref instead of state to avoid infinite loop
+            const storedSelection = uiStateRef.current?.selectedFixIds ?? [];
             const available = new Set(normalizedPending.map((fix) => fix.id));
             const filteredStored = storedSelection.filter((id) => available.has(id));
             if (initialQuality.selected_fix_ids && initialQuality.selected_fix_ids.length > 0) {
@@ -525,7 +533,7 @@ export function QualityPanel({
 
         setSuggestions(initialQuality.suggestions || null);
         setAppliedFixes(Array.isArray(initialQuality.applied_fixes) ? initialQuality.applied_fixes : []);
-    }, [initialQuality, storedUiState, normalizeReport]);
+    }, [initialQuality, normalizeReport]); // Removed storedUiState to break cycle
 
     useEffect(() => {
         if (!storedUiState?.selectedFixIds?.length) return;
@@ -539,41 +547,59 @@ export function QualityPanel({
         }
     }, [storedUiState, selectedFixes.size, pendingFixes, jobId, initialQuality?.selected_fix_ids?.length]);
 
-    // Sync external audit issues with internal pendingFixes (bidirectional sync)
+    // Track previous external issues to detect real external changes
+    const prevExternalIssuesRef = useRef<PendingFix[] | undefined>(externalAuditIssues);
+    const isUpdatingFromExternalRef = useRef(false);
+
+    // Sync external audit issues with internal pendingFixes (one-way: external → internal)
     useEffect(() => {
-        if (externalAuditIssues && externalAuditIssues.length > 0) {
-            // External issues provided - use them as source of truth
-            const externalIds = new Set(externalAuditIssues.map(i => i.id));
-            const currentIds = new Set(pendingFixes.map(i => i.id));
+        if (!externalAuditIssues || externalAuditIssues.length === 0) return;
 
-            // Only update if there's a real difference
-            const isDifferent = externalAuditIssues.length !== pendingFixes.length ||
-                [...externalIds].some(id => !currentIds.has(id));
+        // Check if this is actually a new external update (not a reflection of our own change)
+        const prevIds = prevExternalIssuesRef.current?.map(i => i.id).sort().join(',') ?? '';
+        const newIds = externalAuditIssues.map(i => i.id).sort().join(',');
 
-            if (isDifferent) {
-                setPendingFixes(externalAuditIssues);
-                // Update analysisResult to match
-                setAnalysisResult(prev => prev ? {
-                    ...prev,
-                    pending_fixes: externalAuditIssues,
-                    total_issues: externalAuditIssues.length,
-                } : null);
-            }
+        if (prevIds === newIds) {
+            // Same IDs, no real change
+            prevExternalIssuesRef.current = externalAuditIssues;
+            return;
         }
+
+        // Mark that we're updating from external source
+        isUpdatingFromExternalRef.current = true;
+        prevExternalIssuesRef.current = externalAuditIssues;
+
+        setPendingFixes(externalAuditIssues);
+        setAnalysisResult(prev => prev ? {
+            ...prev,
+            pending_fixes: externalAuditIssues,
+            total_issues: externalAuditIssues.length,
+        } : null);
+
+        // Reset flag after state update
+        requestAnimationFrame(() => {
+            isUpdatingFromExternalRef.current = false;
+        });
     }, [externalAuditIssues]);
 
     // Track previous pendingFixes to detect internal changes
     const prevPendingFixesRef = useRef<PendingFix[]>(pendingFixes);
     useEffect(() => {
-        // Only notify parent if this was an internal change (not from external sync)
-        const wasInternalChange = prevPendingFixesRef.current !== pendingFixes &&
-            (!externalAuditIssues || externalAuditIssues !== pendingFixes);
+        // Skip if this update came from external sync
+        if (isUpdatingFromExternalRef.current) {
+            prevPendingFixesRef.current = pendingFixes;
+            return;
+        }
 
-        if (wasInternalChange && onIssuesUpdated) {
+        // Only notify parent if this was an internal change
+        const prevIds = prevPendingFixesRef.current.map(i => i.id).sort().join(',');
+        const newIds = pendingFixes.map(i => i.id).sort().join(',');
+
+        if (prevIds !== newIds && onIssuesUpdated) {
             onIssuesUpdated(pendingFixes);
         }
         prevPendingFixesRef.current = pendingFixes;
-    }, [pendingFixes, onIssuesUpdated, externalAuditIssues]);
+    }, [pendingFixes, onIssuesUpdated]);
 
     useEffect(() => {
         persistUiState({ severityFilter });

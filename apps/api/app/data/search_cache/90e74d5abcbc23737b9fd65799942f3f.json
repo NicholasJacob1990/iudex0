@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gere um exemplo de minuta resumo",
+  "total": 5,
+  "results": [
+    {
+      "title": "\"Segue anexo\" ou \"Segue em anexo\": qual é a forma ... - Exame",
+      "url": "https://exame.com/carreira/guia-de-carreira/segue-anexo-ou-segue-em-anexo-qual-e-a-forma-correta-para-usar-no-e-mail/",
+      "snippet": "A forma mais recomendada e gramaticalmente correta para indicar que umdocumentoestá sendo enviado comoe-mail é \"segue anexo\". Essa escolha contribui para uma comunicação mais clara e profissional.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Canva: um Kit de Criação Visual para todo mundo",
+      "url": "https://www.canva.com/pt_br/",
+      "snippet": "OCanvaé uma ferramenta gratuitadedesign gráfico online que você pode usar para criar posts para redes sociais, apresentações, cartazes, vídeos, logotipos e muito mais.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Editor online e gratuito de documentos - Crie e edite ... - Canva",
+      "url": "https://www.canva.com/pt_br/criar/documentos/",
+      "snippet": "Crie relatórios, propostas comerciais e outrosdocumentoscom um visual chamativo usandooCanvaDocs, nosso editor online e gratuitodedocumentos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Canva Docs — Editor de documentos online grátis e fácil de usar",
+      "url": "https://www.canva.com/pt_br/documentos/",
+      "snippet": "Crieconteúdodequalidade com mais rapidez usandooTexto Mágico™, um assistentedeescrita e geradordetexto com tecnologia OpenAI. Gere, resuma, amplie e reescreva textosdeum jeito fácil.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Exemplos de Considerações finais: Saiba como fazer e Confira modelos",
+      "url": "https://www.exempl.com.br/exemplos-de-consideracoes-finais/",
+      "snippet": "Principalmente ao fazer um trabalho acadêmico, percebemos a importância das considerações finais, tópico que fica aofinaldotexto, antes apenas das referências, e faz um breve resumo daquilo que se tornou possível compreender.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-02-04T02:54:58.169601"
+}

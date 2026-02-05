@@ -20,8 +20,8 @@ celery==5.4.0
 flower==2.0.1
 
 # IA e ML - Provedores
-openai==1.55.3
-anthropic==0.50.0
+openai>=1.66.0
+anthropic>=0.50.0
 google-generativeai==0.8.3
 google-genai==1.20.0
 Jinja2==3.1.4
@@ -43,6 +43,9 @@ chromadb==0.5.20
 opensearch-py==2.6.0
 
 # Embeddings e NLP
+voyageai>=0.3.2
+isaacus>=0.1.0
+langdetect>=1.0.9
 sentence-transformers==3.3.1
 transformers==4.46.3
 rank-bm25==0.2.2
@@ -60,6 +63,7 @@ pdfplumber==0.11.4
 python-docx==1.1.2
 python-pptx==1.0.2
 openpyxl==3.1.5
+reportlab==4.1.0
 python-magic==0.4.27
 chardet==5.2.0
 odfpy==1.4.1
@@ -100,6 +104,7 @@ pydantic-settings==2.6.1
 python-slugify==8.0.4
 pytz==2024.2
 arrow==1.3.0
+croniter>=2.0.0
 
 # Validação e Schemas
 email-validator==2.2.0
@@ -127,3 +132,4 @@ cryptography==43.0.3
 bcrypt==4.2.1
 openai-agents>=0.7.0
 google-adk>=1.23.0
+claude-agent-sdk>=0.1.26

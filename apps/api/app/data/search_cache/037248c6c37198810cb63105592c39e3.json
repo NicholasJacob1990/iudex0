@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Escreva o conteúdo final do documento solicitado.\nEvite mencionar canvas, interface ou limitações de UI.\nSolicitação: gere um exemplo de minuta 2026",
+  "total": 5,
+  "results": [
+    {
+      "title": "Canva Docs — Editor de documentos online grátis e fácil de usar",
+      "url": "https://www.canva.com/pt_br/documentos/",
+      "snippet": "Quer esteja criandodocumentosinternos para sua equipeouescrevendo uma tarefa,oCanvaDocs combina seus recursos favoritosdeprocessamentodetexto com a capacidadedeturbinar seuconteúdocom visuais impactantes e envolventes.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Editor online e gratuito de documentos - Crie e edite ... - Canva",
+      "url": "https://www.canva.com/pt_br/criar/documentos/",
+      "snippet": "Crie relatórios, propostas comerciais e outrosdocumentoscom um visual chamativo usandooCanvaDocs, nosso editor online e gratuitodedocumentos.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Canva: um Kit de Criação Visual para todo mundo",
+      "url": "https://www.canva.com/pt_br/",
+      "snippet": "OCanvaé uma ferramenta gratuitadedesign gráfico online que você pode usar para criar posts para redes sociais, apresentações, cartazes, vídeos, logotipos e muito mais.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "\"Segue anexo\" ou \"Segue em anexo\": qual é a forma ... - Exame",
+      "url": "https://exame.com/carreira/guia-de-carreira/segue-anexo-ou-segue-em-anexo-qual-e-a-forma-correta-para-usar-no-e-mail/",
+      "snippet": "A forma mais recomendada e gramaticalmente correta para indicar que umdocumentoestá sendo enviado comoe-mail é \"segue anexo\". Essa escolha contribui para uma comunicação mais clara e profissional.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Guia de introdução e visão geral do Canva Docs",
+      "url": "https://www.canva.com/pt_br/help/about-canva-docs/",
+      "snippet": "Comece aqui quando estiver configurando seudocumentodoCanvapara escrita, layoutouimpressão. Você pode selecionar um tipodepágina, ajustar quebrasdepágina e usar recursosdelayout como banners, colunas e contornos para orientar como seudocumentoaparece e flui.",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-02-04T02:54:58.137223"
+}

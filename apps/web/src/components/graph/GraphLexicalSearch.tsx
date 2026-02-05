@@ -53,6 +53,7 @@ export function GraphLexicalSearch() {
         authors: filters.lexicalAuthors,
         matchMode: filters.lexicalMatchMode,
         limit: 50,
+        includeGlobal: filters.includeGlobal,
     });
 
     const handleKeyDown = (

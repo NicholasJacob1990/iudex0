@@ -12,8 +12,8 @@ class FixServerChunkRuntimePathPlugin {
 
       const source = fs.readFileSync(runtimePath, 'utf8');
       const patched = source.replace(
-        /return\\s+\"\"\\s*\\+\\s*chunkId\\s*\\+\\s*\"\\.js\";/g,
-        'return \"chunks/\" + chunkId + \".js\";'
+        /return\s+(?:(?:"chunks\/"\s*\+\s*)|(?:""\s*\+\s*))?chunkId\s*\+\s*["']\.js["']\s*;?/g,
+        'return (typeof chunkId === "string" ? "" : "chunks/") + chunkId + ".js";'
       );
 
       if (patched !== source) {
@@ -27,13 +27,78 @@ class FixServerChunkRuntimePathPlugin {
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ['@iudex/shared'],
+
+  // Cache headers e security headers
+  async headers() {
+    const isProd = process.env.NODE_ENV === 'production';
+    const securityHeaders = [
+      { key: 'X-Content-Type-Options', value: 'nosniff' },
+      { key: 'X-Frame-Options', value: 'DENY' },
+      { key: 'Referrer-Policy', value: 'strict-origin-when-cross-origin' },
+    ];
+
+    return [
+      // Static assets (hashed by Next.js — immutable)
+      {
+        source: '/_next/static/:path*',
+        headers: [
+          ...securityHeaders,
+          // In dev, aggressive caching breaks HMR and can leave the UI unstyled.
+          { key: 'Cache-Control', value: isProd ? 'public, max-age=31536000, immutable' : 'no-store, must-revalidate' },
+        ],
+      },
+      // Images
+      {
+        source: '/images/:path*',
+        headers: [
+          ...securityHeaders,
+          { key: 'Cache-Control', value: isProd ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-store, must-revalidate' },
+        ],
+      },
+      // Logos
+      {
+        source: '/logos/:path*',
+        headers: [
+          ...securityHeaders,
+          { key: 'Cache-Control', value: isProd ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-store, must-revalidate' },
+        ],
+      },
+      // Fonts
+      {
+        source: '/fonts/:path*',
+        headers: [
+          ...securityHeaders,
+          { key: 'Cache-Control', value: isProd ? 'public, max-age=31536000, immutable' : 'no-store, must-revalidate' },
+        ],
+      },
+      // Service Worker — must not be cached long-term
+      {
+        source: '/sw.js',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=0, must-revalidate' },
+          { key: 'Service-Worker-Allowed', value: '/' },
+        ],
+      },
+      // Manifest
+      {
+        source: '/manifest.json',
+        headers: [
+          { key: 'Cache-Control', value: 'public, max-age=86400' },
+        ],
+      },
+      // All other pages — security headers only
+      {
+        source: '/:path*',
+        headers: securityHeaders,
+      },
+    ];
+  },
   webpack: (config, { isServer }) => {
     // In some dev builds, Next/webpack can emit server chunks to
     // `.next/server/chunks/*` but generate a runtime that tries to `require`
     // them from `.next/server/*`, causing "Cannot find module './<id>.js'".
-    // Force a consistent server chunk path.
+    // Patch the runtime so numeric chunk ids resolve under `chunks/`.
     if (isServer) {
-      config.output.chunkFilename = 'chunks/[id].js';
       config.plugins.push(new FixServerChunkRuntimePathPlugin());
     }
 
@@ -53,7 +118,17 @@ const nextConfig = {
   // and avoid cross-origin redirects. No rewrite needed.
   experimental: {
     serverActions: {
-      allowedOrigins: ['localhost:3000', 'localhost:8000', '127.0.0.1:3000', '127.0.0.1:8000'],
+      // Include common dev ports so we can switch origins to bypass SW/caches.
+      allowedOrigins: [
+        'localhost:3000',
+        '127.0.0.1:3000',
+        'localhost:3001',
+        '127.0.0.1:3001',
+        'localhost:3010',
+        '127.0.0.1:3010',
+        'localhost:8000',
+        '127.0.0.1:8000',
+      ],
     },
   },
 };

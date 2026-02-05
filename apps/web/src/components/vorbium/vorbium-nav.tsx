@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import Image from 'next/image';
 import Link from 'next/link';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ChevronDown, Menu, X } from 'lucide-react';
@@ -15,6 +16,8 @@ interface NavDropdownItem {
   label: string;
   href: string;
   description: string;
+  /** Preview image URL shown in mega-dropdown (optional, placeholder used if missing) */
+  previewImage?: string;
 }
 
 interface NavDropdownGroup {
@@ -35,7 +38,7 @@ const PLATFORM_ITEMS: NavDropdownItem[] = [
   },
   {
     label: 'Workflows',
-    href: '/workflows',
+    href: '/solucoes/workflows',
     description: 'Automacao baseada em logica juridica executavel.',
   },
   {
@@ -68,6 +71,9 @@ const NAV_GROUPS: NavDropdownGroup[] = [
 /* ------------------------------------------------------------------ */
 
 function DropdownPanel({ items, onClose }: { items: NavDropdownItem[]; onClose: () => void }) {
+  const [hoveredIdx, setHoveredIdx] = useState(0);
+  const hoveredItem = items[hoveredIdx];
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -76,22 +82,52 @@ function DropdownPanel({ items, onClose }: { items: NavDropdownItem[]; onClose: 
       transition={{ duration: 0.18, ease: 'easeOut' }}
       className="absolute left-0 top-full pt-2 z-50"
     >
-      <div className="min-w-[340px] rounded-xl border border-gray-200 bg-white/95 p-2 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#111114]/95">
-        {items.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={onClose}
-            className="group flex flex-col gap-0.5 rounded-lg px-3.5 py-2.5 transition-colors hover:bg-gray-100 dark:hover:bg-white/5"
-          >
-            <span className="text-sm font-medium text-gray-900 dark:text-white">
-              {item.label}
-            </span>
-            <span className="text-xs leading-relaxed text-gray-500 dark:text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300">
-              {item.description}
-            </span>
-          </Link>
-        ))}
+      <div className="flex min-w-[520px] rounded-xl border border-gray-200 bg-white/95 shadow-xl backdrop-blur-xl dark:border-white/10 dark:bg-[#111114]/95 overflow-hidden">
+        {/* Preview image panel */}
+        <div className="hidden lg:flex w-[200px] shrink-0 bg-gradient-to-br from-indigo-50 to-purple-50 dark:from-indigo-500/5 dark:to-purple-500/5 items-center justify-center p-4 border-r border-gray-100 dark:border-white/5">
+          {hoveredItem?.previewImage ? (
+            <Image
+              src={hoveredItem.previewImage}
+              alt={hoveredItem.label}
+              width={320}
+              height={240}
+              sizes="200px"
+              className="rounded-lg w-full h-auto object-cover"
+              unoptimized
+            />
+          ) : (
+            <div className="text-center">
+              <div className="h-12 w-12 mx-auto rounded-lg bg-indigo-100 dark:bg-indigo-500/10 flex items-center justify-center mb-2">
+                <span className="text-indigo-500 text-lg font-bold">{hoveredItem?.label?.charAt(0) ?? 'V'}</span>
+              </div>
+              <span className="text-xs text-indigo-600/60 dark:text-indigo-400/40">{hoveredItem?.label}</span>
+            </div>
+          )}
+        </div>
+
+        {/* Links panel */}
+        <div className="p-2 flex-1">
+          {items.map((item, i) => (
+            <Link
+              key={item.href}
+              href={item.href}
+              onClick={onClose}
+              onMouseEnter={() => setHoveredIdx(i)}
+              className={`group flex flex-col gap-0.5 rounded-lg px-3.5 py-2.5 transition-colors ${
+                hoveredIdx === i
+                  ? 'bg-gray-100 dark:bg-white/5'
+                  : 'hover:bg-gray-50 dark:hover:bg-white/[0.03]'
+              }`}
+            >
+              <span className="text-sm font-medium text-gray-900 dark:text-white">
+                {item.label}
+              </span>
+              <span className="text-xs leading-relaxed text-gray-500 dark:text-gray-400 group-hover:text-gray-600 dark:group-hover:text-gray-300">
+                {item.description}
+              </span>
+            </Link>
+          ))}
+        </div>
       </div>
     </motion.div>
   );
@@ -275,7 +311,7 @@ function MobileMenu({ onClose }: { onClose: () => void }) {
             </Button>
           </Link>
           <Link href="/demo" onClick={onClose}>
-            <Button className="w-full rounded-md bg-indigo-600 text-white hover:bg-indigo-700">
+            <Button className="w-full rounded-md bg-indigo-600 text-white hover:bg-indigo-700 dark:hover:bg-indigo-700">
               Solicitar demo
             </Button>
           </Link>

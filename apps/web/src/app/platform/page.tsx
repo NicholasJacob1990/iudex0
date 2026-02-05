@@ -63,6 +63,8 @@ export default function PlatformPage() {
                 description="A Plataforma VORBIUM unifica pesquisa, redação, revisão e colaboração em um ambiente seguro e potencializado por IA."
                 primaryCtaText="Conhecer a Plataforma"
                 primaryCtaLink="/demo"
+                worklet="nebula-flow"
+                workletSeed={63}
             />
 
             <FeatureSection
@@ -85,8 +87,8 @@ export default function PlatformPage() {
                     </div>
                     <StaggerContainer className="grid md:grid-cols-4 gap-8 max-w-4xl mx-auto text-center">
                         {[
-                            { value: "70%", label: "Reducao de tempo em pesquisa" },
-                            { value: "4+", label: "Modelos de IA disponiveis" },
+                            { value: "70%", label: "Redução de tempo em pesquisa" },
+                            { value: "4+", label: "Modelos de IA disponíveis" },
                             { value: "100%", label: "Rastreabilidade de fontes" },
                             { value: "24/7", label: "Disponibilidade da plataforma" },
                         ].map((stat, i) => (
@@ -101,7 +103,7 @@ export default function PlatformPage() {
 
             <section className="py-24 relative snap-start text-center">
                 <AnimatedContainer className="container mx-auto px-6">
-                    <h2 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900 dark:text-white">Potencialize sua pratica juridica.</h2>
+                    <h2 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900 dark:text-white">Potencialize sua prática jurídica.</h2>
                     <Link href="/demo">
                         <Button size="lg" className="h-14 px-12 rounded-full text-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_40px_-10px_rgba(79,70,229,0.5)] transition-all hover:scale-105">
                             Agendar Demo

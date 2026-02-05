@@ -71,6 +71,9 @@ export default function CollaborationPage() {
                 description="A VORBIUM Collaboration permite que equipes jurídicas trabalhem juntas em tempo real, com controle de versão, comentários e fluxos de aprovação integrados."
                 primaryCtaText="Experimentar Collaboration"
                 primaryCtaLink="/demo"
+                worklet="nebula-flow"
+                workletColor="#06b6d4"
+                workletSeed={83}
             />
 
             <FeatureSection

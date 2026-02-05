@@ -8,7 +8,7 @@ Supports:
 - Graph export for D3.js/force-graph visualization
 - Path finding between entities
 
-All endpoints require authentication and use the user's ID as tenant_id.
+All endpoints require authentication and use OrgContext.tenant_id for multi-tenancy.
 """
 
 from __future__ import annotations
@@ -21,8 +21,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.core.security import get_current_user
-from app.models.user import User
+from app.core.security import get_org_context, OrgContext
 from app.services.rag.core.neo4j_mvp import (
     EntityType,
     FactExtractor,
@@ -33,6 +32,12 @@ from app.services.rag.core.neo4j_mvp import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
+    if not value:
+        return None
+    out = [v.strip() for v in value.split(",") if v and v.strip()]
+    return out or None
 
 
 # =============================================================================
@@ -103,6 +108,7 @@ class LexicalSearchRequest(BaseModel):
     devices: List[str] = Field(default=[], description="Legal devices (Art. 5º, Lei 8.666)")
     authors: List[str] = Field(default=[], description="Authors/tribunals (STF, Min. Barroso)")
     match_mode: str = Field(default="any", description="Match mode: 'any' (OR) or 'all' (AND)")
+    include_global: bool = Field(default=True, description="Include global scope documents for mention_count")
     types: List[str] = Field(
         default=["lei", "artigo", "sumula", "jurisprudencia", "tema", "tribunal"],
         description="Entity types to search"
@@ -361,8 +367,9 @@ def _opensearch_indices_for_groups(groups: List[str]) -> List[str]:
 
 @router.get("/entities", response_model=List[Dict[str, Any]])
 async def search_entities(
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     query: Optional[str] = Query(None, description="Search query"),
+    include_global: bool = Query(True, description="Include global scope content"),
     types: str = Query(
         "lei,artigo,sumula,jurisprudencia,tema,tribunal",
         description="Comma-separated entity types"
@@ -382,7 +389,7 @@ async def search_entities(
     - Group (legislacao, jurisprudencia, doutrina)
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
 
     # Parse types
     type_list = [t.strip().lower() for t in types.split(",") if t.strip()]
@@ -402,6 +409,7 @@ async def search_entities(
         "types": type_list,
         "tenant_id": tenant_id,
         "limit": limit,
+        "include_global": bool(include_global),
     }
 
     if query:
@@ -414,8 +422,9 @@ async def search_entities(
     WITH e, sum(
         CASE
             WHEN d IS NOT NULL
-             AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+             AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
              AND (d.sigilo IS NULL OR d.sigilo = false)
+             AND (d.scope <> 'local')
             THEN 1
             ELSE 0
         END
@@ -448,7 +457,16 @@ async def search_entities(
 @router.get("/entity/{entity_id}", response_model=EntityDetail)
 async def get_entity_detail(
     entity_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)",
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
+    ),
     include_chunks: bool = Query(True),
     max_neighbors: int = Query(20, ge=1, le=100),
 ):
@@ -456,7 +474,9 @@ async def get_entity_detail(
     Get detailed information about an entity including neighbors and chunks.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
 
     # Get entity
     entity_query = """
@@ -486,14 +506,45 @@ async def get_entity_detail(
         OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
         WHERE neighbor.entity_id <> e.entity_id
           AND d IS NOT NULL
-          AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+          AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
           AND (d.sigilo IS NULL OR d.sigilo = false)
+          AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+          AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+          AND (
+                $document_ids IS NULL
+                OR d.doc_id IN $document_ids
+                OR d.doc_hash IN $document_ids
+          )
         WITH e, neighbor, 'co_occurrence' AS rel_type, count(DISTINCT c) AS weight
 
         // Also get RELATED_TO relationships
         UNION
 
         MATCH (e:Entity {entity_id: $entity_id})-[:RELATED_TO]-(neighbor:Entity)
+        WHERE exists {
+            MATCH (e)<-[:MENTIONS]-(:Chunk)<-[:HAS_CHUNK]-(d:Document)
+            WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+              AND (d.sigilo IS NULL OR d.sigilo = false)
+              AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+              AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+              AND (
+                    $document_ids IS NULL
+                    OR d.doc_id IN $document_ids
+                    OR d.doc_hash IN $document_ids
+              )
+        }
+        AND exists {
+            MATCH (neighbor)<-[:MENTIONS]-(:Chunk)<-[:HAS_CHUNK]-(d:Document)
+            WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+              AND (d.sigilo IS NULL OR d.sigilo = false)
+              AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+              AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+              AND (
+                    $document_ids IS NULL
+                    OR d.doc_id IN $document_ids
+                    OR d.doc_hash IN $document_ids
+              )
+        }
         WITH e, neighbor, 'related' AS rel_type, 1 AS weight
 
         RETURN DISTINCT
@@ -508,7 +559,14 @@ async def get_entity_detail(
 
         neighbors = neo4j._execute_read(
             neighbors_query,
-            {"entity_id": entity_id, "tenant_id": tenant_id, "limit": max_neighbors}
+            {
+                "entity_id": entity_id,
+                "tenant_id": tenant_id,
+                "include_global": bool(include_global),
+                "limit": max_neighbors,
+                "case_ids": case_id_list,
+                "document_ids": doc_id_list,
+            }
         )
 
         # Get chunks mentioning this entity
@@ -517,8 +575,15 @@ async def get_entity_detail(
             chunks_query = """
             MATCH (e:Entity {entity_id: $entity_id})<-[:MENTIONS]-(c:Chunk)
             MATCH (d:Document)-[:HAS_CHUNK]->(c)
-            WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+            WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
               AND (d.sigilo IS NULL OR d.sigilo = false)
+              AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+              AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+              AND (
+                    $document_ids IS NULL
+                    OR d.doc_id IN $document_ids
+                    OR d.doc_hash IN $document_ids
+              )
             RETURN
                 c.chunk_uid AS chunk_uid,
                 c.text_preview AS text,
@@ -530,7 +595,16 @@ async def get_entity_detail(
             LIMIT 20
             """
 
-            chunks = neo4j._execute_read(chunks_query, {"entity_id": entity_id, "tenant_id": tenant_id})
+            chunks = neo4j._execute_read(
+                chunks_query,
+                {
+                    "entity_id": entity_id,
+                    "tenant_id": tenant_id,
+                    "include_global": bool(include_global),
+                    "case_ids": case_id_list,
+                    "document_ids": doc_id_list,
+                },
+            )
 
         return EntityDetail(
             id=entity["id"],
@@ -551,18 +625,19 @@ async def get_entity_detail(
 
 @router.get("/export", response_model=GraphData)
 async def export_graph(
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
     entity_ids: Optional[str] = Query(
         None,
         description="Comma-separated entity IDs to start from"
     ),
+    include_global: bool = Query(True, description="Include global scope content"),
     document_ids: Optional[str] = Query(
         None,
         description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)"
     ),
     case_ids: Optional[str] = Query(
         None,
-        description="Comma-separated case IDs to filter by (matches Document.case_id)"
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
     ),
     types: str = Query(
         "lei,artigo,sumula,jurisprudencia,tema",
@@ -581,13 +656,26 @@ async def export_graph(
     Returns nodes and links in D3.js/force-graph format.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
 
     type_list = [t.strip().lower() for t in types.split(",") if t.strip()]
     group_list = [g.strip().lower() for g in groups.split(",") if g.strip()]
-    doc_id_list = [d.strip() for d in (document_ids or "").split(",") if d.strip()] or None
-    case_id_list = [c.strip() for c in (case_ids or "").split(",") if c.strip()] or None
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
     include_facts = "fatos" in group_list
+
+    try:
+        logger.info(
+            "[graph.export] tenant_id=%s user_id=%s include_global=%s doc_ids=%d case_ids=%d seed_entities=%s",
+            tenant_id,
+            getattr(ctx.user, "id", "unknown"),
+            bool(include_global),
+            len(doc_id_list or []),
+            len(case_id_list or []),
+            "yes" if bool(entity_ids) else "no",
+        )
+    except Exception:
+        pass
 
     # Filter types by groups
     type_list = [t for t in type_list if get_entity_group(t) in group_list]
@@ -611,8 +699,9 @@ async def export_graph(
                 MATCH (e)<-[:MENTIONS]-(c:Chunk)-[:MENTIONS]->(neighbor:Entity)
                 MATCH (d:Document)-[:HAS_CHUNK]->(c)
                 WHERE neighbor.entity_type IN $types
-                  AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+                  AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
                   AND (d.sigilo IS NULL OR d.sigilo = false)
+                  AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
                   AND ($case_ids IS NULL OR d.case_id IN $case_ids)
                   AND (
                         $document_ids IS NULL
@@ -638,6 +727,7 @@ async def export_graph(
                 "seed_ids": seed_ids,
                 "types": type_list,
                 "tenant_id": tenant_id,
+                "include_global": bool(include_global),
                 "max_neighbors": max_nodes // 2,
                 "case_ids": case_id_list,
                 "document_ids": doc_id_list,
@@ -694,8 +784,9 @@ async def export_graph(
             WITH e, sum(
                 CASE
                     WHEN d IS NOT NULL
-                     AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+                     AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
                      AND (d.sigilo IS NULL OR d.sigilo = false)
+                     AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
                      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
                      AND (
                            $document_ids IS NULL
@@ -717,13 +808,17 @@ async def export_graph(
                 mention_count
             """
 
-            results = neo4j._execute_read(top_query, {
-                "types": type_list,
-                "tenant_id": tenant_id,
-                "limit": max_nodes,
-                "case_ids": case_id_list,
-                "document_ids": doc_id_list,
-            })
+            results = neo4j._execute_read(
+                top_query,
+                {
+                    "types": type_list,
+                    "tenant_id": tenant_id,
+                    "include_global": bool(include_global),
+                    "limit": max_nodes,
+                    "case_ids": case_id_list,
+                    "document_ids": doc_id_list,
+                },
+            )
 
             for r in results:
                 entity_type = r.get("type", "")
@@ -745,15 +840,16 @@ async def export_graph(
                 rel_query = """
                 MATCH (e1:Entity)<-[:MENTIONS]-(c:Chunk)-[:MENTIONS]->(e2:Entity)
                 MATCH (d:Document)-[:HAS_CHUNK]->(c)
-                WHERE e1.entity_id IN $node_ids
-                  AND e2.entity_id IN $node_ids
-                  AND e1.entity_id < e2.entity_id
-                  AND (d.tenant_id = $tenant_id OR d.scope = 'global')
-                  AND (d.sigilo IS NULL OR d.sigilo = false)
-                  AND ($case_ids IS NULL OR d.case_id IN $case_ids)
-                  AND (
-                        $document_ids IS NULL
-                        OR d.doc_id IN $document_ids
+	                WHERE e1.entity_id IN $node_ids
+	                  AND e2.entity_id IN $node_ids
+	                  AND e1.entity_id < e2.entity_id
+	                  AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+	                  AND (d.sigilo IS NULL OR d.sigilo = false)
+	                  AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+	                  AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+	                  AND (
+	                        $document_ids IS NULL
+	                        OR d.doc_id IN $document_ids
                         OR d.doc_hash IN $document_ids
                   )
                 WITH e1, e2, count(DISTINCT c) AS weight
@@ -770,6 +866,7 @@ async def export_graph(
                     {
                         "node_ids": list(node_ids),
                         "tenant_id": tenant_id,
+                        "include_global": bool(include_global),
                         "case_ids": case_id_list,
                         "document_ids": doc_id_list,
                     },
@@ -793,6 +890,30 @@ async def export_graph(
                 WHERE e1.entity_id IN $node_ids
                   AND e2.entity_id IN $node_ids
                   AND e1.entity_id < e2.entity_id
+                  AND exists {
+                    MATCH (e1)<-[:MENTIONS]-(:Chunk)<-[:HAS_CHUNK]-(d:Document)
+                    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+                      AND (d.sigilo IS NULL OR d.sigilo = false)
+                      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+                      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+                      AND (
+                            $document_ids IS NULL
+                            OR d.doc_id IN $document_ids
+                            OR d.doc_hash IN $document_ids
+                      )
+                  }
+                  AND exists {
+                    MATCH (e2)<-[:MENTIONS]-(:Chunk)<-[:HAS_CHUNK]-(d:Document)
+                    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+                      AND (d.sigilo IS NULL OR d.sigilo = false)
+                      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+                      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+                      AND (
+                            $document_ids IS NULL
+                            OR d.doc_id IN $document_ids
+                            OR d.doc_hash IN $document_ids
+                      )
+                  }
                 RETURN
                     e1.entity_id AS source,
                     e2.entity_id AS target,
@@ -800,7 +921,14 @@ async def export_graph(
                 LIMIT 200
                 """
                 rel_related_results = neo4j._execute_read(
-                    rel_related_query, {"node_ids": list(node_ids)}
+                    rel_related_query,
+                    {
+                        "node_ids": list(node_ids),
+                        "tenant_id": tenant_id,
+                        "include_global": bool(include_global),
+                        "case_ids": case_id_list,
+                        "document_ids": doc_id_list,
+                    },
                 )
                 for r in rel_related_results:
                     rel_info = get_relation_info("related")
@@ -822,8 +950,9 @@ async def export_graph(
             MATCH (c:Chunk)-[:ASSERTS]->(f:Fact)-[:REFERS_TO]->(e:Entity)
             MATCH (d:Document)-[:HAS_CHUNK]->(c)
             WHERE e.entity_id IN $node_ids
-              AND (d.tenant_id = $tenant_id OR d.scope = 'global')
+              AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
               AND (d.sigilo IS NULL OR d.sigilo = false)
+              AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
               AND ($case_ids IS NULL OR d.case_id IN $case_ids)
               AND (
                     $document_ids IS NULL
@@ -844,6 +973,7 @@ async def export_graph(
                 {
                     "node_ids": list(node_ids),
                     "tenant_id": tenant_id,
+                    "include_global": bool(include_global),
                     "case_ids": case_id_list,
                     "document_ids": doc_id_list,
                     "limit": limit,
@@ -899,7 +1029,16 @@ async def export_graph(
 async def find_path(
     source_id: str = Query(..., description="Source entity ID"),
     target_id: str = Query(..., description="Target entity ID"),
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)",
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
+    ),
     max_length: int = Query(4, ge=1, le=6),
 ):
     """
@@ -908,7 +1047,9 @@ async def find_path(
     Useful for understanding how legal concepts are connected.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
 
     path_query = f"""
     MATCH (e1:Entity {{entity_id: $source_id}})
@@ -916,8 +1057,15 @@ async def find_path(
     MATCH path = shortestPath((e1)-[:MENTIONS|RELATED_TO|ASSERTS|REFERS_TO*1..{max_length}]-(e2))
     WHERE all(n IN nodes(path) WHERE NOT n:Chunk OR exists {{
         MATCH (d:Document)-[:HAS_CHUNK]->(n)
-        WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+        WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
           AND (d.sigilo IS NULL OR d.sigilo = false)
+          AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+          AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+          AND (
+                $document_ids IS NULL
+                OR d.doc_id IN $document_ids
+                OR d.doc_hash IN $document_ids
+          )
     }})
     RETURN
         [n IN nodes(path) | coalesce(n.name, n.entity_id, n.chunk_uid)] AS path_names,
@@ -949,6 +1097,9 @@ async def find_path(
             "source_id": source_id,
             "target_id": target_id,
             "tenant_id": tenant_id,
+            "include_global": bool(include_global),
+            "case_ids": case_id_list,
+            "document_ids": doc_id_list,
         })
 
         if not results:
@@ -981,22 +1132,49 @@ async def find_path(
 
 
 @router.get("/stats", response_model=GraphStats)
-async def get_graph_stats(current_user: User = Depends(get_current_user)):
+async def get_graph_stats(
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)",
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
+    ),
+):
     """
     Get statistics about the knowledge graph.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
 
     stats_query = """
     MATCH (d:Document)
-    WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
       AND (d.sigilo IS NULL OR d.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d.doc_id IN $document_ids
+            OR d.doc_hash IN $document_ids
+      )
     WITH count(DISTINCT d) AS total_documents
 
     MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
-    WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
       AND (d.sigilo IS NULL OR d.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d.doc_id IN $document_ids
+            OR d.doc_hash IN $document_ids
+      )
     WITH total_documents, collect(DISTINCT c) AS chunks, count(DISTINCT c) AS total_chunks
 
     UNWIND chunks AS c
@@ -1012,16 +1190,29 @@ async def get_graph_stats(current_user: User = Depends(get_current_user)):
 
     type_count_query = """
     MATCH (d:Document)
-    WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
       AND (d.sigilo IS NULL OR d.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d.doc_id IN $document_ids
+            OR d.doc_hash IN $document_ids
+      )
     MATCH (d)-[:HAS_CHUNK]->(c:Chunk)-[:MENTIONS]->(e:Entity)
     RETURN e.entity_type AS type, count(DISTINCT e) AS count
     ORDER BY count DESC
     """
 
     try:
-        stats_result = neo4j._execute_read(stats_query, {"tenant_id": tenant_id})
-        type_counts = neo4j._execute_read(type_count_query, {"tenant_id": tenant_id})
+        params = {
+            "tenant_id": tenant_id,
+            "include_global": bool(include_global),
+            "case_ids": case_id_list,
+            "document_ids": doc_id_list,
+        }
+        stats_result = neo4j._execute_read(stats_query, params)
+        type_counts = neo4j._execute_read(type_count_query, params)
 
         stats = stats_result[0] if stats_result else {}
 
@@ -1084,7 +1275,16 @@ async def get_relation_types():
 @router.get("/semantic-neighbors/{entity_id}")
 async def get_semantic_neighbors(
     entity_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)",
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
+    ),
     limit: int = Query(30, ge=1, le=100),
 ):
     """
@@ -1094,7 +1294,9 @@ async def get_semantic_neighbors(
     Returns entities that frequently appear together in the same document contexts.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
 
     # Query for entities that co-occur in the same chunks
     semantic_query = """
@@ -1103,8 +1305,15 @@ async def get_semantic_neighbors(
     // Find chunks mentioning this entity
     MATCH (e)<-[:MENTIONS]-(c:Chunk)
     MATCH (d0:Document)-[:HAS_CHUNK]->(c)
-    WHERE (d0.tenant_id = $tenant_id OR d0.scope = 'global')
+    WHERE (d0.tenant_id = $tenant_id OR ($include_global = true AND d0.scope = 'global'))
       AND (d0.sigilo IS NULL OR d0.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d0.scope <> 'local')
+      AND ($case_ids IS NULL OR d0.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d0.doc_id IN $document_ids
+            OR d0.doc_hash IN $document_ids
+      )
 
     // Find other entities in the same chunks (semantic co-occurrence)
     MATCH (c)-[:MENTIONS]->(other:Entity)
@@ -1116,8 +1325,15 @@ async def get_semantic_neighbors(
 
     // Get document info for context
     OPTIONAL MATCH (other)<-[:MENTIONS]-(oc:Chunk)<-[:HAS_CHUNK]-(d:Document)
-    WHERE (d.tenant_id = $tenant_id OR d.scope = 'global')
+    WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
       AND (d.sigilo IS NULL OR d.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d.scope <> 'local')
+      AND ($case_ids IS NULL OR d.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d.doc_id IN $document_ids
+            OR d.doc_hash IN $document_ids
+      )
 
     WITH other, co_occurrences, sample_contexts,
          collect(DISTINCT d.title)[0..2] AS source_docs
@@ -1135,11 +1351,17 @@ async def get_semantic_neighbors(
     """
 
     try:
-        results = neo4j._execute_read(semantic_query, {
-            "entity_id": entity_id,
-            "tenant_id": tenant_id,
-            "limit": limit
-        })
+        results = neo4j._execute_read(
+            semantic_query,
+            {
+                "entity_id": entity_id,
+                "tenant_id": tenant_id,
+                "include_global": bool(include_global),
+                "limit": limit,
+                "case_ids": case_id_list,
+                "document_ids": doc_id_list,
+            },
+        )
 
         # Enrich with semantic information
         enriched = []
@@ -1186,7 +1408,16 @@ async def get_semantic_neighbors(
 @router.get("/remissoes/{entity_id}")
 async def get_remissoes(
     entity_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    document_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated document IDs to filter by (matches Document.doc_id or Document.doc_hash)",
+    ),
+    case_ids: Optional[str] = Query(
+        None,
+        description="Comma-separated case IDs to filter by (matches Document.case_id). Required to include local scope.",
+    ),
     limit: int = Query(50, ge=1, le=200),
 ):
     """
@@ -1196,7 +1427,9 @@ async def get_remissoes(
     Particularly useful for articles of law.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    doc_id_list = _parse_csv(document_ids)
+    case_id_list = _parse_csv(case_ids)
 
     remissoes_query = """
     // Find entity
@@ -1205,8 +1438,15 @@ async def get_remissoes(
     // Find chunks that mention this entity
     MATCH (e)<-[:MENTIONS]-(c:Chunk)
     MATCH (d0:Document)-[:HAS_CHUNK]->(c)
-    WHERE (d0.tenant_id = $tenant_id OR d0.scope = 'global')
+    WHERE (d0.tenant_id = $tenant_id OR ($include_global = true AND d0.scope = 'global'))
       AND (d0.sigilo IS NULL OR d0.sigilo = false)
+      AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d0.scope <> 'local')
+      AND ($case_ids IS NULL OR d0.case_id IN $case_ids)
+      AND (
+            $document_ids IS NULL
+            OR d0.doc_id IN $document_ids
+            OR d0.doc_hash IN $document_ids
+      )
 
     // Find other entities mentioned in same chunks (remissões)
     MATCH (c)-[:MENTIONS]->(other:Entity)
@@ -1223,8 +1463,15 @@ async def get_remissoes(
          collect(
             CASE
                 WHEN d1 IS NOT NULL
-                 AND (d1.tenant_id = $tenant_id OR d1.scope = 'global')
+                 AND (d1.tenant_id = $tenant_id OR ($include_global = true AND d1.scope = 'global'))
                  AND (d1.sigilo IS NULL OR d1.sigilo = false)
+                 AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d1.scope <> 'local')
+                 AND ($case_ids IS NULL OR d1.case_id IN $case_ids)
+                 AND (
+                       $document_ids IS NULL
+                       OR d1.doc_id IN $document_ids
+                       OR d1.doc_hash IN $document_ids
+                 )
                 THEN sample.text_preview
                 ELSE NULL
             END
@@ -1245,7 +1492,10 @@ async def get_remissoes(
         results = neo4j._execute_read(remissoes_query, {
             "entity_id": entity_id,
             "tenant_id": tenant_id,
-            "limit": limit
+            "include_global": bool(include_global),
+            "limit": limit,
+            "case_ids": case_id_list,
+            "document_ids": doc_id_list,
         })
 
         # Group by type
@@ -1281,7 +1531,7 @@ async def get_remissoes(
 @router.post("/lexical-search", response_model=List[Dict[str, Any]])
 async def lexical_search_entities(
     request: LexicalSearchRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Search entities in the graph using Neo4j fulltext index.
@@ -1297,7 +1547,7 @@ async def lexical_search_entities(
     Returns entities that match the search criteria, ranked by relevance score.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
 
     # Combine all search terms
     all_terms = request.terms + request.devices + request.authors
@@ -1336,15 +1586,16 @@ async def lexical_search_entities(
     // Get mention count for additional ranking
     OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
     OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
-    WITH e, score, sum(
-        CASE
-            WHEN d IS NOT NULL
-             AND (d.tenant_id = $tenant_id OR d.scope = 'global')
-             AND (d.sigilo IS NULL OR d.sigilo = false)
-            THEN 1
-            ELSE 0
-        END
-    ) AS mention_count
+	    WITH e, score, sum(
+	        CASE
+	            WHEN d IS NOT NULL
+	             AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+	             AND (d.sigilo IS NULL OR d.sigilo = false)
+	             AND (d.scope <> 'local')
+	            THEN 1
+	            ELSE 0
+	        END
+	    ) AS mention_count
 
     RETURN
         e.entity_id AS id,
@@ -1362,6 +1613,7 @@ async def lexical_search_entities(
         "lucene_query": lucene_query,
         "types": [t.lower() for t in request.types],
         "tenant_id": tenant_id,
+        "include_global": bool(request.include_global),
         "limit": request.limit,
     }
 
@@ -1391,17 +1643,18 @@ async def lexical_search_entities(
         WHERE e.entity_type IN $types
           AND ({where_clause})
 
-        OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
-        OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
-        WITH e, sum(
-            CASE
-                WHEN d IS NOT NULL
-                 AND (d.tenant_id = $tenant_id OR d.scope = 'global')
-                 AND (d.sigilo IS NULL OR d.sigilo = false)
-                THEN 1
-                ELSE 0
-            END
-        ) AS mention_count
+	        OPTIONAL MATCH (e)<-[:MENTIONS]-(c:Chunk)
+	        OPTIONAL MATCH (d:Document)-[:HAS_CHUNK]->(c)
+	        WITH e, sum(
+	            CASE
+	                WHEN d IS NOT NULL
+	                 AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+	                 AND (d.sigilo IS NULL OR d.sigilo = false)
+	                 AND (d.scope <> 'local')
+	                THEN 1
+	                ELSE 0
+	            END
+	        ) AS mention_count
 
         RETURN
             e.entity_id AS id,
@@ -1418,6 +1671,7 @@ async def lexical_search_entities(
         fallback_params: Dict[str, Any] = {
             "types": [t.lower() for t in request.types],
             "tenant_id": tenant_id,
+            "include_global": bool(request.include_global),
             "limit": request.limit,
         }
         for i, term in enumerate(all_terms):
@@ -1442,7 +1696,7 @@ async def lexical_search_entities(
 @router.post("/content-search", response_model=ContentSearchResponse)
 async def content_search_seed_graph(
     request: ContentSearchRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Search chunk content via OpenSearch BM25 and return entity_ids to seed /graph/export.
@@ -1458,8 +1712,9 @@ async def content_search_seed_graph(
         raise HTTPException(status_code=500, detail=f"OpenSearch service not available: {e}")
 
     service = get_opensearch_service()
-    tenant_id = str(current_user.id)
-    user_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
+    user_id = str(ctx.user.id)
+    group_ids = list(getattr(ctx, "team_ids", []) or [])
 
     indices = _opensearch_indices_for_groups(request.groups)
     if not indices:
@@ -1477,7 +1732,22 @@ async def content_search_seed_graph(
             must_filters.append({"terms": {"case_id": case_ids}})
         source_filter = {"bool": {"must": must_filters}}
 
-    # Two-pass search to include local scope without requiring a single case_id.
+    try:
+        logger.info(
+            "[graph.content_search] tenant_id=%s user_id=%s include_global=%s doc_ids=%d case_ids=%d query_len=%d",
+            tenant_id,
+            user_id,
+            bool(request.include_global),
+            len(doc_ids),
+            len(case_ids),
+            len(request.query or ""),
+        )
+    except Exception:
+        pass
+
+    # Two-pass search:
+    # - Pass 1: normal visibility (global/private/group); local only when case_id is provided (handled in OpenSearch filter).
+    # - Pass 2: local-only, but ONLY when the user scopes by document_id and/or case_id (to avoid mixing locals from all cases).
     results: List[Dict[str, Any]] = []
     try:
         results.extend(
@@ -1489,7 +1759,7 @@ async def content_search_seed_graph(
                 tenant_id=tenant_id,
                 case_id=None,
                 user_id=user_id,
-                group_ids=None,
+                group_ids=group_ids or None,
                 sigilo=None,
                 include_global=bool(request.include_global),
                 source_filter=source_filter,
@@ -1499,23 +1769,24 @@ async def content_search_seed_graph(
     except Exception as e:
         logger.warning(f"OpenSearch content search failed (default scopes): {e}")
 
-    try:
-        local_results = service.search_lexical(
-            query=request.query,
-            indices=[indices[0]],  # local index is always first
-            top_k=request.max_chunks,
-            scope="local",
-            tenant_id=tenant_id,
-            case_id=None,
-            user_id=user_id,
-            group_ids=None,
-            sigilo=None,
-            include_global=False,
-            source_filter=source_filter,
-        )
-        results.extend(local_results or [])
-    except Exception as e:
-        logger.warning(f"OpenSearch content search failed (local scope): {e}")
+    if source_filter is not None:
+        try:
+            local_results = service.search_lexical(
+                query=request.query,
+                indices=[indices[0]],  # local index is always first
+                top_k=request.max_chunks,
+                scope="local",
+                tenant_id=tenant_id,
+                case_id=case_ids[0] if len(case_ids) == 1 else None,
+                user_id=user_id,
+                group_ids=group_ids or None,
+                sigilo=None,
+                include_global=False,
+                source_filter=source_filter,
+            )
+            results.extend(local_results or [])
+        except Exception as e:
+            logger.warning(f"OpenSearch content search failed (local scope): {e}")
 
     # Deduplicate by chunk_uid
     seen_uids = set()
@@ -1575,7 +1846,7 @@ async def content_search_seed_graph(
 @router.post("/add-from-rag", response_model=AddFromRAGResponse)
 async def add_entities_from_rag(
     request: AddFromRAGRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Extract entities from RAG local documents and add them to the knowledge graph.
@@ -1590,7 +1861,7 @@ async def add_entities_from_rag(
     Use this to populate the graph from your local document collection.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
 
     if not request.document_ids and not request.case_ids:
         raise HTTPException(
@@ -1772,7 +2043,7 @@ class ArgumentGraphData(BaseModel):
 @router.get("/argument-graph/{case_id}", response_model=ArgumentGraphData)
 async def get_argument_graph(
     case_id: str,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Get the argument graph for a case.
@@ -1791,7 +2062,7 @@ async def get_argument_graph(
         from app.services.rag.core.argument_neo4j import get_argument_neo4j
 
         svc = get_argument_neo4j()
-        tenant_id = str(current_user.id)
+        tenant_id = ctx.tenant_id
 
         graph = svc.get_argument_graph(tenant_id=tenant_id, case_id=case_id)
         stats = svc.get_stats(tenant_id=tenant_id)
@@ -1816,7 +2087,7 @@ async def get_argument_graph(
 
 @router.get("/argument-stats", response_model=Dict[str, int])
 async def get_argument_stats(
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Get argument graph statistics for the current tenant.
@@ -1827,7 +2098,7 @@ async def get_argument_stats(
         from app.services.rag.core.argument_neo4j import get_argument_neo4j
 
         svc = get_argument_neo4j()
-        tenant_id = str(current_user.id)
+        tenant_id = ctx.tenant_id
         return svc.get_stats(tenant_id=tenant_id)
 
     except Exception as e:
@@ -1843,7 +2114,7 @@ async def get_argument_stats(
 @router.post("/add-facts-from-rag", response_model=AddFactsFromRAGResponse)
 async def add_facts_from_rag(
     request: AddFactsFromRAGRequest,
-    current_user: User = Depends(get_current_user),
+    ctx: OrgContext = Depends(get_org_context),
 ):
     """
     Backfill Fact nodes from already-ingested local documents (Document/Chunk already in Neo4j).
@@ -1852,7 +2123,7 @@ async def add_facts_from_rag(
     It uses `Chunk.text_preview` (not full text), so it's best-effort and intentionally conservative.
     """
     neo4j = get_neo4j_mvp()
-    tenant_id = str(current_user.id)
+    tenant_id = ctx.tenant_id
 
     if not request.document_ids and not request.case_ids:
         raise HTTPException(

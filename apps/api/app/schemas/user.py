@@ -65,7 +65,7 @@ class UserUpdate(BaseModel):
 
 
 class UserResponse(UserBase):
-    """Schema de resposta de usuário"""
+    """Schema de resposta de usuário (sem dados sensíveis)"""
     id: str
     role: str
     plan: str
@@ -73,16 +73,14 @@ class UserResponse(UserBase):
     is_verified: bool
     created_at: datetime
     updated_at: datetime
-    
+
     # Campos de perfil
     avatar: Optional[str] = None
-    cpf: Optional[str] = None
     oab: Optional[str] = None
     oab_state: Optional[str] = None
     phone: Optional[str] = None
-    
+
     institution_name: Optional[str] = None
-    cnpj: Optional[str] = None
     position: Optional[str] = None
     department: Optional[str] = None
 
@@ -90,6 +88,12 @@ class UserResponse(UserBase):
     organization_id: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class UserDetailResponse(UserResponse):
+    """Schema de resposta detalhada (admin) — inclui CPF/CNPJ"""
+    cpf: Optional[str] = None
+    cnpj: Optional[str] = None
 
 
 class TokenResponse(BaseModel):

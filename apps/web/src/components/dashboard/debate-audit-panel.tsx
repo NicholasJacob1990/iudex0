@@ -689,6 +689,26 @@ export function DebateAuditPanel({ metadata, className }: DebateAuditPanelProps)
         return { totalDivergences, totalIssues, totalDrafts };
     }, [sections]);
 
+    // Sort: divergences first, then by issues count
+    const sortedSections = useMemo(() => {
+        if (!sections.length) return [];
+        return [...sections].sort((a, b) => {
+            if (a.has_significant_divergence && !b.has_significant_divergence) return -1;
+            if (!a.has_significant_divergence && b.has_significant_divergence) return 1;
+            const aIssues = (a.review?.critique?.issues?.length || 0) + (a.risk_flags?.length || 0);
+            const bIssues = (b.review?.critique?.issues?.length || 0) + (b.risk_flags?.length || 0);
+            return bIssues - aIssues;
+        });
+    }, [sections]);
+
+    // Default open: sections with divergence
+    const defaultOpen = useMemo(() => {
+        if (!sortedSections.length) return [];
+        return sortedSections
+            .filter(s => s.has_significant_divergence)
+            .map(s => s.section_title);
+    }, [sortedSections]);
+
     if (!sections.length) {
         return (
             <div className={cn("rounded-xl border border-outline/20 bg-card p-6 text-center", className)}>
@@ -702,24 +722,6 @@ export function DebateAuditPanel({ metadata, className }: DebateAuditPanelProps)
             </div>
         );
     }
-
-    // Sort: divergences first, then by issues count
-    const sortedSections = useMemo(() => {
-        return [...sections].sort((a, b) => {
-            if (a.has_significant_divergence && !b.has_significant_divergence) return -1;
-            if (!a.has_significant_divergence && b.has_significant_divergence) return 1;
-            const aIssues = (a.review?.critique?.issues?.length || 0) + (a.risk_flags?.length || 0);
-            const bIssues = (b.review?.critique?.issues?.length || 0) + (b.risk_flags?.length || 0);
-            return bIssues - aIssues;
-        });
-    }, [sections]);
-
-    // Default open: sections with divergence
-    const defaultOpen = useMemo(() => {
-        return sortedSections
-            .filter(s => s.has_significant_divergence)
-            .map(s => s.section_title);
-    }, [sortedSections]);
 
     return (
         <div className={cn("space-y-4", className)}>

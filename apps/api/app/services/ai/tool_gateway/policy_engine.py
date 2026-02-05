@@ -61,6 +61,15 @@ class PolicyEngine:
         self._call_counts: Dict[str, List[datetime]] = {}  # key -> timestamps
         self._audit_log: List[Dict[str, Any]] = []
         self._max_audit_log_size: int = 10000  # Prevent unbounded growth
+        self._cost_tracker: Dict[str, float] = {}  # tenant_id -> accumulated cost
+
+    def record_cost(self, tenant_id: str, cost: float) -> None:
+        """Record cost of a tool execution."""
+        self._cost_tracker[tenant_id] = self._cost_tracker.get(tenant_id, 0.0) + cost
+
+    def get_cost(self, tenant_id: str) -> float:
+        """Get accumulated cost for a tenant."""
+        return self._cost_tracker.get(tenant_id, 0.0)
 
     def set_tenant_override(
         self,

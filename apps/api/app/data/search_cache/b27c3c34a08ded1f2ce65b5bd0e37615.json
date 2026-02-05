@@ -1,0 +1,40 @@
+{
+  "success": true,
+  "query": "Pesquise jurisprudência sobre... doutrina",
+  "total": 5,
+  "results": [
+    {
+      "title": "Doutrina - Jurisprudência | Jusbrasil",
+      "url": "https://www.jusbrasil.com.br/jurisprudencia/busca?q=Doutrina",
+      "snippet": "Pesquisar e ConsultarJurisprudênciasobreDoutrina. Acesse o Jusbrasil e tenha acesso a Notícias, Artigos,Jurisprudência, Legislação, Diários Oficiais e muito mais de forma rápida, objetiva e gratuita. Buscar!",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Pesquisa de Jurisprudência",
+      "url": "https://www.stj.jus.br/sites/portalp/paginas/Sob-medida/Advogado/Jurisprudencia/Pesquisa-de-Jurisprudencia.aspx",
+      "snippet": "Aqui você encontra ajurisprudênciado STJ disponível nas bases de acórdãos, súmulas, decisões monocráticas e Informativo deJurisprudência. Também é possível consultar alguns acórdãos do extinto Tribunal Federal de Recursos - TFR.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Encontre Jurisprudência Comentada do STF e do STJ e muito mais no ...",
+      "url": "https://v1.buscadordizerodireito.com.br/",
+      "snippet": "É possível cadastrar anotaçõessobreum determinado julgado para servir como estudo ou como uma forma de lembrete para pesquisas futuras. Se você está estudando para algum concurso ou atua na área do direito e precisa ter acesso rápidosobrejulgados importantes do STF ou STJ, teste nossa ferramenta e torne-se um assinante premium.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Buscar Jurisprudências Gratuitas - Todos os Tribunais Brasileiros ...",
+      "url": "https://www.advogaia.com.br/jurisprudencias",
+      "snippet": "Pesquisejurisprudênciasgratuitamente em STF, STJ, TST, TRF, TJ e TRT. Mais de 75 tribunais em uma única busca. Depois crie petições automáticas com nossa IA.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Supremo Tribunal Federal",
+      "url": "https://portal.stf.jus.br/Jurisprudencia/",
+      "snippet": "Conteúdo direto e objetivosobreos principais julgamentos proferidos pelos órgãos colegiados do STF. Para otimizar as buscas e explorar melhor as funcionalidades da página de pesquisa dejurisprudência, consulte aqui as nossas dicas!",
+      "source": "duckduckgo"
+    }
+  ],
+  "source": "duckduckgo",
+  "cached": false,
+  "cached_at": "2026-02-05T03:18:14.062156"
+}

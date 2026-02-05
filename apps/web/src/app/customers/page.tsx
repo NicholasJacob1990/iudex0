@@ -73,22 +73,24 @@ export default function CustomersPage() {
                 description="Líderes jurídicos que transformaram suas operações com inteligência artificial governada e segura."
                 primaryCtaText="Ver Casos de Sucesso"
                 primaryCtaLink="/demo"
+                worklet="wave-field"
+                workletSeed={88}
             />
 
             {/* Impact Metrics - Large Numbers */}
             <section className="py-24 relative snap-start bg-white dark:bg-white/5 border-y border-slate-200 dark:border-white/5">
                 <AnimatedContainer className="container mx-auto px-6">
                     <div className="text-center mb-16">
-                        <h2 className="text-3xl md:text-4xl font-bold mb-4 text-slate-900 dark:text-white">Impacto mensuravel</h2>
+                        <h2 className="text-3xl md:text-4xl font-bold mb-4 text-slate-900 dark:text-white">Impacto mensurável</h2>
                         <p className="text-xl text-slate-600 dark:text-gray-400 max-w-2xl mx-auto">
-                            Resultados reais na operacao dos nossos parceiros.
+                            Resultados reais na operação dos nossos parceiros.
                         </p>
                     </div>
                     <StaggerContainer className="grid md:grid-cols-4 gap-8 max-w-5xl mx-auto text-center">
                         {[
-                            { value: "70%", label: "Reducao de tempo em pesquisa juridica", color: "text-indigo-600 dark:text-indigo-400" },
+                            { value: "70%", label: "Redução de tempo em pesquisa jurídica", color: "text-indigo-600 dark:text-indigo-400" },
                             { value: "3x", label: "Aumento de capacidade por profissional", color: "text-emerald-600 dark:text-emerald-400" },
-                            { value: "95%", label: "Precisao na identificacao de precedentes", color: "text-amber-600 dark:text-amber-400" },
+                            { value: "95%", label: "Precisão na identificação de precedentes", color: "text-indigo-600 dark:text-indigo-400" },
                             { value: "24/7", label: "Disponibilidade da plataforma", color: "text-purple-600 dark:text-purple-400" },
                         ].map((stat, i) => (
                             <MotionDiv key={i} variants={fadeUp}>
@@ -113,7 +115,7 @@ export default function CustomersPage() {
                         </div>
                         <h2 className="text-3xl md:text-4xl font-bold mb-4 text-slate-900 dark:text-white">Quem usa o Iudex</h2>
                         <p className="text-xl text-slate-600 dark:text-gray-400 max-w-2xl mx-auto">
-                            Da banca individual ao departamento juridico de multinacional.
+                            Da banca individual ao departamento jurídico de multinacional.
                         </p>
                     </div>
                     <StaggerContainer className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-5xl mx-auto">
@@ -138,27 +140,27 @@ export default function CustomersPage() {
                     <AnimatedContainer className="text-center mb-16">
                         <h2 className="text-3xl md:text-4xl font-bold mb-4">O que nossos clientes dizem</h2>
                         <p className="text-xl text-gray-400 max-w-2xl mx-auto">
-                            Profissionais que transformaram sua pratica com IA juridica governada.
+                            Profissionais que transformaram sua prática com IA jurídica governada.
                         </p>
                     </AnimatedContainer>
                     <StaggerContainer className="grid md:grid-cols-3 gap-8 max-w-5xl mx-auto">
                         {[
                             {
-                                quote: "O Iudex reduziu nosso tempo de pesquisa jurisprudencial de horas para minutos. A qualidade das fontes e citado e impressionante.",
+                                quote: "O Iudex reduziu nosso tempo de pesquisa jurisprudencial de horas para minutos. A qualidade das fontes citadas é impressionante.",
                                 author: "Dra. Marina Costa",
-                                role: "Socia, Escritorio de Advocacia",
+                                role: "Sócia, Escritório de Advocacia",
                                 initials: "MC",
                             },
                             {
-                                quote: "A orquestracao multi-agente e um diferencial real. Cada etapa do workflow tem um agente especializado, com rastreabilidade completa.",
+                                quote: "A orquestração multi-agente é um diferencial real. Cada etapa do workflow tem um agente especializado, com rastreabilidade completa.",
                                 author: "Dr. Ricardo Almeida",
-                                role: "Diretor Juridico, Multinacional",
+                                role: "Diretor Jurídico, Multinacional",
                                 initials: "RA",
                             },
                             {
-                                quote: "Ter acesso a GPT, Claude e Gemini em uma unica plataforma juridica, com governanca, e exatamente o que precisavamos.",
+                                quote: "Ter acesso a GPT, Claude e Gemini em uma única plataforma jurídica, com governança, é exatamente o que precisávamos.",
                                 author: "Dra. Fernanda Lima",
-                                role: "Coordenadora, Departamento Juridico",
+                                role: "Coordenadora, Departamento Jurídico",
                                 initials: "FL",
                             },
                         ].map((testimonial, i) => (
@@ -185,7 +187,7 @@ export default function CustomersPage() {
             {/* CTA */}
             <section className="py-24 relative snap-start text-center">
                 <AnimatedContainer className="container mx-auto px-6">
-                    <h2 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900 dark:text-white">Junte-se a inovacao juridica.</h2>
+                    <h2 className="text-3xl md:text-4xl font-bold mb-8 text-slate-900 dark:text-white">Junte-se à inovação jurídica.</h2>
                     <Link href="/demo">
                         <Button size="lg" className="h-14 px-12 rounded-full text-lg bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_40px_-10px_rgba(79,70,229,0.5)] transition-all hover:scale-105">
                             Falar com Vendas

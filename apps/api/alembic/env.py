@@ -24,6 +24,8 @@ from app.models.chat import Chat, ChatMessage
 from app.models.document import Document
 from app.models.library import LibraryItem, Share
 from app.models.case import Case
+from app.models.workflow import Workflow, WorkflowRun
+from app.models.marketplace import MarketplaceItem, MarketplaceReview
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

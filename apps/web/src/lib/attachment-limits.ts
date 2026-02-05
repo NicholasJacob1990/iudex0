@@ -1,8 +1,14 @@
 import type { ConfigLimits } from '@/stores/config-store';
-import { getModelConfig, type ModelId } from '@/config/models';
+import { getModelConfig, MODEL_REGISTRY, type ModelId } from '@/config/models';
 import { formatFileSize } from '@/lib/utils';
 
 const MB = 1024 * 1024;
+
+// Threshold constants for auto mode decision
+const AUTO_MODE_MAX_FILES_FOR_INJECTION = 5;
+const AUTO_MODE_MIN_CONTEXT_FOR_INJECTION = 200_000; // 200K tokens
+const AUTO_MODE_LARGE_CONTEXT_THRESHOLD = 500_000; // 500K tokens
+const AUTO_MODE_MAX_FILES_LARGE_CONTEXT = 10;
 const DEFAULT_MAX_MB = 4096;
 const DEFAULT_INJECTION_MAX_FILES = 20;
 const DEFAULT_RAG_MAX_FILES = 200;
@@ -112,4 +118,51 @@ export const buildAttachmentLimits = (
     ragLocalMaxFiles,
     typesLabel: CHAT_ATTACHMENT_TYPES.join(', '),
   };
+};
+
+/**
+ * Resolves 'auto' attachment mode to either 'prompt_injection' or 'rag_local'
+ * based on model context window and number of files.
+ *
+ * Decision logic:
+ * - Large context (≥500K tokens) + few files (≤10): prompt_injection
+ * - Medium context (≥200K tokens) + very few files (≤5): prompt_injection
+ * - Otherwise: rag_local (safer for precision and cost)
+ */
+export const resolveAutoAttachmentMode = (
+  modelIds: string[],
+  fileCount: number
+): 'prompt_injection' | 'rag_local' => {
+  if (fileCount === 0) {
+    return 'prompt_injection'; // No files, doesn't matter
+  }
+
+  // Get the smallest context window among selected models
+  const contextWindows = modelIds
+    .map((id) => {
+      const config = MODEL_REGISTRY[id as ModelId];
+      return config?.contextWindow ?? 0;
+    })
+    .filter((ctx) => ctx > 0);
+
+  const minContextWindow = contextWindows.length > 0
+    ? Math.min(...contextWindows)
+    : AUTO_MODE_MIN_CONTEXT_FOR_INJECTION;
+
+  // Large context models can handle more files via injection
+  if (minContextWindow >= AUTO_MODE_LARGE_CONTEXT_THRESHOLD) {
+    if (fileCount <= AUTO_MODE_MAX_FILES_LARGE_CONTEXT) {
+      return 'prompt_injection';
+    }
+  }
+
+  // Medium context models: only inject if very few files
+  if (minContextWindow >= AUTO_MODE_MIN_CONTEXT_FOR_INJECTION) {
+    if (fileCount <= AUTO_MODE_MAX_FILES_FOR_INJECTION) {
+      return 'prompt_injection';
+    }
+  }
+
+  // Default to RAG for safety (better precision, lower cost)
+  return 'rag_local';
 };

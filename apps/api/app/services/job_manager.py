@@ -514,6 +514,7 @@ class JobManager:
                     file_names TEXT,
                     file_paths TEXT,
                     result_path TEXT,
+                    celery_task_id TEXT,
                     created_at TEXT,
                     updated_at TEXT,
                     progress INTEGER,
@@ -522,6 +523,15 @@ class JobManager:
                     error TEXT
                 )
             """)
+
+            # Migração best-effort: adicionar coluna celery_task_id se a tabela já existia sem ela
+            try:
+                cursor.execute("PRAGMA table_info(transcription_jobs)")
+                cols = {row[1] for row in cursor.fetchall() or []}
+                if "celery_task_id" not in cols:
+                    cursor.execute("ALTER TABLE transcription_jobs ADD COLUMN celery_task_id TEXT")
+            except Exception as exc:
+                logger.warning(f"⚠️ Falha ao migrar coluna celery_task_id em transcription_jobs: {exc}")
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_transcription_jobs_status
@@ -720,6 +730,7 @@ class JobManager:
         stage: str = "queued",
         message: str = "Aguardando início",
         result_path: Optional[str] = None,
+        celery_task_id: Optional[str] = None,
     ) -> None:
         try:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -728,8 +739,8 @@ class JobManager:
             cursor.execute("""
                 INSERT INTO transcription_jobs (
                     jobid, job_type, status, config, file_names, file_paths,
-                    result_path, created_at, updated_at, progress, stage, message, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    result_path, celery_task_id, created_at, updated_at, progress, stage, message, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 job_id,
                 job_type,
@@ -738,6 +749,7 @@ class JobManager:
                 json.dumps(file_names, ensure_ascii=False),
                 json.dumps(file_paths, ensure_ascii=False),
                 result_path,
+                celery_task_id,
                 now,
                 now,
                 progress,
@@ -758,6 +770,7 @@ class JobManager:
         stage: Optional[str] = None,
         message: Optional[str] = None,
         result_path: Optional[str] = None,
+        celery_task_id: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
         try:
@@ -778,6 +791,9 @@ class JobManager:
             if result_path is not None:
                 fields.append("result_path = ?")
                 values.append(result_path)
+            if celery_task_id is not None:
+                fields.append("celery_task_id = ?")
+                values.append(celery_task_id)
             if error is not None:
                 fields.append("error = ?")
                 values.append(error)
@@ -806,7 +822,7 @@ class JobManager:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT jobid, job_type, status, config, file_names, file_paths,
-                       result_path, created_at, updated_at, progress, stage, message, error
+                       result_path, celery_task_id, created_at, updated_at, progress, stage, message, error
                 FROM transcription_jobs
                 WHERE jobid = ?
             """, (job_id,))
@@ -822,12 +838,13 @@ class JobManager:
                 "file_names": json.loads(row[4]) if row[4] else [],
                 "file_paths": json.loads(row[5]) if row[5] else [],
                 "result_path": row[6],
-                "created_at": row[7],
-                "updated_at": row[8],
-                "progress": row[9],
-                "stage": row[10],
-                "message": row[11],
-                "error": row[12],
+                "celery_task_id": row[7],
+                "created_at": row[8],
+                "updated_at": row[9],
+                "progress": row[10],
+                "stage": row[11],
+                "message": row[12],
+                "error": row[13],
             }
         except Exception as e:
             logger.error(f"❌ Erro ao ler job de transcrição: {e}")
@@ -854,7 +871,7 @@ class JobManager:
 
             query = """
                 SELECT jobid, job_type, status, config, file_names,
-                       result_path, created_at, updated_at, progress, stage, message, error
+                       result_path, celery_task_id, created_at, updated_at, progress, stage, message, error
                 FROM transcription_jobs
             """
             if where_clauses:
@@ -875,12 +892,13 @@ class JobManager:
                     "config": json.loads(row[3]) if row[3] else {},
                     "file_names": json.loads(row[4]) if row[4] else [],
                     "result_path": row[5],
-                    "created_at": row[6],
-                    "updated_at": row[7],
-                    "progress": row[8],
-                    "stage": row[9],
-                    "message": row[10],
-                    "error": row[11],
+                    "celery_task_id": row[6],
+                    "created_at": row[7],
+                    "updated_at": row[8],
+                    "progress": row[9],
+                    "stage": row[10],
+                    "message": row[11],
+                    "error": row[12],
                 })
             return jobs
         except Exception as e:

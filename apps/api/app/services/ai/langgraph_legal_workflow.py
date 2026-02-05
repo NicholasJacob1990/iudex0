@@ -2,9 +2,11 @@
 LangGraph Legal Workflow - Phase 4 (Audit Feedback Loop + HIL)
 
 Fluxo:
-  outline → [research] → fact_check → citer_verifier → debate →
-  → divergence_hil → audit → [if issues] → propose_corrections →
-  → correction_hil → finalize_hil → END
+  entry_router →
+    ├── quick_chat → END  (fast 2-5s, for simple chat questions)
+    └── gen_outline → [research] → fact_check → citer_verifier → debate →
+        → divergence_hil → audit → [if issues] → propose_corrections →
+        → correction_hil → finalize_hil → END
 
 Nodes:
   - citer_verifier (B2): Gate pré-debate que verifica rastreabilidade
@@ -1383,6 +1385,7 @@ async def _resolve_section_context(
         request_id = state.get("request_id") if isinstance(state, dict) else None
         scope_groups = state.get("rag_scope_groups") or []
         allow_global_scope = bool(state.get("rag_allow_global", False))
+        allow_private_scope = bool(state.get("rag_allow_private", True))
         allow_group_scope = bool(state.get("rag_allow_groups", bool(scope_groups)))
         try:
             neo4j_only = bool(get_rag_config().neo4j_only)
@@ -1393,6 +1396,7 @@ async def _resolve_section_context(
             use_tenant_graph = os.getenv("RAG_GRAPH_TENANT_SCOPED", "false").lower() in ("1", "true", "yes", "on")
             scope_groups = state.get("rag_scope_groups") or []
             allow_global_scope = bool(state.get("rag_allow_global", False))
+            allow_private_scope = bool(state.get("rag_allow_private", True))
             allow_group_scope = bool(state.get("rag_allow_groups", bool(scope_groups)))
             graphs = []
             hop_count = int(route_config.get("graph_hops") or state.get("graph_hops") or 2)
@@ -1411,7 +1415,7 @@ async def _resolve_section_context(
                             allowed_scopes: List[str] = []
                             if allow_global_scope:
                                 allowed_scopes.append("global")
-                            if state.get("tenant_id"):
+                            if allow_private_scope and state.get("tenant_id"):
                                 allowed_scopes.append("private")
                             if allow_group_scope and scope_groups:
                                 allowed_scopes.append("group")
@@ -1436,9 +1440,11 @@ async def _resolve_section_context(
                     logger.warning(f"⚠️ Neo4j-only GraphRAG failed: {exc}")
             else:
                 private_scope_id = state.get("tenant_id") if use_tenant_graph else None
-                private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
-                if private_graph:
-                    graphs.append(("private", private_graph))
+                private_graph = None
+                if allow_private_scope:
+                    private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
+                    if private_graph:
+                        graphs.append(("private", private_graph))
                 if allow_global_scope:
                     global_graph = get_scoped_knowledge_graph(scope="global", scope_id=None)
                     if global_graph:
@@ -1699,6 +1705,7 @@ class DocumentState(TypedDict):
     use_multi_agent: bool
     thinking_level: str
     chat_personality: str
+    playbook_prompt: Optional[str]
     temperature: float
     target_pages: int
     min_pages: int
@@ -2064,6 +2071,10 @@ def _build_outline_fixed_context(
     chat_personality = (state.get("chat_personality") or "").strip()
     if chat_personality:
         items.append(f"Tom/estilo: {chat_personality}")
+
+    _pb_prompt = (state.get("playbook_prompt") or "").strip()
+    if _pb_prompt:
+        items.append(f"Playbook de revisao contratual ativo:\n{_pb_prompt}")
 
     style_instruction = (state.get("style_instruction") or "").strip()
     if style_instruction:
@@ -3164,6 +3175,9 @@ async def web_search_node(state: DocumentState) -> DocumentState:
             cfg = get_model_config(judge_model)
             provider = cfg.provider if cfg else ""
             system_instruction = build_system_instruction(state.get("chat_personality"))
+            _pb_prompt = state.get("playbook_prompt")
+            if _pb_prompt and isinstance(_pb_prompt, str) and _pb_prompt.strip():
+                system_instruction = f"{system_instruction}\n\n{_pb_prompt.strip()}"
             prompt_query = "; ".join(planned_queries[:4]) if planned_queries else query
             prompt = f"Pesquise na web e resuma as fontes relevantes sobre: {prompt_query}. Cite as fontes."
 
@@ -4281,6 +4295,9 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
     chat_personality = (state.get("chat_personality") or "juridico").lower()
     personality_instr = build_personality_instructions(chat_personality)
     system_instruction = build_system_instruction(chat_personality)
+    _pb_prompt = state.get("playbook_prompt")
+    if _pb_prompt and isinstance(_pb_prompt, str) and _pb_prompt.strip():
+        system_instruction = f"{system_instruction}\n\n{_pb_prompt.strip()}"
 
     # Judge model (provider-agnostic)
     drafter = None
@@ -5198,6 +5215,9 @@ Entregue somente o texto final da seção, sem cabeçalhos '##', sem prefácio.
         reasoning_level = state.get("thinking_level", "medium")
         chat_personality = (state.get("chat_personality") or "juridico").lower()
         system_instruction = build_system_instruction(chat_personality)
+        _pb_prompt = state.get("playbook_prompt")
+        if _pb_prompt and isinstance(_pb_prompt, str) and _pb_prompt.strip():
+            system_instruction = f"{system_instruction}\n\n{_pb_prompt.strip()}"
         judge_model_local = state.get("judge_model") or DEFAULT_JUDGE_MODEL
         gpt_model_local = state.get("gpt_model") or (DEFAULT_DEBATE_MODELS[0] if DEFAULT_DEBATE_MODELS else "gpt-5.2")
         claude_model_local = state.get("claude_model") or (DEFAULT_DEBATE_MODELS[1] if len(DEFAULT_DEBATE_MODELS) > 1 else "claude-4.5-sonnet")
@@ -6996,6 +7016,152 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
     )
 
 
+# =============================================================================
+# QUICK CHAT NODE — Fast response bypass (2-5s vs 30-120s full pipeline)
+# =============================================================================
+
+DOC_KEYWORDS_RE = re.compile(
+    r"\b(minuta|peti[cç][aã]o|contesta[cç][aã]o|parecer|recurso|agravo|apela[cç][aã]o|"
+    r"mandado\s+de\s+seguran[cç]a|habeas|contrato|relat[oó]rio|manifest[aã]o|"
+    r"embargos|memorial|defesa|impugna[cç][aã]o|r[eé]plica|contrarraz[oõ]es|"
+    r"despacho|senten[cç]a|ac[oó]rd[aã]o|voto|ementa|pe[cç]a)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_quick_chat(state: "DocumentState") -> bool:
+    """Determine if this request should use quick chat (bypass full pipeline)."""
+    mode = (state.get("mode") or "").lower().strip()
+
+    # Explicit modes that always go full pipeline
+    if mode in ("minuta", "parecer", "contestacao", "peticao", "documento", "committee", "comite"):
+        return False
+
+    # Explicit quick mode
+    if mode in ("chat", "quick", "direct", "rapido"):
+        return True
+
+    input_text = (state.get("input_text") or "").strip()
+
+    # Short messages without document keywords → quick chat
+    if len(input_text) < 600 and not DOC_KEYWORDS_RE.search(input_text):
+        return True
+
+    return False
+
+
+async def quick_chat_node(state: "DocumentState") -> "DocumentState":
+    """
+    Fast chat response: minimal RAG + direct LLM call.
+    Bypasses outline, debate, audit, HIL, and all other heavy nodes.
+    Target latency: 2-5 seconds.
+    """
+    from app.services.ai.agent_clients import (
+        call_vertex_gemini_async,
+        get_gemini_client,
+    )
+
+    job_id = state.get("job_id", "quick-chat")
+    input_text = state.get("input_text", "")
+    personality = state.get("personality", "juridico")
+    strategist_model = state.get("strategist_model") or DEFAULT_JUDGE_MODEL
+
+    # Emit start event
+    _emit_event(state, "node_start", {"node": "quick_chat"}, phase="quick_chat", node="quick_chat")
+
+    # --- 1. Minimal RAG (top-3, ~1s) ---
+    rag_context = ""
+    try:
+        rag_mgr = _get_rag_manager()
+        if rag_mgr:
+            _emit_event(state, "step", {"step": "rag_fetch", "status": "running"}, phase="quick_chat", node="quick_chat")
+            results = await asyncio.to_thread(
+                rag_mgr.search,
+                query=input_text[:500],
+                top_k=3,
+            )
+            if results:
+                rag_context = "\n\n".join(
+                    f"[Fonte {i+1}] {r.get('text', '')[:800]}"
+                    for i, r in enumerate(results[:3])
+                    if r.get("text")
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ [quick_chat] RAG falhou: {e}")
+
+    # --- 2. Build prompt ---
+    personality_instructions = build_personality_instructions(personality)
+
+    system_prompt = f"""Você é o Iudex, assistente jurídico inteligente.
+{personality_instructions}
+
+Responda de forma clara, concisa e fundamentada. Se houver fontes disponíveis, cite-as.
+Não gere documentos longos — apenas responda a pergunta diretamente."""
+
+    user_prompt = input_text
+    if rag_context:
+        user_prompt = f"""Contexto de fontes:
+{rag_context}
+
+---
+Pergunta do usuário:
+{input_text}"""
+
+    # --- 3. Direct LLM call (~2-4s) ---
+    _emit_event(state, "step", {"step": "llm_generate", "status": "running", "model": strategist_model}, phase="quick_chat", node="quick_chat")
+
+    api_model = get_api_model_name(strategist_model)
+    response_text = ""
+
+    try:
+        client = get_gemini_client()
+        if client:
+            response_text = await call_vertex_gemini_async(
+                client,
+                user_prompt,
+                model=api_model,
+                max_tokens=1500,
+                temperature=0.3,
+                system_instruction=system_prompt,
+            )
+        else:
+            # Fallback: try any available model
+            logger.warning("⚠️ [quick_chat] Gemini client indisponível, usando fallback")
+            response_text = f"[Erro] Cliente Gemini indisponível para quick_chat. Verifique credenciais."
+    except Exception as e:
+        logger.error(f"❌ [quick_chat] Erro na geração: {e}")
+        response_text = f"Desculpe, ocorreu um erro ao processar sua pergunta: {str(e)[:200]}"
+
+    # --- 4. Emit result and stream tokens ---
+    if response_text:
+        for chunk in _iter_text_chunks(response_text, 40):
+            _emit_event(
+                state,
+                "token",
+                {"delta": chunk, "model": strategist_model},
+                phase="quick_chat",
+                node="quick_chat",
+            )
+
+    _emit_event(state, "node_end", {"node": "quick_chat"}, phase="quick_chat", node="quick_chat")
+
+    return {
+        **state,
+        "full_document": response_text,
+        "execution_path": "quick_chat",
+        "auto_approve_hil": True,
+    }
+
+
+def entry_router(state: "DocumentState") -> Literal["quick_chat", "gen_outline"]:
+    """Route between quick chat (fast 2-5s) and full pipeline (30-120s)."""
+    if _is_quick_chat(state):
+        logger.info(f"⚡ [entry_router] Quick chat mode (input_len={len(state.get('input_text', ''))})")
+        return "quick_chat"
+    logger.info(f"📋 [entry_router] Full pipeline mode (mode={state.get('mode', 'N/A')})")
+    return "gen_outline"
+
+
 # --- GRAPH DEFINITION ---
 
 workflow = StateGraph(DocumentState)
@@ -7037,9 +7203,15 @@ workflow.add_node("style_check", _wrap_node("style_check", style_check_node))
 workflow.add_node("style_refine", _wrap_node("style_refine", style_refine_node))
 workflow.add_node("document_gate", _wrap_node("document_gate", document_gate_node))
 workflow.add_node("finalize_hil", _wrap_node("finalize_hil", finalize_hil_node))
+workflow.add_node("quick_chat", _wrap_node("quick_chat", quick_chat_node))
 
-# Entry
-workflow.set_entry_point("gen_outline")
+# Entry router: quick_chat (2-5s) vs full pipeline (30-120s)
+workflow.add_conditional_edges("__start__", entry_router, {
+    "quick_chat": "quick_chat",
+    "gen_outline": "gen_outline",
+})
+workflow.add_edge("quick_chat", END)
+logger.info("⚡ Graph: Quick chat node registered (fast bypass)")
 
 # Always go through outline_hil (no-op if not enabled)
 workflow.add_edge("gen_outline", "outline_hil")
@@ -7234,3 +7406,25 @@ else:
     logger.warning("⚠️ LangGraph checkpointer: MemorySaver (SqliteSaver indisponível no ambiente)")
 
 legal_workflow_app = workflow.compile(checkpointer=checkpointer)
+
+
+# ---------------------------------------------------------------------------
+# Public API — used by orchestration router and workflow_compiler bridge
+# ---------------------------------------------------------------------------
+
+
+async def run_workflow_async(initial_state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Execute the full legal workflow and return the final state.
+
+    Args:
+        initial_state: Partial DocumentState dict. Missing fields will use
+                       LangGraph defaults (empty strings, empty lists, etc.).
+
+    Returns:
+        Final DocumentState dict after the graph reaches END.
+    """
+    import uuid as _uuid
+    config = {"configurable": {"thread_id": initial_state.get("job_id", str(_uuid.uuid4()))}}
+    final_state = await legal_workflow_app.ainvoke(initial_state, config=config)
+    return final_state

@@ -115,6 +115,7 @@ from app.services.poe_like_billing import quote_message as poe_quote_message
 from app.services.context_strategy import decide_context_mode_from_paths, supports_upload_cache
 from app.utils.validators import InputValidator
 from app.services.rag_policy import resolve_rag_scope
+from app.services.corpus_chat_tool import search_corpus_for_chat, should_search_corpus
 from app.services.document_processor import (
     extract_text_from_pdf,
     extract_text_from_pdf_with_ocr,
@@ -218,14 +219,27 @@ STREAM_SESSION_TTL_SECONDS = 300
 STREAM_SESSIONS: Dict[str, ChatStreamSession] = {}
 
 
+STREAM_SESSION_STALE_SECONDS = 900  # 15min — sessões não-finalizadas (stuck)
+STREAM_SESSION_MAX_COUNT = 200  # limite absoluto de sessões em memória
+
+
 def _cleanup_stream_sessions() -> None:
     now = time.time()
     expired = [
         key for key, session in STREAM_SESSIONS.items()
-        if session.done and (now - session.created_at) > STREAM_SESSION_TTL_SECONDS
+        if (session.done and (now - session.created_at) > STREAM_SESSION_TTL_SECONDS)
+        or (now - session.created_at) > STREAM_SESSION_STALE_SECONDS
     ]
     for key in expired:
         STREAM_SESSIONS.pop(key, None)
+    # Se ainda estiver acima do limite, remover as mais antigas
+    if len(STREAM_SESSIONS) > STREAM_SESSION_MAX_COUNT:
+        sorted_keys = sorted(
+            STREAM_SESSIONS.keys(),
+            key=lambda k: STREAM_SESSIONS[k].created_at,
+        )
+        for key in sorted_keys[: len(STREAM_SESSIONS) - STREAM_SESSION_MAX_COUNT]:
+            STREAM_SESSIONS.pop(key, None)
 
 
 async def _stream_from_session(
@@ -265,6 +279,10 @@ def sse_activity_event(
     status: str = "running",
     detail: str = "",
     tags: list = None,
+    kind: Optional[str] = None,
+    attachments: Optional[list] = None,
+    terms: Optional[list] = None,
+    sources: Optional[list] = None,
 ) -> str:
     """
     Helper to emit activity step events for the Activity Panel.
@@ -277,20 +295,77 @@ def sse_activity_event(
     - detail: optional detail text
     - tags: optional list of domain/chip tags
     """
+    step_obj: Dict[str, Any] = {
+        "id": step_id,
+        "title": title,
+        "status": status,
+        "detail": detail,
+        "tags": tags or [],
+        "t": int(time.time() * 1000),
+    }
+    if kind:
+        step_obj["kind"] = kind
+    if attachments:
+        step_obj["attachments"] = attachments
+    if terms:
+        step_obj["terms"] = terms
+    if sources:
+        step_obj["sources"] = sources
+
     payload = {
         "type": "activity",
         "turn_id": turn_id,
         "op": op,
-        "step": {
-            "id": step_id,
-            "title": title,
-            "status": status,
-            "detail": detail,
-            "tags": tags or [],
-            "t": int(time.time() * 1000),
-        }
+        "step": step_obj,
     }
     return sse_event(payload)
+
+
+_STOPWORDS_PT_EN = {
+    # PT
+    "a", "o", "os", "as", "um", "uma", "uns", "umas", "de", "da", "do", "das", "dos",
+    "e", "ou", "em", "no", "na", "nos", "nas", "por", "para", "com", "sem", "sobre",
+    "ao", "aos", "à", "às", "que", "como", "qual", "quais", "quando", "onde", "porque",
+    "se", "ser", "são", "foi", "é", "não", "sim", "mais", "menos", "muito", "pouco",
+    # EN
+    "a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "without",
+    "about", "from", "by", "as", "is", "are", "was", "were", "be", "been", "being",
+    "this", "that", "these", "those", "what", "which", "when", "where", "why", "how",
+}
+
+
+def _extract_terms(prompt: str, attachment_names: List[str], max_terms: int = 10) -> List[str]:
+    """
+    Deterministic heuristic for "checking terms in attached file" chips.
+    Source: user prompt + attachment filenames. No model calls.
+    """
+    import re
+
+    raw = " ".join([str(prompt or ""), " ".join([str(x or "") for x in attachment_names or []])]).strip()
+    if not raw:
+        return []
+    # split on non-alnum and underscores, keep latin letters and digits
+    tokens = re.split(r"[^A-Za-zÀ-ÿ0-9_]+", raw)
+    out: List[str] = []
+    seen: set = set()
+    for t in tokens:
+        v = str(t or "").strip().strip("_")
+        if not v:
+            continue
+        if len(v) < 3:
+            continue
+        key = v.lower()
+        if key in _STOPWORDS_PT_EN:
+            continue
+        if key.isdigit():
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v[:32])
+        if len(out) >= max_terms:
+            break
+    return out
 
 def _cursor_debug_log(payload: dict) -> None:
     """
@@ -1581,6 +1656,40 @@ async def send_message(
                 context_rag,
             )
 
+    # ── Corpus auto-search (simple chat): buscar quando sem contexto RAG ──
+    _existing_rag = current_context.get("rag_context", "")
+    _clean_lower_simple = clean_content.strip().lower().rstrip("!?.,:;")
+    _trivial_simple = {"oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "obrigado", "obrigada", "valeu", "ok", "sim", "não", "nao", "tudo bem", "tchau", "bye", "hello", "hi", "hey"}
+    _is_trivial_simple = len(clean_content.split()) <= 4 and (_clean_lower_simple in _trivial_simple or len(clean_content) <= 10)
+
+    if not _existing_rag and not _is_trivial_simple:
+        _should_corpus_simple = should_search_corpus(
+            message=clean_content,
+            rag_sources=list(message_in.rag_sources or []),
+            rag_mode=getattr(message_in, "rag_mode", None) or chat.context.get("rag_mode") or "manual",
+            has_attachments=bool(attachment_docs),
+        )
+        if _should_corpus_simple:
+            try:
+                corpus_ctx = await search_corpus_for_chat(
+                    query=clean_content,
+                    user_id=str(current_user.id),
+                    org_id=str(getattr(current_user, "organization_id", "") or ""),
+                    limit=5,
+                    db=db,
+                )
+                if corpus_ctx:
+                    current_context["rag_context"] = _join_context_parts(
+                        current_context.get("rag_context"),
+                        corpus_ctx,
+                    )
+                    logger.info(
+                        f"📚 [Corpus Auto Simple] Injetando contexto do Corpus "
+                        f"({len(corpus_ctx)} chars) para '{clean_content[:50]}'"
+                    )
+            except Exception as exc:
+                logger.warning(f"Corpus auto-search (simple) falhou: {exc}")
+
     # Persistir sticky docs se houver mudança
     if chat.context.get("sticky_docs") != sticky_docs:
         chat.context["sticky_docs"] = sticky_docs
@@ -1588,7 +1697,7 @@ async def send_message(
         from sqlalchemy.orm.attributes import flag_modified
         flag_modified(chat, "context")
         await db.commit()
-    
+
     # 3. Pré-checagem de Orçamento de Tokens
     if mentions_meta and _should_use_precise_budget(budget_model_id):
         budget = await token_service.check_budget_precise(clean_content, current_context, budget_model_id)
@@ -1700,28 +1809,28 @@ async def send_message(
             except Exception as e:
                 # Fallback em caso de erro (ex: falta de API Key)
                 print(f"Erro na IA: {e}")
-            ai_content = None
-            
-            # Gemini failsafe: try direct Gemini call as last resort
-            try:
-                from app.services.ai.agent_clients import call_vertex_gemini_async
-                from app.services.ai.model_registry import get_api_model_name
-                print("⚠️ Tentando Gemini como fallback...")
-                ai_content = await call_vertex_gemini_async(
-                    None,
-                    clean_content,
-                    model=get_api_model_name("gemini-3-flash"),
-                    max_tokens=1000,
-                    temperature=temperature
-                )
-                if ai_content:
-                    print("✅ Gemini failsafe successful")
-            except Exception as gemini_err:
-                print(f"❌ Gemini failsafe also failed: {gemini_err}")
-            
-            if not ai_content:
-                ai_content = f"Desculpe, estou operando em modo offline no momento. Recebi sua mensagem: '{message_in.content}'"
-            thinking = "Fallback ativado" if thinking_enabled_simple else None
+                ai_content = None
+
+                # Gemini failsafe: try direct Gemini call as last resort
+                try:
+                    from app.services.ai.agent_clients import call_vertex_gemini_async
+                    from app.services.ai.model_registry import get_api_model_name
+                    print("⚠️ Tentando Gemini como fallback...")
+                    ai_content = await call_vertex_gemini_async(
+                        None,
+                        clean_content,
+                        model=get_api_model_name("gemini-3-flash"),
+                        max_tokens=1000,
+                        temperature=temperature
+                    )
+                    if ai_content:
+                        print("✅ Gemini failsafe successful")
+                except Exception as gemini_err:
+                    print(f"❌ Gemini failsafe also failed: {gemini_err}")
+
+                if not ai_content:
+                    ai_content = f"Desculpe, estou operando em modo offline no momento. Recebi sua mensagem: '{message_in.content}'"
+                thinking = "Fallback ativado" if thinking_enabled_simple else None
             item_telemetry = {}
     
     # Montar metadados finais
@@ -1830,6 +1939,12 @@ async def send_message_stream(
     conversation_history_full = _serialize_history(history_messages)
     history_model_ids = _infer_history_model_ids(message_in.content, message_in.model, chat.context)
     base_instruction = build_system_instruction(message_in.chat_personality)
+
+    # Inject playbook prompt if provided (from /minuta playbook selector)
+    playbook_prompt = getattr(message_in, "playbook_prompt", None)
+    if playbook_prompt and isinstance(playbook_prompt, str) and playbook_prompt.strip():
+        base_instruction = f"{base_instruction}\n\n{playbook_prompt.strip()}"
+
     conversation_history = _trim_history_for_models(
         conversation_history_full,
         history_model_ids,
@@ -2540,8 +2655,35 @@ async def send_message_stream(
         await db.commit()
         context_updated = False
 
-    rag_filters = None
+    rag_filters: Optional[Dict[str, Any]] = None
     tipo_peca_filter = None
+    extra_filters: Dict[str, Any] = {}
+    raw_jurisdictions = getattr(message_in, "rag_jurisdictions", None)
+    if raw_jurisdictions:
+        normalized = [
+            str(j).strip().upper()
+            for j in (raw_jurisdictions or [])
+            if j is not None and str(j).strip()
+        ]
+        normalized = list(dict.fromkeys(normalized))
+        # UX aliases: accept UK/GB interchangeably
+        if "UK" in normalized and "GB" not in normalized:
+            normalized.append("GB")
+        if "GB" in normalized and "UK" not in normalized:
+            normalized.append("UK")
+        if normalized:
+            extra_filters["jurisdictions"] = normalized
+
+    raw_source_ids = getattr(message_in, "rag_source_ids", None)
+    if raw_source_ids:
+        normalized_sources = [
+            str(s).strip()
+            for s in (raw_source_ids or [])
+            if s is not None and str(s).strip()
+        ]
+        normalized_sources = list(dict.fromkeys(normalized_sources))
+        if normalized_sources:
+            extra_filters["source_ids"] = normalized_sources
     if isinstance(template_filters, dict) and template_filters:
         tipo_peca_filter = template_filters.get("tipo_peca")
         raw_filters = {}
@@ -2552,7 +2694,9 @@ async def send_message_stream(
                 continue
             raw_filters[key] = value
         if raw_filters:
-            rag_filters = {"pecas_modelo": raw_filters}
+            extra_filters["pecas_modelo"] = raw_filters
+    if extra_filters:
+        rag_filters = extra_filters
 
     template_instruction = ""
     template_id = message_in.template_id or chat.context.get("template_id")
@@ -2594,43 +2738,68 @@ async def send_message_stream(
     elif max_query_cap is not None:
         planned_queries = planned_queries[:max_query_cap]
 
-    scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
-        db,
-        tenant_id=str(current_user.id),
-        user_id=str(current_user.id),
-        user_role=current_user.role,
-        chat_context=chat.context or {},
+    # Fast-path: skip RAG for trivial/short messages (greetings, simple questions)
+    _trivial_words = {"oi", "olá", "ola", "bom dia", "boa tarde", "boa noite", "obrigado", "obrigada", "valeu", "ok", "sim", "não", "nao", "tudo bem", "tchau", "bye", "hello", "hi", "hey"}
+    _clean_lower = clean_content.strip().lower().rstrip("!?.,:;")
+    _is_trivial = (
+        len(clean_content.split()) <= 4
+        and (_clean_lower in _trivial_words or len(clean_content) <= 10)
+        and not attachment_docs
+        and not effective_dense_research
     )
 
-    rag_context, graph_context, _ = await build_rag_context(
-        query=clean_content,
-        rag_sources=effective_rag_sources,
-        rag_top_k=message_in.rag_top_k,
-        attachment_mode=attachment_mode,
-        adaptive_routing=message_in.adaptive_routing,
-        # Router (rag_mode=auto) pode sobrescrever Graph/Argument no nível do request.
-        crag_gate=message_in.crag_gate,
-        crag_min_best_score=message_in.crag_min_best_score,
-        crag_min_avg_score=message_in.crag_min_avg_score,
-        hyde_enabled=message_in.hyde_enabled,
-        multi_query=bool(message_in.multi_query),
-        graph_rag_enabled=bool(effective_graph_rag_enabled),
-        graph_hops=int(effective_graph_hops or message_in.graph_hops or 1),
-        argument_graph_enabled=effective_argument_graph_enabled,
-        dense_research=effective_dense_research,
-        tenant_id=current_user.id,
-        user_id=current_user.id,
-        scope_groups=scope_groups,
-        allow_global_scope=allow_global_scope,
-        allow_group_scope=allow_group_scope,
-        history=conversation_history,
-        summary_text=chat.context.get("conversation_summary"),
-        conversation_id=chat_id,
-        rewrite_query=bool(conversation_history),
-        request_id=request_id,
-        filters=rag_filters,
-        tipo_peca_filter=tipo_peca_filter,
-    )
+    if _is_trivial:
+        rag_context = ""
+        graph_context = ""
+        logger.info(f"⚡ [Fast-path] Skipping RAG for trivial message: '{clean_content[:30]}'")
+    else:
+        from app.core.security import get_org_context
+
+        org_ctx = await get_org_context(current_user=current_user, db=db)
+        # Segurança: nunca confie em flags de escopo vindas do cliente; derive de policy + membership.
+        scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
+            db,
+            tenant_id=str(org_ctx.tenant_id),
+            user_id=str(org_ctx.user.id),
+            user_role=current_user.role,
+            chat_context={
+                "rag_groups": list(org_ctx.team_ids or []),
+                "rag_selected_groups": getattr(message_in, "rag_selected_groups", None),
+                "rag_allow_global": None,
+                "rag_allow_private": getattr(message_in, "rag_allow_private", None),
+                "rag_allow_groups": getattr(message_in, "rag_allow_groups", None),
+            },
+        )
+
+        rag_context, graph_context, _ = await build_rag_context(
+            query=clean_content,
+            rag_sources=effective_rag_sources,
+            rag_top_k=message_in.rag_top_k,
+            attachment_mode=attachment_mode,
+            adaptive_routing=message_in.adaptive_routing,
+            crag_gate=message_in.crag_gate,
+            crag_min_best_score=message_in.crag_min_best_score,
+            crag_min_avg_score=message_in.crag_min_avg_score,
+            hyde_enabled=message_in.hyde_enabled,
+            multi_query=bool(message_in.multi_query),
+            graph_rag_enabled=bool(effective_graph_rag_enabled),
+            graph_hops=int(effective_graph_hops or message_in.graph_hops or 1),
+            argument_graph_enabled=effective_argument_graph_enabled,
+            dense_research=effective_dense_research,
+            tenant_id=org_ctx.tenant_id,
+            user_id=org_ctx.user.id,
+            scope_groups=scope_groups,
+            allow_global_scope=allow_global_scope,
+            allow_private_scope=getattr(message_in, "rag_allow_private", None),
+            allow_group_scope=allow_group_scope,
+            history=conversation_history,
+            summary_text=chat.context.get("conversation_summary"),
+            conversation_id=chat_id,
+            rewrite_query=bool(conversation_history),
+            request_id=request_id,
+            filters=rag_filters,
+            tipo_peca_filter=tipo_peca_filter,
+        )
 
     local_query_override: Optional[str] = None
     local_queries: Optional[List[str]] = None
@@ -2690,6 +2859,44 @@ async def send_message_stream(
         )
         if context_rag:
             rag_context = _join_context_parts(rag_context, context_rag)
+    # ── Corpus auto-search: buscar automaticamente quando sem contexto RAG ──
+    corpus_context = ""
+    if not rag_context and not _is_trivial:
+        _should_corpus = should_search_corpus(
+            message=clean_content,
+            rag_sources=effective_rag_sources,
+            rag_mode=rag_mode,
+            has_attachments=bool(attachment_docs),
+        )
+        if _should_corpus:
+            try:
+                corpus_context = await search_corpus_for_chat(
+                    query=clean_content,
+                    user_id=str(current_user.id),
+                    org_id=str(getattr(current_user, "organization_id", "") or ""),
+                    limit=5,
+                    db=db,
+                )
+                if corpus_context:
+                    rag_context = _join_context_parts(rag_context, corpus_context)
+                    logger.info(
+                        f"📚 [Corpus Auto] Injetando contexto do Corpus "
+                        f"({len(corpus_context)} chars) para '{clean_content[:50]}'"
+                    )
+                    trace_event(
+                        "corpus_auto_search",
+                        {
+                            "query": clean_content[:200],
+                            "context_chars": len(corpus_context),
+                            "mode": "auto_fallback",
+                        },
+                        request_id=request_id,
+                        user_id=str(current_user.id),
+                        conversation_id=chat_id,
+                    )
+            except Exception as exc:
+                logger.warning(f"Corpus auto-search falhou (ignorando): {exc}")
+
     if rag_context:
         current_context["rag_context"] = rag_context
     if graph_context:
@@ -3189,6 +3396,7 @@ async def send_message_stream(
     requested_model = (message_in.model or current_context.get("model") or "").strip()
     model_overrides: dict = {}
     gpt_override_provider: Optional[str] = None
+    use_native_tools = False  # Enabled for agent models with tool calling
     if requested_model and not explicit_mentions:
         try:
             requested_model = validate_model_id(
@@ -3233,6 +3441,11 @@ async def send_message_stream(
         model_overrides[model_key] = requested_model
         if not target_models:
             target_models = [model_key]
+
+        # Enable native tool calling for agent models (e.g. openai-agent, google-agent, claude-agent)
+        use_native_tools = bool(model_cfg and getattr(model_cfg, "for_agents", False) and "agent" in requested_model)
+        if use_native_tools:
+            logger.info(f"🔧 Native tool calling enabled for agent model: {requested_model}")
 
         current_context["model"] = requested_model
         if chat.context.get("model") != requested_model:
@@ -3424,9 +3637,9 @@ async def send_message_stream(
         if level in ("none", "off", "disabled"):
             thinking_budget_override = 0
         elif level == "low":
-            thinking_budget_override = 2000
+            thinking_budget_override = 1024
         elif level == "medium":
-            thinking_budget_override = 8000
+            thinking_budget_override = 4000
         elif level == "xhigh":
             thinking_budget_override = 24000
         elif level == "high":
@@ -3471,27 +3684,53 @@ async def send_message_stream(
         
         yield sse_event({"type": "meta", "phase": "start", "t": start_ms, "turn_id": turn_id, "request_id": request_id})
         
-        # Activity: Chamando modelo(s)
-        model_label_display = model_label if model_label else "modelo"
+        # Activity (Harvey-like): assessing + attachments/terms + web search
         yield sse_activity_event(
             turn_id=turn_id,
             op="add",
-            step_id="call",
-            title=f"Chamando {model_label_display}",
+            step_id="assess_query",
+            title="Avaliando a pergunta",
             status="running",
-            tags=[m for m in target_models[:3]] if target_models else [],
+            kind="assess",
+            detail="",
         )
-        
-        # Activity: Processo de raciocínio (será atualizado quando chegar thinking)
-        if thinking_enabled:
+
+        attachment_names: List[str] = []
+        for a in getattr(message_in, "attachments", []) or []:
+            if isinstance(a, dict) and a.get("name"):
+                attachment_names.append(str(a.get("name")))
+
+        if attachment_names:
+            attachments_payload = []
+            for name in attachment_names[:6]:
+                ext = ""
+                try:
+                    ext = str(name).rsplit(".", 1)[-1].strip().upper()
+                except Exception:
+                    ext = ""
+                attachments_payload.append({"name": name, "ext": ext or None})
             yield sse_activity_event(
                 turn_id=turn_id,
                 op="add",
-                step_id="thinking",
-                title="Processo de raciocínio",
-                status="running",
+                step_id="reviewing_attached_file",
+                title="Revisando arquivo anexado",
+                status="done",
+                kind="attachment_review",
+                attachments=attachments_payload,
             )
-        
+
+            terms = _extract_terms(clean_content, attachment_names, max_terms=10)
+            if terms:
+                yield sse_activity_event(
+                    turn_id=turn_id,
+                    op="add",
+                    step_id="checking_terms",
+                    title="Buscando termos no anexo",
+                    status="done",
+                    kind="file_terms",
+                    terms=terms,
+                )
+
         answer_started = False
 
         def _merge_citations(items: List[Dict[str, Any]]):
@@ -3823,7 +4062,7 @@ async def send_message_stream(
                     title="Pesquisando na web",
                     status="running",
                     detail=f"Consulta: {search_query[:100]}",
-                    tags=["google.com"],
+                    kind="web_search",
                 )
                 if planned_queries and multi_query:
                     per_query = max(2, int(max_sources / max(1, len(planned_queries))))
@@ -3952,6 +4191,13 @@ async def send_message_stream(
                     "queries": search_payload.get("queries") if multi_query else None
                 })
                 # Activity: Web search done
+                sources_payload = []
+                for res in results[:12]:
+                    url = (res.get("url") or "").strip()
+                    if not url:
+                        continue
+                    title = (res.get("title") or "").strip() or url
+                    sources_payload.append({"url": url, "title": title})
                 yield sse_activity_event(
                     turn_id=turn_id,
                     op="done",
@@ -3960,6 +4206,8 @@ async def send_message_stream(
                     status="done",
                     detail=f"Fontes: {len(results)}",
                     tags=search_domains[:6],
+                    kind="web_search",
+                    sources=sources_payload,
                 )
                 if search_payload.get("success") and results:
                     url_title_stream = [
@@ -4336,7 +4584,54 @@ async def send_message_stream(
                     thinking_cat = get_thinking_category(gpt_model_id)
 
                     handled_by_mcp = False
-                    if mcp_enabled and gpt_mcp_client:
+
+                    # Native tool calling for agent models
+                    if use_native_tools and not handled_by_mcp:
+                        try:
+                            from app.services.ai.chat_tools import run_openai_chat_tool_loop
+
+                            logger.info(f"🔧 [GPT] Running native tool loop for {gpt_api_model}")
+                            _tool_client = gpt_mcp_client or get_async_openai_client()
+                            tool_step_id = f"tools_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "Usando ferramentas", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_openai_chat_tool_loop(
+                                client=_tool_client,
+                                model=gpt_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            if tool_trace:
+                                for chunk in chunk_text(text or ""):
+                                    full_text_parts.append(chunk)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                    await asyncio.sleep(0)
+                                handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"Native tool-calling failed for GPT: {exc}")
+
+                    if mcp_enabled and gpt_mcp_client and not handled_by_mcp:
                         try:
                             from app.services.ai.mcp_tools import run_openai_tool_loop
 
@@ -4404,6 +4699,7 @@ async def send_message_stream(
                     if handled_by_mcp:
                         pass
                     elif gpt_stream_client:
+                        _openai_container_id = (chat.context or {}).get("openai_container_id")
                         async for chunk_data in stream_openai_async(
                             gpt_stream_client,
                             clean_content,
@@ -4412,6 +4708,8 @@ async def send_message_stream(
                             temperature=temperature,
                             system_instruction=effective_instruction,
                             reasoning_effort=reasoning_effort_param,
+                            enable_code_interpreter=True,
+                            container_id=_openai_container_id,
                         ):
                             # Handle tuples from native reasoning
                             if isinstance(chunk_data, tuple):
@@ -4422,6 +4720,21 @@ async def send_message_stream(
                                     if chunk_type == "thinking_summary":
                                         payload["thinking_type"] = "summary"
                                     yield sse_event(payload)
+                                elif chunk_type == "code_execution":
+                                    yield sse_event({"type": "code_execution", "data": delta, "model": model_key})
+                                elif chunk_type == "code_execution_result":
+                                    yield sse_event({"type": "code_execution_result", "data": delta, "model": model_key})
+                                elif chunk_type == "container_id":
+                                    # Persist container_id for code interpreter reuse
+                                    try:
+                                        if not chat.context:
+                                            chat.context = {}
+                                        chat.context["openai_container_id"] = delta
+                                        flag_modified(chat, "context")
+                                        db.add(chat)
+                                        await db.commit()
+                                    except Exception:
+                                        logger.warning("Failed to persist openai_container_id")
                                 else:
                                     full_text_parts.append(delta)
                                     if not answer_started:
@@ -4734,7 +5047,52 @@ async def send_message_stream(
                     thinking_cat = get_thinking_category(claude_model_id)
 
                     handled_by_mcp = False
-                    if mcp_enabled and claude_client:
+
+                    # Native tool calling for agent models
+                    if use_native_tools and not handled_by_mcp:
+                        try:
+                            from app.services.ai.chat_tools import run_anthropic_chat_tool_loop
+
+                            tool_step_id = f"tools_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "Usando ferramentas", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_anthropic_chat_tool_loop(
+                                client=claude_client,
+                                model=claude_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            if tool_trace:
+                                for chunk in chunk_text(text or ""):
+                                    full_text_parts.append(chunk)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                    await asyncio.sleep(0)
+                                handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"Native tool-calling failed for Claude: {exc}")
+
+                    if mcp_enabled and claude_client and not handled_by_mcp:
                         try:
                             from app.services.ai.mcp_tools import run_anthropic_tool_loop
 
@@ -4776,7 +5134,7 @@ async def send_message_stream(
                             handled_by_mcp = True
                         except Exception as exc:
                             logger.warning(f"MCP tool-calling failed for Claude: {exc}")
-                    
+
                     # Determine thinking approach based on category
                     extended_thinking_param = False
                     effective_instruction = system_instruction
@@ -4810,6 +5168,7 @@ async def send_message_stream(
                     if handled_by_mcp:
                         pass
                     else:
+                        _claude_container_id = (chat.context or {}).get("anthropic_container_id")
                         async for chunk_data in stream_anthropic_async(
                             claude_client,
                             clean_content,
@@ -4819,6 +5178,8 @@ async def send_message_stream(
                             system_instruction=effective_instruction,
                             extended_thinking=extended_thinking_param,
                             thinking_budget=claude_thinking_budget if extended_thinking_param else None,
+                            enable_code_execution=True,
+                            container_id=_claude_container_id,
                         ):
                         # Handle tuples from native thinking API
                             if isinstance(chunk_data, tuple):
@@ -4829,6 +5190,21 @@ async def send_message_stream(
                                     if chunk_type == "thinking_summary":
                                         payload["thinking_type"] = "summary"
                                     yield sse_event(payload)
+                                elif chunk_type == "code_execution":
+                                    yield sse_event({"type": "code_execution", "data": delta, "model": model_key})
+                                elif chunk_type == "code_execution_result":
+                                    yield sse_event({"type": "code_execution_result", "data": delta, "model": model_key})
+                                elif chunk_type == "container_id":
+                                    # Persist container_id for code execution reuse
+                                    try:
+                                        if not chat.context:
+                                            chat.context = {}
+                                        chat.context["anthropic_container_id"] = delta
+                                        flag_modified(chat, "context")
+                                        db.add(chat)
+                                        await db.commit()
+                                    except Exception:
+                                        logger.warning("Failed to persist anthropic_container_id")
                                 else:
                                     full_text_parts.append(delta)
                                     if not answer_started:
@@ -4871,7 +5247,53 @@ async def send_message_stream(
                     gemini_api_model = get_api_model_name(gemini_model_id)
 
                     handled_by_mcp = False
-                    if mcp_enabled and gemini_client:
+
+                    # Native tool calling for agent models
+                    if use_native_tools and not handled_by_mcp:
+                        try:
+                            from app.services.ai.chat_tools import run_gemini_chat_tool_loop
+
+                            logger.info(f"🔧 [Gemini] Running native tool loop for {gemini_api_model}")
+                            tool_step_id = f"tools_{model_key}_{turn_id}"
+                            yield sse_event({"type": "step.start", "step_name": "Usando ferramentas", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+                            text, tool_trace = await run_gemini_chat_tool_loop(
+                                client=gemini_client,
+                                model=gemini_api_model,
+                                system_instruction=system_instruction,
+                                user_prompt=clean_content,
+                                max_tokens=max_tokens,
+                                temperature=temperature,
+                            )
+                            for item in tool_trace:
+                                yield sse_event(
+                                    {
+                                        "type": "tool_call",
+                                        "model": model_key,
+                                        "step_id": tool_step_id,
+                                        "name": item.get("name"),
+                                        "arguments": item.get("arguments"),
+                                        "result_preview": item.get("result_preview"),
+                                        "turn_id": turn_id,
+                                    }
+                                )
+                                await asyncio.sleep(0)
+                            yield sse_event({"type": "step.done", "step_id": tool_step_id, "model": model_key, "turn_id": turn_id})
+                            await asyncio.sleep(0)
+
+                            if tool_trace:
+                                for chunk in chunk_text(text or ""):
+                                    full_text_parts.append(chunk)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({"type": "meta", "phase": "answer_start", "t": int(time.time() * 1000), "turn_id": turn_id})
+                                    yield sse_event({"type": "token", "delta": chunk, "model": model_key, "turn_id": turn_id})
+                                    await asyncio.sleep(0)
+                                handled_by_mcp = True
+                        except Exception as exc:
+                            logger.warning(f"Native tool-calling failed for Gemini: {exc}")
+
+                    if mcp_enabled and gemini_client and not handled_by_mcp:
                         try:
                             from app.services.ai.mcp_tools import run_gemini_tool_loop
 
@@ -4913,7 +5335,7 @@ async def send_message_stream(
                             handled_by_mcp = True
                         except Exception as exc:
                             logger.warning(f"MCP tool-calling failed for Gemini: {exc}")
-                    
+
                     # NEW: Enable extended thinking for Gemini 2.x Pro/Flash and 3.x models
                     thinking_mode_param = None
                     # Check if model supports thinking - use BOTH canonical id and api model name
@@ -4929,20 +5351,23 @@ async def send_message_stream(
                     normalized_level = (reasoning_level or "").strip().lower()
 
                     if supports_thinking:
-                        if is_flash:
+                        # Skip thinking entirely for trivial messages (greetings etc.)
+                        if _is_trivial and normalized_level in ("low", "minimal", "none", ""):
+                            thinking_mode_param = None
+                        elif is_flash:
                             if normalized_level == "none":
                                 thinking_mode_param = None  # Completely disabled
                             elif normalized_level == "minimal":
                                 thinking_mode_param = "minimal"
-                            elif normalized_level == "low":
+                            elif normalized_level in ("low", "medium"):
                                 thinking_mode_param = "low"
                             else:
-                                # Flash tende a entregar "thoughts" apenas em níveis altos.
+                                # high / xhigh → full thinking
                                 thinking_mode_param = "high"
                         elif is_pro:
-                            thinking_mode_param = "low" if normalized_level == "low" else "high"
+                            thinking_mode_param = "low" if normalized_level in ("low", "medium") else "high"
                         else:
-                            thinking_mode_param = "high"
+                            thinking_mode_param = "high" if normalized_level in ("high", "xhigh") else "low"
                     
                     logger.info(f"🧠 [Gemini] model={gemini_api_model}, id={gemini_model_id}, supports={supports_thinking}, mode={thinking_mode_param}")
 
@@ -4964,6 +5389,7 @@ async def send_message_stream(
                             temperature=temperature,
                             system_instruction=system_instruction,
                             thinking_mode=thinking_mode_param,  # NEW
+                            enable_code_execution=True,
                         ):
                             chunk_type = None
                             delta = None
@@ -5046,6 +5472,14 @@ async def send_message_stream(
                                             _merge_citations([{"title": title or url, "url": url}])
                                     except Exception:
                                         pass
+                                    continue
+
+                                if chunk_type == "code_execution" and delta:
+                                    yield sse_event({"type": "code_execution", "data": delta, "model": model_key})
+                                    continue
+
+                                if chunk_type == "code_execution_result" and delta:
+                                    yield sse_event({"type": "code_execution_result", "data": delta, "model": model_key})
                                     continue
 
                                 if chunk_type == "text" and delta:
@@ -5406,7 +5840,7 @@ async def send_message_stream(
             await db.commit()
 
             # Activity: Mark thinking as done
-            if thinking_enabled:
+            if show_thinking_step:
                 yield sse_activity_event(
                     turn_id=turn_id,
                     op="done",
@@ -5562,7 +5996,22 @@ async def send_message_stream(
             async for event in event_generator():
                 yield await session.append(event)
         except Exception as e:
-            yield await session.append(sse_event({"type": "error", "error": str(e)}))
+            logger.error(f"stream_with_session error chat_id={chat_id} turn_id={turn_id}: {e}")
+            yield await session.append(sse_event({
+                "type": "error",
+                "error": str(e),
+                "turn_id": turn_id,
+                "request_id": request_id,
+            }))
+            yield await session.append(sse_event({
+                "type": "done",
+                "full_text": "",
+                "model": "error",
+                "message_id": None,
+                "turn_id": turn_id,
+                "request_id": request_id,
+                "error": True,
+            }))
         finally:
             session.done = True
             async with session._cond:

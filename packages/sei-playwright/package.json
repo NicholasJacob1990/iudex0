@@ -27,6 +27,9 @@
     "soap": "^1.1.0",
     "zod": "^3.23.8"
   },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/nodemailer": "^7.0.5",

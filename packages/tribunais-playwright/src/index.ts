@@ -8,6 +8,9 @@
 // Core
 export { BaseTribunalClient } from './core/base-client.js';
 export { CaptchaHandler, type CaptchaSelectors } from './core/captcha-handler.js';
+export { SelectorStore } from './core/selector-store.js';
+export { failFast, withRetry, classifyError, resolveResilienceConfig } from './core/resilience.js';
+export { createAgentFallback } from './core/agent-fallback.js';
 
 // PJe
 export { PJeClient, type PJeClientConfig } from './pje/index.js';
@@ -71,4 +74,9 @@ export type {
   // Seletores
   SemanticSelector,
   TribunalSelectors,
+
+  // Resiliência
+  ResilienceConfig,
+  AgentFallbackConfig,
+  SelectorStoreEntry,
 } from './types/index.js';

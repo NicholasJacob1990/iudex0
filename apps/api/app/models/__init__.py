@@ -22,6 +22,26 @@ from app.models.organization import (
     Organization, OrganizationMember, OrgRole,
     Team, TeamMember,
 )
+from app.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus
+from app.models.marketplace import MarketplaceItem, MarketplaceReview, MarketplaceCategory
+from app.models.playbook import Playbook, PlaybookAnalysis, PlaybookRule, PlaybookShare, PlaybookVersion
+from app.models.playbook_run_cache import PlaybookRunCache
+from app.models.review_table import ReviewTable, ReviewTableTemplate
+from app.models.dynamic_column import DynamicColumn, CellExtraction, ExtractionType, VerificationStatus
+from app.models.table_chat import TableChatMessage, MessageRole, QueryType
+from app.models.shared_space import SharedSpace, SpaceInvite, SpaceResource, SpaceRole, InviteStatus
+from app.models.corpus_project import CorpusProject, CorpusProjectDocument, CorpusProjectShare
+from app.models.corpus_retention import CorpusRetentionConfig
+from app.models.dms_integration import DMSIntegration
+from app.models.audit_log import AuditLog
+from app.models.redline_state import RedlineState, RedlineStatus
+from app.models.extraction_job import (
+    ExtractionJob,
+    ExtractionJobDocument,
+    ExtractionJobStatus,
+    ExtractionJobType,
+    DocumentExtractionStatus,
+)
 
 __all__ = [
     "User",
@@ -57,4 +77,43 @@ __all__ = [
     "OrgRole",
     "Team",
     "TeamMember",
+    "Workflow",
+    "WorkflowRun",
+    "WorkflowRunStatus",
+    "MarketplaceItem",
+    "MarketplaceReview",
+    "MarketplaceCategory",
+    "Playbook",
+    "PlaybookAnalysis",
+    "PlaybookRule",
+    "PlaybookShare",
+    "PlaybookVersion",
+    "PlaybookRunCache",
+    "ReviewTable",
+    "ReviewTableTemplate",
+    "DynamicColumn",
+    "CellExtraction",
+    "ExtractionType",
+    "VerificationStatus",
+    "TableChatMessage",
+    "MessageRole",
+    "QueryType",
+    "SharedSpace",
+    "SpaceInvite",
+    "SpaceResource",
+    "SpaceRole",
+    "InviteStatus",
+    "CorpusProject",
+    "CorpusProjectDocument",
+    "CorpusProjectShare",
+    "CorpusRetentionConfig",
+    "DMSIntegration",
+    "AuditLog",
+    "RedlineState",
+    "RedlineStatus",
+    "ExtractionJob",
+    "ExtractionJobDocument",
+    "ExtractionJobStatus",
+    "ExtractionJobType",
+    "DocumentExtractionStatus",
 ]

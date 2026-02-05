@@ -53,6 +53,9 @@ export default function WorkflowsPage() {
                 description="Workflows da VORBIUM transformam regras e padrões jurídicos em fluxos executáveis, com agentes especializados, logs completos e supervisão humana por criticidade."
                 primaryCtaText="Ver exemplos de Workflows"
                 primaryCtaLink="/demo"
+                worklet="wave-field"
+                workletColor="#f59e0b"
+                workletSeed={29}
             />
 
             {/* Seção: Por que Workflows */}

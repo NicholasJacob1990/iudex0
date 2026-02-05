@@ -443,6 +443,7 @@ async def build_rag_context_unified(
     user_id: Optional[str] = None,
     scope_groups: Optional[List[str]] = None,
     allow_global_scope: Optional[bool] = None,
+    allow_private_scope: Optional[bool] = None,
     allow_group_scope: Optional[bool] = None,
     history: Optional[List[dict]] = None,
     summary_text: Optional[str] = None,
@@ -477,8 +478,14 @@ async def build_rag_context_unified(
     # Defaults for scope visibility (match legacy behavior)
     if allow_global_scope is None:
         allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+    if allow_private_scope is None:
+        allow_private_scope = True
     if allow_group_scope is None:
         allow_group_scope = True if scope_groups else False
+
+    # Always pass scope toggles down to pipelines via filters.
+    # NOTE: tenant_id may still exist for auth/membership, but include_private controls retrieval visibility.
+    effective_filters["include_private"] = bool(allow_private_scope)
 
     # History loading + optional history-based query rewrite
     effective_query = query
@@ -515,6 +522,14 @@ async def build_rag_context_unified(
     if adaptive_routing and not effective_sources:
         # Conservative default: allow routing across the main knowledge bases.
         effective_sources = ["lei", "juris", "pecas_modelo"]
+
+    # Corpus auto-fallback: quando nenhuma fonte é especificada e não é adaptive,
+    # usar as fontes padrão do Corpus para busca automática.
+    # Controlado pela env CORPUS_AUTO_SEARCH (default: true).
+    _corpus_auto = os.getenv("CORPUS_AUTO_SEARCH", "true").lower() in ("1", "true", "yes", "on")
+    if _corpus_auto and not effective_sources and not adaptive_routing:
+        effective_sources = ["lei", "juris", "doutrina", "pecas_modelo", "sei"]
+        logger.info("Corpus auto-search: usando fontes padrão do Corpus (nenhuma fonte explícita)")
 
     if adaptive_routing:
         allowed_sources = set(effective_sources)

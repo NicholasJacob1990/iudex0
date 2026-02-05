@@ -39,6 +39,7 @@ class ToolExecutionContext:
     def __init__(
         self,
         user_id: str,
+        tenant_id: Optional[str] = None,
         case_id: Optional[str] = None,
         chat_id: Optional[str] = None,
         job_id: Optional[str] = None,
@@ -46,6 +47,7 @@ class ToolExecutionContext:
         services: Optional[Dict[str, Any]] = None,
     ):
         self.user_id = user_id
+        self.tenant_id = tenant_id
         self.case_id = case_id
         self.chat_id = chat_id
         self.job_id = job_id
@@ -96,6 +98,8 @@ class ToolHandlers:
             "verify_citation": self.handle_verify_citation,
             "search_rag": self.handle_search_rag,
             "create_section": self.handle_create_section,
+            # Graph
+            "ask_graph": self.handle_ask_graph,
             # MCP
             "mcp_tool_search": self.handle_mcp_tool_search,
             "mcp_tool_call": self.handle_mcp_tool_call,
@@ -703,6 +707,101 @@ class ToolHandlers:
                 "results": all_results,
                 "consolidated": False,
                 "note": "Executado sequencialmente (subgraph não disponível)",
+            }
+
+    # =========================================================================
+    # GRAPH ASK HANDLERS
+    # =========================================================================
+
+    async def handle_ask_graph(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """
+        Executa consulta tipada ao grafo de conhecimento.
+
+        Operações suportadas:
+        - path: Caminho entre entidades
+        - neighbors: Vizinhos semânticos
+        - cooccurrence: Co-ocorrência em documentos
+        - search: Busca de entidades
+        - count: Contagem com filtros
+        """
+        operation = params.get("operation", "search")
+        operation_params = params.get("params", {})
+
+        # Extrair parâmetros comuns do nível superior se não estiverem em params
+        if "source_id" in params and "source_id" not in operation_params:
+            operation_params["source_id"] = params["source_id"]
+        if "target_id" in params and "target_id" not in operation_params:
+            operation_params["target_id"] = params["target_id"]
+        if "entity_id" in params and "entity_id" not in operation_params:
+            operation_params["entity_id"] = params["entity_id"]
+        if "entity1_id" in params and "entity1_id" not in operation_params:
+            operation_params["entity1_id"] = params["entity1_id"]
+        if "entity2_id" in params and "entity2_id" not in operation_params:
+            operation_params["entity2_id"] = params["entity2_id"]
+        if "query" in params and "query" not in operation_params:
+            operation_params["query"] = params["query"]
+        if "limit" in params and "limit" not in operation_params:
+            operation_params["limit"] = params["limit"]
+        if "max_hops" in params and "max_hops" not in operation_params:
+            operation_params["max_hops"] = params["max_hops"]
+        if "entity_type" in params and "entity_type" not in operation_params:
+            operation_params["entity_type"] = params["entity_type"]
+
+        try:
+            from app.services.graph_ask_service import get_graph_ask_service
+
+            service = get_graph_ask_service()
+
+            # Extrair contexto de segurança
+            if not ctx or not ctx.tenant_id:
+                return {
+                    "operation": operation,
+                    "success": False,
+                    "results": [],
+                    "error": "Contexto de execução sem tenant_id (bloqueado por segurança).",
+                }
+
+            tenant_id = str(ctx.tenant_id)
+            case_id = ctx.case_id
+            scope = params.get("scope")
+            include_global = bool(params.get("include_global", True))
+
+            result = await service.ask(
+                operation=operation,
+                params=operation_params,
+                tenant_id=tenant_id,
+                scope=scope,
+                case_id=case_id,
+                include_global=include_global,
+            )
+
+            return {
+                "operation": result.operation,
+                "success": result.success,
+                "results": result.results[:20],  # Limitar para contexto do agente
+                "result_count": result.result_count,
+                "execution_time_ms": result.execution_time_ms,
+                "error": result.error,
+            }
+
+        except ImportError:
+            return {
+                "operation": operation,
+                "success": False,
+                "results": [],
+                "error": "GraphAskService não disponível",
+            }
+        except Exception as e:
+            logger.error(f"ask_graph handler failed: {e}")
+            return {
+                "operation": operation,
+                "success": False,
+                "results": [],
+                "error": str(e),
             }
 
     # =========================================================================

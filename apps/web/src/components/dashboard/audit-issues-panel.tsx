@@ -36,27 +36,35 @@ function PatchPreview({ original, replacement }: { original: string; replacement
         return <div className="text-xs text-gray-500 italic">Sugestão: {replacement}</div>;
     }
 
+    let diff: ReturnType<typeof diffLines> | null = null;
+    let hasError = false;
+
     try {
-        const diff = diffLines(original || "", replacement);
-        return (
-            <div className="text-xs font-mono bg-white p-2 border rounded overflow-x-auto whitespace-pre-wrap">
-                {diff.map((part, i) => (
-                    <span
-                        key={i}
-                        className={cn(
-                            part.added ? 'bg-green-100 text-green-800 decoration-clone' :
-                                part.removed ? 'bg-red-50 text-red-800 line-through decoration-clone' :
-                                    'text-gray-500'
-                        )}
-                    >
-                        {part.value}
-                    </span>
-                ))}
-            </div>
-        );
-    } catch (e) {
+        diff = diffLines(original || "", replacement);
+    } catch {
+        hasError = true;
+    }
+
+    if (hasError || !diff) {
         return <div className="text-xs text-red-500">Erro ao gerar preview do patch.</div>;
     }
+
+    return (
+        <div className="text-xs font-mono bg-white p-2 border rounded overflow-x-auto whitespace-pre-wrap">
+            {diff.map((part, i) => (
+                <span
+                    key={i}
+                    className={cn(
+                        part.added ? 'bg-green-100 text-green-800 decoration-clone' :
+                            part.removed ? 'bg-red-50 text-red-800 line-through decoration-clone' :
+                                'text-gray-500'
+                    )}
+                >
+                    {part.value}
+                </span>
+            ))}
+        </div>
+    );
 }
 
 interface AuditIssuesPanelProps {

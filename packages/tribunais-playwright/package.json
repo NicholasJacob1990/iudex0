@@ -43,6 +43,9 @@
     "playwright": "^1.48.0",
     "zod": "^3.23.8"
   },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/node": "^20.10.0",

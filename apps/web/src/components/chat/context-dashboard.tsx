@@ -3,7 +3,6 @@
 import {
     Upload,
     Search,
-    Scale,
     FileText,
     Gavel,
     Sparkles,
@@ -11,7 +10,6 @@ import {
     History,
     ArrowRight,
     PlusCircle,
-    Zap
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -59,7 +57,7 @@ export function ContextDashboard() {
                 <div className="mb-6 flex items-center justify-between">
                     <div>
                         <h3 className="font-display text-xl font-bold text-foreground flex items-center gap-2">
-                            <Zap className="h-5 w-5 text-yellow-500 fill-yellow-500/20" />
+                            <Sparkles className="h-5 w-5 text-yellow-500" />
                             Ações Rápidas
                         </h3>
                         <p className="text-xs text-muted-foreground">

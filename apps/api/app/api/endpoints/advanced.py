@@ -1,9 +1,11 @@
 import logging
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 
+from app.core.security import get_current_user
+from app.models.user import User
 from app.services.quality_service import quality_service
 from app.services.ai.audit_service import audit_service
 from app.services.transcription_service import transcription_service
@@ -67,7 +69,7 @@ class DiarizeRequest(BaseModel):
     segments: Optional[List[Dict[str, Any]]] = None # Whispher segments: {start, end, text}
 
 @router.post("/renumber")
-async def renumber_paragraphs(request: RenumberRequest):
+async def renumber_paragraphs(request: RenumberRequest, current_user: User = Depends(get_current_user)):
     """
     Exposes VomoMLX.renumber_headings / renumber_topics.
     """
@@ -90,7 +92,7 @@ class AuditStructureRequest(BaseModel):
     raw_content: Optional[str] = None
 
 @router.post("/audit-structure-rigorous")
-async def audit_structure_rigorous(request: AuditStructureRequest):
+async def audit_structure_rigorous(request: AuditStructureRequest, current_user: User = Depends(get_current_user)):
     """
     Exposes auto_fix_apostilas.analyze_structural_issues.
     Accepts JSON body with content and document_name.
@@ -109,7 +111,7 @@ async def audit_structure_rigorous(request: AuditStructureRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/consistency-check")
-async def consistency_check(request: RenumberRequest): # Reusing content model
+async def consistency_check(request: RenumberRequest, current_user: User = Depends(get_current_user)): # Reusing content model
     """
     Exposes audit_juridico.audit_document_text (Deep Consistency).
     """
@@ -128,7 +130,7 @@ class CitationCheckRequest(BaseModel):
     provider: str = "gemini"
 
 @router.post("/verify-citation")
-async def verify_citation(request: CitationCheckRequest):
+async def verify_citation(request: CitationCheckRequest, current_user: User = Depends(get_current_user)):
     """
     Exposes audit_juridico.verify_citation_online.
     """
@@ -137,7 +139,7 @@ async def verify_citation(request: CitationCheckRequest):
 # ============= CROSS-FILE ANALYSIS (DRY-RUN) =============
 
 @router.post("/dry-run-analysis")
-async def dry_run_analysis(request: DryRunAnalysisRequest):
+async def dry_run_analysis(request: DryRunAnalysisRequest, current_user: User = Depends(get_current_user)):
     """
     Exposes auto_fix_apostilas.generate_structural_suggestions.
     Analyzes multiple files and returns suggestions without applying changes.
@@ -157,7 +159,7 @@ class CrossFileDuplicatesRequest(BaseModel):
     files: List[str]
 
 @router.post("/cross-file-duplicates")
-async def cross_file_duplicates(request: CrossFileDuplicatesRequest):
+async def cross_file_duplicates(request: CrossFileDuplicatesRequest, current_user: User = Depends(get_current_user)):
     """
     Finds duplicate paragraphs across multiple files using fingerprinting.
     Wraps quality_service.find_cross_file_duplicates.
@@ -170,7 +172,7 @@ async def cross_file_duplicates(request: CrossFileDuplicatesRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/apply-structural-fixes")
-async def apply_structural_fixes(request: ApplyFixesRequest):
+async def apply_structural_fixes(request: ApplyFixesRequest, current_user: User = Depends(get_current_user)):
     """
     Exposes auto_fix_apostilas.apply_structural_fixes_to_file.
     Applies approved fixes to a file.
@@ -192,7 +194,7 @@ async def apply_structural_fixes(request: ApplyFixesRequest):
 # ============= FULL TRANSCRIPTION WITH CLI OPTIONS =============
 
 @router.post("/transcribe-advanced")
-async def transcribe_advanced(request: TranscribeRequest):
+async def transcribe_advanced(request: TranscribeRequest, current_user: User = Depends(get_current_user)):
     """
     Full transcription endpoint with all CLI-equivalent options:
     --dry-run, --skip-formatting, --word-only, --high-accuracy, --auto-apply-fixes
@@ -294,7 +296,7 @@ async def transcribe_advanced(request: TranscribeRequest):
 # ============= AUDIT WITH RAG/GROUNDING =============
 
 @router.post("/audit-with-rag")
-async def audit_with_rag(request: AuditWithRAGRequest):
+async def audit_with_rag(request: AuditWithRAGRequest, current_user: User = Depends(get_current_user)):
     """
     Full audit with optional RAG grounding.
     Exposes audit_juridico.audit_document_text with RAG manager.
@@ -337,7 +339,7 @@ async def audit_with_rag(request: AuditWithRAGRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/diarization/align")
-async def align_diarization(request: DiarizeRequest):
+async def align_diarization(request: DiarizeRequest, current_user: User = Depends(get_current_user)):
     """
     Runs isolated Diarization + Alignment (Pyannote + VomoMLX._align_diarization).
     Requires local audio path (since pyannote needs file) and segments.

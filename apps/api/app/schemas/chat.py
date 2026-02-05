@@ -60,6 +60,22 @@ class MessageCreate(MessageBase):
         pattern="^(case_only|case_and_global|global_only)$",
         description="RAG scope: case_only (only case attachments), case_and_global (both), global_only (ignore case attachments)"
     )
+    rag_selected_groups: Optional[List[str]] = Field(
+        default=None,
+        description="Subset opcional de equipes/departamentos do usuário para restringir o corpus privado (vazio/None = todas as equipes às quais o usuário pertence).",
+    )
+    rag_allow_private: Optional[bool] = Field(
+        default=None,
+        description="Permite desabilitar explicitamente o acesso ao corpus privado (private/tenant scope) para esta mensagem.",
+    )
+    rag_allow_groups: Optional[bool] = Field(
+        default=None,
+        description="Permite desabilitar explicitamente o acesso a corpus por departamentos (group scope) para esta mensagem.",
+    )
+    rag_allow_private: Optional[bool] = Field(
+        default=None,
+        description="Permite desabilitar explicitamente o acesso ao corpus privado da organização (private scope) para esta mensagem.",
+    )
     outline_pipeline: bool = False
     document_type: Optional[str] = None
     doc_kind: Optional[str] = None
@@ -96,6 +112,14 @@ class MessageCreate(MessageBase):
     perplexity_return_videos: bool = False
     research_policy: str = Field(default="auto", pattern="^(auto|force)$")
     rag_sources: Optional[List[str]] = None
+    rag_jurisdictions: Optional[List[str]] = Field(
+        default=None,
+        description="Filtro opcional de jurisdição para o Corpus Global (ex.: ['BR','US']). Vazio/None = todas.",
+    )
+    rag_source_ids: Optional[List[str]] = Field(
+        default=None,
+        description="Filtro opcional de sub-fontes do Corpus Global (ex.: ['br_stf','br_planalto']). Vazio/None = todas.",
+    )
     rag_top_k: Optional[int] = Field(default=None, ge=1, le=50)
     attachment_mode: str = Field(default="auto", pattern="^(auto|rag_local|prompt_injection)$")
     context_mode: str = Field(default="auto", pattern="^(auto|rag_local|upload_cache)$")
@@ -153,6 +177,11 @@ class MessageCreate(MessageBase):
     mcp_server_labels: Optional[List[str]] = Field(
         default=None,
         description="Lista opcional de MCP servers permitidos para esta mensagem (por label).",
+    )
+    # Playbook prompt injection for contract review in /minuta
+    playbook_prompt: Optional[str] = Field(
+        default=None,
+        description="Prompt de playbook para injetar no system prompt do agente (revisao contratual).",
     )
 
 

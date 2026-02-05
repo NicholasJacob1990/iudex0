@@ -12,7 +12,7 @@ import { ToolApprovalModal } from './tool-approval-modal';
 import { ContextIndicatorCompact } from './context-indicator';
 import { CheckpointTimeline } from './checkpoint-timeline';
 import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
-import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy, PanelRight } from 'lucide-react';
+import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy, PanelRight, Search, BookOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { MessageBudgetModal } from '@/components/billing/message-budget-modal';
@@ -141,7 +141,7 @@ export function ChatInterface({
     if (!autoCanvasOnDocumentRequest) return false;
     if (isCommandOrContextMessage(raw)) return false;
     const lower = raw.toLowerCase();
-    return /\b(minuta|documento|pe[cç]a|peti[cç][aã]o|inicial|contesta[cç][aã]o|recurso|agravo|apela[cç][aã]o|mandado\s+de\s+seguran[cç]a|habeas|contrato|parecer|relat[oó]rio|manifest[aã]o)\b/.test(lower);
+    return /\b(minuta|documento|pe[cç]a|peti[cç][aã]o|inicial|contesta[cç][aã]o|recurso|agravo|apela[cç][aã]o|mandado\s+de\s+seguran[cç]a|habeas|contrato|parecer|relat[oó]rio|manifest[aã]o|embargos|memorial|defesa|impugna[cç][aã]o|r[eé]plica|contrarraz[oõ]es|despacho|senten[cç]a|ac[oó]rd[aã]o|voto|ementa|not[ií]cia|procura[cç][aã]o|den[uú]ncia|queixa|libelo|ar[tg]ui[cç][aã]o)\b/.test(lower);
   };
 
   // Sync tenantId with user's organization
@@ -538,6 +538,33 @@ export function ChatInterface({
     }
   };
 
+  const handleFeedback = async (message: any, type: 'up' | 'down') => {
+    // TODO: Send feedback to backend
+    console.log('Feedback:', type, message.id);
+    toast.success(type === 'up' ? 'Obrigado pelo feedback positivo!' : 'Feedback registrado. Vamos melhorar!');
+  };
+
+  const handleShareMessage = async (message: any) => {
+    const text = String(message.content || '').trim();
+    if (!text) return;
+
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: 'Resposta do Iudex',
+          text: text.slice(0, 500) + (text.length > 500 ? '...' : ''),
+        });
+      } else {
+        await navigator.clipboard.writeText(text);
+        toast.success('Link copiado para compartilhar.');
+      }
+    } catch (error) {
+      if ((error as Error).name !== 'AbortError') {
+        toast.error('Não foi possível compartilhar.');
+      }
+    }
+  };
+
   const handleRegenerateFromMessage = async (assistantMessage: any) => {
     if (!assistantMessage || isSending) return;
     const userMessage = getUserMessageForAssistant(assistantMessage);
@@ -679,8 +706,44 @@ export function ChatInterface({
           )}
 
           {(currentChat.messages?.length ?? 0) === 0 ? (
-            <div className="flex flex-1 items-center justify-center text-slate-500">
-              Nenhuma mensagem ainda. Comece a conversar!
+            <div className="flex flex-1 flex-col items-center justify-center gap-8 px-4">
+              {/* Logo + Title */}
+              <div className="flex flex-col items-center gap-3">
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-bold text-xl shadow-lg">
+                  I
+                </div>
+                <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-200">
+                  Como posso ajudar?
+                </h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Assistente jurídico com IA
+                </p>
+              </div>
+
+              {/* Suggestion Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
+                {[
+                  { icon: FileText, label: 'Analise este contrato', desc: 'Upload e análise de documentos' },
+                  { icon: Search, label: 'Pesquise jurisprudência sobre...', desc: 'Busca em tribunais e legislação' },
+                  { icon: FileText, label: 'Redija uma petição inicial', desc: 'Geração de peças processuais' },
+                  { icon: BookOpen, label: 'Explique o artigo 5º da CF', desc: 'Consulta e explicação de leis' },
+                ].map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    onClick={() => handleSendMessage(item.label)}
+                    className="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 text-left transition-all hover:border-emerald-300 hover:shadow-md hover:bg-emerald-50/50 dark:hover:bg-emerald-900/20 group"
+                  >
+                    <item.icon className="h-5 w-5 mt-0.5 text-slate-400 group-hover:text-emerald-600 transition-colors shrink-0" />
+                    <div>
+                      <span className="text-sm font-medium text-slate-700 dark:text-slate-300 group-hover:text-emerald-700 dark:group-hover:text-emerald-400">
+                        {item.label}
+                      </span>
+                      <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{item.desc}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
             </div>
           ) : (
             <div className="flex flex-1 flex-col space-y-6">
@@ -731,6 +794,8 @@ export function ChatInterface({
                       message={current}
                       onCopy={handleCopyMessage}
                       onRegenerate={handleRegenerateFromMessage}
+                      onFeedback={handleFeedback}
+                      onShare={handleShareMessage}
                       disableRegenerate={isSending}
                     />
                   );
@@ -738,6 +803,41 @@ export function ChatInterface({
                 }
                 return items;
               })()}
+              {/* Follow-up input (Perplexity style) */}
+              {!isSending && (currentChat.messages?.length ?? 0) > 0 && (() => {
+                const lastMsg = currentChat.messages[currentChat.messages.length - 1];
+                return lastMsg?.role === 'assistant';
+              })() && (
+                <div className="max-w-[min(92%,76ch)] mt-4">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const input = (e.currentTarget.elements.namedItem('followup') as HTMLInputElement);
+                      const val = input?.value?.trim();
+                      if (val) {
+                        handleSendMessage(val);
+                        input.value = '';
+                      }
+                    }}
+                    className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 transition-all focus-within:border-emerald-300 focus-within:bg-white dark:focus-within:bg-slate-800 focus-within:shadow-sm"
+                  >
+                    <input
+                      name="followup"
+                      type="text"
+                      placeholder="Pergunte um seguimento..."
+                      className="flex-1 bg-transparent text-sm text-slate-700 dark:text-slate-300 placeholder:text-slate-400 outline-none"
+                      autoComplete="off"
+                    />
+                    <button
+                      type="submit"
+                      className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-500 text-white hover:bg-emerald-600 transition-colors shrink-0"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
+                    </button>
+                  </form>
+                </div>
+              )}
+
               <div ref={messagesEndRef} />
             </div>
           )}

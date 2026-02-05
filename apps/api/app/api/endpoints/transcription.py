@@ -1,4 +1,4 @@
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Body, Request
+from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, BackgroundTasks, Body, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from typing import Optional, Any, Dict, List
 from datetime import datetime
@@ -18,12 +18,24 @@ from app.services.transcription_service import TranscriptionService
 from app.services.job_manager import job_manager
 from app.services.api_call_tracker import job_context, usage_context
 from app.core.config import settings
+from app.core.security import get_current_user, decode_token, get_current_user_optional
+from app.models.user import User
 from docx import Document
 from pydantic import BaseModel
 import re
 from app.services.preventive_hil import build_preventive_hil_issues
 from urllib.parse import urlparse
 import ipaddress
+
+# Celery task para transcrição (opcional)
+_USE_CELERY_TRANSCRIPTION = os.getenv("IUDEX_USE_CELERY_TRANSCRIPTION", "false").lower() == "true"
+_CELERY_TRANSCRIPTION_QUEUE = os.getenv("IUDEX_CELERY_TRANSCRIPTION_QUEUE", "transcription")
+if _USE_CELERY_TRANSCRIPTION:
+    try:
+        from app.workers.tasks import transcription_job_task
+    except ImportError:
+        _USE_CELERY_TRANSCRIPTION = False
+        transcription_job_task = None
 
 class ExportRequest(BaseModel):
     content: str
@@ -57,11 +69,33 @@ class JobContentUpdateRequest(BaseModel):
     needs_revalidate: Optional[bool] = None
 
 
+class PendingTranscription(BaseModel):
+    """Schema para transcrição pendente/em andamento."""
+    transcript_id: str
+    file_name: str
+    file_hash: str
+    status: str  # processing, completed, error
+    provider: str  # assemblyai, elevenlabs
+    submitted_at: str
+    completed_at: Optional[str] = None
+    audio_duration: Optional[float] = None
+    config_hash: Optional[str] = None
+
+
+class ResumeTranscriptionRequest(BaseModel):
+    """Request para retomar transcrição."""
+    transcript_id: str
+    provider: str = "assemblyai"  # assemblyai ou elevenlabs
+    speaker_roles: Optional[str] = None
+    mode: Optional[str] = "APOSTILA"
+
+
 class UrlVomoJobRequest(BaseModel):
     url: str
     mode: str = "APOSTILA"
     thinking_level: str = "medium"
     custom_prompt: Optional[str] = None
+    disable_tables: bool = False
     document_theme: str = "classic"
     document_header: Optional[str] = None
     document_footer: Optional[str] = None
@@ -74,6 +108,7 @@ class UrlVomoJobRequest(BaseModel):
     document_paragraph_spacing: Optional[float] = None
     model_selection: str = "gemini-3-flash-preview"
     high_accuracy: bool = False
+    transcription_engine: str = "whisper"  # "whisper" ou "assemblyai"
     diarization: Optional[bool] = None
     diarization_strict: bool = False
     use_cache: bool = True
@@ -83,6 +118,14 @@ class UrlVomoJobRequest(BaseModel):
     skip_audit: bool = False
     skip_fidelity_audit: bool = False
     skip_sources_audit: bool = False
+    language: str = "pt"
+    output_language: str = ""
+    speaker_roles: Optional[str] = None
+    speakers_expected: Optional[int] = None
+    subtitle_format: Optional[str] = None  # "srt", "vtt", "both"
+    # Speaker Identification (AssemblyAI)
+    speaker_id_type: Optional[str] = None  # "name" ou "role"
+    speaker_id_values: Optional[list] = None  # Lista de nomes ou papéis
 
 
 class UrlHearingJobRequest(BaseModel):
@@ -114,13 +157,21 @@ class UrlHearingJobRequest(BaseModel):
     skip_legal_audit: bool = False
     skip_fidelity_audit: bool = False
     skip_sources_audit: bool = False
+    language: str = "pt"
+    output_language: str = ""
+    speaker_roles: Optional[list] = None
+    speakers_expected: Optional[int] = None
+    # Speaker Identification (AssemblyAI)
+    speaker_id_type: Optional[str] = None  # "name" ou "role"
+    speaker_id_values: Optional[list] = None  # Lista de nomes ou papéis
+    transcription_engine: str = "whisper"  # "whisper" ou "assemblyai"
 
 
 def _url_is_public_and_allowed(url: str) -> tuple[bool, str]:
     """
     Política de segurança para importar URLs públicas (anti-SSRF).
 
-    Default: permite apenas hosts de YouTube (configurável por env).
+    Default: permite hosts de YouTube, Vimeo, Mux e outros serviços de vídeo (configurável por env).
     """
     raw = (url or "").strip()
     if not raw:
@@ -150,14 +201,23 @@ def _url_is_public_and_allowed(url: str) -> tuple[bool, str]:
     if allow_all:
         return True, ""
 
-    allowlist = os.getenv("IUDEX_PUBLIC_URL_ALLOWLIST_HOSTS", "youtube.com,youtu.be")
+    # URLs de streaming HLS (.m3u8) são aceitas de qualquer host público
+    # (yt-dlp lida com elas via extractor genérico)
+    path_lower = (parsed.path or "").lower()
+    if path_lower.endswith(".m3u8") or ".m3u8?" in (parsed.path or "").lower() + "?" :
+        return True, ""
+
+    allowlist = os.getenv(
+        "IUDEX_PUBLIC_URL_ALLOWLIST_HOSTS",
+        "youtube.com,youtu.be,vimeo.com,player.vimeo.com,stream.mux.com,mux.com",
+    )
     allowed = [h.strip().lower() for h in allowlist.split(",") if h.strip()]
     host_no_www = host[4:] if host.startswith("www.") else host
     for candidate in allowed:
         cand = candidate[4:] if candidate.startswith("www.") else candidate
         if host_no_www == cand or host_no_www.endswith(f".{cand}"):
             return True, ""
-    return False, f"Host não permitido. Permitidos: {', '.join(allowed) or 'nenhum'}"
+    return False, f"Host não permitido. Permitidos: {', '.join(allowed) or 'nenhum'}. URLs .m3u8 também são aceitas."
 
 
 def _download_public_url_to_job_input(url: str, job_dir: Path, *, index: int = 1) -> tuple[str, str]:
@@ -217,8 +277,12 @@ def _download_public_url_to_job_input(url: str, job_dir: Path, *, index: int = 1
                     cmd += ["--max-filesize", f"{mb}M"]
             except Exception:
                 pass
+        # Timeout generoso para streams HLS/m3u8 que podem demorar mais
+        dl_timeout = int(os.getenv("IUDEX_PUBLIC_URL_DOWNLOAD_TIMEOUT", "600"))
         try:
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, timeout=dl_timeout)
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail=f"Download excedeu timeout de {dl_timeout}s. Tente um vídeo mais curto.")
         except Exception as exc:
             raise HTTPException(status_code=500, detail=f"Falha ao baixar URL: {exc}")
 
@@ -236,6 +300,17 @@ logger = logging.getLogger(__name__)
 
 # Instância global do serviço (carrega modelos na init se necessário, aqui é leve)
 service = TranscriptionService()
+
+# Semáforo global para processar transcrições sequencialmente (1 por vez)
+# Evita competição pela GPU e deadlocks
+_transcription_semaphore: asyncio.Semaphore = None
+
+def _get_transcription_semaphore() -> asyncio.Semaphore:
+    """Retorna semáforo global, criando se necessário (lazy init para event loop)."""
+    global _transcription_semaphore
+    if _transcription_semaphore is None:
+        _transcription_semaphore = asyncio.Semaphore(1)
+    return _transcription_semaphore
 
 # Registro local de execução (permite cancelamento best-effort)
 _transcription_tasks: Dict[str, asyncio.Task] = {}
@@ -448,12 +523,17 @@ def _write_vomo_job_result(
         reports = result.get("reports") or {}
         audit_issues = result.get("audit_issues") or []
         quality = result.get("quality")
+        # Novos campos para rastreabilidade de transcrições AAI
+        transcript_id = result.get("transcript_id")
+        transcription_backend = result.get("backend")
     else:
         content = result or ""
         raw_content = content
         reports = {}
         audit_issues = []
         quality = None
+        transcript_id = None
+        transcription_backend = None
 
     content_path = job_dir / "content.md"
     raw_path = job_dir / "raw.txt"
@@ -483,6 +563,9 @@ def _write_vomo_job_result(
         "rich_text_html_path": None,
         "rich_text_json_path": None,
         "rich_text_meta_path": None,
+        # Campos para recuperação de transcrições AAI interrompidas
+        "transcript_id": transcript_id,
+        "transcription_backend": transcription_backend,
     }
     result_path = job_dir / "result.json"
     result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -599,6 +682,18 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         if audit_candidate.exists():
             with open(audit_candidate, "r", encoding="utf-8") as af:
                 audit_issues = json.load(af)
+
+    # Load consolidated audit_summary if exists
+    audit_summary = None
+    if reports and reports.get("audit_summary_path"):
+        summary_candidate = _resolve_job_path(reports["audit_summary_path"])
+        if summary_candidate.exists():
+            try:
+                with open(summary_candidate, "r", encoding="utf-8") as sf:
+                    audit_summary = json.load(sf)
+            except Exception:
+                audit_summary = None
+
     rich_text_html = None
     rich_text_json = None
     rich_text_meta = None
@@ -632,13 +727,186 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "reports": reports,
         "audit_issues": audit_issues,
         "quality": quality,
+        "audit_summary": audit_summary,  # Consolidated audit data
         "rich_text_html": rich_text_html,
         "rich_text_json": rich_text_json,
         "rich_text_meta": rich_text_meta,
     }
 
+
+# ==================== Endpoints de Recuperação de Transcrições ====================
+
+@router.get("/pending", response_model=List[PendingTranscription])
+async def list_pending_transcriptions(
+    current_user: User = Depends(get_current_user),
+    provider: Optional[str] = None,  # "assemblyai" ou "elevenlabs"
+):
+    """
+    Lista transcrições pendentes ou em andamento que podem ser retomadas.
+
+    Útil quando a conexão é perdida durante uma transcrição AssemblyAI/ElevenLabs.
+    O sistema salva o transcript_id e pode retomar o polling posteriormente.
+    """
+    pending = []
+
+    # Verificar cache AssemblyAI
+    if provider is None or provider == "assemblyai":
+        aai_cache_dir = service._get_aai_cache_dir()
+        if aai_cache_dir.exists():
+            for cache_file in aai_cache_dir.glob("*.json"):
+                try:
+                    cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    # Incluir processing e completed recentes (últimas 24h)
+                    status = cache_data.get("status", "unknown")
+                    if status in ("processing", "completed"):
+                        pending.append(PendingTranscription(
+                            transcript_id=cache_data.get("transcript_id", ""),
+                            file_name=cache_data.get("file_name", "unknown"),
+                            file_hash=cache_data.get("file_hash", ""),
+                            status=status,
+                            provider="assemblyai",
+                            submitted_at=cache_data.get("submitted_at", ""),
+                            completed_at=cache_data.get("completed_at"),
+                            audio_duration=cache_data.get("audio_duration"),
+                            config_hash=cache_data.get("config_hash"),
+                        ))
+                except Exception as e:
+                    logger.warning(f"Erro ao ler cache AAI {cache_file}: {e}")
+
+    # Verificar cache ElevenLabs
+    if provider is None or provider == "elevenlabs":
+        el_cache_dir = service._get_elevenlabs_cache_dir()
+        if el_cache_dir.exists():
+            for cache_file in el_cache_dir.glob("*.json"):
+                try:
+                    cache_data = json.loads(cache_file.read_text(encoding="utf-8"))
+                    # ElevenLabs só tem completed (é síncrono)
+                    if cache_data.get("result"):
+                        pending.append(PendingTranscription(
+                            transcript_id=cache_data.get("file_hash", ""),
+                            file_name=cache_data.get("file_name", "unknown"),
+                            file_hash=cache_data.get("file_hash", ""),
+                            status="completed",
+                            provider="elevenlabs",
+                            submitted_at=cache_data.get("cached_at", ""),
+                            completed_at=cache_data.get("cached_at"),
+                            audio_duration=cache_data.get("audio_duration"),
+                            config_hash=cache_data.get("config_hash"),
+                        ))
+                except Exception as e:
+                    logger.warning(f"Erro ao ler cache ElevenLabs {cache_file}: {e}")
+
+    # Ordenar por data de submissão (mais recentes primeiro)
+    pending.sort(key=lambda x: x.submitted_at or "", reverse=True)
+
+    return pending
+
+
+@router.post("/resume")
+async def resume_transcription(
+    request: ResumeTranscriptionRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Retoma polling de uma transcrição AssemblyAI em andamento.
+
+    Útil quando a conexão foi perdida durante o processamento.
+    O sistema verifica o status atual e retorna o resultado se já completou.
+    """
+    import requests
+
+    if request.provider != "assemblyai":
+        raise HTTPException(
+            status_code=400,
+            detail="Apenas AssemblyAI suporta retomada de transcrição (ElevenLabs é síncrono)"
+        )
+
+    api_key = service._get_assemblyai_key()
+    if not api_key:
+        raise HTTPException(status_code=500, detail="AssemblyAI API key não configurada")
+
+    base_url = "https://api.assemblyai.com"
+    headers = {"authorization": api_key}
+
+    try:
+        # Verificar status atual
+        resp = requests.get(
+            f"{base_url}/v2/transcript/{request.transcript_id}",
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        status = data.get("status", "unknown")
+
+        if status == "completed":
+            # Extrair resultado
+            result = service._extract_aai_result_from_response(
+                data,
+                request.transcript_id,
+                request.speaker_roles,
+                request.mode or "APOSTILA",
+                0,  # start_time placeholder
+            )
+            return {
+                "status": "completed",
+                "transcript_id": request.transcript_id,
+                "text": result.get("text", ""),
+                "segments": result.get("segments", []),
+                "audio_duration": data.get("audio_duration"),
+            }
+        elif status == "processing" or status == "queued":
+            return {
+                "status": status,
+                "transcript_id": request.transcript_id,
+                "message": f"Transcrição ainda em andamento ({status}). Aguarde ou tente novamente.",
+            }
+        elif status == "error":
+            return {
+                "status": "error",
+                "transcript_id": request.transcript_id,
+                "error": data.get("error", "Erro desconhecido"),
+            }
+        else:
+            return {
+                "status": status,
+                "transcript_id": request.transcript_id,
+                "raw_response": data,
+            }
+
+    except requests.exceptions.RequestException as e:
+        raise HTTPException(status_code=500, detail=f"Erro ao consultar AssemblyAI: {str(e)}")
+
+
+@router.delete("/cache/{file_hash}")
+async def delete_transcription_cache(
+    file_hash: str,
+    provider: str = "assemblyai",
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Remove cache de transcrição para forçar reprocessamento.
+    """
+    if provider == "assemblyai":
+        cache_path = service._get_aai_cache_path(file_hash)
+    elif provider == "elevenlabs":
+        cache_path = service._get_elevenlabs_cache_path(file_hash)
+    else:
+        raise HTTPException(status_code=400, detail=f"Provider inválido: {provider}")
+
+    if not cache_path.exists():
+        raise HTTPException(status_code=404, detail="Cache não encontrado")
+
+    cache_path.unlink()
+    return {"status": "deleted", "file_hash": file_hash, "provider": provider}
+
+
+# ==================== Fim Endpoints de Recuperação ====================
+
+
 @router.post("/export/docx")
-async def export_docx(request: ExportRequest):
+async def export_docx(request: ExportRequest, current_user: User = Depends(get_current_user)):
     """
     Converte texto/markdown para DOCX usando VomoMLX.save_as_word.
     Usa a mesma lógica de formatação premium do mlx_vomo.py.
@@ -722,6 +990,7 @@ async def create_vomo_job(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    disable_tables: bool = Form(False),
     document_theme: str = Form("classic"),
     document_header: Optional[str] = Form(None),
     document_footer: Optional[str] = Form(None),
@@ -734,6 +1003,7 @@ async def create_vomo_job(
     document_paragraph_spacing: Optional[float] = Form(None),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
+    transcription_engine: str = Form("whisper"),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
     use_cache: bool = Form(True),
@@ -743,7 +1013,16 @@ async def create_vomo_job(
     skip_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    language: str = Form("pt"),
+    output_language: str = Form(""),
+    speaker_roles: Optional[str] = Form(None),
+    speakers_expected: Optional[int] = Form(None),
+    subtitle_format: Optional[str] = Form(None),
+    area: Optional[str] = Form(None, description="Área: juridico, medicina, ti, engenharia, financeiro"),
+    custom_keyterms: Optional[str] = Form(None, description="Termos separados por vírgula"),
+    current_user: User = Depends(get_current_user),
 ):
+    logger.info(f"[VOMO/JOBS] Received: mode={mode}, thinking_level={thinking_level}, language={language}, diarization={diarization}, subtitle_format={subtitle_format}, area={area}, files={len(files) if files else 0}")
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -768,11 +1047,27 @@ async def create_vomo_job(
     file_names = saved["file_names"]
     mode = (mode or "APOSTILA").strip().upper()
 
+    # Parse speaker_roles JSON string → list
+    parsed_speaker_roles = None
+    if speaker_roles:
+        try:
+            parsed_speaker_roles = json.loads(speaker_roles)
+            if not isinstance(parsed_speaker_roles, list):
+                parsed_speaker_roles = None
+        except (json.JSONDecodeError, TypeError):
+            parsed_speaker_roles = None
+
+    # Parse custom_keyterms (comma-separated string -> list)
+    parsed_keyterms = None
+    if custom_keyterms:
+        parsed_keyterms = [t.strip() for t in custom_keyterms.split(",") if t.strip()][:100]
+
     effective_skip_legal_audit = skip_legal_audit or skip_audit
     config = {
         "mode": mode,
         "thinking_level": thinking_level,
         "custom_prompt": custom_prompt,
+        "disable_tables": bool(disable_tables),
         "document_theme": document_theme,
         "document_header": document_header,
         "document_footer": document_footer,
@@ -785,6 +1080,7 @@ async def create_vomo_job(
         "document_paragraph_spacing": document_paragraph_spacing,
         "model_selection": model_selection,
         "high_accuracy": high_accuracy,
+        "transcription_engine": transcription_engine,
         "diarization": diarization,
         "diarization_strict": diarization_strict,
         "use_cache": use_cache,
@@ -793,6 +1089,12 @@ async def create_vomo_job(
         "skip_legal_audit": effective_skip_legal_audit,
         "skip_fidelity_audit": skip_fidelity_audit,
         "skip_sources_audit": skip_sources_audit,
+        "language": language,
+        "speaker_roles": parsed_speaker_roles,
+        "speakers_expected": speakers_expected,
+        "subtitle_format": subtitle_format if subtitle_format in ("srt", "vtt", "both") else None,
+        "area": area,
+        "custom_keyterms": parsed_keyterms,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -831,96 +1133,329 @@ async def create_vomo_job(
                 message=message,
             )
 
+        # Aguardar semáforo para processar sequencialmente (1 job por vez)
+        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
+        async with _get_transcription_semaphore():
+            try:
+                ensure_not_cancelled()
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="running",
+                    progress=0,
+                    stage="starting",
+                    message="Iniciando processamento",
+                )
+                with job_context(job_id):
+                    if len(file_paths) == 1:
+                        result = await service.process_file_with_progress(
+                            file_path=file_paths[0],
+                            mode=mode,
+                            thinking_level=thinking_level,
+                            custom_prompt=custom_prompt,
+                            disable_tables=config.get("disable_tables", False),
+                            high_accuracy=high_accuracy,
+                            transcription_engine=config.get("transcription_engine", "whisper"),
+                            diarization=diarization,
+                            diarization_strict=diarization_strict,
+                            on_progress=on_progress,
+                            model_selection=model_selection,
+                            use_cache=use_cache,
+                            auto_apply_fixes=auto_apply_fixes,
+                            auto_apply_content_fixes=auto_apply_content_fixes,
+                            skip_legal_audit=effective_skip_legal_audit,
+                            skip_audit=skip_audit,
+                            skip_fidelity_audit=skip_fidelity_audit,
+                            skip_sources_audit=skip_sources_audit,
+                            language=language,
+                            output_language=output_language,
+                            speaker_roles=parsed_speaker_roles,
+                            speakers_expected=speakers_expected,
+                            subtitle_format=config.get("subtitle_format"),
+                            area=area,
+                            custom_keyterms=parsed_keyterms,
+                        )
+                    else:
+                        result = await service.process_batch_with_progress(
+                            file_paths=file_paths,
+                            file_names=file_names,
+                            mode=mode,
+                            thinking_level=thinking_level,
+                            custom_prompt=custom_prompt,
+                            disable_tables=config.get("disable_tables", False),
+                            high_accuracy=high_accuracy,
+                            transcription_engine=config.get("transcription_engine", "whisper"),
+                            diarization=diarization,
+                            diarization_strict=diarization_strict,
+                            model_selection=model_selection,
+                            on_progress=on_progress,
+                            use_cache=use_cache,
+                            auto_apply_fixes=auto_apply_fixes,
+                            auto_apply_content_fixes=auto_apply_content_fixes,
+                            skip_legal_audit=effective_skip_legal_audit,
+                            skip_audit=skip_audit,
+                            skip_fidelity_audit=skip_fidelity_audit,
+                            skip_sources_audit=skip_sources_audit,
+                            language=language,
+                            output_language=output_language,
+                        )
+
+                ensure_not_cancelled()
+                result_path = _write_vomo_job_result(job_dir, result, mode, file_names)
+                result_path = str(Path(result_path).resolve())
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    stage="complete",
+                    message="Concluído",
+                    result_path=result_path,
+                )
+            except asyncio.CancelledError:
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="canceled",
+                    progress=100,
+                    stage="canceled",
+                    message="Cancelado pelo usuário.",
+                )
+            except Exception as e:
+                logger.error(f"Erro no job {job_id}: {e}")
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="error",
+                    progress=100,
+                    stage="error",
+                    message=str(e),
+                    error=str(e),
+                )
+            finally:
+                _cleanup_task(job_id)
+
+    # Usar Celery se habilitado, caso contrário asyncio
+    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+        # Dispara task Celery (roda em worker separado)
+        celery_result = transcription_job_task.apply_async(
+            kwargs={
+                "job_id": job_id,
+                "file_paths": file_paths,
+                "file_names": file_names,
+                "config": config,
+            },
+            queue=_CELERY_TRANSCRIPTION_QUEUE,
+        )
         try:
-            ensure_not_cancelled()
             job_manager.update_transcription_job(
                 job_id,
-                status="running",
-                progress=0,
-                stage="starting",
-                message="Iniciando processamento",
+                celery_task_id=getattr(celery_result, "id", None),
+                message="Enviado para Celery worker",
             )
-            with job_context(job_id):
-                if len(file_paths) == 1:
-                    result = await service.process_file_with_progress(
-                        file_path=file_paths[0],
-                        mode=mode,
-                        thinking_level=thinking_level,
-                        custom_prompt=custom_prompt,
-                        high_accuracy=high_accuracy,
-                        diarization=diarization,
-                        diarization_strict=diarization_strict,
-                        on_progress=on_progress,
-                        model_selection=model_selection,
-                        use_cache=use_cache,
-                        auto_apply_fixes=auto_apply_fixes,
-                        auto_apply_content_fixes=auto_apply_content_fixes,
-                        skip_legal_audit=effective_skip_legal_audit,
-                        skip_audit=skip_audit,
-                        skip_fidelity_audit=skip_fidelity_audit,
-                        skip_sources_audit=skip_sources_audit,
-                    )
-                else:
-                    result = await service.process_batch_with_progress(
-                        file_paths=file_paths,
-                        file_names=file_names,
-                        mode=mode,
-                        thinking_level=thinking_level,
-                        custom_prompt=custom_prompt,
-                        high_accuracy=high_accuracy,
-                        diarization=diarization,
-                        diarization_strict=diarization_strict,
-                        model_selection=model_selection,
-                        on_progress=on_progress,
-                        use_cache=use_cache,
-                        auto_apply_fixes=auto_apply_fixes,
-                        auto_apply_content_fixes=auto_apply_content_fixes,
-                        skip_legal_audit=effective_skip_legal_audit,
-                        skip_audit=skip_audit,
-                        skip_fidelity_audit=skip_fidelity_audit,
-                        skip_sources_audit=skip_sources_audit,
-                    )
-
-            ensure_not_cancelled()
-            result_path = _write_vomo_job_result(job_dir, result, mode, file_names)
-            result_path = str(Path(result_path).resolve())
-            job_manager.update_transcription_job(
-                job_id,
-                status="completed",
-                progress=100,
-                stage="complete",
-                message="Concluído",
-                result_path=result_path,
-            )
-        except asyncio.CancelledError:
-            job_manager.update_transcription_job(
-                job_id,
-                status="canceled",
-                progress=100,
-                stage="canceled",
-                message="Cancelado pelo usuário.",
-            )
-        except Exception as e:
-            logger.error(f"Erro no job {job_id}: {e}")
-            job_manager.update_transcription_job(
-                job_id,
-                status="error",
-                progress=100,
-                stage="error",
-                message=str(e),
-                error=str(e),
-            )
-        finally:
-            _cleanup_task(job_id)
-
-    task = asyncio.create_task(run_job())
-    _register_task(job_id, task)
+        except Exception:
+            pass
+        logger.info(f"[VOMO/JOBS] Job {job_id} enviado para Celery worker")
+    else:
+        # Fallback: asyncio (comportamento original)
+        task = asyncio.create_task(run_job())
+        _register_task(job_id, task)
 
     return {"job_id": job_id, "status": "queued"}
 
 
+@router.post("/vomo/jobs/{job_id}/retry")
+async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_user)):
+    """
+    Reprocessa um job existente que travou ou falhou.
+    Usa os arquivos já salvos no diretório do job.
+    """
+    job = job_manager.get_transcription_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = job.get("status")
+    if status == "running":
+        raise HTTPException(status_code=400, detail="Job já está em execução")
+    if status == "completed":
+        raise HTTPException(status_code=400, detail="Job já foi concluído. Use GET /jobs/{job_id}/result")
+
+    job_dir = _get_job_dir(job_id)
+    input_dir = job_dir / "input"
+    if not input_dir.exists():
+        raise HTTPException(status_code=400, detail="Arquivos de entrada não encontrados")
+
+    # Carregar configuração do metadata.json
+    metadata_path = job_dir / "metadata.json"
+    if not metadata_path.exists():
+        raise HTTPException(status_code=400, detail="Metadata não encontrado")
+
+    config = json.loads(metadata_path.read_text())
+
+    # Reconstruir file_paths e file_names
+    file_paths = sorted([str(f) for f in input_dir.glob("*") if f.is_file()])
+    file_names = [Path(f).name.split("_", 1)[-1] if "_" in Path(f).name else Path(f).name for f in file_paths]
+
+    if not file_paths:
+        raise HTTPException(status_code=400, detail="Nenhum arquivo encontrado no diretório de entrada")
+
+    mode = config.get("mode", "APOSTILA")
+    parsed_speaker_roles = config.get("speaker_roles")
+    parsed_keyterms = config.get("custom_keyterms")
+    effective_skip_legal_audit = config.get("skip_legal_audit", False)
+
+    # Resetar status do job
+    job_manager.update_transcription_job(
+        job_id,
+        status="queued",
+        progress=0,
+        stage="queued",
+        message="Reiniciando job...",
+        error=None,
+    )
+
+    cancel_event = _get_cancel_event(job_id)
+
+    async def run_job():
+        def ensure_not_cancelled():
+            if cancel_event.is_set():
+                raise asyncio.CancelledError()
+            current = job_manager.get_transcription_job(job_id)
+            if current and current.get("status") == "canceled":
+                raise asyncio.CancelledError()
+
+        async def on_progress(stage: str, progress: int, message: str):
+            ensure_not_cancelled()
+            job_manager.update_transcription_job(
+                job_id,
+                status="running",
+                progress=progress,
+                stage=stage,
+                message=message,
+            )
+
+        async with _get_transcription_semaphore():
+            try:
+                ensure_not_cancelled()
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="running",
+                    progress=0,
+                    stage="starting",
+                    message="Reiniciando processamento",
+                )
+                with job_context(job_id):
+                    if len(file_paths) == 1:
+                        result = await service.process_file_with_progress(
+                            file_path=file_paths[0],
+                            mode=mode,
+                            thinking_level=config.get("thinking_level", "medium"),
+                            custom_prompt=config.get("custom_prompt"),
+                            disable_tables=config.get("disable_tables", False),
+                            high_accuracy=config.get("high_accuracy", False),
+                            transcription_engine=config.get("transcription_engine", "whisper"),
+                            diarization=config.get("diarization"),
+                            diarization_strict=config.get("diarization_strict", False),
+                            on_progress=on_progress,
+                            model_selection=config.get("model_selection"),
+                            use_cache=config.get("use_cache", True),
+                            auto_apply_fixes=config.get("auto_apply_fixes", True),
+                            auto_apply_content_fixes=config.get("auto_apply_content_fixes", False),
+                            skip_legal_audit=effective_skip_legal_audit,
+                            skip_audit=config.get("skip_audit"),
+                            skip_fidelity_audit=config.get("skip_fidelity_audit", False),
+                            skip_sources_audit=config.get("skip_sources_audit", False),
+                            language=config.get("language", "pt"),
+                            output_language=config.get("output_language", ""),
+                            speaker_roles=parsed_speaker_roles,
+                            speakers_expected=config.get("speakers_expected"),
+                            subtitle_format=config.get("subtitle_format"),
+                            area=config.get("area"),
+                            custom_keyterms=parsed_keyterms,
+                        )
+                    else:
+                        result = await service.process_batch_with_progress(
+                            file_paths=file_paths,
+                            file_names=file_names,
+                            mode=mode,
+                            thinking_level=config.get("thinking_level", "medium"),
+                            custom_prompt=config.get("custom_prompt"),
+                            disable_tables=config.get("disable_tables", False),
+                            high_accuracy=config.get("high_accuracy", False),
+                            transcription_engine=config.get("transcription_engine", "whisper"),
+                            diarization=config.get("diarization"),
+                            diarization_strict=config.get("diarization_strict", False),
+                            model_selection=config.get("model_selection"),
+                            on_progress=on_progress,
+                            use_cache=config.get("use_cache", True),
+                            auto_apply_fixes=config.get("auto_apply_fixes", True),
+                            auto_apply_content_fixes=config.get("auto_apply_content_fixes", False),
+                            skip_legal_audit=effective_skip_legal_audit,
+                            skip_audit=config.get("skip_audit"),
+                            skip_fidelity_audit=config.get("skip_fidelity_audit", False),
+                            skip_sources_audit=config.get("skip_sources_audit", False),
+                            language=config.get("language", "pt"),
+                            output_language=config.get("output_language", ""),
+                        )
+
+                ensure_not_cancelled()
+                result_path = _write_vomo_job_result(job_dir, result, mode, file_names)
+                result_path = str(Path(result_path).resolve())
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    stage="complete",
+                    message="Concluído",
+                    result_path=result_path,
+                )
+            except asyncio.CancelledError:
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="canceled",
+                    progress=100,
+                    stage="canceled",
+                    message="Cancelado pelo usuário.",
+                )
+            except Exception as e:
+                logger.error(f"Erro no job {job_id} (retry): {e}")
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="error",
+                    progress=100,
+                    stage="error",
+                    message=str(e),
+                    error=str(e),
+                )
+            finally:
+                _cleanup_task(job_id)
+
+    # Usar Celery se habilitado, caso contrário asyncio
+    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+        celery_result = transcription_job_task.apply_async(
+            kwargs={
+                "job_id": job_id,
+                "file_paths": file_paths,
+                "file_names": file_names,
+                "config": config,
+            },
+            queue=_CELERY_TRANSCRIPTION_QUEUE,
+        )
+        try:
+            job_manager.update_transcription_job(
+                job_id,
+                celery_task_id=getattr(celery_result, "id", None),
+                message="Enviado para Celery worker (retry)",
+            )
+        except Exception:
+            pass
+        logger.info(f"[VOMO/JOBS] Job {job_id} (retry) enviado para Celery worker")
+    else:
+        task = asyncio.create_task(run_job())
+        _register_task(job_id, task)
+
+    logger.info(f"🔄 Job {job_id} reiniciado via retry endpoint")
+    return {"job_id": job_id, "status": "queued", "message": "Job reiniciado"}
+
+
 @router.post("/vomo/jobs/url")
-async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...)):
+async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), current_user: User = Depends(get_current_user)):
     url = (request.url or "").strip()
     if request.custom_prompt is not None:
         request.custom_prompt = request.custom_prompt.strip() or None
@@ -943,10 +1478,22 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...)):
     mode = (request.mode or "APOSTILA").strip().upper()
 
     effective_skip_legal_audit = bool(request.skip_legal_audit or request.skip_audit)
+
+    # Parse speaker_roles JSON string → list
+    parsed_speaker_roles_url = None
+    if request.speaker_roles:
+        try:
+            parsed_speaker_roles_url = json.loads(request.speaker_roles)
+            if not isinstance(parsed_speaker_roles_url, list):
+                parsed_speaker_roles_url = None
+        except (json.JSONDecodeError, TypeError):
+            parsed_speaker_roles_url = None
+
     config = {
         "mode": mode,
         "thinking_level": request.thinking_level,
         "custom_prompt": request.custom_prompt,
+        "disable_tables": bool(getattr(request, "disable_tables", False)),
         "document_theme": request.document_theme,
         "document_header": request.document_header,
         "document_footer": request.document_footer,
@@ -959,6 +1506,7 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...)):
         "document_paragraph_spacing": request.document_paragraph_spacing,
         "model_selection": request.model_selection,
         "high_accuracy": bool(request.high_accuracy),
+        "transcription_engine": request.transcription_engine,
         "diarization": request.diarization,
         "diarization_strict": bool(request.diarization_strict),
         "use_cache": bool(request.use_cache),
@@ -967,7 +1515,11 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...)):
         "skip_legal_audit": effective_skip_legal_audit,
         "skip_fidelity_audit": bool(request.skip_fidelity_audit),
         "skip_sources_audit": bool(request.skip_sources_audit),
+        "language": request.language,
         "source_url": url,
+        "speaker_roles": parsed_speaker_roles_url,
+        "speakers_expected": request.speakers_expected,
+        "subtitle_format": request.subtitle_format if request.subtitle_format in ("srt", "vtt", "both") else None,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -1006,69 +1558,100 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...)):
                 message=message,
             )
 
-        try:
-            ensure_not_cancelled()
-            job_manager.update_transcription_job(
-                job_id,
-                status="running",
-                progress=0,
-                stage="starting",
-                message="Iniciando processamento",
-            )
-            with job_context(job_id):
-                result = await service.process_file_with_progress(
-                    file_path=file_paths[0],
-                    mode=mode,
-                    thinking_level=request.thinking_level,
-                    custom_prompt=request.custom_prompt,
-                    high_accuracy=bool(request.high_accuracy),
-                    diarization=request.diarization,
-                    diarization_strict=bool(request.diarization_strict),
-                    on_progress=on_progress,
-                    model_selection=request.model_selection,
-                    use_cache=bool(request.use_cache),
-                    auto_apply_fixes=bool(request.auto_apply_fixes),
-                    auto_apply_content_fixes=bool(request.auto_apply_content_fixes),
-                    skip_legal_audit=effective_skip_legal_audit,
-                    skip_audit=bool(request.skip_audit),
-                    skip_fidelity_audit=bool(request.skip_fidelity_audit),
-                    skip_sources_audit=bool(request.skip_sources_audit),
+        # Aguardar semáforo para processar sequencialmente (1 job por vez)
+        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
+        async with _get_transcription_semaphore():
+            try:
+                ensure_not_cancelled()
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="running",
+                    progress=0,
+                    stage="starting",
+                    message="Iniciando processamento",
                 )
+                with job_context(job_id):
+                    result = await service.process_file_with_progress(
+                        file_path=file_paths[0],
+                        mode=mode,
+                        thinking_level=request.thinking_level,
+                        custom_prompt=request.custom_prompt,
+                        disable_tables=config.get("disable_tables", False),
+                        high_accuracy=bool(request.high_accuracy),
+                        transcription_engine=request.transcription_engine,
+                        diarization=request.diarization,
+                        diarization_strict=bool(request.diarization_strict),
+                        on_progress=on_progress,
+                        model_selection=request.model_selection,
+                        use_cache=bool(request.use_cache),
+                        auto_apply_fixes=bool(request.auto_apply_fixes),
+                        auto_apply_content_fixes=bool(request.auto_apply_content_fixes),
+                        skip_legal_audit=effective_skip_legal_audit,
+                        skip_audit=bool(request.skip_audit),
+                        skip_fidelity_audit=bool(request.skip_fidelity_audit),
+                        skip_sources_audit=bool(request.skip_sources_audit),
+                        language=request.language,
+                        output_language=request.output_language,
+                        speaker_roles=parsed_speaker_roles_url,
+                        speakers_expected=request.speakers_expected,
+                        subtitle_format=config.get("subtitle_format"),
+                    )
 
-            ensure_not_cancelled()
-            result_path = _write_vomo_job_result(job_dir, result, mode, file_names)
-            result_path = str(Path(result_path).resolve())
-            job_manager.update_transcription_job(
-                job_id,
-                status="completed",
-                progress=100,
-                stage="complete",
-                message="Concluído",
-                result_path=result_path,
-            )
-        except asyncio.CancelledError:
-            job_manager.update_transcription_job(
-                job_id,
-                status="canceled",
-                progress=100,
-                stage="canceled",
-                message="Cancelado pelo usuário.",
-            )
-        except Exception as e:
-            logger.error(f"Erro no job {job_id}: {e}")
-            job_manager.update_transcription_job(
-                job_id,
-                status="error",
-                progress=100,
-                stage="error",
-                message=str(e),
-                error=str(e),
-            )
-        finally:
-            _cleanup_task(job_id)
+                ensure_not_cancelled()
+                result_path = _write_vomo_job_result(job_dir, result, mode, file_names)
+                result_path = str(Path(result_path).resolve())
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    stage="complete",
+                    message="Concluído",
+                    result_path=result_path,
+                )
+            except asyncio.CancelledError:
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="canceled",
+                    progress=100,
+                    stage="canceled",
+                    message="Cancelado pelo usuário.",
+                )
+            except Exception as e:
+                logger.error(f"Erro no job {job_id}: {e}")
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="error",
+                    progress=100,
+                    stage="error",
+                    message=str(e),
+                    error=str(e),
+                )
+            finally:
+                _cleanup_task(job_id)
 
-    task = asyncio.create_task(run_job())
-    _register_task(job_id, task)
+    # Usar Celery se habilitado, caso contrário asyncio
+    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+        celery_result = transcription_job_task.apply_async(
+            kwargs={
+                "job_id": job_id,
+                "file_paths": file_paths,
+                "file_names": file_names,
+                "config": config,
+            },
+            queue=_CELERY_TRANSCRIPTION_QUEUE,
+        )
+        try:
+            job_manager.update_transcription_job(
+                job_id,
+                celery_task_id=getattr(celery_result, "id", None),
+                message="Enviado para Celery worker (URL)",
+            )
+        except Exception:
+            pass
+        logger.info(f"[VOMO/JOBS] Job {job_id} (URL) enviado para Celery worker")
+    else:
+        task = asyncio.create_task(run_job())
+        _register_task(job_id, task)
     return {"job_id": job_id, "status": "queued"}
 
 @router.post("/hearing/jobs")
@@ -1101,6 +1684,12 @@ async def create_hearing_job(
     skip_legal_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    language: str = Form("pt"),
+    output_language: str = Form(""),
+    speaker_roles: Optional[str] = Form(None),
+    speakers_expected: Optional[int] = Form(None),
+    transcription_engine: str = Form("whisper"),
+    current_user: User = Depends(get_current_user),
 ):
     job_id = str(uuid.uuid4())
     job_dir = _get_job_dir(job_id)
@@ -1112,6 +1701,16 @@ async def create_hearing_job(
         document_footer = document_footer.strip() or None
     if document_font_family is not None:
         document_font_family = document_font_family.strip() or None
+
+    # Parse speaker_roles from JSON string
+    _speaker_roles_list = None
+    if speaker_roles:
+        try:
+            _speaker_roles_list = json.loads(speaker_roles)
+            if not isinstance(_speaker_roles_list, list):
+                _speaker_roles_list = None
+        except (json.JSONDecodeError, TypeError):
+            _speaker_roles_list = None
 
     try:
         saved = _save_uploaded_files([file], job_dir)
@@ -1150,6 +1749,8 @@ async def create_hearing_job(
         "skip_legal_audit": skip_legal_audit,
         "skip_fidelity_audit": skip_fidelity_audit,
         "skip_sources_audit": skip_sources_audit,
+        "language": language,
+        "transcription_engine": transcription_engine,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -1188,68 +1789,76 @@ async def create_hearing_job(
                 message=message,
             )
 
-        try:
-            ensure_not_cancelled()
-            job_manager.update_transcription_job(
-                job_id,
-                status="running",
-                progress=0,
-                stage="starting",
-                message="Iniciando processamento",
-            )
-            with job_context(job_id):
-                result = await service.process_hearing_with_progress(
-                    file_path=file_paths[0],
-                    case_id=case_id,
-                    goal=goal,
-                    thinking_level=thinking_level,
-                    model_selection=model_selection,
-                    high_accuracy=high_accuracy,
-                    format_mode=format_mode,
-                    custom_prompt=custom_prompt,
-                    format_enabled=format_enabled,
-                    include_timestamps=include_timestamps,
-                    allow_indirect=allow_indirect,
-                    allow_summary=allow_summary,
-                    use_cache=use_cache,
-                    auto_apply_fixes=auto_apply_fixes,
-                    auto_apply_content_fixes=auto_apply_content_fixes,
-                    skip_legal_audit=skip_legal_audit,
-                    skip_fidelity_audit=skip_fidelity_audit,
-                    skip_sources_audit=skip_sources_audit,
-                    on_progress=on_progress,
+        # Aguardar semáforo para processar sequencialmente (1 job por vez)
+        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
+        async with _get_transcription_semaphore():
+            try:
+                ensure_not_cancelled()
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="running",
+                    progress=0,
+                    stage="starting",
+                    message="Iniciando processamento",
                 )
-            ensure_not_cancelled()
-            result_path = _write_hearing_job_result(job_dir, result)
-            result_path = str(Path(result_path).resolve())
-            job_manager.update_transcription_job(
-                job_id,
-                status="completed",
-                progress=100,
-                stage="complete",
-                message="Concluído",
-                result_path=result_path,
-            )
-        except asyncio.CancelledError:
-            job_manager.update_transcription_job(
-                job_id,
-                status="canceled",
-                progress=100,
-                stage="canceled",
-                message="Cancelado pelo usuário.",
-            )
-        except Exception as e:
-            logger.error(f"Erro no job {job_id}: {e}")
-            job_manager.update_transcription_job(
-                job_id,
-                status="error",
-                progress=100,
-                stage="error",
-                message=str(e),
-                error=str(e),
-            )
-        finally:
-            _cleanup_task(job_id)
+                with job_context(job_id):
+                    result = await service.process_hearing_with_progress(
+                        file_path=file_paths[0],
+                        case_id=case_id,
+                        goal=goal,
+                        thinking_level=thinking_level,
+                        model_selection=model_selection,
+                        high_accuracy=high_accuracy,
+                        format_mode=format_mode,
+                        custom_prompt=custom_prompt,
+                        format_enabled=format_enabled,
+                        include_timestamps=include_timestamps,
+                        allow_indirect=allow_indirect,
+                        allow_summary=allow_summary,
+                        use_cache=use_cache,
+                        auto_apply_fixes=auto_apply_fixes,
+                        auto_apply_content_fixes=auto_apply_content_fixes,
+                        skip_legal_audit=skip_legal_audit,
+                        skip_fidelity_audit=skip_fidelity_audit,
+                        skip_sources_audit=skip_sources_audit,
+                        on_progress=on_progress,
+                        language=language,
+                        output_language=output_language,
+                        speaker_roles=_speaker_roles_list,
+                        speakers_expected=speakers_expected,
+                        transcription_engine=transcription_engine,
+                    )
+                ensure_not_cancelled()
+                result_path = _write_hearing_job_result(job_dir, result)
+                result_path = str(Path(result_path).resolve())
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    stage="complete",
+                    message="Concluído",
+                    result_path=result_path,
+                )
+            except asyncio.CancelledError:
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="canceled",
+                    progress=100,
+                    stage="canceled",
+                    message="Cancelado pelo usuário.",
+                )
+            except Exception as e:
+                logger.error(f"Erro no job {job_id}: {e}")
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="error",
+                    progress=100,
+                    stage="error",
+                    message=str(e),
+                    error=str(e),
+                )
+            finally:
+                _cleanup_task(job_id)
 
     task = asyncio.create_task(run_job())
     _register_task(job_id, task)
@@ -1258,7 +1867,7 @@ async def create_hearing_job(
 
 
 @router.post("/hearing/jobs/url")
-async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...)):
+async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...), current_user: User = Depends(get_current_user)):
     url = (request.url or "").strip()
     if request.custom_prompt is not None:
         request.custom_prompt = request.custom_prompt.strip() or None
@@ -1304,7 +1913,9 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...))
         "skip_legal_audit": bool(request.skip_legal_audit),
         "skip_fidelity_audit": bool(request.skip_fidelity_audit),
         "skip_sources_audit": bool(request.skip_sources_audit),
+        "language": request.language,
         "source_url": url,
+        "transcription_engine": request.transcription_engine,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -1343,69 +1954,77 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...))
                 message=message,
             )
 
-        try:
-            ensure_not_cancelled()
-            job_manager.update_transcription_job(
-                job_id,
-                status="running",
-                progress=0,
-                stage="starting",
-                message="Iniciando processamento",
-            )
-            with job_context(job_id):
-                result = await service.process_hearing_with_progress(
-                    file_path=file_paths[0],
-                    case_id=request.case_id,
-                    goal=request.goal,
-                    thinking_level=request.thinking_level,
-                    model_selection=request.model_selection,
-                    high_accuracy=bool(request.high_accuracy),
-                    format_mode=request.format_mode,
-                    custom_prompt=request.custom_prompt,
-                    format_enabled=bool(request.format_enabled),
-                    include_timestamps=bool(getattr(request, "include_timestamps", True)),
-                    allow_indirect=bool(request.allow_indirect),
-                    allow_summary=bool(request.allow_summary),
-                    use_cache=bool(request.use_cache),
-                    auto_apply_fixes=bool(request.auto_apply_fixes),
-                    auto_apply_content_fixes=bool(request.auto_apply_content_fixes),
-                    skip_legal_audit=bool(request.skip_legal_audit),
-                    skip_fidelity_audit=bool(request.skip_fidelity_audit),
-                    skip_sources_audit=bool(request.skip_sources_audit),
-                    on_progress=on_progress,
+        # Aguardar semáforo para processar sequencialmente (1 job por vez)
+        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
+        async with _get_transcription_semaphore():
+            try:
+                ensure_not_cancelled()
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="running",
+                    progress=0,
+                    stage="starting",
+                    message="Iniciando processamento",
                 )
+                with job_context(job_id):
+                    result = await service.process_hearing_with_progress(
+                        file_path=file_paths[0],
+                        case_id=request.case_id,
+                        goal=request.goal,
+                        thinking_level=request.thinking_level,
+                        model_selection=request.model_selection,
+                        high_accuracy=bool(request.high_accuracy),
+                        format_mode=request.format_mode,
+                        custom_prompt=request.custom_prompt,
+                        format_enabled=bool(request.format_enabled),
+                        include_timestamps=bool(getattr(request, "include_timestamps", True)),
+                        allow_indirect=bool(request.allow_indirect),
+                        allow_summary=bool(request.allow_summary),
+                        use_cache=bool(request.use_cache),
+                        auto_apply_fixes=bool(request.auto_apply_fixes),
+                        auto_apply_content_fixes=bool(request.auto_apply_content_fixes),
+                        skip_legal_audit=bool(request.skip_legal_audit),
+                        skip_fidelity_audit=bool(request.skip_fidelity_audit),
+                        skip_sources_audit=bool(request.skip_sources_audit),
+                        on_progress=on_progress,
+                        language=request.language,
+                        output_language=request.output_language,
+                        speaker_roles=getattr(request, "speaker_roles", None),
+                        speakers_expected=getattr(request, "speakers_expected", None),
+                        transcription_engine=request.transcription_engine,
+                    )
 
-            ensure_not_cancelled()
-            result_path = _write_hearing_job_result(job_dir, result)
-            result_path = str(Path(result_path).resolve())
-            job_manager.update_transcription_job(
-                job_id,
-                status="completed",
-                progress=100,
-                stage="complete",
-                message="Concluído",
-                result_path=result_path,
-            )
-        except asyncio.CancelledError:
-            job_manager.update_transcription_job(
-                job_id,
-                status="canceled",
-                progress=100,
-                stage="canceled",
-                message="Cancelado pelo usuário.",
-            )
-        except Exception as e:
-            logger.error(f"Erro no job {job_id}: {e}")
-            job_manager.update_transcription_job(
-                job_id,
-                status="error",
-                progress=100,
-                stage="error",
-                message=str(e),
-                error=str(e),
-            )
-        finally:
-            _cleanup_task(job_id)
+                ensure_not_cancelled()
+                result_path = _write_hearing_job_result(job_dir, result)
+                result_path = str(Path(result_path).resolve())
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="completed",
+                    progress=100,
+                    stage="complete",
+                    message="Concluído",
+                    result_path=result_path,
+                )
+            except asyncio.CancelledError:
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="canceled",
+                    progress=100,
+                    stage="canceled",
+                    message="Cancelado pelo usuário.",
+                )
+            except Exception as e:
+                logger.error(f"Erro no job {job_id}: {e}")
+                job_manager.update_transcription_job(
+                    job_id,
+                    status="error",
+                    progress=100,
+                    stage="error",
+                    message=str(e),
+                    error=str(e),
+                )
+            finally:
+                _cleanup_task(job_id)
 
     task = asyncio.create_task(run_job())
     _register_task(job_id, task)
@@ -1416,12 +2035,13 @@ async def list_transcription_jobs(
     limit: int = 20,
     status: Optional[str] = None,
     job_type: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
 ):
     jobs = job_manager.list_transcription_jobs(limit=limit, status=status, job_type=job_type)
     return {"jobs": jobs}
 
 @router.get("/jobs/{job_id}")
-async def get_transcription_job(job_id: str):
+async def get_transcription_job(job_id: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1429,7 +2049,7 @@ async def get_transcription_job(job_id: str):
 
 
 @router.post("/jobs/{job_id}/cancel")
-async def cancel_transcription_job(job_id: str):
+async def cancel_transcription_job(job_id: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1439,6 +2059,17 @@ async def cancel_transcription_job(job_id: str):
 
     cancel_event = _get_cancel_event(job_id)
     cancel_event.set()
+
+    # Se o job está rodando via Celery, revogar a task (best-effort)
+    celery_task_id = job.get("celery_task_id")
+    if celery_task_id:
+        try:
+            from app.workers.celery_app import celery_app
+
+            terminate = os.getenv("IUDEX_CELERY_REVOKE_TERMINATE", "true").lower() == "true"
+            celery_app.control.revoke(celery_task_id, terminate=terminate)
+        except Exception as exc:
+            logger.warning(f"Falha ao revogar task Celery {celery_task_id}: {exc}")
 
     task = _transcription_tasks.get(job_id)
     if task and not task.done():
@@ -1454,7 +2085,7 @@ async def cancel_transcription_job(job_id: str):
     return {"success": True, "status": "canceled"}
 
 @router.get("/jobs/{job_id}/result")
-async def get_transcription_job_result(job_id: str):
+async def get_transcription_job_result(job_id: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1492,7 +2123,7 @@ class ConvertPreventiveToHilResponse(BaseModel):
 
 
 @router.post("/jobs/{job_id}/convert-preventive-to-hil", response_model=ConvertPreventiveToHilResponse)
-async def convert_preventive_alerts_to_hil(job_id: str):
+async def convert_preventive_alerts_to_hil(job_id: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1588,7 +2219,7 @@ class MergeAuditIssuesResponse(BaseModel):
 
 
 @router.post("/jobs/{job_id}/audit-issues/merge", response_model=MergeAuditIssuesResponse)
-async def merge_audit_issues(job_id: str, request: MergeAuditIssuesRequest):
+async def merge_audit_issues(job_id: str, request: MergeAuditIssuesRequest, current_user: User = Depends(get_current_user)):
     """
     Persistently merge extra audit issues into a job snapshot.
 
@@ -1660,7 +2291,7 @@ async def merge_audit_issues(job_id: str, request: MergeAuditIssuesRequest):
 
 
 @router.delete("/jobs/{job_id}")
-async def delete_transcription_job(job_id: str, delete_outputs: bool = True):
+async def delete_transcription_job(job_id: str, delete_outputs: bool = True, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1692,7 +2323,7 @@ async def delete_transcription_job(job_id: str, delete_outputs: bool = True):
     return {"success": True, "removed_paths": removed_paths}
 
 @router.get("/jobs/{job_id}/reports/{report_key}")
-async def download_transcription_report(job_id: str, report_key: str):
+async def download_transcription_report(job_id: str, report_key: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1728,6 +2359,10 @@ async def download_transcription_report(job_id: str, report_key: str):
             media_type = "application/json"
         elif suffix == ".docx":
             media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        elif suffix == ".srt":
+            media_type = "application/x-subrip"
+        elif suffix == ".vtt":
+            media_type = "text/vtt"
         return FileResponse(resolved, media_type=media_type, filename=resolved.name)
     except HTTPException:
         raise
@@ -1735,11 +2370,29 @@ async def download_transcription_report(job_id: str, report_key: str):
         raise HTTPException(status_code=500, detail=f"Failed to download report: {exc}")
 
 @router.get("/jobs/{job_id}/media")
-async def get_job_media(job_id: str, index: int = 0):
+async def get_job_media(
+    job_id: str,
+    index: int = 0,
+    token: Optional[str] = None,
+    current_user: User = Depends(get_current_user_optional),
+):
     """
     Serve the original audio/video file from a transcription job.
     Used by the frontend player to replay the source media.
+    Accepts token via query param since <audio>/<video> elements can't set headers.
     """
+    # Validate auth from either header or query param token
+    user = current_user
+    if not user and token:
+        try:
+            payload = decode_token(token)
+            if payload.get("type") == "access" and payload.get("sub"):
+                user = True  # Token is valid, allow access
+        except Exception:
+            pass
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1783,10 +2436,27 @@ async def get_job_media(job_id: str, index: int = 0):
     )
 
 @router.get("/jobs/{job_id}/media/list")
-async def list_job_media(job_id: str):
+async def list_job_media(
+    job_id: str,
+    token: Optional[str] = None,
+    current_user: User = Depends(get_current_user_optional),
+):
     """
     List all media files available for a transcription job.
+    Accepts token via query param since called from contexts where headers may not be set.
     """
+    # Validate auth from either header or query param token
+    user = current_user
+    if not user and token:
+        try:
+            payload = decode_token(token)
+            if payload.get("type") == "access" and payload.get("sub"):
+                user = True  # Token is valid, allow access
+        except Exception:
+            pass
+
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1810,7 +2480,7 @@ async def list_job_media(job_id: str):
     return {"files": files}
 
 @router.post("/jobs/{job_id}/preventive-audit/recompute")
-async def recompute_preventive_audit(job_id: str):
+async def recompute_preventive_audit(job_id: str, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -1960,7 +2630,7 @@ async def recompute_preventive_audit(job_id: str):
 
 
 @router.post("/jobs/{job_id}/quality")
-async def update_transcription_job_quality(job_id: str, request: JobQualityUpdateRequest):
+async def update_transcription_job_quality(job_id: str, request: JobQualityUpdateRequest, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2078,6 +2748,53 @@ async def update_transcription_job_quality(job_id: str, request: JobQualityUpdat
                         quality["validation_report"] = validation_report
                         quality["needs_revalidate"] = False
                         result_data["quality"] = quality
+
+                        # Sync audit files with revalidated data
+                        try:
+                            reports = result_data.get("reports") or {}
+                            output_dir_path = reports.get("output_dir")
+                            if output_dir_path:
+                                output_dir = Path(output_dir_path)
+                                # Update _FIDELIDADE.json (compat format)
+                                fidelity_path = reports.get("fidelity_path") or reports.get("validation_path")
+                                if fidelity_path:
+                                    compat_data = {
+                                        "aprovado": validation_report.get("approved", False),
+                                        "nota": validation_report.get("score", 0),
+                                        "nota_fidelidade": validation_report.get("score", 0),
+                                        "omissoes": validation_report.get("omissions", []),
+                                        "omissoes_graves": validation_report.get("omissions", []),
+                                        "distorcoes": validation_report.get("distortions", []),
+                                        "problemas_estrutura": validation_report.get("structural_issues", []),
+                                        "observacoes": validation_report.get("observations", ""),
+                                        "source": "revalidation",
+                                        "revalidated_at": validation_report.get("validated_at"),
+                                    }
+                                    Path(fidelity_path).write_text(
+                                        json.dumps(compat_data, ensure_ascii=False, indent=2),
+                                        encoding="utf-8"
+                                    )
+                                    logger.info(f"✅ Synced fidelity JSON: {fidelity_path}")
+
+                                # Update audit_summary.json with new score
+                                summary_path = reports.get("audit_summary_path")
+                                if summary_path and Path(summary_path).exists():
+                                    try:
+                                        summary_data = json.loads(Path(summary_path).read_text(encoding="utf-8"))
+                                        if "summary" in summary_data:
+                                            summary_data["summary"]["score"] = validation_report.get("score", 0)
+                                            summary_data["summary"]["scores"]["validation_fidelity"] = validation_report.get("score", 0)
+                                            summary_data["summary"]["revalidated_at"] = validation_report.get("validated_at")
+                                            Path(summary_path).write_text(
+                                                json.dumps(summary_data, ensure_ascii=False, indent=2),
+                                                encoding="utf-8"
+                                            )
+                                            logger.info(f"✅ Synced audit_summary.json with new score: {validation_report.get('score')}")
+                                    except Exception as sync_err:
+                                        logger.warning(f"Failed to sync audit_summary.json: {sync_err}")
+                        except Exception as sync_err:
+                            logger.warning(f"Failed to sync audit files after revalidation: {sync_err}")
+
                     except asyncio.TimeoutError:
                         logger.warning("Timeout ao revalidar documento após correções")
                         quality["needs_revalidate"] = True
@@ -2151,7 +2868,7 @@ async def update_transcription_job_quality(job_id: str, request: JobQualityUpdat
         raise HTTPException(status_code=500, detail=f"Failed to update quality: {exc}")
 
 @router.post("/jobs/{job_id}/content")
-async def update_transcription_job_content(job_id: str, request: JobContentUpdateRequest):
+async def update_transcription_job_content(job_id: str, request: JobContentUpdateRequest, current_user: User = Depends(get_current_user)):
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -2238,7 +2955,7 @@ async def update_transcription_job_content(job_id: str, request: JobContentUpdat
         raise HTTPException(status_code=500, detail=f"Failed to update job content: {exc}")
 
 @router.get("/jobs/{job_id}/stream")
-async def stream_transcription_job(job_id: str):
+async def stream_transcription_job(job_id: str, current_user: User = Depends(get_current_user)):
     EventSourceResponse = _get_event_source_response()
 
     async def event_generator():
@@ -2296,6 +3013,7 @@ async def transcribe_vomo(
     custom_prompt: Optional[str] = Form(None),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
+    transcription_engine: str = Form("whisper"),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
     use_cache: bool = Form(True),
@@ -2305,12 +3023,19 @@ async def transcribe_vomo(
     skip_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    speaker_roles: Optional[str] = Form(None),
+    speakers_expected: Optional[int] = Form(None),
+    subtitle_format: Optional[str] = Form(None),
+    # Novos campos para melhorar transcrição bruta (ASR)
+    area: Optional[str] = Form(None, description="Área: juridico, medicina, ti, engenharia, financeiro"),
+    custom_keyterms: Optional[str] = Form(None, description="Termos separados por vírgula"),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Endpoint para transcrição e formatação usando MLX Vomo.
     Suporta arquivos de áudio e vídeo.
     Retorna o texto transcrito/formatado.
-    
+
     WARNING: Processamento síncrono/longo por enquanto (MVP).
     Idealmente mover para BackgroundTasks e retornar JobID.
     """
@@ -2328,6 +3053,23 @@ async def transcribe_vomo(
         
         # Processar
         run_id = str(uuid.uuid4())
+        # Parse speaker_roles JSON string → list
+        parsed_sr = None
+        if speaker_roles:
+            try:
+                parsed_sr = json.loads(speaker_roles)
+                if not isinstance(parsed_sr, list):
+                    parsed_sr = None
+            except (json.JSONDecodeError, TypeError):
+                parsed_sr = None
+
+        validated_subtitle_format = subtitle_format if subtitle_format in ("srt", "vtt", "both") else None
+
+        # Parse custom_keyterms: string separada por vírgula → lista
+        parsed_keyterms = None
+        if custom_keyterms:
+            parsed_keyterms = [t.strip() for t in custom_keyterms.split(",") if t.strip()][:100]
+
         with usage_context("transcription", run_id):
             final_text = await service.process_file(
                 file_path=temp_file_path,
@@ -2335,6 +3077,7 @@ async def transcribe_vomo(
                 thinking_level=thinking_level,
                 custom_prompt=custom_prompt,
                 high_accuracy=high_accuracy,
+                transcription_engine=transcription_engine,
                 diarization=diarization,
                 diarization_strict=diarization_strict,
                 model_selection=model_selection,
@@ -2345,8 +3088,13 @@ async def transcribe_vomo(
                 skip_audit=skip_audit,
                 skip_fidelity_audit=skip_fidelity_audit,
                 skip_sources_audit=skip_sources_audit,
+                speaker_roles=parsed_sr,
+                speakers_expected=speakers_expected,
+                subtitle_format=validated_subtitle_format,
+                area=area,
+                custom_keyterms=parsed_keyterms,
             )
-        
+
         return {
             "status": "success",
             "filename": file.filename,
@@ -2369,8 +3117,10 @@ async def transcribe_vomo_stream(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    disable_tables: bool = Form(False),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
+    transcription_engine: str = Form("whisper"),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
     use_cache: bool = Form(True),
@@ -2380,10 +3130,22 @@ async def transcribe_vomo_stream(
     skip_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    language: str = Form("pt"),
+    output_language: str = Form(""),
+    speaker_roles: Optional[str] = Form(None),
+    speakers_expected: Optional[int] = Form(None),
+    subtitle_format: Optional[str] = Form(None),
+    # Novos campos para melhorar transcrição bruta (ASR)
+    area: Optional[str] = Form(None, description="Área: juridico, medicina, ti, engenharia, financeiro"),
+    custom_keyterms: Optional[str] = Form(None, description="Termos separados por vírgula"),
+    # Speaker Identification (AssemblyAI)
+    speaker_id_type: Optional[str] = Form(None, description="Tipo: 'name' ou 'role'"),
+    speaker_id_values: Optional[str] = Form(None, description="Lista JSON de nomes ou papéis"),
+    current_user: User = Depends(get_current_user),
 ):
     """
     SSE endpoint that streams transcription progress in real-time.
-    
+
     Events:
     - progress: { stage, progress, message }
     - complete: { status, filename, content }
@@ -2393,7 +3155,34 @@ async def transcribe_vomo_stream(
     import asyncio
 
     EventSourceResponse = _get_event_source_response()
-    
+
+    # Parse speaker_roles JSON string → list
+    parsed_sr_stream = None
+    if speaker_roles:
+        try:
+            parsed_sr_stream = json.loads(speaker_roles)
+            if not isinstance(parsed_sr_stream, list):
+                parsed_sr_stream = None
+        except (json.JSONDecodeError, TypeError):
+            parsed_sr_stream = None
+
+    # Parse custom_keyterms: string separada por vírgula → lista
+    parsed_keyterms_stream = None
+    if custom_keyterms:
+        parsed_keyterms_stream = [t.strip() for t in custom_keyterms.split(",") if t.strip()][:100]
+
+    # Parse speaker_id_values JSON string → list
+    parsed_speaker_id_values = None
+    if speaker_id_values:
+        try:
+            parsed_speaker_id_values = json.loads(speaker_id_values)
+            if not isinstance(parsed_speaker_id_values, list):
+                parsed_speaker_id_values = None
+        except (json.JSONDecodeError, TypeError):
+            parsed_speaker_id_values = None
+
+    validated_subtitle_format_stream = subtitle_format if subtitle_format in ("srt", "vtt", "both") else None
+
     temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
     run_id = str(uuid.uuid4())
     
@@ -2427,7 +3216,9 @@ async def transcribe_vomo_stream(
                         mode=mode,
                         thinking_level=thinking_level,
                         custom_prompt=custom_prompt,
+                        disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
+                        transcription_engine=transcription_engine,
                         diarization=diarization,
                         diarization_strict=diarization_strict,
                         model_selection=model_selection,
@@ -2439,6 +3230,15 @@ async def transcribe_vomo_stream(
                         skip_audit=skip_audit,
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
+                        language=language,
+                        output_language=output_language,
+                        speaker_roles=parsed_sr_stream,
+                        speakers_expected=speakers_expected,
+                        subtitle_format=validated_subtitle_format_stream,
+                        area=area,
+                        custom_keyterms=parsed_keyterms_stream,
+                        speaker_id_type=speaker_id_type,
+                        speaker_id_values=parsed_speaker_id_values,
                     )
                 if isinstance(result, dict):
                     final_result["content"] = result.get("content")
@@ -2452,7 +3252,7 @@ async def transcribe_vomo_stream(
             finally:
                 # Signal done
                 await progress_queue.put(None)
-        
+
         # Start processing in background
         task = asyncio.create_task(process_task())
         
@@ -2509,8 +3309,10 @@ async def transcribe_batch_stream(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    disable_tables: bool = Form(False),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
+    transcription_engine: str = Form("whisper"),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
     use_cache: bool = Form(True),
@@ -2520,13 +3322,16 @@ async def transcribe_batch_stream(
     skip_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    language: str = Form("pt"),
+    output_language: str = Form(""),
+    current_user: User = Depends(get_current_user),
 ):
     """
     SSE endpoint for batch transcription of multiple files.
-    
+
     Processes files in order and unifies output into a single document.
     Files are processed sequentially to maintain order (Aula 1, 2, 3...).
-    
+
     Events:
     - progress: { stage, progress, message }
     - complete: { status, filenames, content }
@@ -2577,7 +3382,9 @@ async def transcribe_batch_stream(
                         mode=mode,
                         thinking_level=thinking_level,
                         custom_prompt=custom_prompt,
+                        disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
+                        transcription_engine=transcription_engine,
                         diarization=diarization,
                         diarization_strict=diarization_strict,
                         model_selection=model_selection,
@@ -2589,6 +3396,8 @@ async def transcribe_batch_stream(
                         skip_audit=skip_audit,
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
+                        language=language,
+                        output_language=output_language,
                     )
                 if isinstance(result, dict):
                     final_result["content"] = result.get("content")
@@ -2651,7 +3460,7 @@ async def transcribe_batch_stream(
 
 
 @router.post("/apply-revisions")
-async def apply_revisions(request: Request):
+async def apply_revisions(request: Request, current_user: User = Depends(get_current_user)):
     """
     Apply revisions to transcription based on user-approved issues.
     
@@ -2891,7 +3700,7 @@ class HearingApplyRevisionsRequest(BaseModel):
 
 
 @router.post("/jobs/{job_id}/hearing/apply-revisions")
-async def apply_hearing_revisions(job_id: str, request: HearingApplyRevisionsRequest):
+async def apply_hearing_revisions(job_id: str, request: HearingApplyRevisionsRequest, current_user: User = Depends(get_current_user)):
     """
     Apply AI-assisted revisions to a hearing/meeting job snapshot.
 
@@ -3057,6 +3866,11 @@ async def transcribe_hearing_stream(
     skip_legal_audit: bool = Form(False),
     skip_fidelity_audit: bool = Form(False),
     skip_sources_audit: bool = Form(False),
+    language: str = Form("pt"),
+    output_language: str = Form(""),
+    speaker_roles: Optional[str] = Form(None),
+    speakers_expected: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_user),
 ):
     """
     SSE endpoint for hearings/reunions transcription (structured JSON + evidence).
@@ -3078,6 +3892,16 @@ async def transcribe_hearing_stream(
     logger.info(f"📁 HEARING SSE: Arquivo recebido: {file.filename} (case_id={case_id})")
     if custom_prompt is not None:
         custom_prompt = custom_prompt.strip() or None
+
+    # Parse speaker_roles JSON string → list
+    parsed_speaker_roles = None
+    if speaker_roles:
+        try:
+            parsed_speaker_roles = json.loads(speaker_roles)
+            if not isinstance(parsed_speaker_roles, list):
+                parsed_speaker_roles = None
+        except (json.JSONDecodeError, TypeError):
+            parsed_speaker_roles = None
 
     async def event_generator():
         progress_queue = asyncio.Queue()
@@ -3112,6 +3936,10 @@ async def transcribe_hearing_stream(
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
                         on_progress=on_progress,
+                        language=language,
+                        output_language=output_language,
+                        speaker_roles=parsed_speaker_roles,
+                        speakers_expected=speakers_expected,
                     )
                 final_result["payload"] = result
             except Exception as e:
@@ -3163,7 +3991,7 @@ async def transcribe_hearing_stream(
 
 
 @router.post("/hearing/speakers")
-async def update_hearing_speakers(request: HearingSpeakersUpdateRequest):
+async def update_hearing_speakers(request: HearingSpeakersUpdateRequest, current_user: User = Depends(get_current_user)):
     """
     Update hearing speaker registry (manual edits).
     """
@@ -3173,22 +4001,5 @@ async def update_hearing_speakers(request: HearingSpeakersUpdateRequest):
     return {"status": "success", "speakers": speakers}
 
 
-@router.post("/hearing/enroll")
-async def enroll_hearing_speaker(
-    file: UploadFile = File(...),
-    case_id: str = Form(...),
-    name: str = Form(...),
-    role: str = Form("outro"),
-):
-    """
-    Enroll speaker audio for a case (voice profile seed).
-    """
-    temp_file_path = f"/tmp/{uuid.uuid4()}_{file.filename}"
-    with open(temp_file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    try:
-        speaker = service.enroll_hearing_speaker(case_id=case_id, name=name, role=role, file_path=temp_file_path)
-        return {"status": "success", "speaker": speaker}
-    finally:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
+# REMOVIDO: Endpoint de enrollment de voz (substituído por inferência de papéis por LLM)
+# @router.post("/hearing/enroll") - Deprecado

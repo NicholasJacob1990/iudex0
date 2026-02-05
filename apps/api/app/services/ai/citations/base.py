@@ -12,6 +12,11 @@ class Source:
     n: int
     title: str
     url: str
+    page_number: Optional[int] = None
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    source_file: Optional[str] = None
+    doc_id: Optional[str] = None
 
 
 def stable_numbering(items: Iterable[Tuple[str, str]]) -> Tuple[Dict[str, int], List[Source]]:
@@ -39,11 +44,21 @@ def render_perplexity(text: str, sources: List[Source]) -> str:
 def sources_to_citations(sources: List[Source]) -> List[dict]:
     citations: List[dict] = []
     for s in sources or []:
-        citations.append({
+        citation: dict = {
             "number": s.n,
             "title": s.title,
             "url": s.url,
-        })
+        }
+        # Incluir proveniência se disponível
+        if s.page_number is not None or s.source_file:
+            citation["provenance"] = {
+                "page_number": s.page_number,
+                "line_start": s.line_start,
+                "line_end": s.line_end,
+                "source_file": s.source_file,
+                "doc_id": s.doc_id,
+            }
+        citations.append(citation)
     return citations
 
 

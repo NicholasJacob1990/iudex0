@@ -41,6 +41,10 @@ from app.services.ai.shared.sse_protocol import (
     thinking_event,
     done_event,
     error_event,
+    # Code Artifacts
+    artifact_start_event,
+    artifact_token_event,
+    artifact_done_event,
 )
 
 # Google AI imports
@@ -92,7 +96,7 @@ except ImportError:
 # =============================================================================
 
 GOOGLE_AGENT_ENABLED = os.getenv("GOOGLE_AGENT_ENABLED", "true").lower() == "true"
-GOOGLE_AGENT_DEFAULT_MODEL = os.getenv("GOOGLE_AGENT_DEFAULT_MODEL", "gemini-2.0-flash")
+GOOGLE_AGENT_DEFAULT_MODEL = os.getenv("GOOGLE_AGENT_DEFAULT_MODEL", "gemini-3-flash")
 GOOGLE_AGENT_MAX_ITERATIONS = int(os.getenv("GOOGLE_AGENT_MAX_ITERATIONS", "50"))
 
 # Use Vertex AI em produção
@@ -100,16 +104,21 @@ USE_VERTEX_AI = os.getenv("USE_VERTEX_AI", "false").lower() == "true"
 
 # Modelos e context windows
 MODEL_CONTEXT_WINDOWS = {
-    # Gemini 2.x
+    # Gemini 3.x
+    "gemini-3-pro": 2_000_000,
+    "gemini-3-pro-preview": 2_000_000,
+    "gemini-3-flash": 1_000_000,
+    "gemini-3-flash-preview": 1_000_000,
+    # Gemini 2.5
+    "gemini-2.5-pro": 1_000_000,
+    "gemini-2.5-flash": 1_000_000,
+    # Gemini 2.x (legacy)
     "gemini-2.0-flash": 1_000_000,
     "gemini-2.0-flash-thinking": 1_000_000,
     "gemini-2.0-pro": 2_000_000,
-    # Gemini 1.5
+    # Gemini 1.5 (legacy)
     "gemini-1.5-pro": 2_000_000,
     "gemini-1.5-flash": 1_000_000,
-    # Gemini 3.x (futuro)
-    "gemini-3-pro": 2_000_000,
-    "gemini-3-flash": 1_000_000,
 }
 
 
@@ -131,6 +140,9 @@ class GoogleAgentConfig(ExecutorConfig):
 
     # Safety settings
     safety_settings: Optional[Dict[str, str]] = None
+
+    # Hosted tools (Google managed)
+    enable_code_execution: bool = True  # Gemini code execution sandbox
 
     # ADK specific
     agent_name: str = "iudex_legal_agent"
@@ -373,27 +385,46 @@ class GoogleAgentExecutor(BaseAgentExecutor):
 
     def _convert_tools_to_gemini_format(self) -> Optional[List[Any]]:
         """Converte tools para formato nativo do Gemini."""
-        if not self._tools:
-            return None
-
         if not GENAI_AVAILABLE:
             return None
 
-        try:
-            function_declarations = []
-            for tool_def in self._tools:
-                fd = FunctionDeclaration(
-                    name=tool_def["name"],
-                    description=tool_def.get("description", ""),
-                    parameters=tool_def.get("parameters", {}),
-                )
-                function_declarations.append(fd)
+        tools_list = []
 
-            return [Tool(function_declarations=function_declarations)]
+        # Function declarations (tools unificadas)
+        if self._tools:
+            try:
+                function_declarations = []
+                for tool_def in self._tools:
+                    fd = FunctionDeclaration(
+                        name=tool_def["name"],
+                        description=tool_def.get("description", ""),
+                        parameters=tool_def.get("parameters", {}),
+                    )
+                    function_declarations.append(fd)
 
-        except Exception as e:
-            logger.warning(f"Could not convert tools to Gemini format: {e}")
-            return None
+                tools_list.append(Tool(function_declarations=function_declarations))
+
+            except Exception as e:
+                logger.warning(f"Could not convert tools to Gemini format: {e}")
+
+        # Code execution (hosted tool do Gemini — not supported by flash-lite models)
+        _ce_compatible = not any(
+            self.config.model.startswith(p)
+            for p in ("gemini-2.0-flash-lite", "gemini-2-flash-lite")
+        )
+        if self.config.enable_code_execution and _ce_compatible:
+            try:
+                # Try ToolCodeExecution class (new SDK), then dict fallback (old SDK)
+                _tce = getattr(genai.types if hasattr(genai, 'types') else genai, 'ToolCodeExecution', None)
+                if _tce is not None:
+                    tools_list.append(Tool(code_execution=_tce))
+                else:
+                    tools_list.append(Tool(code_execution={}))
+                logger.debug("Code execution tool enabled for Gemini")
+            except Exception as e:
+                logger.warning(f"Could not enable code_execution tool: {e}")
+
+        return tools_list if tools_list else None
 
     async def run(
         self,
@@ -612,11 +643,33 @@ class GoogleAgentExecutor(BaseAgentExecutor):
                                 success
                             ).to_sse_dict()
 
-                    # Verificar conteúdo de texto
+                    # Verificar conteúdo de texto e code execution
                     if event_content:
                         if hasattr(event_content, 'parts'):
                             for part in event_content.parts:
-                                if hasattr(part, 'text') and part.text:
+                                if hasattr(part, 'executable_code') and part.executable_code:
+                                    code = part.executable_code
+                                    lang = getattr(code, 'language', 'PYTHON')
+                                    code_text = getattr(code, 'code', str(code))
+                                    yield {
+                                        "type": "code_execution",
+                                        "data": {
+                                            "language": str(lang),
+                                            "code": code_text,
+                                        }
+                                    }
+                                elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                                    exec_result = part.code_execution_result
+                                    outcome = getattr(exec_result, 'outcome', 'UNKNOWN')
+                                    output = getattr(exec_result, 'output', '')
+                                    yield {
+                                        "type": "code_execution_result",
+                                        "data": {
+                                            "outcome": str(outcome),
+                                            "output": output,
+                                        }
+                                    }
+                                elif hasattr(part, 'text') and part.text:
                                     text = part.text
                                     yield {
                                         "type": "token",
@@ -801,13 +854,37 @@ class GoogleAgentExecutor(BaseAgentExecutor):
                 yield error_event(job_id, "No response candidate", "empty_response").to_sse_dict()
                 return
 
-            # Verificar function calls
+            # Verificar function calls e code execution
             function_calls = []
             text_parts = []
 
             for part in candidate.content.parts:
                 if hasattr(part, 'function_call') and part.function_call:
                     function_calls.append(part.function_call)
+                elif hasattr(part, 'executable_code') and part.executable_code:
+                    # Gemini code_execution: modelo gerou código para executar
+                    code = part.executable_code
+                    lang = getattr(code, 'language', 'PYTHON')
+                    code_text = getattr(code, 'code', str(code))
+                    yield {
+                        "type": "code_execution",
+                        "data": {
+                            "language": str(lang),
+                            "code": code_text,
+                        }
+                    }
+                elif hasattr(part, 'code_execution_result') and part.code_execution_result:
+                    # Gemini code_execution: resultado da execução
+                    exec_result = part.code_execution_result
+                    outcome = getattr(exec_result, 'outcome', 'UNKNOWN')
+                    output = getattr(exec_result, 'output', '')
+                    yield {
+                        "type": "code_execution_result",
+                        "data": {
+                            "outcome": str(outcome),
+                            "output": output,
+                        }
+                    }
                 elif hasattr(part, 'text') and part.text:
                     text_parts.append(part.text)
 

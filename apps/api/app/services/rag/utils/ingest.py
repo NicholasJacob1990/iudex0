@@ -23,6 +23,10 @@ class Chunk:
     text: str
     page: Optional[int] = None
     chunk_index: int = 0
+    line_start: Optional[int] = None
+    line_end: Optional[int] = None
+    source_file: Optional[str] = None
+    doc_id: Optional[str] = None
 
 
 def chunk_text(
@@ -94,6 +98,7 @@ def chunk_document(
     chunk_chars: int = 1200,
     overlap: int = 200,
     doc_id: Optional[str] = None,
+    source_file: Optional[str] = None,
 ) -> List[dict]:
     """
     Chunk a document and return list of dicts ready for ingestion.
@@ -103,6 +108,7 @@ def chunk_document(
         chunk_chars: Maximum characters per chunk
         overlap: Overlap between chunks
         doc_id: Optional document ID
+        source_file: Optional source file name
 
     Returns:
         List of chunk dictionaries with text and metadata
@@ -114,6 +120,10 @@ def chunk_document(
             "chunk_index": c.chunk_index,
             "doc_id": doc_id,
             "page": c.page,
+            "page_number": c.page,
+            "line_start": c.line_start,
+            "line_end": c.line_end,
+            "source_file": source_file or c.source_file,
         }
         for c in chunks
     ]
@@ -125,6 +135,7 @@ def chunk_pdf(
     chunk_chars: int = 1200,
     overlap: int = 200,
     doc_id: Optional[str] = None,
+    source_file: Optional[str] = None,
 ) -> List[dict]:
     """
     Extract and chunk a PDF document.
@@ -134,6 +145,7 @@ def chunk_pdf(
         chunk_chars: Maximum characters per chunk
         overlap: Overlap between chunks
         doc_id: Optional document ID
+        source_file: Optional source file name
 
     Returns:
         List of chunk dictionaries with text and metadata
@@ -141,8 +153,12 @@ def chunk_pdf(
     pages = extract_pdf_pages(pdf_bytes)
     all_chunks: List[dict] = []
     global_idx = 0
+    global_line = 0
 
     for page_num, page_text in pages:
+        line_count = page_text.count("\n") + 1 if page_text.strip() else 0
+        page_line_start = global_line
+
         page_chunks = chunk_text(
             page_text,
             chunk_chars=chunk_chars,
@@ -150,12 +166,20 @@ def chunk_pdf(
             page=page_num,
         )
         for chunk in page_chunks:
+            chunk_line_count = chunk.text.count("\n") + 1
             all_chunks.append({
                 "text": chunk.text,
                 "chunk_index": global_idx,
                 "page": chunk.page,
+                "page_number": chunk.page,
+                "line_start": page_line_start,
+                "line_end": page_line_start + chunk_line_count - 1,
                 "doc_id": doc_id,
+                "source_file": source_file,
             })
+            page_line_start += chunk_line_count
             global_idx += 1
+
+        global_line += line_count
 
     return all_chunks

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { formatDate } from '@/lib/utils';
-import { User, Bot, Check, Copy, RotateCcw } from 'lucide-react';
+import { User, Bot, Check, Copy, RotateCcw, Globe, ExternalLink, Rocket, ThumbsUp, ThumbsDown, Share2, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
 import { useCanvasStore } from '@/stores/canvas-store';
@@ -26,6 +26,9 @@ interface ChatMessageProps {
   message: Message;
   onCopy?: (message: Message) => void;
   onRegenerate?: (message: Message) => void;
+  onPromoteToAgent?: (message: Message) => void;
+  onFeedback?: (message: Message, type: 'up' | 'down') => void;
+  onShare?: (message: Message) => void;
   disableRegenerate?: boolean;
 }
 
@@ -44,6 +47,99 @@ function LoadingDots() {
       <span className="animate-bounce h-1 w-1 rounded-full bg-slate-400" style={{ animationDelay: '150ms' }} />
       <span className="animate-bounce h-1 w-1 rounded-full bg-slate-400" style={{ animationDelay: '300ms' }} />
     </span>
+  );
+}
+
+// ============================================================================
+// Response Sources Tabs (Perplexity style — Resposta | Fontes)
+// ============================================================================
+
+function ResponseSourcesTabs({ citations }: { citations: CitationItem[] }) {
+  const [activeTab, setActiveTab] = useState<'sources'>('sources');
+
+  function citationDomain(url?: string): string {
+    if (!url) return '';
+    try { return new URL(url).hostname.replace(/^www\./i, ''); } catch { return ''; }
+  }
+  function getFaviconUrl(url?: string): string | null {
+    if (!url) return null;
+    try { return `https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=32`; } catch { return null; }
+  }
+
+  return (
+    <div className="mt-4 border-t border-slate-100 pt-3">
+      {/* Tab header */}
+      <div className="flex items-center gap-1 mb-3">
+        <button
+          type="button"
+          onClick={() => setActiveTab('sources')}
+          className={cn(
+            'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
+            'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+          )}
+        >
+          <Globe className="h-3 w-3" />
+          Fontes
+          <span className="ml-0.5 rounded-full bg-slate-200 dark:bg-slate-700 px-1.5 py-0.5 text-[10px] font-semibold">
+            {citations.length}
+          </span>
+        </button>
+      </div>
+
+      {/* Sources list */}
+      {activeTab === 'sources' && (
+        <div className="grid gap-2">
+          {citations.map((item) => {
+            const domain = citationDomain(item.url);
+            const favicon = getFaviconUrl(item.url);
+
+            return (
+              <a
+                key={`tab-${item.number}-${item.url || item.title || ''}`}
+                href={item.url || '#'}
+                target="_blank"
+                rel="noreferrer noopener"
+                className={cn(
+                  'flex items-start gap-3 rounded-lg border border-slate-100 dark:border-slate-800 p-3 transition-all group',
+                  item.url ? 'hover:border-slate-300 hover:bg-slate-50/50 dark:hover:bg-slate-800/50' : 'pointer-events-none opacity-60',
+                )}
+              >
+                {/* Favicon */}
+                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shrink-0">
+                  {favicon ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img src={favicon} alt="" className="h-4 w-4 rounded-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                  ) : (
+                    <Globe className="h-3.5 w-3.5 text-slate-400" />
+                  )}
+                </div>
+
+                {/* Content */}
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-bold text-slate-500 shrink-0">
+                      {item.number}
+                    </span>
+                    <span className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate group-hover:text-slate-900 dark:group-hover:text-slate-100">
+                      {item.title || domain || `Fonte ${item.number}`}
+                    </span>
+                    <ExternalLink className="h-3 w-3 text-slate-300 group-hover:text-slate-400 shrink-0 ml-auto" />
+                  </div>
+                  {domain && (
+                    <span className="text-[11px] text-slate-400 dark:text-slate-500">{domain}</span>
+                  )}
+                  {item.quote && (
+                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed line-clamp-2">
+                      {item.quote}
+                    </p>
+                  )}
+                </div>
+              </a>
+            );
+          })}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -71,7 +167,8 @@ function injectCitationHtml(html: string, citationMap: Map<string, CitationItem>
   });
 }
 
-export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }: ChatMessageProps) {
+export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, onFeedback, onShare, disableRegenerate }: ChatMessageProps) {
+  const [feedbackGiven, setFeedbackGiven] = useState<'up' | 'down' | null>(null);
   const isUser = message.role === 'user';
   const canvasSuggestion = !isUser ? message.metadata?.canvas_suggestion : null;
   const [diffOpen, setDiffOpen] = useState(false);
@@ -79,7 +176,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
   const autoOpenedRef = useRef(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const activityAutoOpenedRef = useRef(false);
-  const showActions = !isUser && (onCopy || onRegenerate);
+  const showActions = !isUser && (onCopy || onRegenerate || onPromoteToAgent);
   const modelLabel = !isUser ? (message.metadata?.model ? String(message.metadata.model) : '') : '';
   const thinkingEnabled = typeof message.metadata?.thinking_enabled === 'boolean'
     ? message.metadata.thinking_enabled
@@ -236,10 +333,8 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
     }
   }, [isUser, filteredActivitySteps.length, citations.length]);
 
-  // Determine if sources should show inline in the message bubble (when Activity panel is closed)
-  const hasActivityContent = filteredActivitySteps.length > 0 || citations.length > 0 || hasThinkingContent;
-  const showActivityPanelNow = (activityOpen || thinkingOpen) && hasActivityContent;
-  const showSourcesInBubble = !showActivityPanelNow && !isUser && citations.length > 0;
+  // Sources inside the Harvey-like Activity panel. Keep in-bubble sources as fallback only.
+  const showSourcesInBubble = !isUser && citations.length > 0 && filteredActivitySteps.length === 0;
 
   const handleApplySuggestion = () => {
     if (!canvasSuggestion?.original || !canvasSuggestion?.replacement) {
@@ -286,6 +381,9 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
     setDiffOpen(false);
   };
 
+  // Only show thinking timer if there was actual thinking content
+  const showThinkingTimer = thinkingEnabled && hasThinkingContent && typeof thinkingSeconds === 'number' && thinkingSeconds > 0;
+
   return (
     <>
       <div
@@ -294,19 +392,12 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
           isUser && 'flex-row-reverse'
         )}
       >
-        {/* Avatar */}
-        <div
-          className={cn(
-            'flex h-10 w-10 items-center justify-center rounded-full border shadow-sm',
-            isUser ? 'bg-gradient-to-br from-emerald-500 to-emerald-600 border-emerald-500 text-white' : 'bg-white border-slate-200 text-slate-600'
-          )}
-        >
-          {isUser ? (
-            <User className="h-5 w-5 text-white" />
-          ) : (
-            <Bot className="h-5 w-5 text-slate-600" />
-          )}
-        </div>
+        {/* Avatar — only for user messages */}
+        {isUser && (
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm">
+            <User className="h-4 w-4" />
+          </div>
+        )}
 
         {/* Message Content */}
         <div className={cn('flex flex-1 flex-col gap-1', isUser && 'items-end')}>
@@ -315,9 +406,6 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
             <ActivityPanel
               steps={filteredActivitySteps as ActivityStep[]}
               citations={citations as Citation[]}
-              thinkingChunks={allThinkingChunks}
-              thinkingText={thinkingText}
-              isThinking={isActivelyThinking}
               startTime={streamTimes.t0}
               endTime={streamTimes.tDone}
               open={activityOpen || thinkingOpen}
@@ -332,11 +420,27 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
             className={cn(
               'max-w-[min(98%,110ch)] rounded-2xl border px-6 py-5 transition-all duration-200',
               isUser
-                ? 'ml-auto bg-gradient-to-br from-slate-100 to-slate-50 text-black border-slate-200/60 shadow-sm'
-                : 'bg-white text-black border-slate-200/80 shadow-[0_2px_8px_-4px_rgba(0,0,0,0.05)] hover:shadow-[0_4px_12px_-6px_rgba(0,0,0,0.08)]'
+                ? 'ml-auto bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 text-black dark:text-slate-100 border-slate-200/60 dark:border-slate-700/60 shadow-sm'
+                : 'bg-white dark:bg-slate-900 text-black dark:text-slate-100 border-slate-200/80 dark:border-slate-700/80 shadow-[0_2px_8px_-4px_rgba(0,0,0,0.05)] hover:shadow-[0_4px_12px_-6px_rgba(0,0,0,0.08)] dark:shadow-[0_2px_8px_-4px_rgba(0,0,0,0.3)]'
             )}
           >
-            <div className="chat-markdown">
+            <div
+              className="chat-markdown"
+              onClick={(e) => {
+                const btn = (e.target as HTMLElement).closest('.code-block-copy');
+                if (!btn) return;
+                const code = btn.getAttribute('data-code') || '';
+                // Decode HTML entities
+                const txt = new DOMParser().parseFromString(code, 'text/html').documentElement.textContent || '';
+                navigator.clipboard.writeText(txt).then(() => {
+                  const svg = btn.querySelector('svg');
+                  if (svg) {
+                    svg.style.color = '#34d399';
+                    setTimeout(() => { svg.style.color = ''; }, 1200);
+                  }
+                });
+              }}
+            >
               {contentParts.map((part) => (
                 part.type === 'mermaid' ? (
                   <div key={part.key} className="my-3">
@@ -347,49 +451,23 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
                 )
               ))}
             </div>
+            {/* Response Tabs: Resposta / Fontes (Perplexity style) */}
             {showSourcesInBubble && (
-              <div className="mt-4 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                <div className="mb-2 font-semibold text-slate-600">Fontes</div>
-                <div className="space-y-2">
-                  {citations.map((item) => (
-                    <div key={`${item.number}-${item.url || item.title || ''}`} className="space-y-1">
-                      <a
-                        href={item.url || '#'}
-                        target="_blank"
-                        rel="noreferrer noopener"
-                        className="inline-flex items-center gap-2 text-slate-700 hover:text-slate-900"
-                      >
-                        <span className="rounded-full border border-slate-300 bg-white px-1.5 py-0.5 text-[10px] font-semibold">
-                          [{item.number}]
-                        </span>
-                        <span className="truncate">
-                          {item.title || item.url || `Fonte ${item.number}`}
-                        </span>
-                      </a>
-                      {item.quote && (
-                        <div className="text-[11px] text-slate-500">
-                          {item.quote.slice(0, 220)}
-                          {item.quote.length > 220 ? '…' : ''}
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <ResponseSourcesTabs citations={citations} />
             )}
           </div>
           <div className={cn('mt-0.5 flex flex-col gap-1', isUser && 'items-end')}>
-            {showTimers && (
+            {/* Only show timers if meaningful */}
+            {(showThinkingTimer || (isStreaming && typeof writingSeconds === 'number')) && (
               <div className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400', isUser && 'justify-end')}>
-                {thinkingEnabled && typeof thinkingSeconds === 'number' && (
+                {showThinkingTimer && (
                   <span className="inline-flex items-center gap-1">
                     {streamTimes.tAnswerStart ? 'Pensou por' : 'Pensando há'} {thinkingSeconds}s
                   </span>
                 )}
-                {typeof writingSeconds === 'number' && (
-                  <span className="inline-flex items-center gap-1 text-emerald-700">
-                    {streamTimes.tDone ? `Escreveu em ${writingSeconds}s` : `Escrevendo (${writingSeconds}s)`}
-                    {!streamTimes.tDone && <LoadingDots />}
+                {isStreaming && typeof writingSeconds === 'number' && (
+                  <span className="inline-flex items-center gap-1 text-emerald-600">
+                    Escrevendo ({writingSeconds}s) <LoadingDots />
                   </span>
                 )}
               </div>
@@ -401,17 +479,17 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
             {!isUser && (modelLabel || showCanvasApply || showCanvasSuggestion) && (
               <div className="flex items-center gap-2 flex-wrap">
                 {modelLabel && (
-                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-2 py-1 text-xs font-semibold text-slate-700">
+                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
                     {modelLabel}
                   </span>
                 )}
                 {showCanvasApply && (
-                  <span className="inline-flex items-center gap-1 rounded bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-700">
+                  <span className="inline-flex items-center gap-1 rounded bg-emerald-50 dark:bg-emerald-900/30 px-2 py-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">
                     Aplica no canvas
                   </span>
                 )}
                 {!showCanvasApply && showCanvasSuggestion && (
-                  <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-700">
+                  <span className="inline-flex items-center gap-1 rounded bg-amber-50 dark:bg-amber-900/30 px-2 py-1 text-[10px] font-semibold text-amber-700 dark:text-amber-400">
                     Sugestão de edição
                   </span>
                 )}
@@ -419,30 +497,103 @@ export function ChatMessage({ message, onCopy, onRegenerate, disableRegenerate }
             )}
           </div>
 
+          {/* Compact Action Icons (Harvey.ai / Gemini style) */}
           {showActions && (
-            <div className="flex items-center gap-2 text-slate-500">
+            <div className="flex items-center gap-0.5 mt-1">
+              {/* Thumbs Up */}
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackGiven('up');
+                  onFeedback?.(message, 'up');
+                }}
+                className={cn(
+                  'p-1.5 rounded-md transition-colors',
+                  feedbackGiven === 'up'
+                    ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30'
+                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                )}
+                title="Boa resposta"
+              >
+                <ThumbsUp className="h-3.5 w-3.5" />
+              </button>
+
+              {/* Thumbs Down */}
+              <button
+                type="button"
+                onClick={() => {
+                  setFeedbackGiven('down');
+                  onFeedback?.(message, 'down');
+                }}
+                className={cn(
+                  'p-1.5 rounded-md transition-colors',
+                  feedbackGiven === 'down'
+                    ? 'text-red-600 bg-red-50 dark:bg-red-900/30'
+                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                )}
+                title="Resposta ruim"
+              >
+                <ThumbsDown className="h-3.5 w-3.5" />
+              </button>
+
+              {/* Divider */}
+              <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1" />
+
+              {/* Copy */}
               {onCopy && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 gap-1 px-2 text-xs text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                <button
+                  type="button"
                   onClick={() => onCopy(message)}
+                  className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  title="Copiar"
                 >
-                  <Copy className="h-3 w-3" />
-                  Copiar
-                </Button>
+                  <Copy className="h-3.5 w-3.5" />
+                </button>
               )}
+
+              {/* Regenerate */}
               {onRegenerate && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="h-6 gap-1 px-2 text-xs text-slate-500 hover:bg-slate-100 hover:text-slate-700"
+                <button
+                  type="button"
                   onClick={() => onRegenerate(message)}
                   disabled={disableRegenerate}
+                  className={cn(
+                    'p-1.5 rounded-md transition-colors',
+                    disableRegenerate
+                      ? 'text-slate-300 cursor-not-allowed'
+                      : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                  )}
+                  title="Regenerar resposta"
                 >
-                  <RotateCcw className="h-3 w-3" />
-                  Regerar
-                </Button>
+                  <RefreshCw className="h-3.5 w-3.5" />
+                </button>
+              )}
+
+              {/* Share */}
+              {onShare && (
+                <button
+                  type="button"
+                  onClick={() => onShare(message)}
+                  className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  title="Compartilhar"
+                >
+                  <Share2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+
+              {/* Promote to Agent */}
+              {onPromoteToAgent && (
+                <>
+                  <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1" />
+                  <button
+                    type="button"
+                    onClick={() => onPromoteToAgent(message)}
+                    className="p-1.5 rounded-md text-indigo-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 transition-colors"
+                    title="Continuar com agente autônomo"
+                  >
+                    <Rocket className="h-3.5 w-3.5" />
+                  </button>
+                </>
               )}
             </div>
           )}

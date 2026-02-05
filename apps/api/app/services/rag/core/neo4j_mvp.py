@@ -78,6 +78,45 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# COMPOUND CITATION MODEL
+# =============================================================================
+
+
+@dataclass
+class CompoundCitation:
+    """
+    Citação jurídica composta com hierarquia completa.
+
+    Representa referências como:
+    - "Lei 8.666/1993, Art. 23, § 1º, inciso II"
+    - "Art. 5º, caput, da Constituição Federal"
+    - "CLT, Art. 477, § 8º"
+    - "CPC, Art. 1.015, parágrafo único"
+    """
+    full_text: str          # "Lei 8.666/1993, Art. 23, § 1º, inciso II"
+    law: Optional[str]      # "Lei 8.666/1993"
+    code: Optional[str]     # "CPC", "CLT", "CF"
+    article: Optional[str]  # "Art. 23"
+    paragraph: Optional[str]  # "§ 1º" ou "parágrafo único"
+    inciso: Optional[str]   # "inciso II"
+    alinea: Optional[str]   # "alínea 'a'"
+    normalized_id: str      # "lei_8666_1993_art_23_p1_inc_ii"
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Converte para dicionário serializável."""
+        return {
+            "full_text": self.full_text,
+            "law": self.law,
+            "code": self.code,
+            "article": self.article,
+            "paragraph": self.paragraph,
+            "inciso": self.inciso,
+            "alinea": self.alinea,
+            "normalized_id": self.normalized_id,
+        }
+
+
+# =============================================================================
 # ENV PARSING (matches app.services.rag.config._env_bool)
 # =============================================================================
 
@@ -490,6 +529,302 @@ class LegalEntityExtractor:
         """
         return {
             "entities": cls.extract(text),
+            "remissions": cls.extract_remissions(text),
+        }
+
+    # =========================================================================
+    # COMPOUND CITATION EXTRACTION
+    # =========================================================================
+
+    # Mapa de códigos brasileiros e suas formas canônicas
+    CODE_MAP: Dict[str, str] = {
+        "cf": "CF",
+        "constituição federal": "CF",
+        "constituição": "CF",
+        "cpc": "CPC",
+        "código de processo civil": "CPC",
+        "cód. proc. civil": "CPC",
+        "cpp": "CPP",
+        "código de processo penal": "CPP",
+        "cc": "CC",
+        "código civil": "CC",
+        "cód. civil": "CC",
+        "cp": "CP",
+        "código penal": "CP",
+        "cód. penal": "CP",
+        "clt": "CLT",
+        "consolidação das leis do trabalho": "CLT",
+        "cdc": "CDC",
+        "código de defesa do consumidor": "CDC",
+        "cód. defesa consumidor": "CDC",
+        "ctb": "CTB",
+        "código de trânsito brasileiro": "CTB",
+        "ctn": "CTN",
+        "código tributário nacional": "CTN",
+        "eca": "ECA",
+        "estatuto da criança e do adolescente": "ECA",
+        "lep": "LEP",
+        "lei de execução penal": "LEP",
+        "lindb": "LINDB",
+        "lei de introdução às normas do direito brasileiro": "LINDB",
+    }
+
+    # Regex para numerais romanos
+    _ROMAN_RE = re.compile(r"^[IVXLCDM]+$")
+
+    # Regex composta que captura citações hierárquicas completas.
+    # Grupo 1: Lei/Decreto/MP/LC etc com número e ano (opcional)
+    # Grupo 2: Código abreviado (CPC, CLT, CF etc) (opcional)
+    # O padrão continua capturando Art, §, inciso, alínea em sequência.
+    COMPOUND_PATTERN = re.compile(
+        r"(?:"
+        # --- Opção A: Lei/Decreto/MP/LC + número ---
+        r"(?P<law_type>Lei|Decreto|MP|LC|Lei Complementar|Decreto-Lei|Portaria|Resolução)"
+        r"\s*n?[oº]?\s*(?P<law_num>[\d.]+)(?:/(?P<law_year>\d{2,4}))?"
+        # --- Opção B: Código abreviado ---
+        r"|(?P<code>CF|CPC|CPP|CC|CP|CLT|CDC|CTB|CTN|ECA|LEP|LINDB"
+        r"|Constituição\s+Federal|Código\s+(?:de\s+)?(?:Processo\s+)?(?:Civil|Penal|Defesa\s+do\s+Consumidor)"
+        r"|Consolidação\s+das\s+Leis\s+do\s+Trabalho)"
+        r")"
+        # --- Separador opcional ---
+        r"(?:\s*,\s*|\s+)"
+        # --- Artigo (obrigatório para compound) ---
+        r"(?:Art\.?|Artigo)\s*(?P<art_num>\d+[\d.]*)[oº°]?"
+        # --- Parágrafo (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:"
+        r"(?P<paragrafo>§§?\s*\d+[oº°]?)"
+        r"|(?P<paragrafo_unico>par[áa]grafo\s+[úu]nico|caput|p\.?\s*[úu]\.?)"
+        r")"
+        r")?"
+        # --- Inciso (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:inciso|inc\.?)\s*(?P<inciso>[IVXLCDM]+|\d+)"
+        r")?"
+        # --- Alínea (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:al[íi]nea|al\.?)\s*['\"]?(?P<alinea>[a-z])['\"]?"
+        r")?",
+        re.IGNORECASE,
+    )
+
+    # Padrão alternativo: Art. X ... da Lei/do Código (referência invertida)
+    COMPOUND_PATTERN_INVERTED = re.compile(
+        r"(?:Art\.?|Artigo)\s*(?P<art_num>\d+[\d.]*)[oº°]?"
+        # --- Parágrafo (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:"
+        r"(?P<paragrafo>§§?\s*\d+[oº°]?)"
+        r"|(?P<paragrafo_unico>par[áa]grafo\s+[úu]nico|caput|p\.?\s*[úu]\.?)"
+        r")"
+        r")?"
+        # --- Inciso (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:inciso|inc\.?)\s*(?P<inciso>[IVXLCDM]+|\d+)"
+        r")?"
+        # --- Alínea (opcional) ---
+        r"(?:"
+        r"\s*,?\s*(?:al[íi]nea|al\.?)\s*['\"]?(?P<alinea>[a-z])['\"]?"
+        r")?"
+        # --- "da/do" + Lei/Código ---
+        r"\s*,?\s*(?:da|do|d[ao]s?)\s+"
+        r"(?:"
+        r"(?P<law_type>Lei|Decreto|MP|LC|Lei Complementar|Decreto-Lei)"
+        r"\s*n?[oº]?\s*(?P<law_num>[\d.]+)(?:/(?P<law_year>\d{2,4}))?"
+        r"|(?P<code>CF|CPC|CPP|CC|CP|CLT|CDC|CTB|CTN|ECA|LEP|LINDB"
+        r"|Constituição\s+Federal|Código\s+(?:de\s+)?(?:Processo\s+)?(?:Civil|Penal|Defesa\s+do\s+Consumidor)"
+        r"|Consolidação\s+das\s+Leis\s+do\s+Trabalho)"
+        r")",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _normalize_roman(cls, value: str) -> str:
+        """Converte numeral romano para minúsculas para normalização."""
+        if value and cls._ROMAN_RE.match(value.upper()):
+            return value.lower()
+        return value.lower()
+
+    @classmethod
+    def _normalize_paragraph(cls, para: Optional[str], para_unico: Optional[str]) -> Optional[str]:
+        """Normaliza o campo parágrafo para exibição."""
+        if para_unico:
+            pu = para_unico.strip().lower()
+            if "caput" in pu:
+                return "caput"
+            return "parágrafo único"
+        if para:
+            # Extrai o número: "§ 1º" -> "§ 1º"
+            return para.strip()
+        return None
+
+    @classmethod
+    def _normalize_paragraph_id(cls, para: Optional[str], para_unico: Optional[str]) -> str:
+        """Normaliza o parágrafo para o ID: § 1º -> p1, parágrafo único -> pu, caput -> caput."""
+        if para_unico:
+            pu = para_unico.strip().lower()
+            if "caput" in pu:
+                return "caput"
+            return "pu"
+        if para:
+            nums = re.findall(r"\d+", para)
+            if nums:
+                return f"p{nums[0]}"
+        return ""
+
+    @classmethod
+    def _normalize_code(cls, raw_code: str) -> str:
+        """Normaliza nome de código para sigla canônica."""
+        key = raw_code.strip().lower()
+        return cls.CODE_MAP.get(key, raw_code.strip().upper())
+
+    @classmethod
+    def _build_normalized_id(
+        cls,
+        law: Optional[str],
+        code: Optional[str],
+        article: Optional[str],
+        para: Optional[str],
+        para_unico: Optional[str],
+        inciso: Optional[str],
+        alinea: Optional[str],
+    ) -> str:
+        """Constrói o normalized_id a partir dos componentes."""
+        parts: List[str] = []
+
+        if code:
+            parts.append(cls._normalize_code(code).lower())
+        elif law:
+            # "Lei 8.666/1993" -> "lei_8666_1993"
+            # Primeiro remove pontos de numeros (8.666 -> 8666)
+            law_clean = law.strip().lower()
+            law_clean = re.sub(r"(\d)\.(\d)", r"\1\2", law_clean)
+            law_clean = re.sub(r"[/\s]+", "_", law_clean)
+            law_clean = re.sub(r"_+", "_", law_clean).strip("_")
+            parts.append(law_clean)
+
+        if article:
+            art_num = re.sub(r"[^0-9.]", "", article)
+            art_num = art_num.replace(".", "")
+            parts.append(f"art_{art_num}")
+
+        p_id = cls._normalize_paragraph_id(para, para_unico)
+        if p_id:
+            parts.append(p_id)
+
+        if inciso:
+            parts.append(f"inc_{cls._normalize_roman(inciso)}")
+
+        if alinea:
+            parts.append(f"al_{alinea.lower()}")
+
+        return "_".join(parts)
+
+    @classmethod
+    def _build_compound_from_match(cls, match: re.Match, text: str) -> Optional[CompoundCitation]:
+        """Constrói CompoundCitation a partir de um match de regex."""
+        groups = match.groupdict()
+
+        art_num = groups.get("art_num")
+        if not art_num:
+            return None
+
+        law_type = groups.get("law_type")
+        law_num = groups.get("law_num")
+        law_year = groups.get("law_year")
+        raw_code = groups.get("code")
+        para = groups.get("paragrafo")
+        para_unico = groups.get("paragrafo_unico")
+        inciso = groups.get("inciso")
+        alinea = groups.get("alinea")
+
+        # Montar campo law
+        law: Optional[str] = None
+        if law_type and law_num:
+            law = f"{law_type} {law_num}"
+            if law_year:
+                # Normaliza ano de 2 dígitos
+                if len(law_year) == 2:
+                    law_year = f"19{law_year}" if int(law_year) > 50 else f"20{law_year}"
+                law += f"/{law_year}"
+
+        code: Optional[str] = None
+        if raw_code:
+            code = cls._normalize_code(raw_code)
+
+        article = f"Art. {art_num}"
+        paragraph = cls._normalize_paragraph(para, para_unico)
+        inciso_str = f"inciso {inciso.upper()}" if inciso else None
+        alinea_str = f"alínea '{alinea}'" if alinea else None
+
+        normalized_id = cls._build_normalized_id(
+            law=law, code=code, article=art_num,
+            para=para, para_unico=para_unico,
+            inciso=inciso, alinea=alinea,
+        )
+
+        full_text = match.group(0).strip()
+
+        return CompoundCitation(
+            full_text=full_text,
+            law=law,
+            code=code,
+            article=article,
+            paragraph=paragraph,
+            inciso=inciso_str,
+            alinea=alinea_str,
+            normalized_id=normalized_id,
+        )
+
+    @classmethod
+    def extract_compound_citations(cls, text: str) -> List[CompoundCitation]:
+        """
+        Extrai citações jurídicas compostas do texto.
+
+        Captura referências hierárquicas completas como:
+        - "Lei 8.666/1993, Art. 23, § 1º, inciso II"
+        - "Art. 5º, caput, da Constituição Federal"
+        - "CLT, Art. 477, § 8º"
+        - "CPC, Art. 1.015, parágrafo único"
+
+        Retorna lista de CompoundCitation com todos os componentes estruturados.
+        Mantém compatibilidade com extract() simples — este método é complementar.
+        """
+        if not text or not text.strip():
+            return []
+
+        citations: List[CompoundCitation] = []
+        seen_ids: Set[str] = set()
+
+        # Padrão direto: Lei/Código + Art + §/inciso/alínea
+        for match in cls.COMPOUND_PATTERN.finditer(text):
+            citation = cls._build_compound_from_match(match, text)
+            if citation and citation.normalized_id not in seen_ids:
+                seen_ids.add(citation.normalized_id)
+                citations.append(citation)
+
+        # Padrão invertido: Art + §/inciso/alínea + da/do Lei/Código
+        for match in cls.COMPOUND_PATTERN_INVERTED.finditer(text):
+            citation = cls._build_compound_from_match(match, text)
+            if citation and citation.normalized_id not in seen_ids:
+                seen_ids.add(citation.normalized_id)
+                citations.append(citation)
+
+        return citations
+
+    @classmethod
+    def extract_all(cls, text: str) -> Dict[str, Any]:
+        """
+        Extrai entidades simples, citações compostas e remissões do texto.
+
+        Método unificado que retorna todos os tipos de extração.
+
+        Returns:
+            Dict com 'entities', 'compound_citations' e 'remissions'.
+        """
+        return {
+            "entities": cls.extract(text),
+            "compound_citations": cls.extract_compound_citations(text),
             "remissions": cls.extract_remissions(text),
         }
 
@@ -1033,12 +1368,30 @@ class Neo4jMVPService:
     # Connection Management
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _port_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
+        """Quick TCP check to see if host:port is reachable."""
+        import socket
+        try:
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except (OSError, socket.timeout):
+            return False
+
     @property
     def driver(self):
         """Lazy driver initialization."""
         if self._driver is None:
             with self._driver_lock:
                 if self._driver is None:
+                    # Quick port check before trying the full driver
+                    import re as _re
+                    _m = _re.search(r'://([^:/]+):?(\d+)?', self.config.uri)
+                    _host = _m.group(1) if _m else 'localhost'
+                    _port = int(_m.group(2)) if _m and _m.group(2) else 7687
+                    if not self._port_reachable(_host, _port, timeout=1.0):
+                        raise ConnectionError(f"Neo4j port {_host}:{_port} not reachable")
+
                     try:
                         from neo4j import GraphDatabase
                     except ImportError:
@@ -1049,6 +1402,7 @@ class Neo4jMVPService:
                         auth=(self.config.user, self.config.password),
                         max_connection_pool_size=self.config.max_connection_pool_size,
                         connection_timeout=self.config.connection_timeout,
+                        max_transaction_retry_time=2,
                     )
                     logger.info(f"Neo4j connected: {self.config.uri}")
 
@@ -1888,12 +2242,21 @@ class Neo4jMVPService:
 
         return {"connected": False}
 
-    def health_check(self) -> bool:
-        """Check if Neo4j is healthy."""
+    def health_check(self, timeout: float = 5.0) -> bool:
+        """Check if Neo4j is healthy (with timeout guard)."""
+        import concurrent.futures
+        def _check():
+            try:
+                result = self._execute_read("RETURN 1 AS ok")
+                return result[0].get("ok") == 1
+            except Exception:
+                return False
         try:
-            result = self._execute_read("RETURN 1 AS ok")
-            return result[0].get("ok") == 1
-        except Exception:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_check)
+                return future.result(timeout=timeout)
+        except (concurrent.futures.TimeoutError, Exception):
+            logger.warning("Neo4j health_check timed out or failed")
             return False
 
 
@@ -2043,6 +2406,7 @@ __all__ = [
     # Types
     "EntityType",
     "Scope",
+    "CompoundCitation",
     # Extractor
     "LegalEntityExtractor",
     # Service

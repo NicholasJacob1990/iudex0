@@ -21,6 +21,7 @@ export { LibrarySidebar } from './library-sidebar';
 export { LibraryTable } from './library-table';
 export { ManualPrecedentDialog } from './manual-precedent-dialog';
 export { MinuteHistoryGrid } from './minute-history';
+export { default as MinutaSettingsDrawer } from './minuta-settings-drawer';
 export { ModelsBoard } from './models-board';
 export { MultiAgentProgress } from './multi-agent-progress';
 export { OutlineApprovalModal } from './outline-approval-modal';

@@ -8,7 +8,7 @@ import type { CustomPrompt } from '@/components/dashboard/prompt-customization';
 import { cn } from '@/lib/utils';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
-import { Zap, Scale, Box } from 'lucide-react';
+import { Sparkles, Columns2, Box, Bot, Layers, Settings2 } from 'lucide-react';
 
 type AnyPrompt = PredefinedPrompt | CustomPrompt;
 
@@ -29,7 +29,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Mudar para GPT-5.2',
         description: 'Alterna o modelo ativo para GPT-5.2',
         action: 'set-model:gpt-5.2',
-        icon: Zap
+        icon: Bot
     },
     {
         id: 'cmd-claude',
@@ -37,7 +37,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Mudar para Claude 3.5 Sonnet',
         description: 'Alterna o modelo ativo para Claude 3.5 Sonnet',
         action: 'set-model:claude-3-5-sonnet-20240620',
-        icon: Zap
+        icon: Bot
     },
     {
         id: 'cmd-gemini',
@@ -45,7 +45,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Mudar para Gemini Pro',
         description: 'Alterna o modelo ativo para Gemini 1.5 Pro',
         action: 'set-model:gemini-1.5-pro-latest',
-        icon: Zap
+        icon: Bot
     },
     {
         id: 'cmd-multi',
@@ -53,7 +53,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Ativar Modo Multi-Modelo',
         description: 'Ativa chat paralelo com 3 modelos',
         action: 'set-mode:multi-model',
-        icon: Scale
+        icon: Columns2
     },
     {
         id: 'cmd-standard',
@@ -96,7 +96,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Ativar modelos de peça (RAG)',
         description: 'Insere /templates on',
         action: 'insert-text:/templates on',
-        icon: Zap,
+        icon: Layers,
         tooltip: 'Habilita o RAG de pecas_modelo para esta conversa.'
     },
     {
@@ -114,7 +114,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Definir Template ID',
         description: 'Insere /template_id <id>',
         action: 'insert-text:/template_id ',
-        icon: Zap,
+        icon: Settings2,
         tooltip: 'Molde da biblioteca com marcadores (minuta/CONTENT). Aceita @[Nome](id:lib).'
     },
     {
@@ -123,7 +123,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Definir Documento base (RAG)',
         description: 'Insere /template_doc <id>',
         action: 'insert-text:/template_doc ',
-        icon: Zap,
+        icon: Settings2,
         tooltip: 'Usa um documento real como referência (não aplica marcadores). Aceita @[Nome](id:doc).'
     },
     {
@@ -132,7 +132,7 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         name: 'Filtrar modelos do RAG',
         description: 'Insere /template_filters tipo= area= rito= clause=off',
         action: 'insert-text:/template_filters tipo= area= rito= clause=off',
-        icon: Zap,
+        icon: Settings2,
         tooltip: 'Restringe modelos por tipo, área e rito. clause=on usa só clause bank.'
     },
     {
@@ -261,7 +261,7 @@ export function SlashCommandMenu({ onSelect, onClose, position }: SlashCommandMe
                                         <div className="flex items-start gap-3 flex-1 overflow-hidden">
                                             <div className="mt-0.5 flex h-8 w-8 items-center justify-center rounded-md bg-primary/10 text-primary flex-shrink-0">
                                                 {item.category === 'Comandos do Sistema' ? (
-                                                    item.icon ? <item.icon className="h-4 w-4" /> : <Zap className="h-4 w-4" />
+                                                    item.icon ? <item.icon className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />
                                                 ) : ('isCustom' in item && item.isCustom) ? (
                                                     <Star className="h-4 w-4 fill-current" />
                                                 ) : (

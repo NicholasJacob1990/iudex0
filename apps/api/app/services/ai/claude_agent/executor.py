@@ -52,6 +52,20 @@ except ImportError:
 
 from loguru import logger
 
+# Claude Agent SDK (optional — dual mode)
+try:
+    from claude_agent_sdk import query, ClaudeAgentOptions, AssistantMessage, ResultMessage, SystemMessage
+    from .sdk_tools import (
+        create_iudex_mcp_server,
+        set_iudex_tool_context,
+        CLAUDE_SDK_TOOLS_AVAILABLE,
+    )
+    from .template_loader import load_agent_templates
+    CLAUDE_SDK_AVAILABLE = True
+except ImportError:
+    CLAUDE_SDK_AVAILABLE = False
+    CLAUDE_SDK_TOOLS_AVAILABLE = False
+
 # Internal imports
 from app.services.job_manager import job_manager
 from app.services.ai.tool_gateway.adapters import ClaudeMCPAdapter
@@ -71,6 +85,10 @@ from app.services.ai.shared.sse_protocol import (
     thinking_event,
     done_event,
     error_event,
+    # Code Artifacts
+    artifact_start_event,
+    artifact_token_event,
+    artifact_done_event,
 )
 
 # =============================================================================
@@ -79,17 +97,32 @@ from app.services.ai.shared.sse_protocol import (
 
 # Environment variables
 CLAUDE_AGENT_ENABLED = os.getenv("CLAUDE_AGENT_ENABLED", "true").lower() == "true"
-CLAUDE_AGENT_DEFAULT_MODEL = os.getenv("CLAUDE_AGENT_DEFAULT_MODEL", "claude-sonnet-4-20250514")
+CLAUDE_AGENT_DEFAULT_MODEL = os.getenv("CLAUDE_AGENT_DEFAULT_MODEL", "claude-sonnet-4-5")
 CLAUDE_AGENT_MAX_ITERATIONS = int(os.getenv("CLAUDE_AGENT_MAX_ITERATIONS", "50"))
 CLAUDE_AGENT_PERMISSION_MODE = os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "ask")
 CONTEXT_COMPACTION_THRESHOLD = float(os.getenv("CONTEXT_COMPACTION_THRESHOLD", "0.7"))
 
 # Model context windows
 MODEL_CONTEXT_WINDOWS = {
+    # Claude 4.5 (current)
+    "claude-sonnet-4-5-20250929": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-opus-4-5-20251101": 200_000,
+    "claude-opus-4-5": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+    "claude-haiku-4-5": 200_000,
+    # Claude 4.x (legacy)
+    "claude-opus-4-1-20250805": 200_000,
+    "claude-opus-4-1": 200_000,
     "claude-sonnet-4-20250514": 200_000,
+    "claude-sonnet-4-0": 200_000,
     "claude-opus-4-20250514": 200_000,
+    "claude-opus-4-0": 200_000,
+    # Claude 3.x (deprecated)
+    "claude-3-7-sonnet-20250219": 200_000,
     "claude-3-5-sonnet-20241022": 200_000,
     "claude-3-5-haiku-20241022": 200_000,
+    "claude-3-haiku-20240307": 200_000,
     "claude-3-opus-20240229": 200_000,
 }
 
@@ -161,6 +194,9 @@ class AgentConfig:
     system_prompt_prefix: str = ""
     enable_checkpoints: bool = True
     checkpoint_interval: int = 5
+    use_sdk: bool = True  # Use Claude Agent SDK when available (fallback to raw API)
+    enable_code_execution: bool = True  # Anthropic code execution server tool (beta)
+    code_execution_effort: Optional[str] = None  # "low", "medium", "high" — only Opus 4.5 (requires effort-2025-11-24 beta)
 
     def __post_init__(self):
         # Merge default permissions with custom ones
@@ -217,6 +253,7 @@ class AgentState:
     pending_approvals: List[PendingToolApproval] = field(default_factory=list)
     checkpoints: List[str] = field(default_factory=list)
     last_response: Optional[Any] = None
+    container_id: Optional[str] = None  # Anthropic code execution container reuse
     final_output: str = ""
     error: Optional[str] = None
     start_time: Optional[str] = None
@@ -245,6 +282,7 @@ class AgentState:
             "error": self.error,
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "container_id": self.container_id,
             "metadata": self.metadata,
         }
 
@@ -305,6 +343,9 @@ class ClaudeAgentExecutor:
         # Tool Gateway adapter
         self._mcp_adapter: Optional[ClaudeMCPAdapter] = None
         self._execution_context: Optional[Dict[str, Any]] = None
+
+        # Claude Agent SDK session (for resume across turns)
+        self._sdk_session_id: Optional[str] = None
 
     def _init_clients(self) -> Tuple[Optional[Any], Optional[Any]]:
         """Initialize Anthropic sync and async clients."""
@@ -566,6 +607,7 @@ class ClaudeAgentExecutor:
         self,
         messages: List[Dict[str, Any]],
         system_prompt: str,
+        container_id: Optional[str] = None,
     ) -> Any:
         """
         Call Claude API with messages and tools.
@@ -573,6 +615,7 @@ class ClaudeAgentExecutor:
         Args:
             messages: Conversation history
             system_prompt: System prompt
+            container_id: Optional container ID for code execution reuse
 
         Returns:
             Claude Message response
@@ -588,9 +631,28 @@ class ClaudeAgentExecutor:
             "messages": messages,
         }
 
-        # Add tools if registered
-        if self._tools:
-            kwargs["tools"] = self._tools
+        # Build tools list
+        tools = list(self._tools) if self._tools else []
+
+        # Add code execution server tool if enabled (only compatible models)
+        _ce_compatible = any(
+            self.config.model.startswith(p)
+            for p in (
+                "claude-sonnet-4",   # Sonnet 4, 4.5
+                "claude-opus-4",     # Opus 4, 4.1, 4.5
+                "claude-haiku-4",    # Haiku 4.5
+                "claude-3-7-sonnet", # 3.7 (deprecated)
+                "claude-3-5-haiku",  # 3.5 Haiku (deprecated)
+            )
+        )
+        if self.config.enable_code_execution and _ce_compatible:
+            tools.append({
+                "type": "code_execution_20250825",
+                "name": "code_execution",
+            })
+
+        if tools:
+            kwargs["tools"] = tools
 
         # Add extended thinking if enabled
         if self.config.enable_thinking:
@@ -606,9 +668,27 @@ class ClaudeAgentExecutor:
             # Temperature not compatible with extended thinking
             kwargs["temperature"] = self.config.temperature
 
+        # Use beta API when code execution is enabled and model is compatible
+        use_beta = self.config.enable_code_execution and _ce_compatible
+
+        # Pass container_id for code execution state reuse
+        if use_beta and container_id:
+            kwargs["container"] = container_id
+
+        # Effort parameter (only Opus 4.5, requires separate beta header)
+        _effort_betas: List[str] = []
+        if self.config.code_execution_effort and self.config.code_execution_effort in ("low", "medium", "high"):
+            if self.config.model.startswith("claude-opus-4"):
+                kwargs["output_config"] = {"effort": self.config.code_execution_effort}
+                _effort_betas.append("effort-2025-11-24")
+
         start_time = time.time()
         try:
-            response = await self.async_client.messages.create(**kwargs)
+            if use_beta:
+                kwargs["betas"] = ["code-execution-2025-08-25"] + _effort_betas
+                response = await self.async_client.beta.messages.create(**kwargs)
+            else:
+                response = await self.async_client.messages.create(**kwargs)
             latency_ms = int((time.time() - start_time) * 1000)
 
             # Record API call for billing
@@ -644,31 +724,87 @@ class ClaudeAgentExecutor:
             )
             raise
 
-    def _extract_response_content(self, response: Any) -> Tuple[str, List[Dict[str, Any]]]:
+    def _extract_response_content(self, response: Any) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
-        Extract text and tool_use blocks from response.
+        Extract text, tool_use blocks, and server tool events from response.
 
         Args:
             response: Claude Message response
 
         Returns:
-            Tuple of (text_content, tool_use_blocks)
+            Tuple of (text_content, tool_use_blocks, server_tool_events)
         """
         text_parts = []
         tool_uses = []
+        server_tool_events = []
 
         for block in response.content:
-            # Detect tool_use first (MagicMock reports any attribute as present).
-            if hasattr(block, "type") and block.type == "tool_use":
+            block_type = getattr(block, "type", None)
+
+            # Standard tool_use (client-side tools)
+            if block_type == "tool_use":
                 tool_uses.append({
                     "id": block.id,
                     "name": block.name,
                     "input": block.input,
                 })
+
+            # Server tool use (code execution initiated by Claude)
+            elif block_type == "server_tool_use":
+                server_tool_events.append({
+                    "event_type": "code_execution",
+                    "id": block.id,
+                    "name": getattr(block, "name", "code_execution"),
+                    "input": getattr(block, "input", {}),
+                })
+
+            # Bash code execution result
+            elif block_type == "bash_code_execution_tool_result":
+                content = getattr(block, "content", None)
+                if content:
+                    content_type = getattr(content, "type", "")
+                    if content_type == "bash_code_execution_result":
+                        server_tool_events.append({
+                            "event_type": "code_execution_result",
+                            "tool_use_id": getattr(block, "tool_use_id", ""),
+                            "stdout": getattr(content, "stdout", ""),
+                            "stderr": getattr(content, "stderr", ""),
+                            "return_code": getattr(content, "return_code", -1),
+                            "files": [
+                                {"file_id": f.file_id}
+                                for f in getattr(content, "content", [])
+                                if hasattr(f, "file_id")
+                            ],
+                        })
+
+            # Text editor code execution result
+            elif block_type == "text_editor_code_execution_tool_result":
+                content = getattr(block, "content", None)
+                if content:
+                    server_tool_events.append({
+                        "event_type": "code_execution_result",
+                        "tool_use_id": getattr(block, "tool_use_id", ""),
+                        "stdout": getattr(content, "content", ""),
+                        "stderr": "",
+                        "return_code": 0,
+                    })
+
+            # Code execution tool result (legacy format)
+            elif block_type == "code_execution_tool_result":
+                content = getattr(block, "content", None)
+                if content:
+                    server_tool_events.append({
+                        "event_type": "code_execution_result",
+                        "tool_use_id": getattr(block, "tool_use_id", ""),
+                        "stdout": getattr(content, "stdout", ""),
+                        "stderr": getattr(content, "stderr", ""),
+                        "return_code": getattr(content, "return_code", -1),
+                    })
+
             elif hasattr(block, "text"):
                 text_parts.append(block.text)
 
-        return "\n".join(text_parts), tool_uses
+        return "\n".join(text_parts), tool_uses, server_tool_events
 
     async def _process_tool_use(
         self,
@@ -826,7 +962,229 @@ class ClaudeAgentExecutor:
         logger.info(f"Checkpoint created: {checkpoint_id} at iteration {state.iteration}")
         return checkpoint_id
 
+    # =========================================================================
+    # CLAUDE AGENT SDK — DUAL MODE
+    # =========================================================================
+
+    async def _run_with_sdk(
+        self,
+        prompt: str,
+        system_prompt: str,
+        context: Optional[str],
+        job_id: str,
+        user_id: Optional[str] = None,
+        case_id: Optional[str] = None,
+        db: Optional[Any] = None,
+    ) -> AsyncGenerator[SSEEvent, None]:
+        """
+        Run using the Claude Agent SDK with pre-configured MCP tools.
+
+        Falls back to _run_with_raw_api if SDK is not available or fails.
+
+        Args:
+            prompt: User prompt
+            system_prompt: System prompt for Claude
+            context: Additional context
+            job_id: Job ID for SSE events
+            user_id: User ID for template loading and data scoping
+            db: Async database session for template loading
+        """
+        # Build MCP servers
+        mcp_servers: Dict[str, Any] = {}
+
+        # In-process MCP server with Iudex tools
+        iudex_server = create_iudex_mcp_server()
+        if iudex_server:
+            mcp_servers["iudex-legal"] = iudex_server
+
+        # Inject per-run context for SDK tools (tenant/user/case).
+        # Uses ContextVar in sdk_tools, so it's safe under concurrency.
+        try:
+            tenant_id = user_id or "default"
+            if user_id and db:
+                try:
+                    from sqlalchemy import select
+                    from app.models.user import User
+
+                    res = await db.execute(
+                        select(User.organization_id).where(User.id == user_id)
+                    )
+                    org_id = res.scalar_one_or_none()
+                    if org_id:
+                        tenant_id = str(org_id)
+                except Exception as e:
+                    logger.debug(f"[{job_id}] tenant_id resolve failed: {e}")
+
+            set_iudex_tool_context(
+                {
+                    "user_id": user_id or "default",
+                    "tenant_id": tenant_id,
+                    "case_id": case_id,
+                    "job_id": job_id,
+                }
+            )
+        except Exception as e:
+            logger.debug(f"[{job_id}] SDK tool context injection failed: {e}")
+
+        # Load user's .md agent templates
+        user_templates = ""
+        if user_id and db:
+            try:
+                user_templates = await load_agent_templates(user_id, db)
+            except Exception as e:
+                logger.warning(f"Failed to load agent templates: {e}")
+
+        # Build full system prompt
+        full_system = self._build_system_prompt(system_prompt, context)
+        if user_templates:
+            full_system = f"{full_system}\n\n# INSTRUÇÕES DO USUÁRIO (Templates)\n\n{user_templates}"
+
+        # Build SDK options
+        options = ClaudeAgentOptions(
+            model=self.config.model,
+            system_prompt=full_system,
+            mcp_servers=mcp_servers if mcp_servers else None,
+            allowed_tools=["mcp__iudex-legal__*"] if mcp_servers else None,
+            permission_mode="default",
+            max_turns=self.config.max_iterations,
+        )
+
+        # Resume session if available
+        if self._sdk_session_id:
+            options.resume = self._sdk_session_id
+
+        # Emit start event
+        yield create_sse_event(
+            SSEEventType.AGENT_START,
+            {
+                "job_id": job_id,
+                "model": self.config.model,
+                "max_iterations": self.config.max_iterations,
+                "sdk_mode": True,
+                "tools_count": 7 if mcp_servers else 0,
+            },
+            job_id=job_id,
+            phase="agent",
+        )
+
+        logger.info(f"[{job_id}] Using Claude Agent SDK (model={self.config.model})")
+
+        try:
+            async for message in query(prompt=prompt, options=options):
+                if isinstance(message, SystemMessage):
+                    subtype = getattr(message, "subtype", None)
+                    if subtype == "init":
+                        data = getattr(message, "data", {})
+                        self._sdk_session_id = data.get("session_id")
+                        logger.debug(f"[{job_id}] SDK session: {self._sdk_session_id}")
+
+                elif isinstance(message, AssistantMessage):
+                    for block in message.content:
+                        if hasattr(block, "text") and block.text:
+                            yield token_event(job_id=job_id, token=block.text)
+                        elif hasattr(block, "name"):
+                            # Tool use block
+                            yield tool_call_event(
+                                job_id=job_id,
+                                tool_name=block.name,
+                                tool_input=getattr(block, "input", {}),
+                                tool_id=getattr(block, "id", str(uuid.uuid4())),
+                                permission_mode=ToolApprovalMode.ALLOW,
+                            )
+
+                elif isinstance(message, ResultMessage):
+                    result_text = ""
+                    if hasattr(message, "content"):
+                        for block in message.content:
+                            if hasattr(block, "text"):
+                                result_text += block.text
+                    elif hasattr(message, "result"):
+                        result_text = str(message.result)
+
+                    yield done_event(
+                        job_id=job_id,
+                        final_text=result_text,
+                        metadata={
+                            "sdk_mode": True,
+                            "session_id": self._sdk_session_id,
+                        },
+                    )
+                    return
+
+            # Stream ended without ResultMessage
+            yield done_event(
+                job_id=job_id,
+                metadata={"sdk_mode": True, "stream_ended": True},
+            )
+
+        except Exception as e:
+            logger.exception(f"[{job_id}] Claude SDK execution error: {e}")
+            raise  # Let the dispatcher handle fallback
+
+    # =========================================================================
+    # RAW API MODE (FALLBACK)
+    # =========================================================================
+
     async def run(
+        self,
+        prompt: str,
+        system_prompt: str = "",
+        context: Optional[str] = None,
+        job_id: Optional[str] = None,
+        initial_messages: Optional[List[Dict[str, Any]]] = None,
+        user_id: Optional[str] = None,
+        case_id: Optional[str] = None,
+        db: Optional[Any] = None,
+    ) -> AsyncGenerator[SSEEvent, None]:
+        """
+        Run the agent loop — dispatcher for SDK vs raw API mode.
+
+        When Claude Agent SDK is available and config.use_sdk is True,
+        uses the SDK with pre-configured MCP tools. Falls back to the
+        raw Anthropic API loop on failure or when SDK is unavailable.
+
+        Args:
+            prompt: User prompt
+            system_prompt: System prompt for Claude
+            context: Additional context (RAG results, case bundle, etc.)
+            job_id: Job ID for SSE events (auto-generated if not provided)
+            initial_messages: Previous conversation history (optional)
+            user_id: User ID for template loading (SDK mode)
+            db: Async database session (SDK mode)
+
+        Yields:
+            SSE events for each action in the agent loop
+        """
+        job_id = job_id or str(uuid.uuid4())
+
+        # Try SDK mode first
+        if CLAUDE_SDK_AVAILABLE and self.config.use_sdk:
+            try:
+                async for event in self._run_with_sdk(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    context=context,
+                    job_id=job_id,
+                    user_id=user_id,
+                    case_id=case_id,
+                    db=db,
+                ):
+                    yield event
+                return
+            except Exception as exc:
+                logger.warning(f"[{job_id}] Claude SDK failed, falling back to raw API: {exc}")
+
+        # Fallback: raw Anthropic API loop
+        async for event in self._run_with_raw_api(
+            prompt=prompt,
+            system_prompt=system_prompt,
+            context=context,
+            job_id=job_id,
+            initial_messages=initial_messages,
+        ):
+            yield event
+
+    async def _run_with_raw_api(
         self,
         prompt: str,
         system_prompt: str = "",
@@ -835,7 +1193,10 @@ class ClaudeAgentExecutor:
         initial_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> AsyncGenerator[SSEEvent, None]:
         """
-        Run the agent loop.
+        Run the agent loop using the raw Anthropic API.
+
+        This is the original implementation, now used as fallback when
+        the Claude Agent SDK is unavailable or fails.
 
         Args:
             prompt: User prompt
@@ -911,6 +1272,7 @@ class ClaudeAgentExecutor:
                     response = await self._call_claude(
                         state.messages,
                         full_system_prompt,
+                        container_id=state.container_id,
                     )
                 except Exception as e:
                     state.status = AgentStatus.ERROR
@@ -928,6 +1290,11 @@ class ClaudeAgentExecutor:
                 state.total_output_tokens += response.usage.output_tokens
                 state.last_response = response
 
+                # Extract container_id for code execution reuse
+                _container = getattr(response, "container", None)
+                if _container and hasattr(_container, "id"):
+                    state.container_id = _container.id
+
                 # Check context usage
                 context_usage = state.get_context_usage(self.config.context_window)
                 if context_usage >= self.config.compaction_threshold:
@@ -939,11 +1306,19 @@ class ClaudeAgentExecutor:
                     )
 
                 # Extract content
-                text_content, tool_uses = self._extract_response_content(response)
+                text_content, tool_uses, server_tool_events = self._extract_response_content(response)
 
                 # Emit text content as tokens
                 if text_content:
                     yield token_event(job_id=job_id, token=text_content)
+
+                # Emit server tool events (code execution)
+                for ste in server_tool_events:
+                    yield create_sse_event(
+                        SSEEventType.CODE_EXECUTION if ste["event_type"] == "code_execution" else SSEEventType.CODE_EXECUTION_RESULT,
+                        ste,
+                        job_id=job_id,
+                    )
 
                 # Add assistant message to history
                 state.messages.append({
@@ -968,6 +1343,12 @@ class ClaudeAgentExecutor:
                         }
                     )
                     return
+
+                # Handle pause_turn (code execution in progress — continue the turn)
+                if response.stop_reason == "pause_turn":
+                    # The API paused a long-running code execution turn.
+                    # Re-send the assistant response as-is to let Claude continue.
+                    continue
 
                 # Process tool uses
                 if tool_uses:
@@ -1192,16 +1573,30 @@ class ClaudeAgentExecutor:
                 response = await self._call_claude(
                     state.messages,
                     full_system_prompt,
+                    container_id=state.container_id,
                 )
 
                 state.total_input_tokens += response.usage.input_tokens
                 state.total_output_tokens += response.usage.output_tokens
                 state.last_response = response
 
-                text_content, tool_uses = self._extract_response_content(response)
+                # Extract container_id for code execution reuse
+                _container = getattr(response, "container", None)
+                if _container and hasattr(_container, "id"):
+                    state.container_id = _container.id
+
+                text_content, tool_uses, server_tool_events = self._extract_response_content(response)
 
                 if text_content:
                     yield token_event(job_id=job_id, token=text_content)
+
+                # Emit server tool events (code execution)
+                for ste in server_tool_events:
+                    yield create_sse_event(
+                        SSEEventType.CODE_EXECUTION if ste["event_type"] == "code_execution" else SSEEventType.CODE_EXECUTION_RESULT,
+                        ste,
+                        job_id=job_id,
+                    )
 
                 state.messages.append({
                     "role": "assistant",

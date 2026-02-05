@@ -650,6 +650,114 @@ Use para:
 
 
 # =============================================================================
+# GRAPH ASK TOOL — Consultas tipadas ao knowledge graph
+# =============================================================================
+
+ASK_GRAPH_TOOL = UnifiedTool(
+    name="ask_graph",
+    description="""Consulta o grafo de conhecimento jurídico usando operações tipadas.
+
+Use para descobrir conexões entre entidades jurídicas (leis, artigos, súmulas,
+teses, conceitos), encontrar caminhos semânticos, ou buscar co-ocorrências.
+
+**Operações disponíveis:**
+
+1. **path** - Encontra caminho entre duas entidades
+   - params: {source_id, target_id, max_hops?}
+   - Ex: "Qual a conexão entre Art. 5º CF e Súmula 473 STF?"
+
+2. **neighbors** - Retorna vizinhos semânticos de uma entidade
+   - params: {entity_id, limit?}
+   - Ex: "Quais entidades estão relacionadas à Lei 8.666?"
+
+3. **cooccurrence** - Encontra co-ocorrências entre duas entidades
+   - params: {entity1_id, entity2_id}
+   - Ex: "Quantas vezes Lei 8.666 e licitação aparecem juntas?"
+
+4. **search** - Busca entidades por nome
+   - params: {query, entity_type?, limit?}
+   - Ex: "Buscar súmulas sobre terceirização"
+
+5. **count** - Conta entidades com filtros
+   - params: {entity_type?, query?}
+
+**Tipos de entidade válidos:**
+lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
+
+**IMPORTANTE:** Esta tool NÃO aceita Cypher arbitrário. Use as operações acima.""",
+    category=ToolCategory.SEARCH,
+    risk_level=ToolRiskLevel.LOW,
+    requires_context=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": ["path", "neighbors", "cooccurrence", "search", "count"],
+                "description": "Operação a executar no grafo"
+            },
+            "params": {
+                "type": "object",
+                "description": "Parâmetros específicos da operação",
+                "properties": {
+                    "source_id": {
+                        "type": "string",
+                        "description": "Entity ID de origem (para path)"
+                    },
+                    "target_id": {
+                        "type": "string",
+                        "description": "Entity ID de destino (para path)"
+                    },
+                    "entity_id": {
+                        "type": "string",
+                        "description": "Entity ID (para neighbors)"
+                    },
+                    "entity1_id": {
+                        "type": "string",
+                        "description": "Primeiro entity ID (para cooccurrence)"
+                    },
+                    "entity2_id": {
+                        "type": "string",
+                        "description": "Segundo entity ID (para cooccurrence)"
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Termo de busca (para search)"
+                    },
+                    "entity_type": {
+                        "type": "string",
+                        "enum": ["lei", "artigo", "sumula", "tema", "tribunal", "tese", "conceito", "principio", "instituto"],
+                        "description": "Filtrar por tipo de entidade"
+                    },
+                    "max_hops": {
+                        "type": "integer",
+                        "default": 4,
+                        "description": "Máximo de hops no caminho (1-6)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "description": "Número máximo de resultados"
+                    }
+                }
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["global", "private", "group", "local"],
+                "description": "Escopo de acesso"
+            },
+            "include_global": {
+                "type": "boolean",
+                "default": True,
+                "description": "Se true, permite considerar conteúdo do corpus global (além do tenant)."
+            }
+        },
+        "required": ["operation"]
+    }
+)
+
+
+# =============================================================================
 # MCP INTEGRATION TOOLS
 # =============================================================================
 
@@ -733,6 +841,8 @@ ALL_UNIFIED_TOOLS: List[UnifiedTool] = [
     VERIFY_CITATION_TOOL,
     SEARCH_RAG_TOOL,
     CREATE_SECTION_TOOL,
+    # Graph
+    ASK_GRAPH_TOOL,
     # MCP
     MCP_SEARCH_TOOL,
     MCP_CALL_TOOL,

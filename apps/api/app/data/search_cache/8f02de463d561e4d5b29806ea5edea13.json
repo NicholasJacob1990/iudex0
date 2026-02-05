@@ -1,18 +1,48 @@
 {
   "success": true,
   "query": "oi resumo",
-  "total": 4,
+  "total": 10,
   "results": [
     {
-      "title": "Resumo da última conta - Oi",
-      "url": "https://www.oi.com.br/minha-oi/resumo-ultima-conta/",
-      "snippet": "Consulte oresumoda sua última conta daOi",
+      "title": "Falência da Oi: entenda como ficam clientes, tráfego aéreo e ... - G1",
+      "url": "https://g1.globo.com/economia/negocios/noticia/2025/11/11/falencia-da-oi-entenda.ghtml",
+      "snippet": "Com dívida de R$ 1,7 bilhão, aOiteve a falência decretada pela Justiça do Rio nesta segunda (10) por descumprir obrigações do plano de recuperação judicial.",
       "source": "duckduckgo"
     },
     {
-      "title": "De fracasso em fracasso: a inevitável agonia da Oi, por Marcos Dantas",
-      "url": "https://jornalggn.com.br/artigos/de-fracasso-em-fracasso-a-inevitavel-agonia-da-oi-por-marcos-dantas/",
-      "snippet": "Resumoda notícia Em 1998, artigo já previa inviabilidade econômica da Tele Centro-Sul e Norte-Leste, hojeOi, diante da privatização da Telebrás. Fusão Telemar/Brasil Telecom em 2008 não resolveu problemas estruturais;Oientrou em crise e passou por recuperação judicial.",
+      "title": "Oi (empresa) - Wikipédia, a enciclopédia livre",
+      "url": "https://pt.wikipedia.org/wiki/Oi_(empresa)",
+      "snippet": "Oi, anteriormente conhecida como Telemar, [3] é uma empresa que atua no segmento de telecomunicações no Brasil.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "A Oi faliu! E agora? Veja o que muda para quem é cliente",
+      "url": "https://canaltech.com.br/telecom/a-oi-faliu-e-agora-veja-o-que-muda-para-quem-e-cliente/",
+      "snippet": "Emresumo, aOifaliu, mas os clientes não precisam se preocupar: a transição está sendo feita de forma controlada, com fiscalização do governo e sem interrupção dos serviços.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "(iii) Oi - Resumo Banda Larga Fixa e Telefonia móvel",
+      "url": "https://ri.oi.com.br/arquivos/iii-oi-resumo-banda-larga-fixa-e-telefonia-movel/",
+      "snippet": "Acesse nossa página de (iii)Oi-ResumoBanda Larga Fixa e Telefonia móvel e fique bem informado. Somos o site oficial de relacionamento com investidores daOi.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Oi chegou ao fim: entenda o que acontece com ações e clientes após a ...",
+      "url": "https://arevista.com.br/mercados/oi-chegou-ao-fim-entenda-o-que-acontece-com-acoes-e-clientes-apos-a-falencia/",
+      "snippet": "Após anos de tentativas frustradas, aOi— que já foi uma das maiores teles do Brasil — tem a falência decretada. Veja o que acontece com ações, clientes e o legado da marca.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Oi tem falência decretada: o que muda na prática | VEJA RIO",
+      "url": "https://vejario.abril.com.br/cidade/oi-tem-falencia-decretada/",
+      "snippet": "O grupo de telecomunicaçõesOiteve sua falência decretada nesta segunda (10) pela 7ª Vara Empresarial do Tribunal de Justiça do Rio de Janeiro (TJ-RJ). A operadora já enfrentava dificuldades financeiras há anos e estava em sua segunda recuperação judicial.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "Histórico - Oi",
+      "url": "https://ri.oi.com.br/sobre-a-oi/historico/",
+      "snippet": "Criada em 1998, a partir do processo de privatização do sistema Telebrás, aOicomeçou a operar em 64% do país. Em 2008, a companhia lançou o serviço de telefonia móvel no estado de São Paulo e, em 2009, comprou a BrT, assumindo o controle em 2010, e passando a atuar em todo o território nacional.",
       "source": "duckduckgo"
     },
     {
@@ -22,13 +52,19 @@
       "source": "duckduckgo"
     },
     {
-      "title": "Oi (empresa) - Wikipédia, a enciclopédia livre",
-      "url": "https://pt.wikipedia.org/wiki/Oi_(empresa)",
-      "snippet": "Oi, anteriormente conhecida como Telemar, [3] é uma empresa que atua no segmento de telecomunicações no Brasil. [4] É a terceira maior operadora de telefonia fixa e até então uma das maiores empresas do setor de telecomunicações na América do Sul. [5][6][7][8] Atuava no país inteiro além de possuir um instituto de inovação e criatividade para impacto social, o InstitutoOiFuturo ...",
+      "title": "Resumeio - Home",
+      "url": "https://www.resumeio.com/",
+      "snippet": "It is a long established fact that a reader will be distracted by the readable content of a page when looking at its layout.",
+      "source": "duckduckgo"
+    },
+    {
+      "title": "(ii) Oi - Resumo de CapEx",
+      "url": "https://ri.oi.com.br/arquivos/ii-oi-resumo-de-capex/",
+      "snippet": "Acesse nossa página de (ii)Oi-Resumode CapEx e fique bem informado. Somos o site oficial de relacionamento com investidores daOi.",
       "source": "duckduckgo"
     }
   ],
   "source": "duckduckgo",
   "cached": false,
-  "cached_at": "2026-01-17T01:11:56.141105"
+  "cached_at": "2026-02-05T02:50:11.350028"
 }

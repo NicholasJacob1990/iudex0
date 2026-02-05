@@ -52,8 +52,8 @@ import {
 import {
     useGraphData,
     useGraphStats,
-    useGraphEntity,
-    useGraphRemissoes,
+    useGraphEntityScoped,
+    useGraphRemissoesScoped,
     useSemanticNeighbors,
     useGraphPath,
     useGraphLexicalSearch,
@@ -192,6 +192,7 @@ export default function GraphPage() {
             matchMode: filters.lexicalMatchMode,
             types: filters.entityTypes,
             limit: 200,
+            includeGlobal: filters.includeGlobal,
         },
         hasLexicalFilters && filters.lexicalSearchMode === 'entities'
     );
@@ -237,7 +238,7 @@ export default function GraphPage() {
             groups: opensearchGroups,
             maxChunks: 15,
             maxEntities: 30,
-            includeGlobal: true,
+            includeGlobal: filters.includeGlobal,
             documentIds: materialDocumentIdList,
             caseIds: materialCaseIdList,
         },
@@ -281,23 +282,33 @@ export default function GraphPage() {
             entityIds: lexicalSeedIds,
             documentIds: materialDocumentIds,
             caseIds: materialCaseIds,
+            includeGlobal: filters.includeGlobal,
         },
         graphDataEnabled
     );
 
-    const statsQuery = useGraphStats();
-    const entityQuery = useGraphEntity(selectedNode?.id ?? null);
-    const remissoesQuery = useGraphRemissoes(selectedNode?.id ?? null);
+    const scopeParams = useMemo(
+        () => ({
+            includeGlobal: filters.includeGlobal,
+            documentIds: materialDocumentIds,
+            caseIds: materialCaseIds,
+        }),
+        [filters.includeGlobal, materialDocumentIds, materialCaseIds]
+    );
+
+    const statsQuery = useGraphStats(scopeParams);
+    const entityQuery = useGraphEntityScoped(selectedNode?.id ?? null, scopeParams);
+    const remissoesQuery = useGraphRemissoesScoped(selectedNode?.id ?? null, scopeParams);
     const neighborsQuery = useSemanticNeighbors(
         selectedNode?.id ?? null,
-        30,
+        { ...scopeParams, limit: 30 },
         activeTab === 'neighbors' && !!selectedNode
     );
 
     const pathQuery = useGraphPath(
         pathSource,
         pathTarget,
-        4,
+        { ...scopeParams, maxLength: 4 },
         showPathMode && !!pathSource && !!pathTarget
     );
 
@@ -410,9 +421,9 @@ export default function GraphPage() {
 
     const handleNodeHover = useCallback((nodeId: string | null) => {
         if (nodeId) {
-            prefetchEntity(nodeId);
+            prefetchEntity(nodeId, scopeParams);
         }
-    }, [prefetchEntity]);
+    }, [prefetchEntity, scopeParams]);
 
     const handleZoomIn = () => {
         if (nvlRef.current) {
@@ -1032,7 +1043,7 @@ export default function GraphPage() {
                                                                     key={neighbor.id}
                                                                     className="p-2 rounded-lg hover:bg-muted cursor-pointer border transition-colors"
                                                                     onClick={() => navigateToNode(neighbor.id)}
-                                                                    onMouseEnter={() => prefetchNeighbors(neighbor.id)}
+                                                                    onMouseEnter={() => prefetchNeighbors(neighbor.id, scopeParams)}
                                                                 >
                                                                     <div className="flex items-center justify-between mb-1">
                                                                         <div className="flex items-center gap-2">

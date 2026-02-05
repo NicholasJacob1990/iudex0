@@ -21,6 +21,7 @@ import { AuditIssuesPanel } from '@/components/dashboard/audit-issues-panel';
 import { PreventiveAuditPanel } from '@/components/dashboard/preventive-audit-panel';
 import { TranscriptionPromptPicker } from '@/components/dashboard/transcription-prompt-picker';
 import { SyncedTranscriptViewer } from '@/components/dashboard/synced-transcript-viewer';
+import { WordLevelTranscriptViewer } from '@/components/dashboard/word-level-transcript-viewer';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
 import { MarkdownEditorPanel, MarkdownPreview, RichHtmlPreview } from '@/components/dashboard/markdown-editor-panel';
@@ -59,6 +60,16 @@ function SettingInfoPopover({ children }: { children: React.ReactNode }) {
 
 type PromptSnippet = { id: string; title: string; template: string };
 type DocumentTheme = { id: string; title: string; description: string };
+type TableColorPalette = {
+    id: string;
+    title: string;
+    headerBg: string;
+    headerText: string;
+    rowEvenBg: string;
+    rowOddBg: string;
+    cellText: string;
+    borderColor: string;
+};
 type DocumentLayout = {
     margins: 'compact' | 'normal' | 'wide';
     headerText: string;
@@ -67,9 +78,82 @@ type DocumentLayout = {
     pageFrame: boolean;
     fontFamily: string;
     fontSize: number;
+    tableFontSize: number;
     lineHeight: number;
     paragraphSpacing: number;
+    tableColorPalette: string;
+    tableColors: {
+        headerBg: string;
+        headerText: string;
+        rowEvenBg: string;
+        rowOddBg: string;
+        cellText: string;
+        borderColor: string;
+    };
 };
+
+const TABLE_COLOR_PALETTES: TableColorPalette[] = [
+    {
+        id: 'neutral',
+        title: 'Neutro',
+        headerBg: '#f1f5f9',
+        headerText: '#1e293b',
+        rowEvenBg: '#f8fafc',
+        rowOddBg: '#ffffff',
+        cellText: '#334155',
+        borderColor: '#e2e8f0',
+    },
+    {
+        id: 'slate',
+        title: 'Cinza Escuro',
+        headerBg: '#334155',
+        headerText: '#ffffff',
+        rowEvenBg: '#f1f5f9',
+        rowOddBg: '#ffffff',
+        cellText: '#1e293b',
+        borderColor: '#cbd5e1',
+    },
+    {
+        id: 'blue',
+        title: 'Azul',
+        headerBg: '#1e40af',
+        headerText: '#ffffff',
+        rowEvenBg: '#eff6ff',
+        rowOddBg: '#ffffff',
+        cellText: '#1e3a8a',
+        borderColor: '#bfdbfe',
+    },
+    {
+        id: 'green',
+        title: 'Verde',
+        headerBg: '#166534',
+        headerText: '#ffffff',
+        rowEvenBg: '#f0fdf4',
+        rowOddBg: '#ffffff',
+        cellText: '#14532d',
+        borderColor: '#bbf7d0',
+    },
+    {
+        id: 'amber',
+        title: 'Âmbar',
+        headerBg: '#b45309',
+        headerText: '#ffffff',
+        rowEvenBg: '#fffbeb',
+        rowOddBg: '#ffffff',
+        cellText: '#78350f',
+        borderColor: '#fde68a',
+    },
+    {
+        id: 'custom',
+        title: 'Personalizado',
+        headerBg: '#f1f5f9',
+        headerText: '#1e293b',
+        rowEvenBg: '#f8fafc',
+        rowOddBg: '#ffffff',
+        cellText: '#334155',
+        borderColor: '#e2e8f0',
+    },
+];
 
 const PROMPT_SNIPPETS = {
     apostila: [
@@ -228,15 +312,24 @@ const DOCUMENT_THEMES: DocumentTheme[] = [
         title: 'Acadêmico',
         description: 'Linhas sutis e foco em legibilidade.',
     },
+    {
+        id: 'legal',
+        title: 'Compacto Legal',
+        description: 'Texto 12px, tabelas 11px. Ideal para documentos jurídicos.',
+    },
 ];
 
 export default function TranscriptionPage() {
     const [files, setFiles] = useState<File[]>([]);
     const [publicUrl, setPublicUrl] = useState('');
-    const [transcriptionType, setTranscriptionType] = useState<'apostila' | 'hearing'>('apostila');
+    const [transcriptionLanguage, setTranscriptionLanguage] = useState('pt');
+    const [outputLanguage, setOutputLanguage] = useState('');
+    const [transcriptionType, setTranscriptionType] = useState<'apostila' | 'hearing' | 'legenda'>('apostila');
     const [mode, setMode] = useState('FIDELIDADE');
+    const [subtitleFormat, setSubtitleFormat] = useState<'srt' | 'vtt' | 'both'>('both');
     const [thinkingLevel, setThinkingLevel] = useState('medium');
     const [customPrompt, setCustomPrompt] = useState('');
+    const [disableTables, setDisableTables] = useState(false);
     const [documentTheme, setDocumentTheme] = useState('classic');
     const [documentLayout, setDocumentLayout] = useState<DocumentLayout>({
         margins: 'normal',
@@ -246,15 +339,30 @@ export default function TranscriptionPage() {
         pageFrame: true,
         fontFamily: '',
         fontSize: 15,
+        tableFontSize: 15,
         lineHeight: 1.5,
         paragraphSpacing: 8,
+        tableColorPalette: 'neutral',
+        tableColors: {
+            headerBg: '#f1f5f9',
+            headerText: '#1e293b',
+            rowEvenBg: '#f8fafc',
+            rowOddBg: '#ffffff',
+            cellText: '#334155',
+            borderColor: '#e2e8f0',
+        },
     });
     const [highAccuracy, setHighAccuracy] = useState(false);
+    const [transcriptionEngine, setTranscriptionEngine] = useState<'whisper' | 'assemblyai' | 'elevenlabs'>('whisper');
+    const [transcriptionArea, setTranscriptionArea] = useState<string>('geral');
+    const [customKeyterms, setCustomKeyterms] = useState<string>('');
     const [enableDiarization, setEnableDiarization] = useState(false);
     const [isProcessing, setIsProcessing] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
     const [selectedModel, setSelectedModel] = useState('gemini-3-flash-preview');
     const [result, setResult] = useState<string | null>(null);
     const [rawResult, setRawResult] = useState<string | null>(null);
+    const [transcriptionWords, setTranscriptionWords] = useState<Array<{word: string; start: number; end: number; speaker?: string}>>([]);
     const [richTextHtml, setRichTextHtml] = useState<string | null>(null);
     const [richTextJson, setRichTextJson] = useState<any | null>(null);
     const [richTextMeta, setRichTextMeta] = useState<any | null>(null);
@@ -267,6 +375,7 @@ export default function TranscriptionPage() {
     const [preventiveAuditMarkdown, setPreventiveAuditMarkdown] = useState<string | null>(null);
     const [preventiveAuditLoading, setPreventiveAuditLoading] = useState(false);
     const [preventiveAuditError, setPreventiveAuditError] = useState<string | null>(null);
+    const [auditSummary, setAuditSummary] = useState<any | null>(null); // Consolidated audit data
     const [issueAssistantOpen, setIssueAssistantOpen] = useState(false);
     const [issueAssistantIssue, setIssueAssistantIssue] = useState<any | null>(null);
     const [issueAssistantInstruction, setIssueAssistantInstruction] = useState('');
@@ -297,14 +406,24 @@ export default function TranscriptionPage() {
         pageFrame: true,
         fontFamily: '',
         fontSize: 15,
+        tableFontSize: 15,
         lineHeight: 1.5,
         paragraphSpacing: 8,
+        tableColorPalette: 'neutral',
+        tableColors: {
+            headerBg: '#f1f5f9',
+            headerText: '#1e293b',
+            rowEvenBg: '#f8fafc',
+            rowOddBg: '#ffffff',
+            cellText: '#334155',
+            borderColor: '#e2e8f0',
+        },
     });
+    const [hearingSpeakerRoles, setHearingSpeakerRoles] = useState<string[]>([]);
+    const [speakerIdType, setSpeakerIdType] = useState<'name' | 'role'>('role');
+    const [newRoleInput, setNewRoleInput] = useState('');
     const [hearingSpeakers, setHearingSpeakers] = useState<any[]>([]);
-    const [enrollName, setEnrollName] = useState('');
-    const [enrollRole, setEnrollRole] = useState('outro');
-    const [enrollFile, setEnrollFile] = useState<File | null>(null);
-    const [isEnrolling, setIsEnrolling] = useState(false);
+    // REMOVIDO: Estados de enrollment de voz (substituído por inferência LLM)
     const [isSavingSpeakers, setIsSavingSpeakers] = useState(false);
     const [hearingCourt, setHearingCourt] = useState('');
     const [hearingCity, setHearingCity] = useState('');
@@ -352,6 +471,9 @@ export default function TranscriptionPage() {
     const [logs, setLogs] = useState<{ timestamp: string; message: string }[]>([]);
     const [progressLogsOpen, setProgressLogsOpen] = useState(false);
     const [progressDockMinimized, setProgressDockMinimized] = useState(false);
+    const [processStartTime, setProcessStartTime] = useState<number | null>(null);
+    const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
+    const logsEndRef = useRef<HTMLDivElement>(null);
 
     // HIL Audit State
     const [auditIssues, setAuditIssues] = useState<any[]>([]);
@@ -372,20 +494,56 @@ export default function TranscriptionPage() {
     const [savedDocsSearch, setSavedDocsSearch] = useState('');
     const [layoutDialogOpen, setLayoutDialogOpen] = useState(false);
     const [layoutDialogTab, setLayoutDialogTab] = useState<'tables' | 'margins' | 'header' | 'page' | 'breaks' | 'typography'>('tables');
+
+    // Recovery Dialog State
+    const [recoveryDialogOpen, setRecoveryDialogOpen] = useState(false);
+    const [pendingTranscriptions, setPendingTranscriptions] = useState<Array<{
+        transcript_id: string;
+        file_name: string;
+        file_hash: string;
+        status: string;
+        provider: string;
+        submitted_at: string;
+        completed_at?: string;
+        audio_duration?: number;
+        config_hash?: string;
+    }>>([]);
+    const [isLoadingPending, setIsLoadingPending] = useState(false);
+    const [isResuming, setIsResuming] = useState<string | null>(null);
+
     const refreshDocuments = useDocumentStore((state) => state.fetchDocuments);
 
     const isHearing = transcriptionType === 'hearing';
+    const isLegenda = transcriptionType === 'legenda';
+    // Motor de transcrição disponível para todos os tipos que processam áudio
+    const showEngineSelector = transcriptionType === 'apostila' || transcriptionType === 'hearing' || transcriptionType === 'legenda';
     const activeDocumentTheme = isHearing ? hearingDocumentTheme : documentTheme;
     const activeDocumentLayout = isHearing ? hearingDocumentLayout : documentLayout;
     const documentThemeClass = activeDocumentTheme ? `doc-theme-${activeDocumentTheme}` : 'doc-theme-classic';
     const documentLayoutClass = `doc-typography doc-margins-${activeDocumentLayout.margins}${activeDocumentLayout.pageFrame ? ' doc-page-frame' : ''}`;
     const isRawMode = !isHearing && mode === 'RAW';
     const hasActiveProgress = Boolean(progressStage || (isProcessing && progressMessage) || logs.length > 0);
+
+    // Removido: não resetar mais o engine automaticamente
+    // O usuário pode escolher o engine uma vez e manter a escolha entre tipos de transcrição
+
+    useEffect(() => {
+        if (transcriptionEngine === 'assemblyai' && highAccuracy) {
+            setHighAccuracy(false);
+        }
+    }, [transcriptionEngine, highAccuracy]);
     const documentTypographyStyle = useMemo(() => {
         const style: CSSProperties & Record<string, string> = {
             '--doc-font-size': `${activeDocumentLayout.fontSize}px`,
+            '--doc-table-font-size': `${activeDocumentLayout.tableFontSize}px`,
             '--doc-line-height': String(activeDocumentLayout.lineHeight),
             '--doc-paragraph-spacing': `${activeDocumentLayout.paragraphSpacing}px`,
+            '--doc-table-header-bg': activeDocumentLayout.tableColors.headerBg,
+            '--doc-table-header-text': activeDocumentLayout.tableColors.headerText,
+            '--doc-table-row-even-bg': activeDocumentLayout.tableColors.rowEvenBg,
+            '--doc-table-row-odd-bg': activeDocumentLayout.tableColors.rowOddBg,
+            '--doc-table-cell-text': activeDocumentLayout.tableColors.cellText,
+            '--doc-table-border-color': activeDocumentLayout.tableColors.borderColor,
         };
         if (activeDocumentLayout.fontFamily) {
             style['--doc-font-family'] = activeDocumentLayout.fontFamily;
@@ -394,8 +552,10 @@ export default function TranscriptionPage() {
     }, [
         activeDocumentLayout.fontFamily,
         activeDocumentLayout.fontSize,
+        activeDocumentLayout.tableFontSize,
         activeDocumentLayout.lineHeight,
         activeDocumentLayout.paragraphSpacing,
+        activeDocumentLayout.tableColors,
     ]);
 
     const setActiveTheme = useCallback((themeId: string) => {
@@ -947,6 +1107,73 @@ export default function TranscriptionPage() {
         }
     }, [normalizeSavedDocument]);
 
+    // Função para carregar transcrições pendentes (AssemblyAI/ElevenLabs)
+    const loadPendingTranscriptions = useCallback(async () => {
+        try {
+            setIsLoadingPending(true);
+            const response = await fetch('/api/v1/transcription/pending');
+            if (!response.ok) {
+                throw new Error(`Erro ao carregar transcrições pendentes: ${response.status}`);
+            }
+            const data = await response.json();
+            setPendingTranscriptions(data || []);
+        } catch (error) {
+            console.error('Erro ao carregar transcrições pendentes:', error);
+            toast.error('Falha ao carregar transcrições pendentes');
+            setPendingTranscriptions([]);
+        } finally {
+            setIsLoadingPending(false);
+        }
+    }, []);
+
+    // Função para retomar transcrição do AssemblyAI
+    const handleResumeTranscription = useCallback(async (transcriptId: string, fileHash: string) => {
+        try {
+            setIsResuming(transcriptId);
+            const response = await fetch('/api/v1/transcription/resume', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ transcript_id: transcriptId, file_hash: fileHash }),
+            });
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({}));
+                throw new Error(errorData.detail || `Erro ao retomar: ${response.status}`);
+            }
+            const data = await response.json();
+            if (data.status === 'completed' && data.text) {
+                toast.success(`Transcrição recuperada: ${data.text.length.toLocaleString()} caracteres`);
+                // Atualizar a lista de pendentes
+                await loadPendingTranscriptions();
+            } else if (data.status === 'processing') {
+                toast.info('Transcrição ainda em processamento. Tente novamente em alguns minutos.');
+            } else {
+                toast.warning(`Status: ${data.status}`);
+            }
+        } catch (error: any) {
+            console.error('Erro ao retomar transcrição:', error);
+            toast.error(error.message || 'Falha ao retomar transcrição');
+        } finally {
+            setIsResuming(null);
+        }
+    }, [loadPendingTranscriptions]);
+
+    // Função para limpar cache de transcrição
+    const handleClearTranscriptionCache = useCallback(async (fileHash: string) => {
+        try {
+            const response = await fetch(`/api/v1/transcription/cache/${fileHash}`, {
+                method: 'DELETE',
+            });
+            if (!response.ok) {
+                throw new Error(`Erro ao limpar cache: ${response.status}`);
+            }
+            toast.success('Cache de transcrição removido');
+            await loadPendingTranscriptions();
+        } catch (error) {
+            console.error('Erro ao limpar cache:', error);
+            toast.error('Falha ao limpar cache de transcrição');
+        }
+    }, [loadPendingTranscriptions]);
+
     useEffect(() => {
         loadJobHistory();
     }, [loadJobHistory]);
@@ -992,6 +1219,23 @@ export default function TranscriptionPage() {
         }
     }, [savedDocuments, selectedSavedDocIds, resolveSavedDocumentId]);
 
+    // Timer para tempo decorrido durante processamento
+    useEffect(() => {
+        if (isProcessing && processStartTime) {
+            const interval = setInterval(() => {
+                setElapsedSeconds(Math.floor((Date.now() - processStartTime) / 1000));
+            }, 1000);
+            return () => clearInterval(interval);
+        }
+    }, [isProcessing, processStartTime]);
+
+    // Auto-scroll para o final dos logs
+    useEffect(() => {
+        if (logsEndRef.current && logs.length > 0) {
+            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    }, [logs]);
+
     const extractReports = (content?: string | null) => {
         if (!content) return null;
         const reportRegex = /<!--\s*RELATÓRIO:([\s\S]*?)-->/gi;
@@ -1004,11 +1248,11 @@ export default function TranscriptionPage() {
         return combined || null;
     };
 
-    const stripReportBlocks = (content?: string | null) => {
+    const stripReportBlocks = useCallback((content?: string | null) => {
         if (!content) return content ?? null;
         const cleaned = content.replace(/<!--\s*RELATÓRIO:[\s\S]*?-->/gi, '');
         return cleaned.replace(/\n{3,}/g, '\n\n').trim();
-    };
+    }, []);
 
     const coerceNumber = (value: any, fallback: number) => {
         const parsed = Number(value);
@@ -1630,7 +1874,8 @@ export default function TranscriptionPage() {
         const reportMap = resolveReportMap(payload?.paths)
             || resolveReportMap(payload?.payload?.paths)
             || resolveReportMap(payload?.reports);
-        const auditSummary = payload?.audit_summary || payload?.reports?.audit_summary || payload?.payload?.audit_summary;
+        const auditSummaryData = payload?.audit_summary || payload?.reports?.audit_summary || payload?.payload?.audit_summary;
+        setAuditSummary(auditSummaryData || null);
         setHearingPayload(hearing || null);
         setHearingSpeakers(hearing?.speakers || []);
         const transcript = hearing?.transcript_markdown || '';
@@ -1644,7 +1889,7 @@ export default function TranscriptionPage() {
         // Preview padrão deve ser o resultado formatado (quando existir).
         setResult(cleanFormatted || cleanTranscript || null);
         clearRichContent();
-        const mergedReports = mergeReportKeys(reportMap, auditSummary);
+        const mergedReports = mergeReportKeys(reportMap, auditSummaryData);
         if (mergedReports) {
             setReportPaths(normalizeReportPaths(mergedReports));
         } else {
@@ -1818,6 +2063,12 @@ export default function TranscriptionPage() {
             json: payload?.rich_text_json ?? null,
             meta: payload?.rich_text_meta ?? null,
         });
+        // Extrair words para timestamps por palavra
+        if (Array.isArray(payload?.words)) {
+            setTranscriptionWords(payload.words);
+        } else {
+            setTranscriptionWords([]);
+        }
         setReportPaths(normalizeReportPaths(mergeReportKeys(payload?.reports ?? null, payload?.audit_summary)));
         setJobQuality(payload?.quality ?? null);
         setIsAuditOutdated(Boolean(payload?.quality?.needs_revalidate));
@@ -1915,6 +2166,7 @@ export default function TranscriptionPage() {
                         : prev.pageFrame,
                     fontFamily: String(data?.config?.document_font_family || prev.fontFamily || ''),
                     fontSize: coerceNumber(data?.config?.document_font_size, prev.fontSize),
+                    tableFontSize: coerceNumber(data?.config?.document_table_font_size, prev.tableFontSize),
                     lineHeight: coerceNumber(data?.config?.document_line_height, prev.lineHeight),
                     paragraphSpacing: coerceNumber(data?.config?.document_paragraph_spacing, prev.paragraphSpacing),
                 }));
@@ -1943,6 +2195,7 @@ export default function TranscriptionPage() {
                         : prev.pageFrame,
                     fontFamily: String(data?.config?.document_font_family || prev.fontFamily || ''),
                     fontSize: coerceNumber(data?.config?.document_font_size, prev.fontSize),
+                    tableFontSize: coerceNumber(data?.config?.document_table_font_size, prev.tableFontSize),
                     lineHeight: coerceNumber(data?.config?.document_line_height, prev.lineHeight),
                     paragraphSpacing: coerceNumber(data?.config?.document_paragraph_spacing, prev.paragraphSpacing),
                 }));
@@ -1955,6 +2208,12 @@ export default function TranscriptionPage() {
                     json: data?.rich_text_json ?? null,
                     meta: data?.rich_text_meta ?? null,
                 });
+                // Extrair words para timestamps por palavra
+                if (Array.isArray(data?.words)) {
+                    setTranscriptionWords(data.words);
+                } else {
+                    setTranscriptionWords([]);
+                }
                 setReportPaths(normalizeReportPaths(mergeReportKeys(data?.reports ?? null, data?.audit_summary)));
                 setJobQuality(data?.quality ?? null);
                 setIsAuditOutdated(Boolean(data?.quality?.needs_revalidate));
@@ -1996,6 +2255,8 @@ export default function TranscriptionPage() {
     const handleResumeJob = async (jobId: string) => {
         setActiveJobId(jobId);
         setIsProcessing(true);
+        setProcessStartTime(Date.now());
+        setElapsedSeconds(0);
             setResult(null);
             clearRichContent();
         setRawResult(null);
@@ -2035,6 +2296,31 @@ export default function TranscriptionPage() {
         } catch (error: any) {
             console.error(error);
             toast.error(formatApiError(error, 'Falha ao excluir job:'));
+        }
+    };
+
+    const handleRetryJob = async (jobId: string) => {
+        try {
+            await apiClient.retryTranscriptionJob(jobId);
+            toast.success('Job reiniciado. Acompanhe o progresso.');
+            setActiveJobId(jobId);
+            setIsProcessing(true);
+            setProcessStartTime(Date.now());
+            setElapsedSeconds(0);
+            setResult(null);
+            clearRichContent();
+            setLogs([]);
+            setActiveSegmentId(null);
+            setCurrentTime(0);
+            setEtaSeconds(null);
+            loadJobHistory().catch(() => undefined);
+
+            await runJobStream(jobId, async (payload) => {
+                await handleJobCompletion(payload, false);
+            });
+        } catch (error: any) {
+            console.error(error);
+            toast.error(formatApiError(error, 'Falha ao reiniciar job:'));
         }
     };
 
@@ -2195,10 +2481,12 @@ export default function TranscriptionPage() {
     };
 
     const handleSubmit = async () => {
+        if (isSubmitting) return;
         const urlValue = publicUrl.trim();
         const hasUrl = Boolean(urlValue);
+        const effectiveHighAccuracy = transcriptionEngine === 'assemblyai' ? false : highAccuracy;
         if (files.length === 0 && !hasUrl) {
-            toast.error('Selecione um arquivo OU informe uma URL pública (YouTube).');
+            toast.error('Selecione um arquivo OU informe uma URL pública (YouTube, Vimeo, Mux, .m3u8).');
             return;
         }
         if (files.length > 0 && hasUrl) {
@@ -2213,6 +2501,7 @@ export default function TranscriptionPage() {
             mode,
             thinking_level: thinkingLevel,
             custom_prompt: customPrompt || undefined,
+            disable_tables: disableTables,
             document_theme: documentTheme,
             document_header: (documentLayout.headerText || '').trim() || undefined,
             document_footer: (documentLayout.footerText || '').trim() || undefined,
@@ -2221,10 +2510,12 @@ export default function TranscriptionPage() {
             document_show_header_footer: documentLayout.showHeaderFooter,
             document_font_family: documentLayout.fontFamily || undefined,
             document_font_size: documentLayout.fontSize,
+            document_table_font_size: documentLayout.tableFontSize,
             document_line_height: documentLayout.lineHeight,
             document_paragraph_spacing: documentLayout.paragraphSpacing,
             model_selection: selectedModel,
-            high_accuracy: highAccuracy,
+            high_accuracy: effectiveHighAccuracy,
+            transcription_engine: transcriptionEngine,
             diarization: enableDiarization ? true : undefined,
             diarization_strict: enableDiarization ? true : undefined,
             use_cache: useRawCache,
@@ -2233,6 +2524,15 @@ export default function TranscriptionPage() {
             skip_legal_audit: skipLegalAudit,
             skip_fidelity_audit: skipFidelityAudit,
             skip_sources_audit: skipFidelityAudit,
+            language: transcriptionLanguage,
+            output_language: outputLanguage || undefined,
+            speaker_roles: enableDiarization && hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+            speakers_expected: enableDiarization && hearingSpeakerRoles.length ? hearingSpeakerRoles.length : undefined,
+            speaker_id_type: enableDiarization && hearingSpeakerRoles.length ? speakerIdType : undefined,
+            speaker_id_values: enableDiarization && hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+            subtitle_format: isLegenda ? subtitleFormat : undefined,
+            area: transcriptionArea !== 'geral' ? transcriptionArea : undefined,
+            custom_keyterms: customKeyterms.trim() || undefined,
         };
 
         if (isHearing) {
@@ -2255,6 +2555,7 @@ export default function TranscriptionPage() {
         }
 
         if (!followJobLive) {
+            setIsSubmitting(true);
             try {
                 if (isHearing) {
                     setActiveDocumentName(hearingCaseId?.trim() ? `Caso ${hearingCaseId.trim()}` : 'Audiência');
@@ -2270,7 +2571,7 @@ export default function TranscriptionPage() {
                             goal: hearingGoal,
                             thinking_level: thinkingLevel,
                             model_selection: selectedModel,
-                            high_accuracy: highAccuracy,
+                            high_accuracy: effectiveHighAccuracy,
                             format_mode: formatMode,
                             custom_prompt: customPrompt,
                             document_theme: hearingDocumentTheme,
@@ -2281,6 +2582,7 @@ export default function TranscriptionPage() {
                             document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
                             document_font_family: hearingDocumentLayout.fontFamily || undefined,
                             document_font_size: hearingDocumentLayout.fontSize,
+                            document_table_font_size: hearingDocumentLayout.tableFontSize,
                             document_line_height: hearingDocumentLayout.lineHeight,
                             document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
                             format_enabled: formatEnabled,
@@ -2293,13 +2595,26 @@ export default function TranscriptionPage() {
                             skip_legal_audit: skipLegalAudit,
                             skip_fidelity_audit: skipFidelityAudit,
                             skip_sources_audit: skipFidelityAudit,
+                            speaker_roles: hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+                            speakers_expected: hearingSpeakerRoles.length || undefined,
+                            speaker_id_type: hearingSpeakerRoles.length ? speakerIdType : undefined,
+                            speaker_id_values: hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+                            area: 'juridico',
+                            custom_keyterms: [
+                                hearingCaseId.trim(),
+                                hearingCourt.trim(),
+                                hearingCity.trim(),
+                                hearingNotes.trim(),
+                                ...hearingSpeakerRoles,
+                            ].filter(Boolean).join(', ') || undefined,
+                            transcription_engine: transcriptionEngine,
                         })
                         : await apiClient.startHearingJob(files[0], {
                             case_id: hearingCaseId.trim(),
                             goal: hearingGoal,
                             thinking_level: thinkingLevel,
                             model_selection: selectedModel,
-                            high_accuracy: highAccuracy,
+                            high_accuracy: effectiveHighAccuracy,
                             format_mode: formatMode,
                             custom_prompt: customPrompt,
                             document_theme: hearingDocumentTheme,
@@ -2310,6 +2625,7 @@ export default function TranscriptionPage() {
                             document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
                             document_font_family: hearingDocumentLayout.fontFamily || undefined,
                             document_font_size: hearingDocumentLayout.fontSize,
+                            document_table_font_size: hearingDocumentLayout.tableFontSize,
                             document_line_height: hearingDocumentLayout.lineHeight,
                             document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
                             format_enabled: formatEnabled,
@@ -2322,9 +2638,24 @@ export default function TranscriptionPage() {
                             skip_legal_audit: skipLegalAudit,
                             skip_fidelity_audit: skipFidelityAudit,
                             skip_sources_audit: skipFidelityAudit,
+                            speaker_roles: hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+                            speakers_expected: hearingSpeakerRoles.length || undefined,
+                            speaker_id_type: hearingSpeakerRoles.length ? speakerIdType : undefined,
+                            speaker_id_values: hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+                            area: 'juridico',
+                            custom_keyterms: [
+                                hearingCaseId.trim(),
+                                hearingCourt.trim(),
+                                hearingCity.trim(),
+                                hearingNotes.trim(),
+                                ...hearingSpeakerRoles,
+                            ].filter(Boolean).join(', ') || undefined,
+                            transcription_engine: transcriptionEngine,
                         });
                     if (job?.job_id) setActiveJobId(job.job_id);
                 } else {
+                    console.log('[handleSubmit] Apostila/Legenda mode, hasUrl:', hasUrl, 'files.length:', files.length);
+                    console.log('[handleSubmit] Files:', files.map(f => ({ name: f.name, size: f.size })));
                     setActiveDocumentName(hasUrl ? 'URL pública' : (files.length === 1 ? files[0]?.name || 'Documento' : `${files.length} arquivos`));
                     const job = hasUrl
                         ? await apiClient.startTranscriptionJobFromUrl(urlValue, options)
@@ -2336,14 +2667,21 @@ export default function TranscriptionPage() {
                 setPublicUrl('');
                 setSettingsOpen(false);
                 setMainTab('jobs');
+                setIsProcessing(false);  // Reset para permitir novos jobs
                 await loadJobHistory().catch(() => undefined);
             } catch (error: any) {
                 toast.error(formatApiError(error, 'Falha ao iniciar job.'));
+                setIsProcessing(false);  // Reset em caso de erro também
+            } finally {
+                setIsSubmitting(false);
             }
             return;
         }
 
+        setIsSubmitting(true);
         setIsProcessing(true);
+        setProcessStartTime(Date.now());
+        setElapsedSeconds(0);
         setResult(null);
         clearRichContent();
         setRawResult(null);
@@ -2361,6 +2699,15 @@ export default function TranscriptionPage() {
 
         setEtaSeconds(null);
         setSettingsOpen(false);
+        {
+            const now = new Date();
+            const timestamp = `${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}`;
+            const uploadMessage = hasUrl ? '🔗 Preparando URL para processamento...' : '⏫ Enviando arquivos para o servidor...';
+            setProgressStage('upload');
+            setProgressPercent(1);
+            setProgressMessage(uploadMessage);
+            setLogs([{ timestamp, message: uploadMessage }]);
+        }
 
         if (isHearing) {
             const formatEnabled = hearingFormatMode !== 'none';
@@ -2377,7 +2724,7 @@ export default function TranscriptionPage() {
                         goal: hearingGoal,
                         thinking_level: thinkingLevel,
                         model_selection: selectedModel,
-                        high_accuracy: highAccuracy,
+                        high_accuracy: effectiveHighAccuracy,
                         format_mode: formatMode,
                         custom_prompt: customPrompt,
                         document_theme: hearingDocumentTheme,
@@ -2388,6 +2735,7 @@ export default function TranscriptionPage() {
                         document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
                         document_font_family: hearingDocumentLayout.fontFamily || undefined,
                         document_font_size: hearingDocumentLayout.fontSize,
+                        document_table_font_size: hearingDocumentLayout.tableFontSize,
                         document_line_height: hearingDocumentLayout.lineHeight,
                         document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
                         format_enabled: formatEnabled,
@@ -2400,13 +2748,26 @@ export default function TranscriptionPage() {
                         skip_legal_audit: skipLegalAudit,
                         skip_fidelity_audit: skipFidelityAudit,
                         skip_sources_audit: skipFidelityAudit,
+                        speaker_roles: hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+                        speakers_expected: hearingSpeakerRoles.length || undefined,
+                        speaker_id_type: hearingSpeakerRoles.length ? speakerIdType : undefined,
+                        speaker_id_values: hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+                        area: 'juridico',
+                        custom_keyterms: [
+                            hearingCaseId.trim(),
+                            hearingCourt.trim(),
+                            hearingCity.trim(),
+                            hearingNotes.trim(),
+                            ...hearingSpeakerRoles,
+                        ].filter(Boolean).join(', ') || undefined,
+                        transcription_engine: transcriptionEngine,
                     })
                     : await apiClient.startHearingJob(files[0], {
                         case_id: hearingCaseId.trim(),
                         goal: hearingGoal,
                         thinking_level: thinkingLevel,
                         model_selection: selectedModel,
-                        high_accuracy: highAccuracy,
+                        high_accuracy: effectiveHighAccuracy,
                         format_mode: formatMode,
                         custom_prompt: customPrompt,
                         document_theme: hearingDocumentTheme,
@@ -2417,6 +2778,7 @@ export default function TranscriptionPage() {
                         document_show_header_footer: hearingDocumentLayout.showHeaderFooter,
                         document_font_family: hearingDocumentLayout.fontFamily || undefined,
                         document_font_size: hearingDocumentLayout.fontSize,
+                        document_table_font_size: hearingDocumentLayout.tableFontSize,
                         document_line_height: hearingDocumentLayout.lineHeight,
                         document_paragraph_spacing: hearingDocumentLayout.paragraphSpacing,
                         format_enabled: formatEnabled,
@@ -2429,27 +2791,46 @@ export default function TranscriptionPage() {
                         skip_legal_audit: skipLegalAudit,
                         skip_fidelity_audit: skipFidelityAudit,
                         skip_sources_audit: skipFidelityAudit,
+                        speaker_roles: hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+                        speakers_expected: hearingSpeakerRoles.length || undefined,
+                        speaker_id_type: hearingSpeakerRoles.length ? speakerIdType : undefined,
+                        speaker_id_values: hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+                        area: 'juridico',
+                        custom_keyterms: [
+                            hearingCaseId.trim(),
+                            hearingCourt.trim(),
+                            hearingCity.trim(),
+                            hearingNotes.trim(),
+                            ...hearingSpeakerRoles,
+                        ].filter(Boolean).join(', ') || undefined,
+                        transcription_engine: transcriptionEngine,
                     });
                 setActiveJobId(job.job_id);
                 setMainTab('preview');
+                setIsSubmitting(false);
                 await runJobStream(job.job_id, async (payload) => {
                     await handleJobCompletion(payload, true);
                 });
             } catch (error: any) {
+                setIsSubmitting(false);
                 handleStreamError(error.message || 'Falha ao iniciar job');
             }
             return;
         }
         try {
+            console.log('[handleSubmit LIVE] Apostila/Legenda mode, hasUrl:', hasUrl, 'files.length:', files.length);
+            console.log('[handleSubmit LIVE] Files:', files.map(f => ({ name: f.name, size: f.size })));
             const job = hasUrl
                 ? await apiClient.startTranscriptionJobFromUrl(urlValue, options)
                 : await apiClient.startTranscriptionJob(files, options);
             setActiveJobId(job.job_id);
             setMainTab('preview');
+            setIsSubmitting(false);
             await runJobStream(job.job_id, async (payload) => {
                 await handleJobCompletion(payload, true);
             });
         } catch (error: any) {
+            setIsSubmitting(false);
             handleStreamError(error.message || 'Falha ao iniciar job');
         }
     };
@@ -2507,6 +2888,7 @@ export default function TranscriptionPage() {
                     document_margins: activeDocumentLayout.margins,
                     document_font_family: activeDocumentLayout.fontFamily || undefined,
                     document_font_size: activeDocumentLayout.fontSize,
+                    document_table_font_size: activeDocumentLayout.tableFontSize,
                     document_line_height: activeDocumentLayout.lineHeight,
                     document_paragraph_spacing: activeDocumentLayout.paragraphSpacing,
                 });
@@ -2980,31 +3362,7 @@ export default function TranscriptionPage() {
         });
     };
 
-    const handleEnrollSpeaker = async () => {
-        if (!enrollFile || !hearingCaseId.trim() || !enrollName.trim()) {
-            toast.error('Informe caso, nome e áudio para enrollment.');
-            return;
-        }
-        setIsEnrolling(true);
-        try {
-            const response = await apiClient.enrollHearingSpeaker(enrollFile, {
-                case_id: hearingCaseId.trim(),
-                name: enrollName.trim(),
-                role: enrollRole,
-            });
-            toast.success('Voz cadastrada com sucesso!');
-            if (response?.speaker) {
-                setHearingSpeakers(prev => [...prev, response.speaker]);
-            }
-            setEnrollFile(null);
-            setEnrollName('');
-        } catch (error: any) {
-            console.error(error);
-            toast.error('Erro ao cadastrar voz.');
-        } finally {
-            setIsEnrolling(false);
-        }
-    };
+    // REMOVIDO: handleEnrollSpeaker (substituído por inferência automática de papéis via LLM)
 
     const handleSaveSpeakers = async () => {
         if (!hearingCaseId.trim() || hearingSpeakers.length === 0) return;
@@ -3121,6 +3479,20 @@ export default function TranscriptionPage() {
             setProgressDockMinimized(false);
         }
     }, [isProcessing]);
+
+    // Reset isProcessing quando muda para aba de jobs (permite criar novo job)
+    useEffect(() => {
+        if (mainTab === 'jobs') {
+            setIsProcessing(false);
+        }
+    }, [mainTab]);
+
+    // Reset isProcessing quando usuário adiciona novos arquivos ou URL (nova intenção de transcrição)
+    useEffect(() => {
+        if (files.length > 0 || publicUrl.trim()) {
+            setIsProcessing(false);
+        }
+    }, [files, publicUrl]);
 
     return (
         <>
@@ -3307,6 +3679,7 @@ export default function TranscriptionPage() {
                                             const status = String(job?.status || '');
                                             const canLoad = status === 'completed';
                                             const canResume = status === 'running' || status === 'queued';
+                                            const canRetry = status === 'error';
                                             const canDelete = !canResume;
                                             const isSelected = Boolean(activeJobId && activeJobId === job?.job_id);
                                             const statusVariant = status === 'completed' ? 'default' : status === 'error' ? 'destructive' : 'secondary';
@@ -3373,6 +3746,11 @@ export default function TranscriptionPage() {
                                                         {canResume ? (
                                                             <Button size="sm" variant="destructive" onClick={() => handleCancelJob(job.job_id)}>
                                                                 Interromper
+                                                            </Button>
+                                                        ) : null}
+                                                        {canRetry ? (
+                                                            <Button size="sm" variant="outline" onClick={() => handleRetryJob(job.job_id)}>
+                                                                Reiniciar
                                                             </Button>
                                                         ) : null}
                                                         <Button
@@ -3529,7 +3907,7 @@ export default function TranscriptionPage() {
                                 className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                                 value={transcriptionType}
                                 onChange={(e) => {
-                                    const value = e.target.value as 'apostila' | 'hearing';
+                                    const value = e.target.value as 'apostila' | 'hearing' | 'legenda';
                                     setTranscriptionType(value);
                                     setResult(null);
                                     clearRichContent();
@@ -3542,10 +3920,79 @@ export default function TranscriptionPage() {
                             >
                                 <option value="apostila">📚 Aula / Apostila</option>
                                 <option value="hearing">⚖️ Audiência / Reunião</option>
+                                <option value="legenda">🎬 Legendas (SRT/VTT)</option>
                             </select>
                         </div>
 
-	                        {/* Upload */}
+                        {showEngineSelector && (
+                            <div className="space-y-2">
+                                <Label className="flex flex-col space-y-1">
+                                    <span className="flex items-center gap-2">
+                                        Motor de transcrição
+                                        <SettingInfoPopover>
+                                            <div className="space-y-2">
+                                                <div className="font-semibold">Whisper (Local)</div>
+                                                <div>Roda no seu Mac usando MLX. Gratuito, privado, mas mais lento em arquivos longos.</div>
+                                                <div className="font-semibold">AssemblyAI (Nuvem)</div>
+                                                <div>API na nuvem. Mais rápido, melhor para arquivos longos, custo por minuto.</div>
+                                                {(isLegenda || isHearing) && (
+                                                    <>
+                                                        <div className="font-semibold">ElevenLabs Scribe</div>
+                                                        <div>Timestamps precisos, identificação de eventos sonoros e diarização automática.</div>
+                                                    </>
+                                                )}
+                                            </div>
+                                        </SettingInfoPopover>
+                                    </span>
+                                    <span className="font-normal text-xs text-muted-foreground">
+                                        {transcriptionEngine === 'whisper'
+                                            ? 'Processamento local no Mac (gratuito)'
+                                            : transcriptionEngine === 'elevenlabs'
+                                            ? 'ElevenLabs Scribe (melhor para legendas)'
+                                            : 'Processamento na nuvem (mais rápido)'}
+                                    </span>
+                                </Label>
+                                <div className="flex rounded-md border overflow-hidden">
+                                    <button
+                                        type="button"
+                                        className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                                            transcriptionEngine === 'whisper'
+                                                ? 'bg-primary text-primary-foreground'
+                                                : 'bg-background hover:bg-muted'
+                                        }`}
+                                        onClick={() => setTranscriptionEngine('whisper')}
+                                    >
+                                        Whisper
+                                    </button>
+                                    <button
+                                        type="button"
+                                        className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                                            transcriptionEngine === 'assemblyai'
+                                                ? 'bg-primary text-primary-foreground'
+                                                : 'bg-background hover:bg-muted'
+                                        }`}
+                                        onClick={() => setTranscriptionEngine('assemblyai')}
+                                    >
+                                        AssemblyAI
+                                    </button>
+                                    {(isLegenda || isHearing) && (
+                                        <button
+                                            type="button"
+                                            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                                                transcriptionEngine === 'elevenlabs'
+                                                    ? 'bg-primary text-primary-foreground'
+                                                    : 'bg-background hover:bg-muted'
+                                            }`}
+                                            onClick={() => setTranscriptionEngine('elevenlabs')}
+                                        >
+                                            ElevenLabs
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Upload */}
 	                        <div className="space-y-2">
 	                            <Label>Arquivos (Áudio/Vídeo/Texto)</Label>
                             <div
@@ -3606,10 +4053,10 @@ export default function TranscriptionPage() {
 	                        </div>
 
                             <div className="space-y-2">
-                                <Label>OU URL pública (YouTube)</Label>
+                                <Label>OU URL pública (YouTube, Vimeo, Mux, HLS...)</Label>
                                 <input
                                     className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                                    placeholder="https://www.youtube.com/watch?v=..."
+                                    placeholder="https://vimeo.com/... ou https://stream.mux.com/....m3u8"
                                     value={publicUrl}
                                     onChange={(e) => {
                                         const value = e.target.value;
@@ -3620,11 +4067,76 @@ export default function TranscriptionPage() {
                                     }}
                                 />
                                 <p className="text-xs text-muted-foreground">
-                                    Dica: por segurança, o backend aceita apenas hosts permitidos (default: youtube.com, youtu.be).
+                                    Aceita YouTube, Vimeo, Mux e links .m3u8 (HLS). Outros hosts podem ser liberados via config do servidor.
                                 </p>
                             </div>
-	
-                        <div className="border-t border-border" />
+
+                            <div className="space-y-2">
+                                <Label>Idioma do áudio</Label>
+                                <select
+                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    value={transcriptionLanguage}
+                                    onChange={(e) => setTranscriptionLanguage(e.target.value)}
+                                >
+                                    <option value="auto">Auto-detectar</option>
+                                    <option value="pt">Português</option>
+                                    <option value="en">Inglês</option>
+                                    <option value="es">Espanhol</option>
+                                    <option value="fr">Francês</option>
+                                    <option value="de">Alemão</option>
+                                    <option value="it">Italiano</option>
+                                    <option value="ja">Japonês</option>
+                                    <option value="ko">Coreano</option>
+                                    <option value="zh">Chinês</option>
+                                    <option value="ru">Russo</option>
+                                    <option value="ar">Árabe</option>
+                                    <option value="hi">Hindi</option>
+                                    <option value="nl">Holandês</option>
+                                    <option value="pl">Polonês</option>
+                                    <option value="tr">Turco</option>
+                                    <option value="sv">Sueco</option>
+                                    <option value="da">Dinamarquês</option>
+                                    <option value="fi">Finlandês</option>
+                                    <option value="no">Norueguês</option>
+                                    <option value="uk">Ucraniano</option>
+                                </select>
+                            </div>
+
+	                            <div className="space-y-2">
+	                                <Label>Idioma de saída (formatado)</Label>
+	                                <select
+	                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                    value={outputLanguage}
+	                                    onChange={(e) => setOutputLanguage(e.target.value)}
+	                                >
+	                                    <option value="">Mesmo do áudio (auto)</option>
+	                                    <option value="pt">Português</option>
+	                                    <option value="en">Inglês</option>
+	                                    <option value="es">Espanhol</option>
+	                                    <option value="fr">Francês</option>
+	                                    <option value="de">Alemão</option>
+	                                    <option value="it">Italiano</option>
+	                                    <option value="ja">Japonês</option>
+	                                    <option value="ko">Coreano</option>
+	                                    <option value="zh">Chinês</option>
+	                                    <option value="ru">Russo</option>
+	                                    <option value="ar">Árabe</option>
+	                                    <option value="hi">Hindi</option>
+	                                    <option value="nl">Holandês</option>
+	                                    <option value="pl">Polonês</option>
+	                                    <option value="tr">Turco</option>
+	                                    <option value="sv">Sueco</option>
+	                                    <option value="da">Dinamarquês</option>
+	                                    <option value="fi">Finlandês</option>
+	                                    <option value="no">Norueguês</option>
+	                                    <option value="uk">Ucraniano</option>
+	                                </select>
+	                                <p className="text-xs text-muted-foreground">
+	                                    Escolha o idioma do texto formatado. Padrão: mesmo idioma do áudio.
+	                                </p>
+	                            </div>
+
+	                        <div className="border-t border-border" />
 
                         {!isHearing && (
                             <div className="space-y-2">
@@ -3670,7 +4182,7 @@ export default function TranscriptionPage() {
 
                         <div className="border-t border-border" />
 
-                        {!isHearing && (
+                        {!isHearing && !isLegenda && (
                             <div className="space-y-2">
                                 <Label>Modo de Formatação</Label>
                                 <select
@@ -3682,6 +4194,27 @@ export default function TranscriptionPage() {
                                     <option value="FIDELIDADE">🎯 Fidelidade (Literal)</option>
                                     <option value="RAW">📝 Raw (Apenas Transcrição)</option>
                                 </select>
+                            </div>
+                        )}
+
+                        {isLegenda && (
+                            <div className="space-y-4">
+                                <div className="space-y-2">
+                                    <Label>Formato de Legenda</Label>
+                                    <select
+                                        className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                        value={subtitleFormat}
+                                        onChange={(e) => setSubtitleFormat(e.target.value as 'srt' | 'vtt' | 'both')}
+                                    >
+                                        <option value="both">📦 Ambos (SRT + VTT)</option>
+                                        <option value="srt">📝 SRT (SubRip)</option>
+                                        <option value="vtt">🌐 VTT (WebVTT)</option>
+                                    </select>
+                                </div>
+                                <div className="rounded-md bg-muted/50 p-3 text-sm text-muted-foreground">
+                                    <p className="font-medium">🎬 Modo Legendas</p>
+                                    <p className="mt-1">Gera arquivos de legenda com timestamps precisos para vídeos.</p>
+                                </div>
                             </div>
                         )}
 
@@ -3810,6 +4343,84 @@ export default function TranscriptionPage() {
                                                     onCheckedChange={setHearingIncludeTimestamps}
                                                 />
                                             </div>
+                                            {/* Identificação dos participantes */}
+                                            <div className="border p-3 rounded-md space-y-2">
+                                                <Label className="flex flex-col space-y-1">
+                                                    <span>Participantes da audiência</span>
+                                                    <span className="font-normal text-xs text-muted-foreground">
+                                                        {speakerIdType === 'role'
+                                                            ? 'Defina os papéis para rotular automaticamente cada fala (ex: Juiz, Advogado, Testemunha).'
+                                                            : 'Defina os nomes reais dos participantes para identificação automática.'}
+                                                    </span>
+                                                </Label>
+                                                {/* Toggle entre Nome e Papel */}
+                                                <div className="flex items-center gap-2 text-xs">
+                                                    <span className="text-muted-foreground">Identificar por:</span>
+                                                    <div className="inline-flex rounded-md border overflow-hidden">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setSpeakerIdType('role')}
+                                                            className={`px-3 py-1 text-xs transition-colors ${speakerIdType === 'role' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
+                                                        >
+                                                            Papel
+                                                        </button>
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setSpeakerIdType('name')}
+                                                            className={`px-3 py-1 text-xs transition-colors ${speakerIdType === 'name' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
+                                                        >
+                                                            Nome
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {hearingSpeakerRoles.map((role, i) => (
+                                                        <span
+                                                            key={i}
+                                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20"
+                                                        >
+                                                            {role}
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setHearingSpeakerRoles(prev => prev.filter((_, idx) => idx !== i))}
+                                                                className="ml-0.5 hover:text-destructive transition-colors"
+                                                            >
+                                                                ×
+                                                            </button>
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                                <div className="flex gap-2">
+                                                    <input
+                                                        type="text"
+                                                        value={newRoleInput}
+                                                        onChange={(e) => setNewRoleInput(e.target.value)}
+                                                        onKeyDown={(e) => {
+                                                            if (e.key === 'Enter' && newRoleInput.trim()) {
+                                                                e.preventDefault();
+                                                                if (!hearingSpeakerRoles.includes(newRoleInput.trim())) {
+                                                                    setHearingSpeakerRoles(prev => [...prev, newRoleInput.trim()]);
+                                                                }
+                                                                setNewRoleInput('');
+                                                            }
+                                                        }}
+                                                        placeholder={speakerIdType === 'role' ? 'Adicionar papel...' : 'Adicionar nome...'}
+                                                        className="flex-1 px-2 py-1 text-sm rounded border bg-background"
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => {
+                                                            if (newRoleInput.trim() && !hearingSpeakerRoles.includes(newRoleInput.trim())) {
+                                                                setHearingSpeakerRoles(prev => [...prev, newRoleInput.trim()]);
+                                                            }
+                                                            setNewRoleInput('');
+                                                        }}
+                                                        className="px-3 py-1 text-xs rounded border hover:bg-accent transition-colors"
+                                                    >
+                                                        +
+                                                    </button>
+                                                </div>
+                                            </div>
                                         </div>
                                     )}
                                     <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
@@ -3927,44 +4538,8 @@ export default function TranscriptionPage() {
                                         </div>
                                     )}
                                 </div>
-                                <div className="border rounded-md p-3 space-y-3">
-                                    <div className="flex items-center gap-2 text-sm font-medium">
-                                        <Users className="h-4 w-4" /> Enrollment de voz (opcional)
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Nome do falante</Label>
-                                        <input
-                                            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                                            value={enrollName}
-                                            onChange={(e) => setEnrollName(e.target.value)}
-                                            placeholder="Ex: Juiz Fulano"
-                                        />
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Papel</Label>
-                                        <select
-                                            className="flex h-9 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm"
-                                            value={enrollRole}
-                                            onChange={(e) => setEnrollRole(e.target.value)}
-                                        >
-                                            {hearingRoles.map(role => (
-                                                <option key={role} value={role}>{role}</option>
-                                            ))}
-                                        </select>
-                                    </div>
-                                    <div className="space-y-2">
-                                        <Label>Áudio (10-30s)</Label>
-                                        <input
-                                            type="file"
-                                            accept="audio/*,.mp3,.wav,.m4a,.aac"
-                                            onChange={(e) => setEnrollFile(e.target.files?.[0] || null)}
-                                        />
-                                    </div>
-                                    <Button variant="secondary" onClick={handleEnrollSpeaker} disabled={isEnrolling}>
-                                        {isEnrolling ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Gavel className="mr-2 h-4 w-4" />}
-                                        Cadastrar voz
-                                    </Button>
-                                </div>
+                                {/* REMOVIDO: Seção de enrollment de voz
+                                   Os papéis agora são inferidos automaticamente via LLM durante a transcrição */}
 	                            </div>
 	                        )}
 	                        <Accordion type="single" collapsible className="rounded-md border">
@@ -3987,71 +4562,193 @@ export default function TranscriptionPage() {
                                 id="high-accuracy"
                                 checked={highAccuracy}
                                 onCheckedChange={setHighAccuracy}
+                                disabled={transcriptionEngine === 'assemblyai'}
                             />
                         </div>
 
-                        {/* Diarization Switch */}
+                        {/* Área de Conhecimento e Termos Específicos - todos os modos */}
+                        <div className="border p-3 rounded-md space-y-2">
+                            <Label className="flex flex-col space-y-1">
+                                <span>Área de conhecimento</span>
+                                <span className="font-normal text-xs text-muted-foreground">
+                                    Melhora o reconhecimento de termos técnicos da área selecionada.
+                                </span>
+                            </Label>
+                            <select
+                                className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm"
+                                value={isHearing ? 'juridico' : transcriptionArea}
+                                onChange={(e) => setTranscriptionArea(e.target.value)}
+                                disabled={isHearing}
+                            >
+                                <option value="geral">Geral</option>
+                                <option value="juridico">Jurídico</option>
+                                <option value="medicina">Medicina</option>
+                                <option value="ti">Tecnologia da Informação</option>
+                                <option value="engenharia">Engenharia</option>
+                                <option value="financeiro">Financeiro</option>
+                            </select>
+                        </div>
+                        <div className="border p-3 rounded-md space-y-2">
+                            <Label className="flex flex-col space-y-1">
+                                <span>Termos específicos</span>
+                                <span className="font-normal text-xs text-muted-foreground">
+                                    Nomes próprios, siglas, termos técnicos que devem ser reconhecidos corretamente (separados por vírgula).
+                                </span>
+                            </Label>
+                            <textarea
+                                className="flex min-h-[60px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none"
+                                placeholder="Ex: Dr. Silva, LGPD, API REST, Machine Learning"
+                                value={customKeyterms}
+                                onChange={(e) => setCustomKeyterms(e.target.value)}
+                            />
+                        </div>
+
+                        {/* Identificar Falantes Switch */}
                         <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
                             <Label htmlFor="diarization" className="flex flex-col space-y-1">
                                 <span className="flex items-center gap-2">
-                                    Diarização (separar falantes)
+                                    Identificar Falantes
                                     <SettingInfoPopover>
                                         <div className="space-y-2">
                                             <div className="font-semibold">O que faz</div>
-                                            <div>Detecta troca de falantes e marca o texto por SPEAKER (melhora quando há troca real de professores/participantes).</div>
+                                            <div>Detecta automaticamente quem está falando e separa o texto por participante.</div>
                                             <div className="font-semibold">Quando usar</div>
-                                            <div>✅ Reuniões, audiências e aulas com mais de um professor/falante.</div>
+                                            <div>✅ Reuniões, audiências, entrevistas e aulas com mais de um falante.</div>
                                             <div className="font-semibold">Importante</div>
-                                            <div>Requer Pyannote/Torch no backend e <code>HUGGING_FACE_TOKEN</code>. Ao ativar, o backend pode falhar se a diarização não estiver disponível.</div>
+                                            <div>O AssemblyAI sempre identifica falantes automaticamente. Para Whisper local, requer Pyannote configurado.</div>
                                             <div className="font-semibold">Padrão</div>
-                                            <div>Em audiências/reuniões: sempre ativa. Em apostilas: opcional.</div>
+                                            <div>Em audiências/reuniões/legendas: sempre ativo. Em apostilas: opcional.</div>
                                         </div>
                                     </SettingInfoPopover>
                                 </span>
                                 <span className="font-normal text-xs text-muted-foreground">
-                                    {isHearing
-                                        ? 'Sempre ativo em audiências/reuniões.'
-                                        : 'Opcional nas apostilas: ativa apenas quando você ligar.'}
+                                    {isHearing || isLegenda
+                                        ? 'Sempre ativo neste modo.'
+                                        : 'Opcional: ative para separar falas de diferentes pessoas.'}
                                 </span>
                             </Label>
                             <Switch
                                 id="diarization"
-                                checked={isHearing ? true : enableDiarization}
-                                disabled={isHearing}
+                                checked={isHearing || isLegenda ? true : enableDiarization}
+                                disabled={isHearing || isLegenda}
                                 onCheckedChange={(value) => {
-                                    if (isHearing) return;
+                                    if (isHearing || isLegenda) return;
                                     setEnableDiarization(value);
                                 }}
                             />
                         </div>
 
-                        <>
-                            <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
-                                <Label htmlFor="use-raw-cache" className="flex flex-col space-y-1">
-                                    <span className="flex items-center gap-2">
-                                        Usar cache RAW
-                                        <SettingInfoPopover>
-                                            <div className="space-y-2">
-                                                <div className="font-semibold">Recomendação</div>
-                                                <div>✅ Manter ligado (padrão).</div>
-                                                <div className="font-semibold">O que faz</div>
-                                                <div>Reaproveita a transcrição bruta (RAW) já gerada anteriormente para este mesmo arquivo. Isso acelera reprocessamentos e reduz custo.</div>
-                                                <div className="font-semibold">Quando desligar</div>
-                                                <div>Quando você quiser forçar uma nova transcrição do zero (por exemplo, se mudou a configuração de precisão ou acha que a transcrição bruta anterior ficou ruim).</div>
-                                            </div>
-                                        </SettingInfoPopover>
-                                    </span>
+                        {/* Identificação dos participantes */}
+                        {!isHearing && (enableDiarization || isLegenda) && (
+                            <div className="border p-3 rounded-md space-y-2">
+                                <Label className="flex flex-col space-y-1">
+                                    <span>Participantes esperados</span>
                                     <span className="font-normal text-xs text-muted-foreground">
-                                        Reaproveita transcrições brutas anteriores do mesmo arquivo.
+                                        {speakerIdType === 'role'
+                                            ? 'Defina os papéis para rotular automaticamente (ex: Professor, Aluno, Entrevistador).'
+                                            : 'Defina os nomes reais dos participantes para identificação automática.'}
                                     </span>
                                 </Label>
-                                <Switch
-                                    id="use-raw-cache"
-                                    checked={useRawCache}
-                                    onCheckedChange={setUseRawCache}
-                                />
+                                {/* Toggle entre Nome e Papel */}
+                                <div className="flex items-center gap-2 text-xs">
+                                    <span className="text-muted-foreground">Identificar por:</span>
+                                    <div className="inline-flex rounded-md border overflow-hidden">
+                                        <button
+                                            type="button"
+                                            onClick={() => setSpeakerIdType('role')}
+                                            className={`px-3 py-1 text-xs transition-colors ${speakerIdType === 'role' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
+                                        >
+                                            Papel
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => setSpeakerIdType('name')}
+                                            className={`px-3 py-1 text-xs transition-colors ${speakerIdType === 'name' ? 'bg-primary text-primary-foreground' : 'hover:bg-accent'}`}
+                                        >
+                                            Nome
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                    {hearingSpeakerRoles.map((role, i) => (
+                                        <span
+                                            key={i}
+                                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary border border-primary/20"
+                                        >
+                                            {role}
+                                            <button
+                                                type="button"
+                                                onClick={() => setHearingSpeakerRoles(prev => prev.filter((_, idx) => idx !== i))}
+                                                className="ml-0.5 hover:text-destructive transition-colors"
+                                            >
+                                                ×
+                                            </button>
+                                        </span>
+                                    ))}
+                                </div>
+                                <div className="flex gap-2">
+                                    <input
+                                        type="text"
+                                        value={newRoleInput}
+                                        onChange={(e) => setNewRoleInput(e.target.value)}
+                                        onKeyDown={(e) => {
+                                            if (e.key === 'Enter' && newRoleInput.trim()) {
+                                                e.preventDefault();
+                                                if (!hearingSpeakerRoles.includes(newRoleInput.trim())) {
+                                                    setHearingSpeakerRoles(prev => [...prev, newRoleInput.trim()]);
+                                                }
+                                                setNewRoleInput('');
+                                            }
+                                        }}
+                                        placeholder={speakerIdType === 'role' ? 'Adicionar papel...' : 'Adicionar nome...'}
+                                        className="flex-1 px-2 py-1 text-sm rounded border bg-background"
+                                    />
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            if (newRoleInput.trim() && !hearingSpeakerRoles.includes(newRoleInput.trim())) {
+                                                setHearingSpeakerRoles(prev => [...prev, newRoleInput.trim()]);
+                                            }
+                                            setNewRoleInput('');
+                                        }}
+                                        className="px-3 py-1 text-xs rounded border hover:bg-accent transition-colors"
+                                    >
+                                        +
+                                    </button>
+                                </div>
                             </div>
+                        )}
 
+                        {/* Usar cache RAW - relevante para todos os modos */}
+                        <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
+                            <Label htmlFor="use-raw-cache" className="flex flex-col space-y-1">
+                                <span className="flex items-center gap-2">
+                                    Usar cache RAW
+                                    <SettingInfoPopover>
+                                        <div className="space-y-2">
+                                            <div className="font-semibold">Recomendação</div>
+                                            <div>✅ Manter ligado (padrão).</div>
+                                            <div className="font-semibold">O que faz</div>
+                                            <div>Reaproveita a transcrição bruta (RAW) já gerada anteriormente para este mesmo arquivo. Isso acelera reprocessamentos e reduz custo.</div>
+                                            <div className="font-semibold">Quando desligar</div>
+                                            <div>Quando você quiser forçar uma nova transcrição do zero (por exemplo, se mudou a configuração de precisão ou acha que a transcrição bruta anterior ficou ruim).</div>
+                                        </div>
+                                    </SettingInfoPopover>
+                                </span>
+                                <span className="font-normal text-xs text-muted-foreground">
+                                    Reaproveita transcrições brutas anteriores do mesmo arquivo.
+                                </span>
+                            </Label>
+                            <Switch
+                                id="use-raw-cache"
+                                checked={useRawCache}
+                                onCheckedChange={setUseRawCache}
+                            />
+                        </div>
+
+                        {/* Opções de auditoria - não aplicáveis para legendas */}
+                        {!isLegenda && (
+                        <>
                             <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
                                 <Label htmlFor="auto-apply-fixes" className="flex flex-col space-y-1">
                                     <span className="flex items-center gap-2">
@@ -4165,8 +4862,11 @@ export default function TranscriptionPage() {
                                 />
                             </div>
                         </>
+                        )}
 
-                        {/* Thinking Level */}
+                        {/* Thinking Level e Modelo - não relevante para legendas (exceto tradução) */}
+                        {!isLegenda && (
+                        <>
                         <div className="space-y-2">
                             <Label>Nível de Pensamento (Thinking Budget)</Label>
                             <select
@@ -4180,7 +4880,6 @@ export default function TranscriptionPage() {
                             </select>
                         </div>
 
-                        {/* Seleção de Modelo */}
                         <div className="space-y-2">
                             <Label>Modelo de IA</Label>
                             <select
@@ -4192,9 +4891,44 @@ export default function TranscriptionPage() {
                                 <option value="gpt-5-mini">GPT-5 Mini</option>
                             </select>
                         </div>
+                        </>
+                        )}
 
-                        {!isHearing && !isRawMode && (
+                        {!isHearing && !isRawMode && !isLegenda && (
                             <div className="space-y-2">
+                                <div className="flex items-center justify-between space-x-2 border p-3 rounded-md">
+                                    <Label htmlFor="disable-tables" className="flex flex-col space-y-1">
+                                        <span className="flex items-center gap-2">
+                                            Desabilitar tabelas/extras
+                                            <SettingInfoPopover>
+                                                <div className="space-y-2">
+                                                    <div className="font-semibold">O que faz</div>
+                                                    <div>
+                                                        Remove a camada de <span className="font-medium">TABELAS/EXTRAS</span> do prompt do `mlx_vomo.py` (ex.: quadro-síntese,
+                                                        pegadinhas, checklists, fluxograma, mapa mental, questionário).
+                                                    </div>
+                                                    <div className="font-semibold">Quando usar</div>
+                                                    <div>
+                                                        Quando você quer um texto mais “limpo” (sem quadros/tabelas) ou quando as tabelas estão causando latência/instabilidade.
+                                                    </div>
+                                                    <div className="font-semibold">Observação</div>
+                                                    <div>
+                                                        Em <span className="font-medium">APOSTILA</span>, o prompt customizado é focado em tabelas/extras; com esta opção ligada, ele pode ser ignorado.
+                                                    </div>
+                                                </div>
+                                            </SettingInfoPopover>
+                                        </span>
+                                        <span className="font-normal text-xs text-muted-foreground">
+                                            Evita gerar tabelas Markdown e anexos por tópico.
+                                        </span>
+                                    </Label>
+                                    <Switch
+                                        id="disable-tables"
+                                        checked={disableTables}
+                                        onCheckedChange={setDisableTables}
+                                    />
+                                </div>
+
                                 <Label className="flex items-center gap-2">
                                     Prompt Customizado (Opcional)
                                     <SettingInfoPopover>
@@ -4288,11 +5022,11 @@ export default function TranscriptionPage() {
 	                        <Button
 	                            className="w-full"
 	                            onClick={handleSubmit}
-	                            disabled={isProcessing || files.length === 0}
+	                            disabled={isSubmitting || (files.length === 0 && !publicUrl.trim())}
                         >
-                            {isProcessing ? (
+                            {isSubmitting ? (
                                 <>
-                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Processando...
+                                    <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Iniciando...
                                 </>
                             ) : (
                                 <>
@@ -4301,238 +5035,17 @@ export default function TranscriptionPage() {
                             )}
                         </Button>
 
-                        <div className="relative w-full mt-4 border-t pt-4">
-                            <div className="flex items-center justify-between mb-2 gap-2">
-                                <Label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                                    Histórico de Jobs
-                                </Label>
-                                <div className="flex items-center gap-2">
-                                    <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                                        <input
-                                            ref={jobsSelectAllRef}
-                                            type="checkbox"
-                                            className="h-3 w-3 rounded border border-input"
-                                            checked={allJobsSelected}
-                                            disabled={deletableJobIds.length === 0}
-                                            onChange={(e) => handleSelectAllJobs(e.target.checked)}
-                                        />
-                                        Todos
-                                    </label>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-6 px-2 text-[10px]"
-                                        onClick={() => handleDeleteSelectedJobs()}
-                                        disabled={selectedJobIds.size === 0}
-                                    >
-                                        Excluir selecionados
-                                    </Button>
-                                </div>
-                            </div>
-                            {activeJobId && (
-                                <div className="text-[10px] text-muted-foreground mb-2">
-                                    Job atual: <span className="font-mono">{activeJobId}</span>
-                                </div>
-                            )}
-                            {jobsLoading ? (
-                                <div className="text-xs text-muted-foreground">Carregando...</div>
-                            ) : jobHistory.length === 0 ? (
-                                <div className="text-xs text-muted-foreground">Nenhum job recente.</div>
-                            ) : (
-                                <div className="space-y-2 max-h-56 overflow-y-auto">
-                                    {jobHistory.map((job) => {
-                                        const jobLabel = job.job_type === 'hearing' ? 'Audiência' : 'Transcrição';
-                                        const title = job.job_type === 'hearing'
-                                            ? `Caso ${job.config?.case_id || '—'}`
-                                            : (job.file_names || []).join(', ') || job.job_id;
-                                        const canLoad = job.status === 'completed';
-                                        const canResume = job.status === 'running' || job.status === 'queued';
-                                        const canDelete = !canResume;
-                                        return (
-                                            <div key={job.job_id} className="flex items-center justify-between gap-2 text-xs border rounded-md px-2 py-2">
-                                                <div className="flex items-start gap-2 min-w-0">
-                                                    <input
-                                                        type="checkbox"
-                                                        className="mt-1 h-3 w-3 rounded border border-input"
-                                                        checked={selectedJobIds.has(job.job_id)}
-                                                        disabled={!canDelete}
-                                                        onChange={(e) => toggleJobSelection(job.job_id, e.target.checked)}
-                                                        title={canDelete ? 'Selecionar job' : 'Job em execução'}
-                                                    />
-                                                    <div className="min-w-0">
-                                                        <div className="flex items-center gap-2">
-                                                            <Badge variant={job.status === 'completed' ? 'default' : job.status === 'error' ? 'destructive' : 'secondary'}>
-                                                                {job.status}
-                                                            </Badge>
-                                                            <span className="font-medium">{jobLabel}</span>
-                                                        </div>
-                                                        <div className="text-[11px] text-muted-foreground truncate" title={title}>
-                                                            {title}
-                                                        </div>
-                                                        <div className="text-[10px] text-muted-foreground">
-                                                            {formatJobTime(job.updated_at || job.created_at)}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div className="flex flex-col items-end gap-1">
-                                                    {typeof job.progress === 'number' && (
-                                                        <span className="text-[10px] text-muted-foreground">{job.progress}%</span>
-                                                    )}
-                                                    {canLoad && (
-                                                        <Button
-                                                            size="sm"
-                                                            variant="secondary"
-                                                            onClick={async () => {
-                                                                await handleLoadJobResult(job.job_id);
-                                                                setMainTab('preview');
-                                                            }}
-                                                        >
-                                                            Carregar
-                                                        </Button>
-                                                    )}
-                                                    {canResume && (
-                                                        <Button size="sm" variant="outline" onClick={() => handleResumeJob(job.job_id)}>
-                                                            Acompanhar
-                                                        </Button>
-                                                    )}
-                                                    {canResume && (
-                                                        <Button size="sm" variant="destructive" onClick={() => handleCancelJob(job.job_id)}>
-                                                            Interromper
-                                                        </Button>
-                                                    )}
-                                                    <Button
-                                                        size="icon"
-                                                        variant="ghost"
-                                                        className="h-7 w-7 text-destructive"
-                                                        onClick={() => handleDeleteJob(job.job_id)}
-                                                        disabled={!canDelete}
-                                                        title={canDelete ? 'Excluir job' : 'Job em execução'}
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-
-                        <div className="relative w-full mt-4 border-t pt-4">
-                            <div className="flex items-center justify-between mb-2 gap-2">
-                                <Label className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                                    Arquivos salvos
-                                </Label>
-                                <div className="flex items-center gap-2">
-                                    <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
-                                        <input
-                                            ref={savedDocsSelectAllRef}
-                                            type="checkbox"
-                                            className="h-3 w-3 rounded border border-input"
-                                            checked={allDocsSelected}
-                                            disabled={selectableSavedDocIds.length === 0}
-                                            onChange={(e) => handleSelectAllSavedDocs(e.target.checked)}
-                                        />
-                                        Todos
-                                    </label>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-6 px-2 text-[10px]"
-                                        onClick={() => handleDeleteSelectedSavedDocuments()}
-                                        disabled={selectedSavedDocIds.size === 0}
-                                    >
-                                        Excluir selecionados
-                                    </Button>
-                                    <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        className="h-6 px-2 text-[10px]"
-                                        onClick={loadSavedDocuments}
-                                        disabled={savedDocsLoading}
-                                    >
-                                        Atualizar
-                                    </Button>
-                                </div>
-                            </div>
-                            {savedDocsLoading ? (
-                                <div className="text-xs text-muted-foreground">Carregando...</div>
-                            ) : savedDocuments.length === 0 ? (
-                                <div className="text-xs text-muted-foreground">Nenhum arquivo salvo ainda.</div>
-                            ) : (
-                                <div className="space-y-2 max-h-48 overflow-y-auto">
-                                    {savedDocuments.map((doc) => {
-                                        const docId = resolveSavedDocumentId(doc);
-                                        const docKey = docId || `${doc?.name || 'documento'}-${doc?.created_at || ''}`;
-                                        return (
-                                            <div key={docKey} className="flex items-center justify-between gap-2 text-xs border rounded-md px-2 py-2">
-                                                <div className="flex items-start gap-2 min-w-0">
-                                                    <input
-                                                        type="checkbox"
-                                                        className="mt-1 h-3 w-3 rounded border border-input"
-                                                        checked={docId ? selectedSavedDocIds.has(docId) : false}
-                                                        disabled={!docId}
-                                                        onChange={(e) => docId && toggleSavedDocSelection(docId, e.target.checked)}
-                                                        title={docId ? 'Selecionar arquivo' : 'ID indisponível'}
-                                                    />
-                                                    <div className="min-w-0">
-                                                        <div className="text-[11px] font-medium truncate" title={doc.name}>
-                                                            {doc.name}
-                                                        </div>
-                                                        <div className="text-[10px] text-muted-foreground">
-                                                            {formatJobTime(doc.created_at)}
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <Button
-                                                        size="sm"
-                                                        variant="outline"
-                                                        className="text-[10px] h-6 px-2"
-                                                        onClick={() => (window.location.href = '/documents')}
-                                                    >
-                                                        Abrir
-                                                    </Button>
-                                                    <Button
-                                                        size="icon"
-                                                        variant="ghost"
-                                                        className="h-6 w-6 text-destructive"
-                                                        onClick={() => handleDeleteSavedDocument(doc)}
-                                                        disabled={!docId}
-                                                        title={docId ? 'Excluir documento' : 'ID do documento indisponível'}
-                                                    >
-                                                        <Trash2 className="h-4 w-4" />
-                                                    </Button>
-                                                </div>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-
-                        {!isHearing && (
-                            <div className="relative w-full mt-4 border-t pt-4">
-                                <Label className="mb-2 block text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                                    Validação HIL (Offline)
-                                </Label>
-                                <div className="relative">
-                                    <input
-                                        type="file"
-                                        accept=".md,.txt"
-                                        onChange={handleImportMD}
-                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
-                                    />
-                                    <Button variant="secondary" className="w-full" disabled={isProcessing}>
-                                        <Upload className="mr-2 h-4 w-4" />
-                                        Carregar Markdown Existente
-                                    </Button>
-                                </div>
-                                <p className="text-[10px] text-muted-foreground mt-1 text-center">
-                                    Carregue um arquivo local (.md) para usar o Painel de Qualidade.
-                                </p>
-                            </div>
-                        )}
+                        {/* Botão de recuperação de transcrições */}
+                        <Button
+                            variant="outline"
+                            className="w-full mt-2"
+                            onClick={() => {
+                                loadPendingTranscriptions();
+                                setRecoveryDialogOpen(true);
+                            }}
+                        >
+                            <RefreshCw className="mr-2 h-4 w-4" /> Recuperar transcrição anterior
+                        </Button>
 
                             </CardContent>
                         </Card>
@@ -4590,7 +5103,7 @@ export default function TranscriptionPage() {
 												value="preventive"
 												className={preventiveShouldBlockDisplay ? "text-orange-600" : (preventiveAudit || preventiveAuditMarkdown) ? "text-green-600" : ""}
 											>
-												{preventiveShouldBlockDisplay ? '⚠️ Auditoria Preventiva' : 'Auditoria Preventiva'}
+												{preventiveShouldBlockDisplay ? '⚠️ Auditoria' : 'Auditoria'}
 											</TabsTrigger>
 										)}
 										<TabsTrigger value="quality">{isHearing ? 'Qualidade' : 'Qualidade (Resumo)'}</TabsTrigger>
@@ -4642,6 +5155,7 @@ export default function TranscriptionPage() {
                                                                 mediaRef.current = el;
                                                             }}
                                                             src={mediaUrl}
+                                                            preload="metadata"
                                                             controls
                                                             className="w-full rounded-md border"
                                                             onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
@@ -4653,6 +5167,7 @@ export default function TranscriptionPage() {
                                                                 mediaRef.current = el;
                                                             }}
                                                             src={mediaUrl}
+                                                            preload="metadata"
                                                             controls
                                                             className="w-full"
                                                             onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
@@ -4808,8 +5323,8 @@ export default function TranscriptionPage() {
                                                                     triggerMarkdownDownload(content, `transcricao-${new Date().getTime()}.md`);
                                                                     toast.success('Arquivo Markdown baixado!');
                                                                 }}
-	                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
-	                                                                themeClassName={`${documentThemeClass} ${documentLayoutClass}`}
+	                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass} doc-table-colors`}
+	                                                                themeClassName={`${documentThemeClass} ${documentLayoutClass} doc-table-colors`}
 	                                                                style={documentTypographyStyle}
 	                                                            />
                                                         </div>
@@ -4920,17 +5435,34 @@ export default function TranscriptionPage() {
                                                         </div>
 
                                                         <div className="flex-1 overflow-y-auto">
+                                                            {/* DEBUG: Verificar dados word-level */}
+                                                            {process.env.NODE_ENV === 'development' && previewMode === 'raw' && (
+                                                                <div className="text-xs text-muted-foreground p-2 bg-muted/30 border-b">
+                                                                    Words: {transcriptionWords.length} | MediaURL: {mediaUrl ? 'OK' : 'null'}
+                                                                </div>
+                                                            )}
                                                             {previewMode === 'raw' && (isHearing ? hearingTranscript : rawResult) ? (
-                                                                <SyncedTranscriptViewer
-                                                                    rawContent={(isHearing ? hearingTranscript : rawResult) || ''}
-                                                                    mediaUrl={mediaUrl}
-                                                                    mediaFiles={
-                                                                        files.length > 0
-                                                                            ? files.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
-                                                                            : jobMediaFiles
-                                                                    }
-                                                                    className="h-full border rounded-md"
-                                                                />
+                                                                // Usar WordLevelTranscriptViewer quando words disponíveis, senão SyncedTranscriptViewer
+                                                                !isHearing && transcriptionWords.length > 0 ? (
+                                                                    <WordLevelTranscriptViewer
+                                                                        rawContent={rawResult || ''}
+                                                                        words={transcriptionWords}
+                                                                        mediaUrl={mediaUrl}
+                                                                        timestampInterval={mode === 'AUDIENCIA' || mode === 'REUNIAO' || mode === 'LEGENDA' ? 0 : 60}
+                                                                        className="h-full border rounded-md"
+                                                                    />
+                                                                ) : (
+                                                                    <SyncedTranscriptViewer
+                                                                        rawContent={(isHearing ? hearingTranscript : rawResult) || ''}
+                                                                        mediaUrl={mediaUrl}
+                                                                        mediaFiles={
+                                                                            files.length > 0
+                                                                                ? files.map((f) => ({ name: f.name, url: URL.createObjectURL(f) }))
+                                                                                : jobMediaFiles
+                                                                        }
+                                                                        className="h-full border rounded-md"
+                                                                    />
+                                                                )
                                                             ) : (
                                                                 <div className="h-full flex flex-col gap-2">
                                                                     {activeDocumentLayout.showHeaderFooter && (
@@ -4943,13 +5475,13 @@ export default function TranscriptionPage() {
                                                                         {richTextHtml ? (
                                                                             <RichHtmlPreview
                                                                                 html={richTextHtml}
-                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
+                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass} doc-table-colors`}
                                                                                 style={documentTypographyStyle}
                                                                             />
                                                                         ) : (
                                                                             <MarkdownPreview
                                                                                 content={stripReportBlocks(result) || result || ''}
-                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass}`}
+                                                                                className={`h-full ${documentThemeClass} ${documentLayoutClass} doc-table-colors`}
                                                                                 style={documentTypographyStyle}
                                                                             />
                                                                         )}
@@ -4984,6 +5516,24 @@ export default function TranscriptionPage() {
                                             >
                                                 <FileType className="mr-2 h-4 w-4" /> Word
                                             </Button>
+                                            {reportPaths?.srt_path && (
+                                                <Button
+                                                    variant="outline"
+                                                    onClick={() => handleDownloadReport('srt_path')}
+                                                    disabled={!activeJobId}
+                                                >
+                                                    <FileText className="mr-2 h-4 w-4" /> SRT
+                                                </Button>
+                                            )}
+                                            {reportPaths?.vtt_path && (
+                                                <Button
+                                                    variant="outline"
+                                                    onClick={() => handleDownloadReport('vtt_path')}
+                                                    disabled={!activeJobId}
+                                                >
+                                                    <FileText className="mr-2 h-4 w-4" /> VTT
+                                                </Button>
+                                            )}
                                         </div>
                                     </div>
                                     <div className="border rounded-md p-4 space-y-2">
@@ -5049,6 +5599,8 @@ export default function TranscriptionPage() {
 													onRecompute={handleRecomputePreventiveAudit}
 													canRecompute={Boolean(activeJobId) && !preventiveAuditLoading}
 													onReload={() => fetchPreventiveAudit(true)}
+													consolidatedScore={auditSummary?.summary?.score}
+													consolidatedStatus={auditSummary?.summary?.status}
 												/>
 											</TabsContent>
 										)}
@@ -5079,6 +5631,9 @@ export default function TranscriptionPage() {
 												onIssuesUpdated={!isHearing ? setAuditIssues : undefined}
 												onAuditOutdatedChange={setIsAuditOutdated}
 												onConvertContentAlerts={!isHearing ? handleConvertQualityAlertsToHil : undefined}
+												// Consolidated audit score (from audit_summary.json)
+												consolidatedScore={auditSummary?.summary?.score}
+												consolidatedStatus={auditSummary?.summary?.status}
 											/>
 										</TabsContent>
 
@@ -5223,11 +5778,10 @@ export default function TranscriptionPage() {
                                                             <ul className="list-disc list-inside">
                                                                 {auditWarnings.map((warning) => (
                                                                     <li key={warning}>
-                                                                        {warning === 'sem_match_enrollment' && 'Sem correspondência de enrollment'}
                                                                         {warning === 'sem_formatacao' && 'Texto sem formatação aplicada'}
                                                                         {warning === 'act_classification_truncated' && 'Classificação de atos truncada'}
                                                                         {warning === 'claims_truncated' && 'Claims truncados (limite de evidências)'}
-                                                                        {!['sem_match_enrollment', 'sem_formatacao', 'act_classification_truncated', 'claims_truncated'].includes(warning) && warning}
+                                                                        {!['sem_formatacao', 'act_classification_truncated', 'claims_truncated'].includes(warning) && warning}
                                                                     </li>
                                                                 ))}
                                                             </ul>
@@ -5303,14 +5857,21 @@ export default function TranscriptionPage() {
                                             />
                                         </div>
 
-                                        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground mb-4">
-                                            <Clock className="h-3 w-3" />
-                                            <span>
-                                                ETA {etaSeconds !== null ? formatDuration(etaSeconds) : 'calculando...'}
+                                        <div className="flex items-center justify-center gap-4 text-xs text-muted-foreground mb-4">
+                                            <span className="flex items-center gap-1.5 bg-muted/50 px-3 py-1.5 rounded-full">
+                                                <Clock className="h-3 w-3" />
+                                                <span className="font-mono font-medium text-foreground">{formatDuration(elapsedSeconds)}</span>
+                                                <span className="text-muted-foreground/70">decorrido</span>
                                             </span>
+                                            {etaSeconds !== null && (
+                                                <span className="flex items-center gap-1.5 bg-primary/10 px-3 py-1.5 rounded-full">
+                                                    <span className="text-primary font-mono font-medium">{formatDuration(etaSeconds)}</span>
+                                                    <span className="text-primary/70">restante</span>
+                                                </span>
+                                            )}
                                         </div>
 
-                                        <div className="grid grid-cols-4 text-xs text-muted-foreground mt-2 mb-6 gap-2">
+                                        <div className="grid grid-cols-4 text-xs text-muted-foreground mt-2 mb-4 gap-2">
                                             <span className={`flex flex-col items-center gap-1 p-2 rounded-md transition-all ${progressStage === 'audio_optimization'
                                                 ? 'bg-primary/10 text-primary font-medium border border-primary/30'
                                                 : progressPercent > 20
@@ -5349,23 +5910,40 @@ export default function TranscriptionPage() {
                                             </span>
                                         </div>
 
-	                                        <div className="mt-4 flex items-center justify-between gap-3">
-	                                            <div className="text-[11px] text-muted-foreground">
-	                                                Logs em tempo real do servidor
-	                                                {logs.length ? ` · ${logs.length} linhas` : ''}
-	                                            </div>
-	                                            <Button
-	                                                type="button"
-	                                                variant="outline"
-	                                                size="sm"
-	                                                className="h-8"
-	                                                onClick={() => setProgressLogsOpen(true)}
-	                                                disabled={logs.length === 0}
-	                                            >
-	                                                Ver logs
-	                                            </Button>
-	                                        </div>
-	                                    </div>
+                                        {/* Logs em tempo real */}
+                                        <div className="mt-4 text-left">
+                                            <div className="flex items-center justify-between mb-2">
+                                                <span className="text-[11px] text-muted-foreground font-medium">
+                                                    📋 Logs em tempo real {logs.length > 0 && `(${logs.length})`}
+                                                </span>
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="h-6 text-[10px] px-2"
+                                                    onClick={() => setLogs([])}
+                                                    disabled={logs.length === 0}
+                                                >
+                                                    Limpar
+                                                </Button>
+                                            </div>
+                                            <div className="rounded-md border bg-black/95 text-green-400 font-mono text-[11px] p-3 h-[200px] overflow-y-auto">
+                                                {logs.length === 0 ? (
+                                                    <div className="text-green-600/50 animate-pulse">$ aguardando logs...</div>
+                                                ) : (
+                                                    <>
+                                                        {logs.map((log, i) => (
+                                                            <div key={i} className="leading-relaxed">
+                                                                <span className="text-green-600/70">[{log.timestamp}]</span>{' '}
+                                                                <span className="text-green-300">{log.message}</span>
+                                                            </div>
+                                                        ))}
+                                                        <div ref={logsEndRef} />
+                                                    </>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
 	                                ) : (
                                     <div className="text-center">
                                         <FileAudio className="h-12 w-12 mx-auto mb-4 opacity-20" />
@@ -5583,7 +6161,7 @@ export default function TranscriptionPage() {
                     <DialogHeader>
                         <DialogTitle>Logs do processamento</DialogTitle>
                         <DialogDescription>
-                            Output em tempo real do servidor (útil para diagnosticar travamentos, falhas de diarização, etc.).
+                            Output em tempo real do servidor (útil para diagnosticar travamentos e erros).
                         </DialogDescription>
                     </DialogHeader>
                     <div className="flex items-center justify-between gap-2">
@@ -5865,23 +6443,168 @@ export default function TranscriptionPage() {
 	                    </TabsContent>
 
 	                    <TabsContent value="tables" className="mt-5">
-	                        <div className="grid gap-2">
-	                            <Label>Tema de tabelas</Label>
-	                            <select
-	                                className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
-	                                value={activeDocumentTheme}
-	                                onChange={(e) => setActiveTheme(e.target.value)}
-	                            >
-	                                {DOCUMENT_THEMES.map((theme) => (
-	                                    <option key={theme.id} value={theme.id}>
-	                                        {theme.title}
-	                                    </option>
-	                                ))}
-	                            </select>
-	                            <p className="text-xs text-muted-foreground">
-	                                {DOCUMENT_THEMES.find((t) => t.id === activeDocumentTheme)?.description
-	                                    || 'Define o estilo visual do documento (principalmente tabelas).'}
-	                            </p>
+	                        <div className="grid gap-4">
+	                            <div className="grid gap-2">
+	                                <Label>Tema de tabelas</Label>
+	                                <select
+	                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                    value={activeDocumentTheme}
+	                                    onChange={(e) => setActiveTheme(e.target.value)}
+	                                >
+	                                    {DOCUMENT_THEMES.map((theme) => (
+	                                        <option key={theme.id} value={theme.id}>
+	                                            {theme.title}
+	                                        </option>
+	                                    ))}
+	                                </select>
+	                                <p className="text-xs text-muted-foreground">
+	                                    {DOCUMENT_THEMES.find((t) => t.id === activeDocumentTheme)?.description
+	                                        || 'Define o estilo visual do documento (principalmente tabelas).'}
+	                                </p>
+	                            </div>
+	                            <div className="grid gap-2">
+	                                <Label>Tamanho da fonte das tabelas (px)</Label>
+	                                <select
+	                                    className="flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+	                                    value={activeDocumentLayout.tableFontSize}
+	                                    onChange={(e) => updateActiveLayout({ tableFontSize: Number(e.target.value) })}
+	                                >
+	                                    {[9, 10, 11, 12, 13, 14, 15, 16].map((size) => (
+	                                        <option key={size} value={size}>
+	                                            {size}px
+	                                        </option>
+	                                    ))}
+	                                </select>
+	                                <p className="text-xs text-muted-foreground">
+	                                    Tamanho independente do texto principal. Para docs jurídicos, 11px é comum.
+	                                </p>
+	                            </div>
+	                            <div className="grid gap-2">
+	                                <Label>Paleta de cores</Label>
+	                                <div className="grid grid-cols-3 gap-2">
+	                                    {TABLE_COLOR_PALETTES.map((palette) => (
+	                                        <button
+	                                            key={palette.id}
+	                                            type="button"
+	                                            onClick={() => {
+	                                                updateActiveLayout({
+	                                                    tableColorPalette: palette.id,
+	                                                    tableColors: {
+	                                                        headerBg: palette.headerBg,
+	                                                        headerText: palette.headerText,
+	                                                        rowEvenBg: palette.rowEvenBg,
+	                                                        rowOddBg: palette.rowOddBg,
+	                                                        cellText: palette.cellText,
+	                                                        borderColor: palette.borderColor,
+	                                                    },
+	                                                });
+	                                            }}
+	                                            className={`flex flex-col items-center gap-1 rounded-md border p-2 text-xs transition-colors ${
+	                                                activeDocumentLayout.tableColorPalette === palette.id
+	                                                    ? 'border-primary bg-primary/10'
+	                                                    : 'border-input hover:bg-muted'
+	                                            }`}
+	                                        >
+	                                            <div className="flex gap-0.5">
+	                                                <div
+	                                                    className="h-4 w-4 rounded-sm border"
+	                                                    style={{ backgroundColor: palette.headerBg }}
+	                                                />
+	                                                <div
+	                                                    className="h-4 w-4 rounded-sm border"
+	                                                    style={{ backgroundColor: palette.rowEvenBg }}
+	                                                />
+	                                            </div>
+	                                            <span>{palette.title}</span>
+	                                        </button>
+	                                    ))}
+	                                </div>
+	                            </div>
+	                            {activeDocumentLayout.tableColorPalette === 'custom' && (
+	                                <div className="grid gap-3 rounded-md border p-3">
+	                                    <p className="text-xs font-medium text-muted-foreground">Cores personalizadas</p>
+	                                    <div className="grid grid-cols-2 gap-3">
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Fundo cabeçalho</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.headerBg}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, headerBg: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Texto cabeçalho</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.headerText}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, headerText: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Linhas pares</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.rowEvenBg}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, rowEvenBg: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Linhas ímpares</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.rowOddBg}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, rowOddBg: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Texto células</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.cellText}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, cellText: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                        <div className="grid gap-1">
+	                                            <Label className="text-xs">Bordas</Label>
+	                                            <input
+	                                                type="color"
+	                                                value={activeDocumentLayout.tableColors.borderColor}
+	                                                onChange={(e) =>
+	                                                    updateActiveLayout({
+	                                                        tableColors: { ...activeDocumentLayout.tableColors, borderColor: e.target.value },
+	                                                    })
+	                                                }
+	                                                className="h-8 w-full cursor-pointer rounded border"
+	                                            />
+	                                        </div>
+	                                    </div>
+	                                </div>
+	                            )}
 	                        </div>
 	                    </TabsContent>
 
@@ -5911,6 +6634,111 @@ export default function TranscriptionPage() {
 	                    <Button variant="outline" onClick={() => setLayoutDialogOpen(false)}>
 	                        Fechar
 	                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+
+        {/* Diálogo de recuperação de transcrições */}
+        <Dialog open={recoveryDialogOpen} onOpenChange={setRecoveryDialogOpen}>
+            <DialogContent className="max-w-2xl">
+                <DialogHeader>
+                    <DialogTitle className="flex items-center gap-2">
+                        <RefreshCw className="h-5 w-5" />
+                        Recuperar Transcrições
+                    </DialogTitle>
+                    <DialogDescription>
+                        Transcrições enviadas para AssemblyAI ou ElevenLabs que podem ser recuperadas.
+                    </DialogDescription>
+                </DialogHeader>
+                <div className="space-y-4 max-h-[400px] overflow-y-auto">
+                    {isLoadingPending ? (
+                        <div className="flex items-center justify-center py-8">
+                            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                            <span className="ml-2 text-muted-foreground">Carregando...</span>
+                        </div>
+                    ) : pendingTranscriptions.length === 0 ? (
+                        <div className="text-center py-8 text-muted-foreground">
+                            <FileAudio className="h-12 w-12 mx-auto mb-2 opacity-50" />
+                            <p>Nenhuma transcrição pendente encontrada.</p>
+                            <p className="text-xs mt-1">Transcrições antigas podem ter expirado (7 dias para AAI).</p>
+                        </div>
+                    ) : (
+                        pendingTranscriptions.map((t) => (
+                            <div
+                                key={t.transcript_id}
+                                className="flex items-center justify-between p-4 border rounded-lg bg-muted/30"
+                            >
+                                <div className="space-y-1">
+                                    <div className="font-medium flex items-center gap-2">
+                                        <FileAudio className="h-4 w-4" />
+                                        {t.file_name}
+                                    </div>
+                                    <div className="text-xs text-muted-foreground space-x-2">
+                                        <Badge variant="outline" className="text-xs">
+                                            {t.provider.toUpperCase()}
+                                        </Badge>
+                                        <Badge
+                                            variant={
+                                                t.status === 'completed'
+                                                    ? 'default'
+                                                    : t.status === 'error'
+                                                    ? 'destructive'
+                                                    : 'secondary'
+                                            }
+                                            className="text-xs"
+                                        >
+                                            {t.status}
+                                        </Badge>
+                                        <span>Enviado: {new Date(t.submitted_at).toLocaleString('pt-BR')}</span>
+                                        {t.audio_duration && (
+                                            <span>Duração: {Math.round(t.audio_duration / 60)}min</span>
+                                        )}
+                                    </div>
+                                </div>
+                                <div className="flex gap-2">
+                                    {t.provider === 'assemblyai' && t.status !== 'completed' && (
+                                        <Button
+                                            size="sm"
+                                            onClick={() => handleResumeTranscription(t.transcript_id, t.file_hash)}
+                                            disabled={isResuming === t.transcript_id}
+                                        >
+                                            {isResuming === t.transcript_id ? (
+                                                <Loader2 className="h-4 w-4 animate-spin" />
+                                            ) : (
+                                                <>
+                                                    <RefreshCw className="h-4 w-4 mr-1" />
+                                                    Retomar
+                                                </>
+                                            )}
+                                        </Button>
+                                    )}
+                                    {t.status === 'completed' && (
+                                        <Badge variant="default" className="bg-green-600">
+                                            <CheckCircle className="h-3 w-3 mr-1" />
+                                            Já em cache
+                                        </Badge>
+                                    )}
+                                    <Button
+                                        size="sm"
+                                        variant="ghost"
+                                        onClick={() => handleClearTranscriptionCache(t.file_hash)}
+                                        title="Limpar cache"
+                                    >
+                                        <Trash2 className="h-4 w-4 text-destructive" />
+                                    </Button>
+                                </div>
+                            </div>
+                        ))
+                    )}
+                </div>
+                <DialogFooter className="gap-2">
+                    <Button variant="outline" onClick={() => loadPendingTranscriptions()}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Atualizar
+                    </Button>
+                    <Button variant="outline" onClick={() => setRecoveryDialogOpen(false)}>
+                        Fechar
+                    </Button>
                 </DialogFooter>
             </DialogContent>
         </Dialog>

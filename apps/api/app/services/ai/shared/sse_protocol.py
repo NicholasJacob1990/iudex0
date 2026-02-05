@@ -82,6 +82,15 @@ class SSEEventType(str, Enum):
     RESEARCH_RESULT = "research_result"
     RESEARCH_COMPLETE = "research_complete"
 
+    # Code execution (hosted tools)
+    CODE_EXECUTION = "code_execution"
+    CODE_EXECUTION_RESULT = "code_execution_result"
+
+    # Code Artifacts (for Canvas/Editor)
+    ARTIFACT_START = "artifact_start"
+    ARTIFACT_TOKEN = "artifact_token"
+    ARTIFACT_DONE = "artifact_done"
+
     # CogGRAG Events
     COGRAG_DECOMPOSE_START = "cograg_decompose_start"
     COGRAG_DECOMPOSE_NODE = "cograg_decompose_node"
@@ -459,6 +468,114 @@ def error_event(
             "recoverable": recoverable,
         },
         job_id=job_id,
+        **kwargs
+    )
+
+
+# =============================================================================
+# CODE ARTIFACT EVENT BUILDERS
+# =============================================================================
+
+def artifact_start_event(
+    job_id: str,
+    artifact_id: str,
+    artifact_type: str = "code",
+    language: str = "typescript",
+    title: str = "Artifact",
+    description: str = "",
+    model: Optional[str] = None,
+    **kwargs
+) -> SSEEvent:
+    """
+    Create an artifact start event.
+
+    Signals the frontend to create a new code artifact and start streaming.
+    Works with Claude Agent SDK, OpenAI Agents SDK, and Gemini.
+
+    Args:
+        job_id: Job/session identifier
+        artifact_id: Unique identifier for the artifact
+        artifact_type: Type of artifact (code, component, diagram, chart, html, markdown)
+        language: Programming language (typescript, python, jsx, etc.)
+        title: Display title for the artifact
+        description: Optional description
+        model: Model that generated this artifact (claude, gpt, gemini)
+    """
+    return create_sse_event(
+        SSEEventType.ARTIFACT_START,
+        {
+            "artifact_id": artifact_id,
+            "artifact_type": artifact_type,
+            "language": language,
+            "title": title,
+            "description": description,
+            "model": model,
+        },
+        job_id=job_id,
+        phase="artifact",
+        **kwargs
+    )
+
+
+def artifact_token_event(
+    job_id: str,
+    artifact_id: str,
+    token: str,
+    **kwargs
+) -> SSEEvent:
+    """
+    Create an artifact token streaming event.
+
+    Streams code content incrementally to the frontend.
+
+    Args:
+        job_id: Job/session identifier
+        artifact_id: The artifact receiving this token
+        token: The code chunk/token to append
+    """
+    return create_sse_event(
+        SSEEventType.ARTIFACT_TOKEN,
+        {
+            "artifact_id": artifact_id,
+            "token": token,
+        },
+        job_id=job_id,
+        phase="artifact",
+        **kwargs
+    )
+
+
+def artifact_done_event(
+    job_id: str,
+    artifact_id: str,
+    final_code: Optional[str] = None,
+    dependencies: Optional[List[str]] = None,
+    executable: bool = False,
+    **kwargs
+) -> SSEEvent:
+    """
+    Create an artifact completion event.
+
+    Signals the frontend that the artifact is complete.
+
+    Args:
+        job_id: Job/session identifier
+        artifact_id: The completed artifact
+        final_code: Optional complete code (for verification)
+        dependencies: List of npm/pip dependencies
+        executable: Whether this artifact can be executed in browser
+    """
+    return create_sse_event(
+        SSEEventType.ARTIFACT_DONE,
+        {
+            "artifact_id": artifact_id,
+            "final_code": final_code,
+            "dependencies": dependencies or [],
+            "executable": executable,
+            "status": "complete",
+        },
+        job_id=job_id,
+        phase="artifact",
         **kwargs
     )
 

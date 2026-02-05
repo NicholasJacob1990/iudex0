@@ -48,6 +48,7 @@ import { QualityGatePanel } from './quality-gate-panel';
 import { HilChecklistPanel } from './hil-checklist-panel';
 import { DebateAuditPanel } from './debate-audit-panel';
 import { HilHistoryPanel } from './hil-history-panel';
+import { CodeArtifactViewer } from './code-artifact-viewer';
 
 function injectFootnoteRefsIntoHtml(html: string): string {
     const raw = String(html || '');
@@ -749,6 +750,12 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
 	                                    </span>
 	                                </TabsTrigger>
 	                            )}
+	                            <TabsTrigger value="code" className="rounded-none border-b-2 border-transparent data-[state=active]:border-primary data-[state=active]:bg-transparent px-2 h-full text-xs font-medium">
+	                                <span className="flex items-center gap-1">
+	                                    <FileCode className="h-3 w-3" />
+	                                    Code
+	                                </span>
+	                            </TabsTrigger>
 	                        </TabsList>
 
                         {/* Summary metrics in the bar */}
@@ -762,7 +769,7 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
                         )}
                     </div>
 
-                    <TabsContent value="editor" className="flex-1 min-h-0 overflow-auto p-8 bg-white m-0">
+                    <TabsContent value="editor" className="flex-1 min-h-0 overflow-auto p-4 bg-white m-0">
                         {hasDocument && !hideEditBanner && (
                             <div className="mb-4 flex items-start justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-900">
                                 <div className="flex items-start gap-2">
@@ -929,6 +936,11 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
 	                        </div>
 	                    </TabsContent>
 	                    )}
+
+	                    {/* Code Artifacts Tab */}
+	                    <TabsContent value="code" className="flex-1 min-h-0 overflow-y-auto p-6 bg-white m-0">
+	                        <CodeArtifactViewer />
+	                    </TabsContent>
 	                </Tabs>
             </div>
 

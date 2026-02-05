@@ -102,6 +102,9 @@ class Settings(BaseSettings):
         "http://0.0.0.0:3000",
         "http://0.0.0.0:3001",
         "http://0.0.0.0:3002",
+        # Office Add-in (dev)
+        "https://localhost:3100",
+        "https://127.0.0.1:3100",
     ]
     
     @field_validator("CORS_ORIGINS", mode="before")
@@ -152,7 +155,10 @@ class Settings(BaseSettings):
     GOOGLE_TEMPERATURE: float = 0.7
     GOOGLE_MAX_TOKENS: int = 4000
     
-    # Embeddings
+    # Embeddings — Provider local/fallback (SentenceTransformers)
+    # Dimensão 768 corresponde ao modelo paraphrase-multilingual-mpnet-base-v2.
+    # NOTA: O provider primário (OpenAI text-embedding-3-large, 3072d) é configurado
+    # em app/services/rag/config.py → RAGConfig.embedding_dimensions.
     EMBEDDING_MODEL: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
     EMBEDDING_DIMENSION: int = 768
     
@@ -242,7 +248,21 @@ class Settings(BaseSettings):
     # Opt-in: diarização em APOSTILA/FIDELIDADE (AUDIENCIA/REUNIAO já usam diarização por padrão no VomoMLX)
     ENABLE_DIARIZATION_APOSTILA: bool = False
     ENABLE_PODCAST_GENERATION: bool = True
-    
+
+    # Benchmark: comparar transcrição local vs AssemblyAI Universal-2
+    BENCHMARK_ASSEMBLYAI: bool = False
+    ASSEMBLYAI_API_KEY: Optional[str] = None
+    # Forçar AssemblyAI como backend primário (mesmo para APOSTILA/FIDELIDADE)
+    ASSEMBLYAI_PRIMARY: bool = False
+
+    # ElevenLabs Scribe v2 (Speech-to-Text para legendas)
+    ELEVENLABS_API_KEY: Optional[str] = None
+
+    # Whisper Server (RunPod/Modal) - Transcrição em GPU externa
+    WHISPER_SERVER_URL: Optional[str] = None  # Ex: https://your-pod-8080.proxy.runpod.net
+    WHISPER_SERVER_API_KEY: Optional[str] = None
+    WHISPER_SERVER_MODEL: str = "large-v3"  # Modelo padrão
+
     # APIs Externas
     CNJ_API_URL: Optional[str] = None
     CNJ_API_KEY: Optional[str] = None
@@ -250,6 +270,14 @@ class Settings(BaseSettings):
     DJEN_API_KEY: Optional[str] = None
     JURISPRUDENCE_API_URL: Optional[str] = None
     JURISPRUDENCE_API_KEY: Optional[str] = None
+
+    # DMS (Document Management System)
+    GOOGLE_DRIVE_CLIENT_ID: Optional[str] = None
+    GOOGLE_DRIVE_CLIENT_SECRET: Optional[str] = None
+    MICROSOFT_CLIENT_ID: Optional[str] = None
+    MICROSOFT_CLIENT_SECRET: Optional[str] = None
+    MICROSOFT_TENANT_ID: Optional[str] = None  # "common" para multi-tenant
+    DMS_OAUTH_REDIRECT_URL: Optional[str] = None
 
     # Serviço de Tribunais
     TRIBUNAIS_SERVICE_URL: str = "http://localhost:3100/api"

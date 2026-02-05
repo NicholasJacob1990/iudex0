@@ -97,7 +97,7 @@ export default function DashboardLayout({
       <div className="flex flex-1 flex-col">
         <TopNav />
         <div className="flex flex-1 min-h-0 overflow-hidden">
-          <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>
+          <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') || pathname?.startsWith('/ask') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>
             <PageTransition>{children}</PageTransition>
           </main>
         </div>

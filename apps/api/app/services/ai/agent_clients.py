@@ -196,12 +196,15 @@ def init_vertex_client():
     
     # We prioritize Vertex AI (GCP) if project_id is available AND not forced direct
     if project_id and not force_direct:
+        logger.info(f"🔗 [Gemini] Inicializando via Vertex AI (project={project_id}, region={region})")
         return genai.Client(vertexai=True, project=project_id, location=region)
     elif api_key:
-        # Fallback to direct Gemini API if no GCP project is set or forced direct
         if force_direct:
-            logger.info("⚡ GEMINI_FORCE_DIRECT=true: Usando API keys diretas (bypass Vertex)")
+            logger.info("⚡ [Gemini] GEMINI_FORCE_DIRECT=true: Usando API keys diretas (bypass Vertex)")
+        else:
+            logger.info("🔑 [Gemini] Sem GOOGLE_CLOUD_PROJECT, usando API key direta")
         return genai.Client(api_key=api_key)
+    logger.warning("⚠️ [Gemini] Sem credenciais: GOOGLE_CLOUD_PROJECT e GEMINI_API_KEY/GOOGLE_API_KEY ausentes")
     return None
 
 def init_openai_client():
@@ -425,6 +428,30 @@ def get_async_claude_client():
 
     _async_anthropic_client = anthropic.AsyncAnthropic(api_key=api_key)
     return _async_anthropic_client
+
+
+# Cached direct client for code execution fallback (Vertex doesn't support code-execution beta)
+_async_anthropic_direct_client = None
+
+def get_async_claude_direct_client():
+    """Get a direct (non-Vertex) Anthropic client for features not supported on Vertex AI.
+
+    Used as fallback when the primary client is Vertex but the feature (e.g. code execution)
+    requires the direct Anthropic API.
+    """
+    global _async_anthropic_direct_client
+    if _async_anthropic_direct_client is not None:
+        return _async_anthropic_direct_client
+
+    if not anthropic:
+        return None
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return None
+
+    _async_anthropic_direct_client = anthropic.AsyncAnthropic(api_key=api_key)
+    return _async_anthropic_direct_client
 
 
 # =============================================================================
@@ -672,13 +699,23 @@ def get_active_cache(job_id: str) -> Optional[Any]:
 # =============================================================================
 
 API_TIMEOUT_SECONDS = 60
+_INTERACTION_RULES = (
+    "REGRA DE INTERAÇÃO: "
+    "Para mensagens casuais (oi, olá, bom dia, obrigado, tudo bem), responda brevemente e de forma natural. "
+    "NÃO gere templates, minutas ou peças jurídicas a menos que explicitamente solicitado. "
+    "Adapte a extensão e formalidade da resposta à complexidade da pergunta."
+)
+
 DEFAULT_LEGAL_SYSTEM_INSTRUCTION = (
-    "Você é um advogado jurídico sênior brasileiro. Responda sempre em português formal jurídico. "
-    "REGRA OBRIGATÓRIA: Ao citar fatos dos autos, USE SEMPRE o formato [TIPO - Doc. X, p. Y]."
+    "Você é um especialista jurídico brasileiro altamente qualificado. "
+    f"{_INTERACTION_RULES} "
+    "Quando o assunto exigir, use linguagem técnica e formal. "
+    "Ao citar fatos dos autos, use o formato [TIPO - Doc. X, p. Y]."
 )
 DEFAULT_GENERAL_SYSTEM_INSTRUCTION = (
     "Você é um assistente geral prestativo. Responda em português claro e natural, "
-    "sem jargões jurídicos, e seja objetivo."
+    "sem jargões jurídicos, e seja objetivo. "
+    f"{_INTERACTION_RULES}"
 )
 
 
@@ -1637,26 +1674,29 @@ async def call_vertex_gemini_async(
             
             # Apply thinking mode if specified and not "none"
             if thinking_mode and thinking_mode.lower() not in ("none", "off", "disabled"):
-                normalized_thinking = thinking_mode.lower()
-                if normalized_thinking in ("standard",):
-                    normalized_thinking = "medium"
-                elif normalized_thinking in ("extended", "xhigh"):
-                    normalized_thinking = "high"
-                
-                if normalized_thinking in ("minimal", "low"):
-                    # v6.1: Force very low budget for Gemini minimal to ensure speed
-                    if hasattr(thinking_config, "include_thoughts"):
-                         setattr(thinking_config, "include_thoughts", True)
-                
+                raw = thinking_mode.lower()
+                # SDK ThinkingLevel enum expects UPPERCASE
+                if raw in ("standard", "medium"):
+                    normalized_thinking = "MEDIUM"
+                elif raw in ("extended", "high", "xhigh"):
+                    normalized_thinking = "HIGH"
+                elif raw == "minimal":
+                    normalized_thinking = "MINIMAL"
+                elif raw == "low":
+                    normalized_thinking = "LOW"
+                else:
+                    normalized_thinking = raw.upper()
+
                 logger.info(f"🧠 [Gemini Async] Ativando thinking_mode={normalized_thinking} para {model_id}")
-                thinking_config = types.ThinkingConfig(include_thoughts=True)
-                try:
-                    if hasattr(thinking_config, "thinking_level"):
-                        setattr(thinking_config, "thinking_level", normalized_thinking)
-                    elif hasattr(thinking_config, "thinkingLevel"):
-                        setattr(thinking_config, "thinkingLevel", normalized_thinking)
-                except Exception:
-                    pass
+                if normalized_thinking in ("MEDIUM", "HIGH"):
+                    try:
+                        thinking_config = types.ThinkingConfig(
+                            include_thoughts=True, thinking_level=normalized_thinking
+                        )
+                    except Exception:
+                        thinking_config = types.ThinkingConfig(include_thoughts=True)
+                else:
+                    thinking_config = types.ThinkingConfig(include_thoughts=True)
                 config_kwargs["thinking_config"] = thinking_config
 
             async def _call(active_client):
@@ -1768,14 +1808,19 @@ async def stream_openai_async(
     temperature: float = 0.3,
     system_instruction: Optional[str] = None,
     reasoning_effort: Optional[str] = None,  # For reasoning models (o1/o3, GPT-5.2)
+    enable_code_interpreter: bool = True,  # OpenAI code interpreter (Responses API)
+    container_id: Optional[str] = None,  # Container reuse for code interpreter
 ):
     """Async streaming for GPT (Vertex or direct) with thinking support.
-    
+
     Args:
         reasoning_effort: Options: 'none', 'low', 'medium', 'high', 'xhigh'
-    
+        enable_code_interpreter: Enable code interpreter via Responses API
+        container_id: Optional container ID to reuse sandbox state
+
     Yields:
-        Tuples of (chunk_type, content) where chunk_type is 'thinking' or 'text'
+        Tuples of (chunk_type, content) where chunk_type is 'thinking', 'text',
+        'code_execution', 'code_execution_result', or 'container_id'
     """
     if not client:
         return
@@ -1857,8 +1902,129 @@ async def stream_openai_async(
     if not async_client:
         return
 
+    # --- Responses API path (when code_interpreter is enabled) ---
+    # Chat Completions API does NOT support code_interpreter; Responses API does.
+    _has_responses_api = hasattr(async_client, 'responses') and hasattr(async_client.responses, 'create')
+    if enable_code_interpreter and _has_responses_api:
+        logger.info(f"🔧 [OpenAI] Using Responses API with code_interpreter for model={model}")
+        ci_tool: Dict[str, Any] = {"type": "code_interpreter"}
+        if container_id:
+            ci_tool["container"] = container_id
+        else:
+            ci_tool["container"] = {"type": "auto"}
+
+        responses_kwargs: Dict[str, Any] = {
+            "model": model,
+            "tools": [ci_tool],
+            "instructions": system_instruction,
+            "input": prompt,
+        }
+        if max_tokens:
+            responses_kwargs["max_output_tokens"] = max_tokens
+        if temperature != 1.0:
+            responses_kwargs["temperature"] = temperature
+        if reasoning_effort and (model.startswith(("o1-", "o3-")) or "gpt-5" in model):
+            responses_kwargs["reasoning"] = {"effort": reasoning_effort}
+
+        # Include code_interpreter outputs in response
+        responses_kwargs["include"] = ["code_interpreter_call.outputs"]
+
+        try:
+            # Use streaming if available
+            if hasattr(async_client.responses, 'create'):
+                response = await async_client.responses.create(stream=True, **responses_kwargs)
+                record_api_call(
+                    kind="llm", provider="openai", model=model,
+                    success=True, meta={"stream": True, "code_interpreter": True, "api": "responses"},
+                )
+
+                # Process streaming events from Responses API
+                # Event names per OpenAI docs (note underscores not dots between call_code):
+                #   response.output_text.delta — text output
+                #   response.reasoning_summary_text.delta — thinking
+                #   response.code_interpreter_call_code.delta — code being generated
+                #   response.code_interpreter_call_code.done — code generation complete
+                #   response.code_interpreter_call.completed — execution finished (contains outputs)
+                #   response.completed — full response done
+                _ci_code_buffer = []
+                async for event in response:
+                    event_type = getattr(event, 'type', '')
+
+                    # Text output delta
+                    if event_type == 'response.output_text.delta':
+                        delta_text = getattr(event, 'delta', '')
+                        if delta_text:
+                            yield ('text', delta_text)
+
+                    # Reasoning/thinking
+                    elif event_type == 'response.reasoning_summary_text.delta':
+                        delta_text = getattr(event, 'delta', '')
+                        if delta_text:
+                            yield ('thinking', delta_text)
+
+                    # Code interpreter: code being generated (delta)
+                    elif event_type == 'response.code_interpreter_call_code.delta':
+                        delta_code = getattr(event, 'delta', '')
+                        if delta_code:
+                            _ci_code_buffer.append(delta_code)
+                            yield ('code_execution', {
+                                'language': 'python',
+                                'code_delta': delta_code,
+                            })
+
+                    # Code interpreter: execution completed (outputs available)
+                    elif event_type == 'response.code_interpreter_call.completed':
+                        item = getattr(event, 'item', None) or getattr(event, 'output_item', None)
+                        if item:
+                            results = getattr(item, 'results', None) or getattr(item, 'output', None) or []
+                            logs = ''
+                            files_out = []
+                            if isinstance(results, list):
+                                for r in results:
+                                    r_type = getattr(r, 'type', '')
+                                    if r_type == 'logs':
+                                        logs = getattr(r, 'logs', '')
+                                    elif r_type == 'files':
+                                        files_out.extend(getattr(r, 'files', []))
+                            yield ('code_execution_result', {
+                                'outcome': 'OUTCOME_OK',
+                                'output': logs,
+                                'files': [
+                                    {'file_id': getattr(f, 'file_id', ''), 'name': getattr(f, 'name', '')}
+                                    for f in files_out
+                                ],
+                            })
+                            # Extract container_id from the completed call item
+                            _cid = getattr(item, 'container_id', None)
+                            if _cid:
+                                yield ('container_id', _cid)
+                        _ci_code_buffer.clear()
+
+                    # Response completed — fallback container_id extraction
+                    elif event_type == 'response.completed':
+                        resp_obj = getattr(event, 'response', None)
+                        if resp_obj:
+                            for output_item in getattr(resp_obj, 'output', []):
+                                if getattr(output_item, 'type', '') == 'code_interpreter_call':
+                                    _cid = getattr(output_item, 'container_id', None)
+                                    if _cid:
+                                        yield ('container_id', _cid)
+                                        break
+
+            return
+
+        except Exception as e:
+            record_api_call(
+                kind="llm", provider="openai", model=model,
+                success=False, meta={"stream": True, "code_interpreter": True, "api": "responses"},
+            )
+            logger.warning(f"Responses API failed ({e}), falling back to Chat Completions (no code_interpreter)")
+            # Fall through to Chat Completions below
+
+    # --- Chat Completions API path (standard, no code_interpreter) ---
+
     # Build completion kwargs
-    completion_kwargs = {
+    completion_kwargs: Dict[str, Any] = {
         "model": model,
         "messages": [
             {"role": "system", "content": system_instruction},
@@ -1879,11 +2045,11 @@ async def stream_openai_async(
         # Standard models
         completion_kwargs["max_tokens"] = max_tokens
         completion_kwargs["temperature"] = temperature
-    
-    # NEW: Add reasoning_effort for o1/o3 models
+
+    # Add reasoning_effort for o1/o3 models
     if reasoning_effort and (model.startswith(("o1-", "o3-")) or "gpt-5.2" in model):
         completion_kwargs["reasoning_effort"] = reasoning_effort
-    
+
     try:
         stream = await async_client.chat.completions.create(**completion_kwargs)
         record_api_call(
@@ -1902,19 +2068,19 @@ async def stream_openai_async(
             meta={"stream": True},
         )
         raise
-    
+
     async for chunk in stream:
         if not getattr(chunk, "choices", None):
             continue
-        
+
         choice = chunk.choices[0]
-        
-        # NEW: Check for reasoning/thinking content (o1/o3 models)
+
+        # Check for reasoning/thinking content (o1/o3 models)
         if hasattr(choice, 'delta'):
             # Check for reasoning content
             if hasattr(choice.delta, 'reasoning_content') and choice.delta.reasoning_content:
                 yield ('thinking', choice.delta.reasoning_content)
-            
+
             # Regular content
             delta = getattr(choice.delta, "content", None)
             if delta:
@@ -1930,14 +2096,21 @@ async def stream_anthropic_async(
     system_instruction: Optional[str] = None,
     extended_thinking: bool = False,  # NEW: Enable extended thinking
     thinking_budget: Optional[int] = None,
+    enable_code_execution: bool = True,  # Anthropic code execution server tool
+    code_execution_effort: str = "medium",  # "low", "medium", "high"
+    container_id: Optional[str] = None,  # Container reuse for code execution
 ):
     """Async streaming for Claude (Vertex or direct) with thinking support.
-    
+
     Args:
         extended_thinking: Enable extended thinking mode for Claude Sonnet 4 Thinking
-    
+        enable_code_execution: Enable Anthropic code execution server tool (beta)
+        code_execution_effort: Effort level for code execution ("low", "medium", "high")
+        container_id: Optional container ID for reusing code execution sandbox state
+
     Yields:
-        Tuples of (chunk_type, content) where chunk_type is 'thinking' or 'text'
+        Tuples of (chunk_type, content) where chunk_type is 'thinking', 'text',
+        'code_execution', 'code_execution_result', or 'container_id'
     """
     if not client:
         return
@@ -1949,6 +2122,15 @@ async def stream_anthropic_async(
 
     async_vertex_cls = getattr(anthropic, "AsyncAnthropicVertex", None) if anthropic else None
     is_vertex = _is_anthropic_vertex_client(client) or (async_vertex_cls and isinstance(client, async_vertex_cls))
+
+    # Vertex AI does not support code-execution beta — fallback to direct client if available
+    if is_vertex and enable_code_execution:
+        direct_client = get_async_claude_direct_client()
+        if direct_client:
+            logger.info("🔄 [Claude] Vertex não suporta code execution beta — usando client direto como fallback")
+            client = direct_client
+            is_vertex = False
+
     if not is_vertex:
         model_id = _get_anthropic_direct_model(model_id)
 
@@ -1961,7 +2143,28 @@ async def stream_anthropic_async(
             "system": system_instruction,
             "messages": [{"role": "user", "content": prompt}],
         }
-        
+
+        # Add code execution server tool if enabled (only for compatible models)
+        # Compatible: claude-sonnet-4+, claude-opus-4+, claude-haiku-4.5+, claude-3-7-sonnet
+        _ce_compatible = any(
+            model_id.startswith(p)
+            for p in (
+                "claude-sonnet-4",   # Sonnet 4, 4.5
+                "claude-opus-4",     # Opus 4, 4.1, 4.5
+                "claude-haiku-4",    # Haiku 4.5
+                "claude-3-7-sonnet", # 3.7 (deprecated)
+                "claude-3-5-haiku",  # 3.5 Haiku (deprecated)
+            )
+        )
+        if enable_code_execution and not is_vertex and _ce_compatible:
+            message_kwargs["tools"] = [
+                {"type": "code_execution_20250825", "name": "code_execution"},
+            ]
+            # Effort goes in output_config (not tool definition), only for Opus 4.5
+            # Requires additional beta header: effort-2025-11-24
+            if code_execution_effort in ("low", "medium", "high") and model_id.startswith("claude-opus-4"):
+                message_kwargs["output_config"] = {"effort": code_execution_effort}
+
         # NEW: Add extended thinking for Claude with thinking capability
         # Per Anthropic docs: thinking: {"type": "enabled", "budget_tokens": N}
         # Claude supports budget_tokens 0-63999
@@ -1986,33 +2189,97 @@ async def stream_anthropic_async(
             message_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
         
         provider_name = "vertex-anthropic" if is_vertex else "anthropic"
+
+        # Use beta API when code execution is enabled and model is compatible
+        use_beta = enable_code_execution and not is_vertex and _ce_compatible
+        if use_beta:
+            _betas = ["code-execution-2025-08-25"]
+            if "output_config" in message_kwargs:
+                _betas.append("effort-2025-11-24")
+            message_kwargs["betas"] = _betas
+            # Pass container_id for sandbox state reuse
+            if container_id:
+                message_kwargs["container"] = container_id
+            # Try beta.messages.stream first; fallback to beta.messages (no .stream)
+            beta_stream_fn = getattr(getattr(client, 'beta', None), 'messages', None)
+            if beta_stream_fn and hasattr(beta_stream_fn, 'stream'):
+                stream_ctx_mgr = beta_stream_fn.stream(**message_kwargs)
+            else:
+                # Fallback: use regular messages.stream (beta header still sent via betas kwarg)
+                stream_ctx_mgr = client.messages.stream(**message_kwargs)
+        else:
+            stream_ctx_mgr = client.messages.stream(**message_kwargs)
+
         try:
-            async with client.messages.stream(**message_kwargs) as stream:
+            async with stream_ctx_mgr as stream:
                 record_api_call(
                     kind="llm",
                     provider=provider_name,
                     model=model_id,
                     success=True,
-                    meta={"stream": True},
+                    meta={"stream": True, "code_execution": use_beta},
                 )
                 # Use async for to iterate through SSE events
                 async for event in stream:
                     # Claude SSE event types: content_block_start, content_block_delta, etc.
-                    if hasattr(event, 'type'):
-                        if event.type == 'content_block_delta':
-                            delta = getattr(event, 'delta', None)
-                            if delta and hasattr(delta, 'type'):
-                                # thinking_delta: contains thinking text
-                                if delta.type == 'thinking_delta':
-                                    thinking_text = getattr(delta, 'thinking', '')
-                                    if thinking_text:
-                                        logger.debug(f"🧠 [Claude Thinking] Delta: {thinking_text[:50]}...")
-                                        yield ('thinking', thinking_text)
-                                # text_delta: contains regular response text
-                                elif delta.type == 'text_delta':
-                                    text = getattr(delta, 'text', '')
-                                    if text:
-                                        yield ('text', text)
+                    if not hasattr(event, 'type'):
+                        continue
+
+                    if event.type == 'content_block_start':
+                        block = getattr(event, 'content_block', None)
+                        block_type = getattr(block, 'type', None)
+                        # server_tool_use: code execution started
+                        if block_type == 'server_tool_use':
+                            yield ('code_execution', {
+                                'id': getattr(block, 'id', ''),
+                                'name': getattr(block, 'name', 'code_execution'),
+                            })
+                        # Code execution results arrive as content_block_start (per Anthropic streaming docs)
+                        elif block_type in (
+                            'bash_code_execution_tool_result',
+                            'text_editor_code_execution_tool_result',
+                            'code_execution_tool_result',
+                        ):
+                            content = getattr(block, 'content', None)
+                            yield ('code_execution_result', {
+                                'stdout': getattr(content, 'stdout', '') if content else '',
+                                'stderr': getattr(content, 'stderr', '') if content else '',
+                                'return_code': getattr(content, 'return_code', -1) if content else -1,
+                            })
+
+                    elif event.type == 'content_block_delta':
+                        delta = getattr(event, 'delta', None)
+                        if delta and hasattr(delta, 'type'):
+                            # thinking_delta: contains thinking text
+                            if delta.type == 'thinking_delta':
+                                thinking_text = getattr(delta, 'thinking', '')
+                                if thinking_text:
+                                    logger.debug(f"🧠 [Claude Thinking] Delta: {thinking_text[:50]}...")
+                                    yield ('thinking', thinking_text)
+                            # text_delta: contains regular response text
+                            elif delta.type == 'text_delta':
+                                text = getattr(delta, 'text', '')
+                                if text:
+                                    yield ('text', text)
+
+                    # Capture container_id from message_stop or message events
+                    elif event.type == 'message_stop':
+                        msg = getattr(event, 'message', None) or getattr(stream, 'current_message_snapshot', None)
+                        if msg:
+                            _container = getattr(msg, 'container', None)
+                            if _container and hasattr(_container, 'id'):
+                                yield ('container_id', _container.id)
+
+                # Also try getting container from final message snapshot
+                final_msg = getattr(stream, 'get_final_message', None)
+                if callable(final_msg):
+                    try:
+                        fm = final_msg()
+                        _container = getattr(fm, 'container', None)
+                        if _container and hasattr(_container, 'id'):
+                            yield ('container_id', _container.id)
+                    except Exception:
+                        pass
         except Exception:
             record_api_call(
                 kind="llm",
@@ -2044,6 +2311,7 @@ async def stream_vertex_gemini_async(
     temperature: float = 0.3,
     system_instruction: Optional[str] = None,
     thinking_mode: Optional[str] = None,  # 'minimal'|'low'|'medium'|'high' (or legacy 'standard'|'extended')
+    enable_code_execution: bool = True,  # Gemini code_execution tool
 ):
     """Async streaming for Gemini via Vertex/Google GenAI with Extended Thinking support.
     
@@ -2057,12 +2325,16 @@ async def stream_vertex_gemini_async(
         Tuples of (chunk_type, content) where chunk_type is 'thinking' or 'text'
     """
     if not genai:
+        logger.error("❌ [Gemini] google-genai SDK não disponível. pip install google-genai")
+        yield ("error", "Gemini SDK (google-genai) não instalado no servidor.")
         return
 
     if not client:
         client = init_vertex_client()
 
     if not client:
+        logger.error("❌ [Gemini] Cliente não inicializado. Verifique GOOGLE_CLOUD_PROJECT ou GEMINI_API_KEY.")
+        yield ("error", "Gemini Client não inicializado. Verifique credenciais do Vertex AI.")
         return
 
     from app.services.ai.model_registry import get_api_model_name
@@ -2159,6 +2431,24 @@ async def stream_vertex_gemini_async(
             if not parts:
                 continue
             for part in parts:
+                # Code execution parts (Gemini code_execution tool)
+                if hasattr(part, 'executable_code') and part.executable_code:
+                    code = part.executable_code
+                    yield ("code_execution", {
+                        "language": str(getattr(code, 'language', 'PYTHON')),
+                        "code": getattr(code, 'code', str(code)),
+                    })
+                    yielded_any = True
+                    continue
+                if hasattr(part, 'code_execution_result') and part.code_execution_result:
+                    exec_result = part.code_execution_result
+                    yield ("code_execution_result", {
+                        "outcome": str(getattr(exec_result, 'outcome', 'UNKNOWN')),
+                        "output": getattr(exec_result, 'output', ''),
+                    })
+                    yielded_any = True
+                    continue
+
                 text = getattr(part, "text", None)
                 if not isinstance(text, str) or not text:
                     continue
@@ -2189,6 +2479,27 @@ async def stream_vertex_gemini_async(
         "temperature": temperature,
     }
 
+    # Add code_execution tool if enabled (not supported by flash-lite models)
+    _ce_gemini_compatible = not any(
+        model_id.startswith(p) for p in ("gemini-2.0-flash-lite", "gemini-2-flash-lite")
+    )
+    if enable_code_execution and types and _ce_gemini_compatible:
+        try:
+            # Per Google docs: types.Tool(code_execution=types.ToolCodeExecution)
+            # Try ToolCodeExecution (class ref, not instance), then CodeExecution(), then dict
+            tool_ce = getattr(types, "ToolCodeExecution", None)
+            if tool_ce is not None:
+                config_kwargs["tools"] = [types.Tool(code_execution=tool_ce)]
+            else:
+                code_exec_cls = getattr(types, "CodeExecution", None)
+                if code_exec_cls:
+                    config_kwargs["tools"] = [types.Tool(code_execution=code_exec_cls())]
+                else:
+                    config_kwargs["tools"] = [types.Tool(code_execution={})]
+            logger.debug("Code execution tool enabled for Gemini chat")
+        except Exception as e:
+            logger.warning(f"Could not enable Gemini code_execution: {e}")
+
     def _normalize_gemini_thinking(level: Optional[str]) -> Optional[str]:
         if not level:
             return None
@@ -2196,27 +2507,33 @@ async def stream_vertex_gemini_async(
         # "none"/"off"/"disabled" -> return None to completely disable thinking
         if raw in ("none", "off", "disabled"):
             return None
+        # SDK ThinkingLevel enum expects UPPERCASE: LOW, MEDIUM, HIGH, MINIMAL
         if raw in ("standard", "medium"):
-            return "medium"
+            return "MEDIUM"
         if raw in ("extended", "high", "xhigh"):
-            return "high"
-        if raw in ("minimal", "low"):
-            return raw
-        return raw
+            return "HIGH"
+        if raw == "minimal":
+            return "MINIMAL"
+        if raw == "low":
+            return "LOW"
+        return raw.upper()
 
     normalized_thinking = _normalize_gemini_thinking(thinking_mode)
     if normalized_thinking:
         logger.info(
             f"🧠 [Gemini Thinking] Ativando thinking_mode={normalized_thinking} para modelo {model_id}"
         )
-        thinking_config = types.ThinkingConfig(include_thoughts=True)
-        try:
-            if hasattr(thinking_config, "thinking_level"):
-                setattr(thinking_config, "thinking_level", normalized_thinking)
-            elif hasattr(thinking_config, "thinkingLevel"):
-                setattr(thinking_config, "thinkingLevel", normalized_thinking)
-        except Exception:
-            logger.warning("⚠️ Não foi possível aplicar thinking_level no ThinkingConfig; usando include_thoughts apenas.")
+        # Only pass thinking_level for MEDIUM/HIGH; LOW/MINIMAL use just include_thoughts
+        # to avoid Vertex AI 400 "thinking_level is not supported by this model"
+        if normalized_thinking in ("MEDIUM", "HIGH"):
+            try:
+                thinking_config = types.ThinkingConfig(
+                    include_thoughts=True, thinking_level=normalized_thinking
+                )
+            except Exception:
+                thinking_config = types.ThinkingConfig(include_thoughts=True)
+        else:
+            thinking_config = types.ThinkingConfig(include_thoughts=True)
         config_kwargs["thinking_config"] = thinking_config
 
     active_client = client

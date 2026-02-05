@@ -28,23 +28,24 @@ import type {
 export const graphKeys = {
     all: ['graph'] as const,
     data: (params: GraphDataParams) => [...graphKeys.all, 'data', params] as const,
-    entity: (id: string) => [...graphKeys.all, 'entity', id] as const,
-    remissoes: (id: string) => [...graphKeys.all, 'remissoes', id] as const,
-    semanticNeighbors: (id: string, limit?: number) =>
-        [...graphKeys.all, 'semantic-neighbors', id, limit] as const,
-    stats: () => [...graphKeys.all, 'stats'] as const,
-    path: (sourceId: string, targetId: string, maxLength?: number) =>
-        [...graphKeys.all, 'path', sourceId, targetId, maxLength] as const,
-    search: (query: string, types?: string, group?: string) =>
-        [...graphKeys.all, 'search', query, types, group] as const,
+    entity: (id: string, scope?: GraphScopeParams) => [...graphKeys.all, 'entity', id, scope ?? {}] as const,
+    remissoes: (id: string, scope?: GraphScopeParams) => [...graphKeys.all, 'remissoes', id, scope ?? {}] as const,
+    semanticNeighbors: (id: string, params: SemanticNeighborsParams) =>
+        [...graphKeys.all, 'semantic-neighbors', id, params] as const,
+    stats: (scope?: GraphScopeParams) => [...graphKeys.all, 'stats', scope ?? {}] as const,
+    path: (sourceId: string, targetId: string, params: GraphPathParams) =>
+        [...graphKeys.all, 'path', sourceId, targetId, params] as const,
+    search: (query: string, types?: string, group?: string, includeGlobal?: boolean) =>
+        [...graphKeys.all, 'search', query, types, group, includeGlobal] as const,
     lexicalSearch: (
         terms: string[],
         devices: string[],
         authors: string[],
         matchMode: 'all' | 'any',
         types: string[],
-        limit?: number
-    ) => [...graphKeys.all, 'lexical-search', terms, devices, authors, matchMode, types, limit] as const,
+        limit?: number,
+        includeGlobal?: boolean
+    ) => [...graphKeys.all, 'lexical-search', terms, devices, authors, matchMode, types, limit, includeGlobal] as const,
     relationTypes: () => [...graphKeys.all, 'relation-types'] as const,
 };
 
@@ -60,6 +61,21 @@ export interface GraphDataParams {
     entityIds?: string;
     documentIds?: string;
     caseIds?: string;
+    includeGlobal?: boolean;
+}
+
+export interface GraphScopeParams {
+    includeGlobal?: boolean;
+    documentIds?: string;
+    caseIds?: string;
+}
+
+export interface SemanticNeighborsParams extends GraphScopeParams {
+    limit?: number;
+}
+
+export interface GraphPathParams extends GraphScopeParams {
+    maxLength?: number;
 }
 
 export interface PathNode {
@@ -139,6 +155,7 @@ export function useGraphData(params: GraphDataParams, enabled = true) {
                 entity_ids: params.entityIds,
                 document_ids: params.documentIds,
                 case_ids: params.caseIds,
+                include_global: params.includeGlobal,
             });
             return data;
         },
@@ -155,7 +172,7 @@ export function useGraphEntity(entityId: string | null, enabled = true) {
     const queryClient = useQueryClient();
 
     return useQuery({
-        queryKey: graphKeys.entity(entityId ?? ''),
+        queryKey: graphKeys.entity(entityId ?? '', undefined),
         queryFn: async (): Promise<EntityDetail> => {
             if (!entityId) throw new Error('Entity ID is required');
             const data = await apiClient.getGraphEntity(entityId);
@@ -167,16 +184,62 @@ export function useGraphEntity(entityId: string | null, enabled = true) {
     });
 }
 
+export function useGraphEntityScoped(
+    entityId: string | null,
+    scope: GraphScopeParams,
+    enabled = true
+) {
+    return useQuery({
+        queryKey: graphKeys.entity(entityId ?? '', scope),
+        queryFn: async (): Promise<EntityDetail> => {
+            if (!entityId) throw new Error('Entity ID is required');
+            return await apiClient.getGraphEntity(entityId, {
+                include_global: scope.includeGlobal,
+                document_ids: scope.documentIds,
+                case_ids: scope.caseIds,
+            });
+        },
+        enabled: enabled && !!entityId,
+        staleTime: 1000 * 60 * 5,
+        gcTime: 1000 * 60 * 15,
+    });
+}
+
 /**
  * Fetch remissoes (cross-references) for an entity
  */
 export function useGraphRemissoes(entityId: string | null, enabled = true) {
     return useQuery({
-        queryKey: graphKeys.remissoes(entityId ?? ''),
+        queryKey: graphKeys.remissoes(entityId ?? '', undefined),
         queryFn: async () => {
             if (!entityId) throw new Error('Entity ID is required');
             const data = await apiClient.getGraphRemissoes(entityId);
             // Transform to Remissao array
+            return [
+                ...data.legislacao.map((r) => ({ ...r, group: 'legislacao' as const })),
+                ...data.jurisprudencia.map((r) => ({ ...r, group: 'jurisprudencia' as const })),
+            ];
+        },
+        enabled: enabled && !!entityId,
+        staleTime: 1000 * 60 * 5,
+        gcTime: 1000 * 60 * 15,
+    });
+}
+
+export function useGraphRemissoesScoped(
+    entityId: string | null,
+    scope: GraphScopeParams,
+    enabled = true
+) {
+    return useQuery({
+        queryKey: graphKeys.remissoes(entityId ?? '', scope),
+        queryFn: async () => {
+            if (!entityId) throw new Error('Entity ID is required');
+            const data = await apiClient.getGraphRemissoes(entityId, {
+                include_global: scope.includeGlobal,
+                document_ids: scope.documentIds,
+                case_ids: scope.caseIds,
+            });
             return [
                 ...data.legislacao.map((r) => ({ ...r, group: 'legislacao' as const })),
                 ...data.jurisprudencia.map((r) => ({ ...r, group: 'jurisprudencia' as const })),
@@ -193,14 +256,22 @@ export function useGraphRemissoes(entityId: string | null, enabled = true) {
  */
 export function useSemanticNeighbors(
     entityId: string | null,
-    limit = 30,
+    limitOrParams: number | SemanticNeighborsParams = 30,
     enabled = true
 ) {
+    const params: SemanticNeighborsParams =
+        typeof limitOrParams === 'number' ? { limit: limitOrParams } : limitOrParams;
+
     return useQuery({
-        queryKey: graphKeys.semanticNeighbors(entityId ?? '', limit),
+        queryKey: graphKeys.semanticNeighbors(entityId ?? '', params),
         queryFn: async (): Promise<SemanticNeighborsResponse> => {
             if (!entityId) throw new Error('Entity ID is required');
-            return await apiClient.getGraphSemanticNeighbors(entityId, limit);
+            return await apiClient.getGraphSemanticNeighbors(entityId, {
+                limit: params.limit,
+                include_global: params.includeGlobal,
+                document_ids: params.documentIds,
+                case_ids: params.caseIds,
+            });
         },
         enabled: enabled && !!entityId,
         staleTime: 1000 * 60 * 3, // 3 minutes
@@ -211,11 +282,19 @@ export function useSemanticNeighbors(
 /**
  * Fetch graph statistics
  */
-export function useGraphStats(enabled = true) {
+export function useGraphStats(scope?: GraphScopeParams, enabled = true) {
     return useQuery({
-        queryKey: graphKeys.stats(),
+        queryKey: graphKeys.stats(scope),
         queryFn: async (): Promise<GraphStats> => {
-            return await apiClient.getGraphStats();
+            return await apiClient.getGraphStats(
+                scope
+                    ? {
+                          include_global: scope.includeGlobal,
+                          document_ids: scope.documentIds,
+                          case_ids: scope.caseIds,
+                      }
+                    : undefined
+            );
         },
         enabled,
         staleTime: 1000 * 60 * 5, // 5 minutes
@@ -229,14 +308,22 @@ export function useGraphStats(enabled = true) {
 export function useGraphPath(
     sourceId: string | null,
     targetId: string | null,
-    maxLength = 4,
+    maxLengthOrParams: number | GraphPathParams = 4,
     enabled = true
 ) {
+    const params: GraphPathParams =
+        typeof maxLengthOrParams === 'number' ? { maxLength: maxLengthOrParams } : maxLengthOrParams;
+
     return useQuery({
-        queryKey: graphKeys.path(sourceId ?? '', targetId ?? '', maxLength),
+        queryKey: graphKeys.path(sourceId ?? '', targetId ?? '', params),
         queryFn: async (): Promise<FindPathResponse> => {
             if (!sourceId || !targetId) throw new Error('Source and target IDs are required');
-            return await apiClient.getGraphPath(sourceId, targetId, maxLength);
+            return await apiClient.getGraphPath(sourceId, targetId, {
+                max_length: params.maxLength,
+                include_global: params.includeGlobal,
+                document_ids: params.documentIds,
+                case_ids: params.caseIds,
+            });
         },
         enabled: enabled && !!sourceId && !!targetId,
         staleTime: 1000 * 60 * 10, // 10 minutes (paths don't change often)
@@ -252,13 +339,15 @@ export function useSearchEntities(
     types?: string,
     group?: string,
     limit = 50,
+    includeGlobal = true,
     enabled = true
 ) {
     return useQuery({
-        queryKey: graphKeys.search(query, types, group),
+        queryKey: graphKeys.search(query, types, group, includeGlobal),
         queryFn: async () => {
             return await apiClient.searchGraphEntities({
                 query: query || undefined,
+                include_global: includeGlobal,
                 types,
                 group,
                 limit,
@@ -283,6 +372,7 @@ export function useGraphLexicalSearch(
         matchMode: 'all' | 'any';
         types: string[];
         limit?: number;
+        includeGlobal?: boolean;
     },
     enabled = true
 ) {
@@ -293,7 +383,8 @@ export function useGraphLexicalSearch(
             params.authors,
             params.matchMode,
             params.types,
-            params.limit
+            params.limit,
+            params.includeGlobal
         ),
         queryFn: async () => {
             return await apiClient.graphLexicalSearch({
@@ -303,6 +394,7 @@ export function useGraphLexicalSearch(
                 matchMode: params.matchMode,
                 types: params.types,
                 limit: params.limit,
+                includeGlobal: params.includeGlobal,
             });
         },
         enabled,
@@ -372,10 +464,15 @@ export function useRelationTypes(enabled = true) {
 export function usePrefetchEntity() {
     const queryClient = useQueryClient();
 
-    return (entityId: string) => {
+    return (entityId: string, scope?: GraphScopeParams) => {
         queryClient.prefetchQuery({
-            queryKey: graphKeys.entity(entityId),
-            queryFn: () => apiClient.getGraphEntity(entityId),
+            queryKey: graphKeys.entity(entityId, scope),
+            queryFn: () =>
+                apiClient.getGraphEntity(entityId, {
+                    include_global: scope?.includeGlobal,
+                    document_ids: scope?.documentIds,
+                    case_ids: scope?.caseIds,
+                }),
             staleTime: 1000 * 60 * 5,
         });
     };
@@ -387,10 +484,22 @@ export function usePrefetchEntity() {
 export function usePrefetchNeighbors() {
     const queryClient = useQueryClient();
 
-    return (entityId: string) => {
+    return (entityId: string, scope?: GraphScopeParams) => {
+        const params: SemanticNeighborsParams = {
+            limit: 30,
+            includeGlobal: scope?.includeGlobal,
+            documentIds: scope?.documentIds,
+            caseIds: scope?.caseIds,
+        };
         queryClient.prefetchQuery({
-            queryKey: graphKeys.semanticNeighbors(entityId, 30),
-            queryFn: () => apiClient.getGraphSemanticNeighbors(entityId, 30),
+            queryKey: graphKeys.semanticNeighbors(entityId, params),
+            queryFn: () =>
+                apiClient.getGraphSemanticNeighbors(entityId, {
+                    limit: params.limit,
+                    include_global: params.includeGlobal,
+                    document_ids: params.documentIds,
+                    case_ids: params.caseIds,
+                }),
             staleTime: 1000 * 60 * 3,
         });
     };
@@ -403,10 +512,24 @@ export function usePrefetchNeighbors() {
 /**
  * Combined hook for entity detail + remissoes (used when clicking a node)
  */
-export function useEntityDetails(entityId: string | null) {
-    const entityQuery = useGraphEntity(entityId);
-    const remissoesQuery = useGraphRemissoes(entityId);
-    const neighborsQuery = useSemanticNeighbors(entityId, 30, false); // Lazy - enable manually
+export function useEntityDetails(entityId: string | null, scope?: GraphScopeParams) {
+    // Always call both hooks to satisfy Rules of Hooks (same order every render)
+    // Pass empty scope object when scope is undefined to keep hook order consistent
+    const emptyScope: GraphScopeParams = {};
+    const entityQueryScoped = useGraphEntityScoped(entityId, scope ?? emptyScope);
+    const entityQueryUnscoped = useGraphEntity(entityId);
+    const remissoesQueryScoped = useGraphRemissoesScoped(entityId, scope ?? emptyScope);
+    const remissoesQueryUnscoped = useGraphRemissoes(entityId);
+
+    // Select the appropriate result based on whether scope is provided
+    const entityQuery = scope ? entityQueryScoped : entityQueryUnscoped;
+    const remissoesQuery = scope ? remissoesQueryScoped : remissoesQueryUnscoped;
+
+    const neighborsQuery = useSemanticNeighbors(
+        entityId,
+        scope ? { ...scope, limit: 30 } : 30,
+        false
+    ); // Lazy - enable manually
 
     return {
         entity: entityQuery.data,
@@ -434,6 +557,7 @@ export interface LexicalSearchParams {
     matchMode?: 'any' | 'all';
     types?: string[];
     limit?: number;
+    includeGlobal?: boolean;
 }
 
 /**

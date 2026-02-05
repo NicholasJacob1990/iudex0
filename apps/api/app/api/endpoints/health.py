@@ -12,8 +12,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+
+from app.core.security import get_current_user
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +177,7 @@ async def health_check_qdrant() -> ServiceHealthStatus:
     description="Reset all RAG circuit breakers to closed state (admin only)",
     tags=["health"],
 )
-async def reset_circuit_breakers() -> Dict[str, str]:
+async def reset_circuit_breakers(current_user: User = Depends(get_current_user)) -> Dict[str, str]:
     """
     Reset all circuit breakers to closed state.
 
@@ -182,11 +185,21 @@ async def reset_circuit_breakers() -> Dict[str, str]:
     - After fixing a known issue with a service
     - During maintenance windows
     - Testing circuit breaker behavior
+
+    Requires admin role.
     """
+    user_role = getattr(current_user, "role", None)
+    role_value = user_role.value if hasattr(user_role, "value") else str(user_role)
+    if role_value not in ("admin", "ADMIN"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
+        )
+
     from app.services.rag.core.resilience import reset_all_circuit_breakers
 
     reset_all_circuit_breakers()
-    logger.info("All RAG circuit breakers reset via API")
+    logger.info("All RAG circuit breakers reset via API by user %s", current_user.id)
 
     return {"status": "ok", "message": "All circuit breakers reset to closed state"}
 

@@ -2,7 +2,7 @@ import nextCoreWebVitals from 'eslint-config-next/core-web-vitals';
 
 const config = [
   {
-    ignores: ['.next/**', 'node_modules/**', 'dist/**'],
+    ignores: ['.next/**', '.next.bak*/**', 'node_modules/**', 'dist/**'],
   },
   ...nextCoreWebVitals,
   {

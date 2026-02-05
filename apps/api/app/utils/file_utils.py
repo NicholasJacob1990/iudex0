@@ -14,11 +14,52 @@ from app.core.config import settings
 
 ALLOWED_EXTENSIONS = {
     'pdf', 'docx', 'doc', 'odt', 'txt', 'rtf', 'html',
+    'pptx', 'xlsx', 'xls', 'csv',
     'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',
     'mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac',
     'mp4', 'avi', 'mov', 'wmv', 'flv', 'mkv',
     'zip'
 }
+
+# Mapeamento de extensões para MIME types
+MIME_TYPE_MAP = {
+    'pdf': 'application/pdf',
+    'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'doc': 'application/msword',
+    'odt': 'application/vnd.oasis.opendocument.text',
+    'txt': 'text/plain',
+    'rtf': 'application/rtf',
+    'html': 'text/html',
+    'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'xls': 'application/vnd.ms-excel',
+    'csv': 'text/csv',
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'gif': 'image/gif',
+    'webp': 'image/webp',
+    'bmp': 'image/bmp',
+    'mp3': 'audio/mpeg',
+    'wav': 'audio/wav',
+    'ogg': 'audio/ogg',
+    'm4a': 'audio/mp4',
+    'flac': 'audio/flac',
+    'aac': 'audio/aac',
+    'mp4': 'video/mp4',
+    'avi': 'video/x-msvideo',
+    'mov': 'video/quicktime',
+    'wmv': 'video/x-ms-wmv',
+    'flv': 'video/x-flv',
+    'mkv': 'video/x-matroska',
+    'zip': 'application/zip',
+}
+
+
+def get_mime_type(filename: str) -> str:
+    """Retorna o MIME type baseado na extensão do arquivo"""
+    ext = get_file_extension(filename)
+    return MIME_TYPE_MAP.get(ext, 'application/octet-stream')
 
 
 def get_file_extension(filename: str) -> str:

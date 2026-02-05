@@ -92,6 +92,65 @@ def _normalize_text(value: Optional[str]) -> str:
     return text
 
 
+_STOPWORDS_PT_EN = {
+    # PT
+    "a", "o", "os", "as", "um", "uma", "uns", "umas", "de", "da", "do", "das", "dos",
+    "e", "ou", "em", "no", "na", "nos", "nas", "por", "para", "com", "sem", "sobre",
+    "ao", "aos", "à", "às", "que", "como", "qual", "quais", "quando", "onde", "porque",
+    "se", "ser", "são", "foi", "é", "não", "sim", "mais", "menos", "muito", "pouco",
+    # EN
+    "a", "an", "the", "and", "or", "in", "on", "at", "to", "for", "of", "with", "without",
+    "about", "from", "by", "as", "is", "are", "was", "were", "be", "been", "being",
+    "this", "that", "these", "those", "what", "which", "when", "where", "why", "how",
+}
+
+
+def _extract_terms(prompt: str, attachment_names: List[str], max_terms: int = 10) -> List[str]:
+    """
+    Deterministic heuristic for "checking terms in attached file" chips.
+    Source: user prompt + attachment filenames. No model calls.
+    """
+    raw = " ".join([str(prompt or ""), " ".join([str(x or "") for x in attachment_names or []])]).strip()
+    if not raw:
+        return []
+    tokens = re.split(r"[^A-Za-zÀ-ÿ0-9_]+", raw)
+    out: List[str] = []
+    seen: set = set()
+    for t in tokens:
+        v = str(t or "").strip().strip("_")
+        if not v:
+            continue
+        if len(v) < 3:
+            continue
+        key = v.lower()
+        if key in _STOPWORDS_PT_EN:
+            continue
+        if key.isdigit():
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(v[:32])
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def _attachment_name(doc: Any) -> str:
+    if doc is None:
+        return ""
+    if isinstance(doc, dict):
+        return str(doc.get("name") or doc.get("title") or doc.get("filename") or "").strip()
+    for attr in ("name", "title", "filename", "file_name"):
+        try:
+            val = getattr(doc, attr, None)
+            if val:
+                return str(val).strip()
+        except Exception:
+            continue
+    return ""
+
+
 def _find_all_occurrences(haystack: str, needle: str) -> List[int]:
     if not haystack or not needle:
         return []
@@ -112,6 +171,28 @@ def _common_suffix_len(a: str, b: str) -> int:
     while i < max_len and a[-(i + 1)] == b[-(i + 1)]:
         i += 1
     return i
+
+
+# ---------------------------------------------------------------------------
+# Canvas suggestion heuristic: detect document-like LLM responses
+# ---------------------------------------------------------------------------
+_DOC_STRUCTURE_RE = re.compile(
+    r"(^#{1,3}\s.+|"                         # Markdown headings
+    r"^\*{3,}$|"                              # Horizontal rules
+    r"^(?:Art\.|Artigo|Cláusula|Parágrafo)\s|"  # Legal article markers
+    r"^\d+\.\s+[A-ZÀ-Ú]|"                   # Numbered sections
+    r"^(?:I{1,3}V?|VI{0,3})\s*[-–—]\s)",     # Roman numeral sections
+    re.MULTILINE,
+)
+
+def _detect_canvas_suggestion(full_text: str) -> bool:
+    """Return True when the LLM response looks like a structured document
+    that would benefit from being displayed in the canvas editor."""
+    if not full_text or len(full_text) < 600:
+        return False
+    hits = len(_DOC_STRUCTURE_RE.findall(full_text))
+    # Require at least 3 structural markers for a document-like response
+    return hits >= 3
 
 
 HISTORY_BUFFER_TOKENS = 1000
@@ -1193,6 +1274,8 @@ Retorne APENAS o texto final, sem explicações.
         perplexity_return_images: bool = False,
         perplexity_return_videos: bool = False,
         rag_sources: Optional[List[str]] = None,
+        rag_jurisdictions: Optional[List[str]] = None,
+        rag_source_ids: Optional[List[str]] = None,
         rag_top_k: Optional[int] = None,
         adaptive_routing: bool = False,
         crag_gate: bool = False,
@@ -1206,6 +1289,7 @@ Retorne APENAS o texto final, sem explicações.
         rag_scope: str = "case_and_global",  # case_only, case_and_global, global_only
         scope_groups: Optional[List[str]] = None,
         allow_global_scope: Optional[bool] = None,
+        allow_private_scope: Optional[bool] = None,
         allow_group_scope: Optional[bool] = None,
         deep_research_effort: Optional[str] = None,
         deep_research_provider: Optional[str] = None,
@@ -1486,6 +1570,30 @@ Retorne APENAS o texto final, sem explicações.
         rag_context = ""
         graph_context = ""
         if rag_scope != "case_only":
+            rag_filters: Dict[str, Any] = {}
+            if rag_jurisdictions:
+                normalized = [
+                    str(j).strip().upper()
+                    for j in (rag_jurisdictions or [])
+                    if j is not None and str(j).strip()
+                ]
+                normalized = list(dict.fromkeys(normalized))
+                # UX aliases: accept UK/GB interchangeably
+                if "UK" in normalized and "GB" not in normalized:
+                    normalized.append("GB")
+                if "GB" in normalized and "UK" not in normalized:
+                    normalized.append("UK")
+                if normalized:
+                    rag_filters["jurisdictions"] = normalized
+            if rag_source_ids:
+                normalized_sources = [
+                    str(s).strip()
+                    for s in (rag_source_ids or [])
+                    if s is not None and str(s).strip()
+                ]
+                normalized_sources = list(dict.fromkeys(normalized_sources))
+                if normalized_sources:
+                    rag_filters["source_ids"] = normalized_sources
             resolved_scope_groups = scope_groups
             if resolved_scope_groups is None:
                 raw_groups = os.getenv("RAG_SCOPE_GROUPS", "")
@@ -1493,6 +1601,9 @@ Retorne APENAS o texto final, sem explicações.
             resolved_allow_global_scope = allow_global_scope
             if resolved_allow_global_scope is None:
                 resolved_allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+            resolved_allow_private_scope = allow_private_scope
+            if resolved_allow_private_scope is None:
+                resolved_allow_private_scope = True
             resolved_allow_group_scope = allow_group_scope
             if resolved_allow_group_scope is None:
                 resolved_allow_group_scope = True if resolved_scope_groups else False
@@ -1515,11 +1626,13 @@ Retorne APENAS o texto final, sem explicações.
                 user_id=None,
                 scope_groups=resolved_scope_groups,
                 allow_global_scope=bool(resolved_allow_global_scope),
+                allow_private_scope=bool(resolved_allow_private_scope),
                 allow_group_scope=bool(resolved_allow_group_scope),
                 history=history,
                 summary_text=None,
                 rewrite_query=len(history) > 1,
                 request_id=request_id,
+                filters=rag_filters or None,
             )
 
         # Combine contexts based on rag_scope
@@ -2149,6 +2262,7 @@ Retorne APENAS o texto final, sem explicações.
                     "model": model_id,
                     "full_text": lead_text,
                     "citations": list(citations_by_url.values()),
+                    "canvas_suggestion": _detect_canvas_suggestion(lead_text),
                 }
                 return
 
@@ -2174,6 +2288,22 @@ Retorne APENAS o texto final, sem explicações.
                 total_ms,
                 event_type,
             )
+
+        attachment_names: List[str] = []
+        for doc in attachment_docs or []:
+            name = _attachment_name(doc)
+            if name:
+                attachment_names.append(name)
+        attachment_names = list(dict.fromkeys(attachment_names))
+        attachments_payload: List[Dict[str, Any]] = []
+        for name in attachment_names[:6]:
+            ext = ""
+            try:
+                ext = str(name).rsplit(".", 1)[-1].strip().upper()
+            except Exception:
+                ext = ""
+            attachments_payload.append({"name": name, "ext": ext or None})
+        terms_payload = _extract_terms(user_message, attachment_names, max_terms=10) if attachment_names else []
 
         async def stream_model(model_id: str):
             """Stream wrapper for a single model"""
@@ -2222,6 +2352,67 @@ Retorne APENAS o texto final, sem explicações.
                     model_thinking_budget = model_override.get("thinking_budget")
 
                 yield {"type": "meta", "phase": "start", "t": int(time.time() * 1000), "model": model_id}
+
+                # Activity (Harvey-like) — per-model panel
+                yield {
+                    "type": "activity",
+                    "op": "add",
+                    "model": model_id,
+                    "step": {
+                        "id": "assess_query",
+                        "title": "Avaliando a pergunta",
+                        "status": "running",
+                        "kind": "assess",
+                        "detail": "",
+                        "tags": [],
+                        "t": int(time.time() * 1000),
+                    },
+                }
+                if attachments_payload:
+                    yield {
+                        "type": "activity",
+                        "op": "add",
+                        "model": model_id,
+                        "step": {
+                            "id": "reviewing_attached_file",
+                            "title": "Revisando arquivo anexado",
+                            "status": "done",
+                            "kind": "attachment_review",
+                            "attachments": attachments_payload,
+                            "tags": [],
+                            "t": int(time.time() * 1000),
+                        },
+                    }
+                if terms_payload:
+                    yield {
+                        "type": "activity",
+                        "op": "add",
+                        "model": model_id,
+                        "step": {
+                            "id": "checking_terms",
+                            "title": "Buscando termos no anexo",
+                            "status": "done",
+                            "kind": "file_terms",
+                            "terms": terms_payload,
+                            "tags": [],
+                            "t": int(time.time() * 1000),
+                        },
+                    }
+                if web_search:
+                    yield {
+                        "type": "activity",
+                        "op": "add",
+                        "model": model_id,
+                        "step": {
+                            "id": "web_search",
+                            "title": "Pesquisando na web",
+                            "status": "running",
+                            "kind": "web_search",
+                            "detail": "",
+                            "tags": [],
+                            "t": int(time.time() * 1000),
+                        },
+                    }
 
                 if allow_native_search and not use_shared_search and _supports_native_search(model_id):
                     native_messages = []
@@ -2655,6 +2846,7 @@ Retorne APENAS o texto final, sem explicações.
                                         "full_text": full_response,
                                         "thinking": full_thinking or None,
                                         "citations": list(citations_by_url.values()),
+                                        "canvas_suggestion": _detect_canvas_suggestion(full_response),
                                     }
                                     return
                             except Exception as e:
@@ -2869,6 +3061,7 @@ Retorne APENAS o texto final, sem explicações.
                                         "full_text": full_response,
                                         "thinking": full_thinking or None,
                                         "citations": list(citations_by_url.values()),
+                                        "canvas_suggestion": _detect_canvas_suggestion(full_response),
                                     }
                                     return
                             except Exception as e:
@@ -3032,6 +3225,9 @@ Retorne APENAS o texto final, sem explicações.
                         ):
                             if isinstance(chunk_data, tuple):
                                 chunk_type, delta = chunk_data
+                                if chunk_type == "error":
+                                    yield {"type": "error", "model": model_id, "error": str(delta)}
+                                    return
                                 if chunk_type in ("thinking", "thinking_summary") and delta:
                                     full_thinking += str(delta)
                                     payload: Dict[str, Any] = {
@@ -3122,6 +3318,7 @@ Retorne APENAS o texto final, sem explicações.
                     "full_text": full_response,
                     "thinking": full_thinking or None,
                     "citations": list(citations_by_url.values()),
+                    "canvas_suggestion": _detect_canvas_suggestion(full_response),
                 }
                 
             except Exception as e:
@@ -3129,28 +3326,60 @@ Retorne APENAS o texto final, sem explicações.
                 yield {"type": "error", "model": model_id, "error": str(e)}
 
         # Run all model streams concurrently and merge results
-        # Using a simple gather pattern is tricky for merged streaming generator.
-        # We'll use an asyncio Queue to merge streams.
-        
-        queue = asyncio.Queue()
-        active_streams = len(selected_models)
-        
-        async def producer(model_id):
-            async for event in stream_model(model_id):
-                await queue.put(event)
-            await queue.put(None) # Signal done for this model
-            
-        # Start producers
-        producers = [asyncio.create_task(producer(m)) for m in selected_models]
-        
-        # Consume queue
-        completed_streams = 0
-        while completed_streams < active_streams:
-            item = await queue.get()
-            if item is None:
-                completed_streams += 1
-            else:
-                yield item
+        # OPTIMIZATION: Use per-model queues with FIRST_COMPLETED for better TTFT
+        # This yields tokens as soon as ANY model produces them, not sequentially
+
+        model_queues = {m: asyncio.Queue() for m in selected_models}
+        completed_models = set()
+
+        async def producer(model_id: str, q: asyncio.Queue):
+            try:
+                async for event in stream_model(model_id):
+                    await q.put(event)
+            finally:
+                await q.put(None)  # Signal done
+
+        # Start all producers
+        producers = [
+            asyncio.create_task(producer(m, model_queues[m]))
+            for m in selected_models
+        ]
+
+        # OPTIMIZATION: Consume with FIRST_COMPLETED pattern
+        # Create initial get tasks for all queues
+        pending_gets = {
+            asyncio.create_task(q.get()): model_id
+            for model_id, q in model_queues.items()
+        }
+
+        while pending_gets:
+            done, _ = await asyncio.wait(
+                pending_gets.keys(),
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            for task in done:
+                model_id = pending_gets.pop(task)
+                try:
+                    item = task.result()
+                except Exception:
+                    item = None
+
+                if item is None:
+                    # Model stream completed
+                    completed_models.add(model_id)
+                else:
+                    # Yield immediately (low latency)
+                    yield item
+                    # Re-queue get for this model if not completed
+                    if model_id not in completed_models:
+                        new_task = asyncio.create_task(model_queues[model_id].get())
+                        pending_gets[new_task] = model_id
+
+        # Ensure all producers are done
+        for p in producers:
+            if not p.done():
+                p.cancel()
 
 
 # Backwards-compatible alias for imports expecting ChatService.

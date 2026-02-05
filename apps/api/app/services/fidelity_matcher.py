@@ -269,7 +269,99 @@ class FidelityMatcher:
                 issue["confidence"] = "medium"
         
         return issue
-    
+
+    @classmethod
+    def validate_hallucination_issue(
+        cls,
+        issue: Dict[str, Any],
+        raw_text: str,
+        formatted_text: str
+    ) -> Dict[str, Any]:
+        """
+        Valida se uma issue de alucinação é real ou falso positivo.
+        Específico para alucinações de nomes de pessoas/autores.
+
+        O problema: o LLM pode reportar um nome como "alucinação" quando:
+        1. O nome existe no RAW mas em um chunk diferente do formatado
+        2. O nome existe no RAW com grafia ligeiramente diferente
+
+        Args:
+            issue: Dicionário da issue de alucinação
+            raw_text: Texto RAW completo
+            formatted_text: Texto formatado completo
+
+        Returns:
+            Issue atualizado com campos de validação
+        """
+        category = issue.get("category", "")
+        if category != "alucinacao":
+            return issue
+
+        # Extrair o texto reportado como alucinação
+        trecho = issue.get("description", "") or issue.get("trecho_formatado", "")
+        if not trecho or not raw_text:
+            issue["is_false_positive"] = False
+            issue["validation_evidence"] = "Sem texto para validar"
+            issue["confidence"] = "low"
+            return issue
+
+        raw_lower = raw_text.lower()
+        trecho_lower = trecho.lower().strip()
+
+        # 1. Verificar se o trecho exato existe no RAW
+        if trecho_lower and len(trecho_lower) > 10:
+            if trecho_lower in raw_lower:
+                issue["is_false_positive"] = True
+                issue["validation_evidence"] = f"✅ Trecho exato encontrado no RAW"
+                issue["confidence"] = "high"
+                logger.info(f"FALSO POSITIVO (alucinação): trecho exato encontrado no RAW")
+                return issue
+
+        # 2. Extrair e verificar nomes próprios (2+ palavras capitalizadas)
+        name_pattern = re.compile(
+            r'\b([A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇ][a-záàâãéèêíïóôõöúç]+(?:\s+[A-ZÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇ][a-záàâãéèêíïóôõöúç]+)+)\b'
+        )
+        names_in_trecho = name_pattern.findall(trecho)
+
+        if names_in_trecho:
+            names_found_in_raw = []
+            for name in names_in_trecho:
+                if len(name) < 6 or len(name.split()) < 2:
+                    continue
+                name_lower = name.lower()
+                if name_lower in raw_lower:
+                    names_found_in_raw.append(name)
+
+            if names_found_in_raw:
+                issue["is_false_positive"] = True
+                issue["validation_evidence"] = (
+                    f"✅ Nome(s) encontrado(s) no RAW: {', '.join(names_found_in_raw)}"
+                )
+                issue["confidence"] = "high"
+                logger.info(
+                    f"FALSO POSITIVO (alucinação): nomes encontrados no RAW: {names_found_in_raw}"
+                )
+                return issue
+
+        # 3. Verificar palavras-chave significativas (>5 chars)
+        keywords = [w for w in trecho_lower.split() if len(w) > 5]
+        if keywords:
+            keywords_found = sum(1 for kw in keywords if kw in raw_lower)
+            ratio = keywords_found / len(keywords) if keywords else 0
+            if ratio >= 0.7:
+                issue["is_false_positive"] = True
+                issue["validation_evidence"] = (
+                    f"✅ {keywords_found}/{len(keywords)} palavras-chave encontradas no RAW ({ratio*100:.0f}%)"
+                )
+                issue["confidence"] = "medium"
+                return issue
+
+        # Não é falso positivo - parece ser alucinação real
+        issue["is_false_positive"] = False
+        issue["validation_evidence"] = "⚠️ Conteúdo não encontrado no RAW"
+        issue["confidence"] = "high"
+        return issue
+
     @classmethod
     def filter_false_positives(
         cls,

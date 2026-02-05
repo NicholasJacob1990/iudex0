@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 import hashlib
 from datetime import datetime
@@ -23,8 +24,32 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.core.security import get_current_user
+from app.core.database import get_db
+from app.core.security import get_current_user, get_org_context, OrgContext
 from app.models.user import User
+from app.services.rag_policy import resolve_rag_scope
+from sqlalchemy.ext.asyncio import AsyncSession
+
+# Lazy imports para Smart Search/Ingest (embedding_router pode não estar disponível)
+try:
+    from app.services.rag.embedding_router import (
+        SmartSearchRequest,
+        SmartSearchResponse,
+        SmartSearchResult,
+        SmartIngestRequest,
+        SmartIngestResponse,
+        EmbeddingRoutingDecision,
+    )
+    _SMART_ROUTING_AVAILABLE = True
+except ImportError:
+    _SMART_ROUTING_AVAILABLE = False
+    # Stubs para que FastAPI não falhe ao registrar endpoints
+    SmartSearchRequest = BaseModel  # type: ignore[assignment,misc]
+    SmartSearchResponse = BaseModel  # type: ignore[assignment,misc]
+    SmartSearchResult = BaseModel  # type: ignore[assignment,misc]
+    SmartIngestRequest = BaseModel  # type: ignore[assignment,misc]
+    SmartIngestResponse = BaseModel  # type: ignore[assignment,misc]
+    EmbeddingRoutingDecision = None  # type: ignore[assignment,misc]
 
 
 # =============================================================================
@@ -72,6 +97,10 @@ class SearchRequest(BaseModel):
     force_vector: Optional[bool] = Field(
         False,
         description="Force vector search even if lexical is strong"
+    )
+    legal_mode: Optional[bool] = Field(
+        False,
+        description="Enable Brazilian legal embeddings optimization (preprocessing, synonym expansion, BM25)"
     )
 
     # Search parameters
@@ -131,6 +160,10 @@ class LocalIngestRequest(BaseModel):
         False,
         description="Extract legal arguments when ingesting to graph"
     )
+    legal_mode: Optional[bool] = Field(
+        False,
+        description="Enable Brazilian legal preprocessing during ingestion (abbreviation expansion, noise removal)"
+    )
 
     class Config:
         json_schema_extra = {
@@ -162,6 +195,10 @@ class GlobalIngestRequest(BaseModel):
     extract_arguments: Optional[bool] = Field(
         False,
         description="Extract legal arguments when ingesting to graph"
+    )
+    legal_mode: Optional[bool] = Field(
+        False,
+        description="Enable Brazilian legal preprocessing during global ingestion"
     )
 
     class Config:
@@ -312,6 +349,7 @@ router = APIRouter(tags=["rag"])
 async def search(
     request: SearchRequest,
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
     pipeline=Depends(get_rag_pipeline),
 ) -> SearchResponse:
     """
@@ -329,22 +367,59 @@ async def search(
     request_id = str(uuid.uuid4())
     started_at = datetime.utcnow()
 
+    org_ctx: OrgContext = await get_org_context(current_user=current_user, db=db)
+    scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
+        db,
+        tenant_id=str(org_ctx.tenant_id),
+        user_id=str(org_ctx.user.id),
+        user_role=current_user.role,
+        chat_context={
+            "rag_groups": list(org_ctx.team_ids or []),
+            "rag_allow_global": None,
+            "rag_allow_groups": None,
+        },
+    )
+    effective_tenant_id = str(org_ctx.tenant_id)
+    effective_group_ids = scope_groups if allow_group_scope else []
+    effective_user_id = str(current_user.id)
+
     logger.info(
-        f"RAG search: query='{request.query[:50]}...' tenant={request.tenant_id} "
-        f"case={request.case_id} user={current_user.id}"
+        f"RAG search: query='{request.query[:50]}...' tenant={effective_tenant_id} "
+        f"case={request.case_id} user={current_user.id} groups={len(effective_group_ids)} "
+        f"allow_global={bool(allow_global_scope)}"
     )
 
     try:
-        # Build search parameters
-        search_params = {
-            "query": request.query,
-            "tenant_id": request.tenant_id,
-            "case_id": request.case_id,
-            "group_ids": request.group_ids or [],
-            "user_id": request.user_id or str(current_user.id),
-            "top_k": request.top_k or 10,
-            "fetch_k": request.fetch_k or 50,
-            "request_id": request_id,
+        # Apply legal preprocessing if legal_mode is enabled
+        effective_query = request.query
+        legal_metadata: Optional[Dict[str, Any]] = None
+        if request.legal_mode:
+            try:
+                from app.services.rag.legal_embeddings import get_legal_embeddings_service
+                legal_svc = get_legal_embeddings_service()
+                query_info = legal_svc.preprocess_query_for_search(
+                    request.query, legal_mode=True
+                )
+                effective_query = query_info["processed_query"]
+                legal_metadata = {
+                    "legal_mode": True,
+                    "original_query": request.query,
+                    "processed_query": effective_query,
+                    "expanded_queries_count": len(query_info.get("expanded_queries", [])),
+                }
+                logger.info(
+                    f"Legal mode: query preprocessed '{request.query[:40]}' -> '{effective_query[:40]}'"
+                )
+            except Exception as e:
+                logger.warning(f"Legal preprocessing failed, using original query: {e}")
+                effective_query = request.query
+
+        # Derive visibility from OrgContext + policy (do not trust request.tenant_id/group_ids).
+        # New pipeline expects filters.include_global + filters.group_ids.
+        search_filters: Dict[str, Any] = {
+            "include_global": bool(allow_global_scope),
+            "group_ids": list(effective_group_ids),
+            "user_id": request.user_id or effective_user_id,
         }
 
         # Add optional feature flags
@@ -362,14 +437,26 @@ async def search(
         # Execute search
         if hasattr(pipeline, "search"):
             # New pipeline interface
-            raw_results = await pipeline.search(**search_params)
+            raw_results = await pipeline.search(
+                query=effective_query,
+                filters=search_filters,
+                top_k=request.top_k or 10,
+                include_graph=True,
+                tenant_id=effective_tenant_id,
+                scope="",  # derive visibility via filters (include_global + group_ids + case_id/user_id)
+                case_id=request.case_id,
+                hyde_enabled=request.use_hyde,
+                multi_query=request.use_multiquery,
+                multi_query_max=None,
+                crag_gate=request.use_crag,
+            )
         elif hasattr(pipeline, "hybrid_search"):
             # Old RAGManager interface
             raw_results = pipeline.hybrid_search(
                 query=request.query,
-                tenant_id=request.tenant_id,
+                tenant_id=effective_tenant_id,
                 case_id=request.case_id,
-                group_ids=request.group_ids,
+                group_ids=effective_group_ids,
                 top_k=request.top_k or 10,
             )
         else:
@@ -488,6 +575,17 @@ async def ingest_local(
             try:
                 doc_id = doc.doc_id or str(uuid.uuid4())
 
+                # Apply legal preprocessing if enabled
+                ingest_text = doc.text
+                if request.legal_mode:
+                    try:
+                        from app.services.rag.legal_embeddings import get_legal_embeddings_service
+                        legal_svc = get_legal_embeddings_service()
+                        prep = legal_svc.preprocess_for_ingestion(doc.text, legal_mode=True)
+                        ingest_text = prep["processed_text"]
+                    except Exception as le:
+                        logger.warning(f"Legal preprocessing failed for doc {idx}: {le}")
+
                 # Build metadata
                 metadata = doc.metadata.copy() if doc.metadata else {}
                 metadata.update({
@@ -497,12 +595,13 @@ async def ingest_local(
                     "ingested_at": datetime.utcnow().isoformat(),
                     "scope": "local",
                     "doc_id": doc_id,
+                    "legal_mode": bool(request.legal_mode),
                 })
 
                 # Ingest document
                 if hasattr(pipeline, "ingest_local"):
                     result = await pipeline.ingest_local(
-                        text=doc.text,
+                        text=ingest_text,
                         metadata=metadata,
                         tenant_id=request.tenant_id,
                         case_id=request.case_id,
@@ -511,7 +610,7 @@ async def ingest_local(
                     )
                 elif hasattr(pipeline, "add_local_document"):
                     result = pipeline.add_local_document(
-                        text=doc.text,
+                        text=ingest_text,
                         metadata=metadata,
                         tenant_id=request.tenant_id,
                         case_id=request.case_id,
@@ -519,7 +618,7 @@ async def ingest_local(
                 else:
                     # Fallback: use generic add method
                     result = pipeline.add_document(
-                        text=doc.text,
+                        text=ingest_text,
                         metadata=metadata,
                         collection="local",
                     )
@@ -540,7 +639,7 @@ async def ingest_local(
                 if _should_ingest_to_graph(request.ingest_to_graph):
                     try:
                         await _ingest_document_to_graph(
-                            text=doc.text,
+                            text=ingest_text,
                             doc_id=doc_id,
                             metadata=metadata,
                             tenant_id=request.tenant_id,
@@ -633,6 +732,17 @@ async def ingest_global(
             try:
                 doc_id = doc.doc_id or str(uuid.uuid4())
 
+                # Apply legal preprocessing if enabled
+                ingest_text_global = doc.text
+                if request.legal_mode:
+                    try:
+                        from app.services.rag.legal_embeddings import get_legal_embeddings_service
+                        legal_svc = get_legal_embeddings_service()
+                        prep = legal_svc.preprocess_for_ingestion(doc.text, legal_mode=True)
+                        ingest_text_global = prep["processed_text"]
+                    except Exception as le:
+                        logger.warning(f"Legal preprocessing failed for global doc {idx}: {le}")
+
                 # Build metadata
                 metadata = doc.metadata.copy() if doc.metadata else {}
                 metadata.update({
@@ -641,12 +751,13 @@ async def ingest_global(
                     "ingested_at": datetime.utcnow().isoformat(),
                     "ingested_by": str(current_user.id),
                     "doc_id": doc_id,
+                    "legal_mode": bool(request.legal_mode),
                 })
 
                 # Ingest document
                 if hasattr(pipeline, "ingest_global"):
                     result = await pipeline.ingest_global(
-                        text=doc.text,
+                        text=ingest_text_global,
                         metadata=metadata,
                         dataset=request.dataset.value,
                         chunk_size=request.chunk_size,
@@ -656,13 +767,13 @@ async def ingest_global(
                 elif hasattr(pipeline, "add_to_collection"):
                     result = pipeline.add_to_collection(
                         collection=collection_name,
-                        text=doc.text,
+                        text=ingest_text_global,
                         metadata=metadata,
                     )
                 else:
                     # Fallback: use generic add method
                     result = pipeline.add_document(
-                        text=doc.text,
+                        text=ingest_text_global,
                         metadata=metadata,
                         collection=collection_name,
                     )
@@ -686,7 +797,7 @@ async def ingest_global(
                     if _should_ingest_to_graph(request.ingest_to_graph):
                         try:
                             await _ingest_document_to_graph(
-                                text=doc.text,
+                                text=ingest_text_global,
                                 doc_id=doc_id,
                                 metadata=metadata,
                                 tenant_id="global",
@@ -1129,3 +1240,367 @@ async def _ingest_document_to_graph(
             logger.debug("KG Builder scheduling failed: %s", e)
 
     return results
+
+
+# =============================================================================
+# Legal Embeddings Comparison Endpoint
+# =============================================================================
+
+
+# =============================================================================
+# Smart Search / Smart Ingest Endpoints (Multi-Embedding Router)
+# =============================================================================
+
+
+@router.post("/smart-search")
+async def smart_search(
+    request: SmartSearchRequest,
+    current_user: User = Depends(get_current_user),
+) -> SmartSearchResponse:
+    """
+    Smart search with automatic multi-embedding routing.
+
+    Automatically detects jurisdiction, language, and document type to route
+    the query to the optimal embedding model and Qdrant collection:
+      - BR → JurisBERT (768d) → legal_br collection
+      - US/UK/INT → Kanon 2 Embedder (1024d) → legal_international collection
+      - EU → Voyage law-2 (1024d) → legal_eu collection
+      - General → OpenAI text-embedding-3-large (3072d) → general collection
+
+    Returns results with routing metadata explaining which model was used and why.
+    """
+    if not _SMART_ROUTING_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Smart routing module not available. Check embedding_router installation."
+        )
+
+    from app.services.rag.embedding_router import get_embedding_router
+
+    started_at = time.time()
+
+    logger.info(
+        f"Smart search: query='{request.query[:50]}...' tenant={request.tenant_id} "
+        f"user={current_user.id} jurisdiction_hint={request.jurisdiction_hint}"
+    )
+
+    try:
+        router_instance = get_embedding_router()
+
+        # Build metadata com hints
+        search_metadata: Dict[str, Any] = {}
+        if request.jurisdiction_hint:
+            search_metadata["jurisdiction"] = request.jurisdiction_hint
+        if request.language_hint:
+            search_metadata["language"] = request.language_hint
+
+        # Executar busca com routing (include_legacy busca tambem nas collections legadas)
+        raw_result = await router_instance.search_with_routing(
+            query=request.query,
+            metadata=search_metadata,
+            top_k=request.top_k,
+            include_legacy=request.include_legacy,
+        )
+
+        elapsed_ms = (time.time() - started_at) * 1000
+
+        # Converter resultados
+        results = []
+        for item in raw_result.get("results", []):
+            results.append(SmartSearchResult(
+                chunk_id=item.get("chunk_id", ""),
+                text=item.get("text", ""),
+                score=float(item.get("score", 0.0)),
+                metadata=item.get("metadata", {}),
+                source_collection=item.get("source_collection", ""),
+            ))
+
+        routing_info = raw_result.get("routing") if request.include_routing_info else None
+
+        logger.info(
+            f"Smart search complete: {len(results)} results in {elapsed_ms:.1f}ms "
+            f"provider={raw_result.get('provider', 'unknown')} "
+            f"collection={raw_result.get('collection', 'unknown')}"
+        )
+
+        return SmartSearchResponse(
+            results=results,
+            routing=routing_info,
+            processing_time_ms=round(elapsed_ms, 2),
+            provider_used=raw_result.get("provider", "unknown"),
+            collections_searched=raw_result.get("collections_searched", []),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Smart search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Smart search failed: {str(e)}")
+
+
+@router.post("/smart-ingest")
+async def smart_ingest(
+    request: SmartIngestRequest,
+    current_user: User = Depends(get_current_user),
+    pipeline=Depends(get_rag_pipeline),
+) -> SmartIngestResponse:
+    """
+    Smart ingest with automatic multi-embedding routing.
+
+    Automatically classifies the document's jurisdiction, language, and type,
+    then ingests it into the correct Qdrant collection with the appropriate
+    embedding model.
+
+    If the document is small enough (< threshold), it may recommend skipping
+    RAG and sending directly to the LLM context window.
+
+    Returns the routing decision and ingestion result.
+    """
+    if not _SMART_ROUTING_AVAILABLE:
+        raise HTTPException(
+            status_code=503,
+            detail="Smart routing module not available. Check embedding_router installation."
+        )
+
+    from app.services.rag.embedding_router import get_embedding_router
+
+    started_at = time.time()
+
+    logger.info(
+        f"Smart ingest: tenant={request.tenant_id} text_len={len(request.text)} "
+        f"user={current_user.id} jurisdiction_hint={request.jurisdiction_hint}"
+    )
+
+    try:
+        router_instance = get_embedding_router()
+
+        # Build metadata com hints
+        ingest_metadata: Dict[str, Any] = dict(request.metadata) if request.metadata else {}
+        if request.jurisdiction_hint:
+            ingest_metadata["jurisdiction"] = request.jurisdiction_hint
+        if request.language_hint:
+            ingest_metadata["language"] = request.language_hint
+
+        # Rotear o documento
+        route = await router_instance.route(request.text, metadata=ingest_metadata)
+
+        # Check se deve pular RAG
+        if route.decision.skip_rag:
+            elapsed_ms = (time.time() - started_at) * 1000
+            logger.info(
+                f"Smart ingest: documento pequeno ({route.decision.estimated_pages} pgs), "
+                f"recomendando envio direto ao LLM"
+            )
+            return SmartIngestResponse(
+                indexed_count=0,
+                collection=route.decision.collection,
+                routing=route.decision,
+                skip_rag=True,
+                skip_reason=(
+                    f"Documento com ~{route.decision.estimated_pages} páginas "
+                    f"({len(request.text)} chars) é pequeno o suficiente para "
+                    f"envio direto ao LLM sem RAG"
+                ),
+                processing_time_ms=round(elapsed_ms, 2),
+            )
+
+        # Gerar embeddings com o provider correto
+        embed_result = await router_instance.embed_with_routing(
+            texts=[request.text],
+            metadata=ingest_metadata,
+        )
+
+        # Ingerir na collection correta
+        indexed_count = 0
+        target_collection = route.decision.collection
+
+        # Metadata para o chunk
+        chunk_metadata = {
+            **(request.metadata or {}),
+            "tenant_id": request.tenant_id,
+            "case_id": request.case_id,
+            "user_id": str(current_user.id),
+            "ingested_at": datetime.utcnow().isoformat(),
+            "jurisdiction": route.decision.jurisdiction.value,
+            "document_type": route.decision.document_type.value,
+            "language": route.decision.language,
+            "embedding_provider": route.decision.provider.value,
+            "routing_method": route.decision.method,
+            "routing_confidence": route.decision.confidence,
+        }
+
+        # Usar pipeline existente para chunking + storage
+        if hasattr(pipeline, "ingest_to_collection"):
+            result = await pipeline.ingest_to_collection(
+                text=request.text,
+                collection=target_collection,
+                metadata=chunk_metadata,
+                chunk_size=request.chunk_size,
+                chunk_overlap=request.chunk_overlap,
+                embedding_vector=embed_result.vectors[0] if embed_result.vectors else None,
+            )
+            indexed_count = result if isinstance(result, int) else result.get("indexed", 1)
+        elif hasattr(pipeline, "ingest_local"):
+            result = await pipeline.ingest_local(
+                text=request.text,
+                metadata=chunk_metadata,
+                tenant_id=request.tenant_id,
+                case_id=request.case_id or "smart_ingest",
+                chunk_size=request.chunk_size,
+                chunk_overlap=request.chunk_overlap,
+            )
+            indexed_count = result if isinstance(result, int) else result.get("indexed", 1)
+        elif hasattr(pipeline, "add_document"):
+            result = pipeline.add_document(
+                text=request.text,
+                metadata=chunk_metadata,
+                collection=target_collection,
+            )
+            indexed_count = 1
+        else:
+            logger.warning("Pipeline não suporta ingestão customizada")
+            indexed_count = 0
+
+        elapsed_ms = (time.time() - started_at) * 1000
+
+        logger.info(
+            f"Smart ingest complete: collection={target_collection} indexed={indexed_count} "
+            f"provider={route.decision.provider.value} in {elapsed_ms:.1f}ms"
+        )
+
+        return SmartIngestResponse(
+            indexed_count=indexed_count,
+            collection=target_collection,
+            routing=route.decision,
+            skip_rag=False,
+            processing_time_ms=round(elapsed_ms, 2),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Smart ingest error: {e}")
+        raise HTTPException(status_code=500, detail=f"Smart ingest failed: {str(e)}")
+
+
+@router.get("/embedding-router/stats")
+async def get_embedding_router_stats(
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Get statistics for all embedding providers and the routing system.
+
+    Returns stats for JurisBERT, Kanon 2, Voyage, and OpenAI providers,
+    plus collection configuration.
+    """
+    from app.services.rag.embedding_router import (
+        EMBEDDING_COLLECTIONS,
+        get_embedding_router,
+    )
+
+    stats: Dict[str, Any] = {
+        "collections": EMBEDDING_COLLECTIONS,
+    }
+
+    # JurisBERT stats
+    try:
+        from app.services.rag.jurisbert_embeddings import get_jurisbert_provider
+        stats["jurisbert"] = get_jurisbert_provider().get_stats()
+    except Exception as e:
+        stats["jurisbert"] = {"error": str(e)}
+
+    # Kanon 2 stats
+    try:
+        from app.services.rag.kanon_embeddings import get_kanon_provider
+        stats["kanon2"] = get_kanon_provider().get_stats()
+    except Exception as e:
+        stats["kanon2"] = {"error": str(e)}
+
+    # Voyage stats
+    try:
+        from app.services.rag.voyage_embeddings import get_voyage_provider
+        stats["voyage"] = get_voyage_provider().get_stats()
+    except Exception as e:
+        stats["voyage"] = {"error": str(e)}
+
+    # OpenAI/EmbeddingsService stats
+    try:
+        from app.services.rag.core.embeddings import get_embeddings_service
+        stats["openai"] = get_embeddings_service().get_cache_stats()
+    except Exception as e:
+        stats["openai"] = {"error": str(e)}
+
+    return stats
+
+
+# =============================================================================
+# Legal Embeddings Comparison Endpoint
+# =============================================================================
+
+
+class EmbeddingsCompareRequest(BaseModel):
+    """Request schema for comparing standard vs legal embeddings."""
+
+    query: str = Field(..., min_length=1, max_length=5000, description="Search query to compare")
+    documents: List[str] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description="List of document texts to rank against the query",
+    )
+    top_k: Optional[int] = Field(10, ge=1, le=50, description="Number of top results to return")
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "query": "responsabilidade civil do Estado por ato de agente público",
+                "documents": [
+                    "Art. 37, § 6º da CF: As pessoas jurídicas de direito público responderão pelos danos que seus agentes causarem a terceiros.",
+                    "O contrato de trabalho é bilateral, oneroso e comutativo.",
+                    "A responsabilidade objetiva do Estado dispensa prova de culpa do agente.",
+                ],
+                "top_k": 10,
+            }
+        }
+
+
+@router.post("/embeddings/compare")
+async def compare_embeddings(
+    request: EmbeddingsCompareRequest,
+    current_user: User = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    Compare search results with and without Brazilian legal embeddings optimization.
+
+    Returns side-by-side comparison showing:
+    - Standard embeddings ranking
+    - Legal-optimized embeddings ranking (with preprocessing, BM25, synonym expansion)
+    - Ranking changes and score improvements
+
+    Useful for evaluating the impact of legal-domain optimization.
+    """
+    logger.info(
+        f"Embeddings compare: query='{request.query[:50]}...' "
+        f"docs={len(request.documents)} user={current_user.id}"
+    )
+
+    try:
+        from app.services.rag.legal_embeddings import get_legal_embeddings_service
+
+        service = get_legal_embeddings_service()
+        result = await service.search_with_comparison(
+            query=request.query,
+            documents=request.documents,
+            top_k=request.top_k or 10,
+        )
+        return result
+
+    except ImportError as e:
+        logger.error(f"Legal embeddings module not available: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Legal embeddings service not available. Check installation.",
+        )
+    except Exception as e:
+        logger.exception(f"Embeddings comparison error: {e}")
+        raise HTTPException(status_code=500, detail=f"Comparison failed: {str(e)}")

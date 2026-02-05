@@ -75,5 +75,10 @@ export { SEIDaemon, type DaemonConfig } from './daemon.js';
 // Criptografia
 export { encrypt, decrypt, decryptJson, generateSecurePassword } from './crypto.js';
 
+// Resiliência e Self-Healing
+export { SelectorStore } from './core/selector-store.js';
+export { failFast, withRetry, classifyError, resolveResilienceConfig } from './core/resilience.js';
+export { createAgentFallback } from './core/agent-fallback.js';
+
 // Tipos
 export * from './types.js';

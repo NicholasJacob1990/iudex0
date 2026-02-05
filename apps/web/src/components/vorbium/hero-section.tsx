@@ -9,6 +9,16 @@ import { useVorbiumPaint } from '@/hooks/use-vorbium-paint';
 import { MotionDiv, fadeUp, staggerContainer, smoothTransition } from '@/components/ui/motion';
 import { useTilt } from '@/hooks/use-tilt';
 import { ChevronDown } from 'lucide-react';
+import { LogoCarousel } from '@/components/vorbium/logo-carousel';
+
+/* Placeholder logos — replace with real client logos */
+const HERO_LOGOS = [
+    { name: 'Escritório Alpha', logo: <svg viewBox="0 0 120 32" fill="currentColor"><rect width="120" height="32" rx="4" opacity="0.3" /><text x="60" y="20" textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">Alpha</text></svg> },
+    { name: 'Jurídico Beta', logo: <svg viewBox="0 0 120 32" fill="currentColor"><rect width="120" height="32" rx="4" opacity="0.3" /><text x="60" y="20" textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">Beta</text></svg> },
+    { name: 'Consultoria Gamma', logo: <svg viewBox="0 0 120 32" fill="currentColor"><rect width="120" height="32" rx="4" opacity="0.3" /><text x="60" y="20" textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">Gamma</text></svg> },
+    { name: 'Advocacia Delta', logo: <svg viewBox="0 0 120 32" fill="currentColor"><rect width="120" height="32" rx="4" opacity="0.3" /><text x="60" y="20" textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">Delta</text></svg> },
+    { name: 'Legal Epsilon', logo: <svg viewBox="0 0 120 32" fill="currentColor"><rect width="120" height="32" rx="4" opacity="0.3" /><text x="60" y="20" textAnchor="middle" fontSize="11" fill="currentColor" opacity="0.6">Epsilon</text></svg> },
+];
 
 function TiltCard({ children, className }: { children: React.ReactNode; className?: string }) {
     const ref = useRef<HTMLDivElement>(null);
@@ -24,44 +34,44 @@ export function HeroSection() {
     const containerRef = useRef<HTMLDivElement>(null);
     const { theme, systemTheme } = useTheme();
 
-    useVorbiumPaint(containerRef);
+    const { hasPaintWorklet } = useVorbiumPaint(containerRef);
 
     const currentTheme = theme === 'system' ? systemTheme : theme;
     const isDark = currentTheme === 'dark';
     const themeColor = isDark ? '#6366f1' : '#4f46e5';
+
+    // Only apply paint() + Houdini animations when worklet is supported (Chrome/Edge).
+    // Safari/Firefox get a <canvas> fallback injected by the hook.
+    const workletStyle: React.CSSProperties = hasPaintWorklet ? {
+        '--cursor-x': '0.5',
+        '--cursor-y': '0.5',
+        '--theme-color': themeColor,
+        '--seed': '42',
+        '--ring-radius': '140',
+        '--ring-thickness': '380',
+        '--particle-count': '120',
+        '--particle-rows': '30',
+        '--particle-size': '2.8',
+        '--particle-min-alpha': '0.08',
+        '--particle-max-alpha': '0.95',
+        animation: 'ripple 6s linear infinite, ringBreathe 6s ease-in-out infinite alternate, vorbiumTime 60s linear infinite',
+        transition: '--cursor-x 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), --cursor-y 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)',
+        backgroundImage: isDark
+            ? 'paint(verbium-particles), radial-gradient(circle at 50% 50%, #1e1b4b 0%, #0a0a0c 60%)'
+            : 'paint(verbium-particles), radial-gradient(circle at 50% 50%, #e0e7ff 0%, #f8fafc 60%)',
+    } as React.CSSProperties : {
+        '--theme-color': themeColor,
+    } as React.CSSProperties;
 
     return (
         <section
             ref={containerRef}
             id="welcome"
             className="relative min-h-[100dvh] flex items-center justify-center overflow-hidden bg-slate-50 dark:bg-[#0a0a0c] text-slate-900 dark:text-white snap-start transition-colors duration-500"
-            style={{
-                // @ts-ignore
-                '--cursor-x': '0.5',
-                '--cursor-y': '0.5',
-                '--theme-color': themeColor,
-                '--seed': '42',
-                '--ring-radius': '140',
-                '--ring-thickness': '380',
-                '--particle-count': '120',
-                '--particle-rows': '30',
-                '--particle-size': '2.8',
-                '--particle-min-alpha': '0.08',
-                '--particle-max-alpha': '0.95',
-
-                // Ring animations: ripple (wave cycle) + ring breathing + vorbiumTime (clock)
-                animation: 'ripple 6s linear infinite, ringBreathe 6s ease-in-out infinite alternate, vorbiumTime 60s linear infinite',
-
-                // Smooth cursor tracking for organic ring drift + responsive repulsion
-                transition: '--cursor-x 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), --cursor-y 0.3s cubic-bezier(0.2, 0.8, 0.2, 1)',
-
-                backgroundImage: isDark
-                    ? 'paint(verbium-particles), radial-gradient(circle at 50% 50%, #1e1b4b 0%, #0a0a0c 60%)'
-                    : 'paint(verbium-particles), radial-gradient(circle at 50% 50%, #e0e7ff 0%, #f8fafc 60%)',
-            }}
+            style={workletStyle}
         >
 
-            <div className="absolute inset-0 pointer-events-none">
+            <div className="absolute inset-0 z-[1] pointer-events-none">
                 <div className="absolute inset-0 opacity-[0.03] dark:opacity-[0.04] bg-dotted-grid [background-size:24px_24px] animate-drift" />
                 <div className="absolute inset-0 opacity-[0.04] dark:opacity-[0.06] noise-overlay" />
             </div>
@@ -74,7 +84,7 @@ export function HeroSection() {
                 >
                     {/* Badge */}
                     <MotionDiv variants={fadeUp} transition={smoothTransition}>
-                        <div className="inline-flex items-center gap-2 px-4 py-2 mb-8 rounded-full bg-indigo-500/5 dark:bg-indigo-500/10 border border-indigo-500/10 dark:border-indigo-500/20 backdrop-blur-md pointer-events-auto">
+                        <div className="inline-flex items-center gap-2 px-4 py-2 mb-8 rounded-full bg-indigo-500/5 dark:bg-indigo-500/10 border border-indigo-500/15 dark:border-indigo-500/20 backdrop-blur-md pointer-events-auto">
                             <span className="relative flex h-2 w-2">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-75"></span>
                                 <span className="relative inline-flex rounded-full h-2 w-2 bg-indigo-500"></span>
@@ -135,11 +145,20 @@ export function HeroSection() {
                             </TiltCard>
                         </div>
                     </MotionDiv>
+
+                    {/* Logo Carousel — Social proof (uncomment when client logos are available)
+                    <MotionDiv variants={fadeUp} transition={smoothTransition}>
+                        <div className="mt-16 pointer-events-auto">
+                            <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400 dark:text-white/30 mb-6">Confiado por escritórios que fazem a diferença</p>
+                            <LogoCarousel logos={HERO_LOGOS} />
+                        </div>
+                    </MotionDiv>
+                    */}
                 </MotionDiv>
 
             </div>
 
-            <div className="absolute bottom-0 left-0 w-full h-32 bg-gradient-to-t from-slate-50 dark:from-[#0a0a0c] to-transparent pointer-events-none transition-colors duration-500" />
+            <div className="absolute bottom-0 left-0 w-full h-32 z-[2] bg-gradient-to-t from-slate-50 dark:from-[#0a0a0c] to-transparent pointer-events-none transition-colors duration-500" />
 
             {/* Scroll indicator with animated chevron */}
             <MotionDiv

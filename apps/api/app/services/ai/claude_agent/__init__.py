@@ -44,7 +44,15 @@ from .executor import (
     AgentStatus,
     ClaudeAgentExecutor,
     create_claude_agent,
+    CLAUDE_SDK_AVAILABLE,
 )
+
+# SDK tools and template loader
+from .sdk_tools import create_iudex_mcp_server, CLAUDE_SDK_TOOLS_AVAILABLE
+from .template_loader import load_agent_templates
+
+# Background agent pool
+from .parallel_agents import agent_pool, AgentPool, AgentTaskStatus
 
 # Permission classes
 from .permissions import (
@@ -71,6 +79,15 @@ __all__ = [
     "AgentStatus",
     "ClaudeAgentExecutor",
     "create_claude_agent",
+    "CLAUDE_SDK_AVAILABLE",
+    # SDK tools
+    "create_iudex_mcp_server",
+    "CLAUDE_SDK_TOOLS_AVAILABLE",
+    "load_agent_templates",
+    # Background agents
+    "agent_pool",
+    "AgentPool",
+    "AgentTaskStatus",
     # Permissions - Classes principais
     "PermissionManager",
     "PermissionRule",

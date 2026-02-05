@@ -1501,6 +1501,42 @@ class RAGPipeline:
                     if use_opensearch and hasattr(self._opensearch, "search_lexical"):
                         f = filters or {}
                         tipo_peca = f.get("tipo_peca") or f.get("tipo_peca_filter")
+                        jurisdictions_raw = f.get("jurisdictions") or f.get("jurisdiction")
+                        source_ids_raw = f.get("source_ids") or f.get("source_id")
+                        jurisdictions: List[str] = []
+                        if jurisdictions_raw:
+                            if isinstance(jurisdictions_raw, str):
+                                jurisdictions = [jurisdictions_raw]
+                            elif isinstance(jurisdictions_raw, list):
+                                jurisdictions = jurisdictions_raw
+                            else:
+                                jurisdictions = [str(jurisdictions_raw)]
+                            jurisdictions = [
+                                str(j).strip().upper()
+                                for j in jurisdictions
+                                if j is not None and str(j).strip()
+                            ]
+                            jurisdictions = list(dict.fromkeys(jurisdictions))
+                            # UX aliases: accept UK/GB interchangeably
+                            if "UK" in jurisdictions and "GB" not in jurisdictions:
+                                jurisdictions.append("GB")
+                            if "GB" in jurisdictions and "UK" not in jurisdictions:
+                                jurisdictions.append("UK")
+
+                        source_ids: List[str] = []
+                        if source_ids_raw:
+                            if isinstance(source_ids_raw, str):
+                                source_ids = [source_ids_raw]
+                            elif isinstance(source_ids_raw, list):
+                                source_ids = source_ids_raw
+                            else:
+                                source_ids = [str(source_ids_raw)]
+                            source_ids = [
+                                str(s).strip()
+                                for s in source_ids
+                                if s is not None and str(s).strip()
+                            ]
+                            source_ids = list(dict.fromkeys(source_ids))
 
                         def _tipo_filter(tipo: str) -> Dict[str, Any]:
                             # Support both flattened and nested metadata mappings.
@@ -1517,6 +1553,77 @@ class RAGPipeline:
                                     "minimum_should_match": 1,
                                 }
                             }
+
+                        def _jurisdiction_terms(values: List[str]) -> Dict[str, Any]:
+                            # Support both flattened and nested metadata mappings.
+                            return {
+                                "bool": {
+                                    "should": [
+                                        {"terms": {"jurisdiction": values}},
+                                        {"terms": {"jurisdiction.keyword": values}},
+                                        {"terms": {"metadata.jurisdiction": values}},
+                                        {"terms": {"metadata.jurisdiction.keyword": values}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
+
+                        def _jurisdiction_filter(values: List[str]) -> Dict[str, Any]:
+                            """
+                            Apply jurisdiction constraints only to global scope, without excluding
+                            private/group/local corpora that might not have jurisdiction metadata.
+                            """
+                            terms = _jurisdiction_terms(values)
+                            return {
+                                "bool": {
+                                    "should": [
+                                        {"bool": {"must": [{"term": {"scope": "global"}}, terms]}},
+                                        {"bool": {"must_not": [{"term": {"scope": "global"}}]}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
+
+                        def _source_id_terms(values: List[str]) -> Dict[str, Any]:
+                            # Support both flattened and nested metadata mappings.
+                            return {
+                                "bool": {
+                                    "should": [
+                                        {"terms": {"source_id": values}},
+                                        {"terms": {"source_id.keyword": values}},
+                                        {"terms": {"metadata.source_id": values}},
+                                        {"terms": {"metadata.source_id.keyword": values}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
+
+                        def _source_id_filter(values: List[str]) -> Dict[str, Any]:
+                            """
+                            Apply source_id constraints only to global scope, without excluding
+                            private/group/local corpora that might not have `source_id` metadata.
+                            """
+                            terms = _source_id_terms(values)
+                            return {
+                                "bool": {
+                                    "should": [
+                                        {"bool": {"must": [{"term": {"scope": "global"}}, terms]}},
+                                        {"bool": {"must_not": [{"term": {"scope": "global"}}]}},
+                                    ],
+                                    "minimum_should_match": 1,
+                                }
+                            }
+
+                        def _and_filters(parts: List[Optional[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+                            items = [p for p in parts if p]
+                            if not items:
+                                return None
+                            if len(items) == 1:
+                                return items[0]
+                            return {"bool": {"must": items}}
+
+                        jurisdiction_filter = _jurisdiction_filter(jurisdictions) if jurisdictions else None
+                        source_id_filter = _source_id_filter(source_ids) if source_ids else None
 
                         # If we need a tipo_peca filter, apply it only to the pecas index(es)
                         # to avoid filtering out other indices in a multi-index search.
@@ -1536,7 +1643,11 @@ class RAGPipeline:
                                         group_ids=f.get("group_ids"),
                                         sigilo=f.get("sigilo"),
                                         include_global=bool(f.get("include_global", True)),
-                                        source_filter=_tipo_filter(str(tipo_peca)) if needs else None,
+                                        source_filter=_and_filters([
+                                            jurisdiction_filter,
+                                            source_id_filter,
+                                            _tipo_filter(str(tipo_peca)) if needs else None,
+                                        ]),
                                     )
                                     query_results.extend(extra or [])
                                 except Exception as e:
@@ -1554,7 +1665,11 @@ class RAGPipeline:
                                 group_ids=f.get("group_ids"),
                                 sigilo=f.get("sigilo"),
                                 include_global=bool(f.get("include_global", True)),
-                                source_filter=_tipo_filter(str(tipo_peca)) if tipo_peca else None,
+                                source_filter=_and_filters([
+                                    jurisdiction_filter,
+                                    source_id_filter,
+                                    _tipo_filter(str(tipo_peca)) if tipo_peca else None,
+                                ]),
                             )
                     elif use_opensearch and hasattr(self._opensearch, "search_async"):
                         query_results = await self._opensearch.search_async(
@@ -1574,6 +1689,7 @@ class RAGPipeline:
                     elif use_neo4j and hasattr(self._neo4j, "search_chunks_fulltext"):
                         f = filters or {}
                         include_global = bool(f.get("include_global", True))
+                        include_private = bool(f.get("include_private", True))
                         group_ids = f.get("group_ids") or []
                         if isinstance(group_ids, str):
                             group_ids = [group_ids]
@@ -1582,7 +1698,7 @@ class RAGPipeline:
                         allowed_scopes: List[str] = []
                         if include_global:
                             allowed_scopes.append("global")
-                        if f.get("tenant_id"):
+                        if include_private and f.get("tenant_id"):
                             allowed_scopes.append("private")
                         if group_ids:
                             allowed_scopes.append("group")
@@ -1739,6 +1855,42 @@ class RAGPipeline:
             group_ids = f.get("group_ids") if isinstance(f.get("group_ids"), list) else None
             case_id = f.get("case_id")
             tipo_peca = f.get("tipo_peca") or f.get("tipo_peca_filter")
+            jurisdictions_raw = f.get("jurisdictions") or f.get("jurisdiction")
+            source_ids_raw = f.get("source_ids") or f.get("source_id")
+            jurisdictions: List[str] = []
+            if jurisdictions_raw:
+                if isinstance(jurisdictions_raw, str):
+                    jurisdictions = [jurisdictions_raw]
+                elif isinstance(jurisdictions_raw, list):
+                    jurisdictions = jurisdictions_raw
+                else:
+                    jurisdictions = [str(jurisdictions_raw)]
+                jurisdictions = [
+                    str(j).strip().upper()
+                    for j in jurisdictions
+                    if j is not None and str(j).strip()
+                ]
+                jurisdictions = list(dict.fromkeys(jurisdictions))
+                # UX aliases: accept UK/GB interchangeably
+                if "UK" in jurisdictions and "GB" not in jurisdictions:
+                    jurisdictions.append("GB")
+                if "GB" in jurisdictions and "UK" not in jurisdictions:
+                    jurisdictions.append("UK")
+
+            source_ids: List[str] = []
+            if source_ids_raw:
+                if isinstance(source_ids_raw, str):
+                    source_ids = [source_ids_raw]
+                elif isinstance(source_ids_raw, list):
+                    source_ids = source_ids_raw
+                else:
+                    source_ids = [str(source_ids_raw)]
+                source_ids = [
+                    str(s).strip()
+                    for s in source_ids
+                    if s is not None and str(s).strip()
+                ]
+                source_ids = list(dict.fromkeys(source_ids))
 
             scope = f.get("scope")
             if scope:
@@ -1772,36 +1924,124 @@ class RAGPipeline:
                     pecas_collections = [c for c in collections if "pecas" in str(c)] if tipo_peca else []
                     other_collections = [c for c in collections if c not in pecas_collections] if pecas_collections else list(collections)
 
+                    effective_scopes = scopes or ["global", "private", "group", "local"]
+                    scopes_global = ["global"] if "global" in effective_scopes else []
+                    scopes_other = [s for s in effective_scopes if s != "global"]
+                    apply_jurisdiction = bool(jurisdictions) and bool(scopes_global)
+                    apply_source_ids = bool(source_ids) and bool(scopes_global)
+                    apply_global_only_filters = bool(apply_jurisdiction or apply_source_ids)
+
                     multi: Dict[str, Any] = {}
-                    if other_collections:
-                        multi.update(
-                            await self._qdrant.search_multi_collection_async(
-                                collection_types=other_collections,
-                                query_vector=embedding,
-                                tenant_id=tenant,
-                                user_id=user,
-                                top_k=self.config.max_results_per_source,
-                                scopes=scopes,
-                                sigilo_levels=sigilo_levels,
-                                group_ids=group_ids,
-                                case_id=case_id,
-                            )
+                    async def _search_sets(
+                        *,
+                        coll_types: List[str],
+                        scopes_value: Optional[List[str]],
+                        metadata_filters: Optional[Dict[str, Any]],
+                    ) -> Dict[str, Any]:
+                        if not coll_types:
+                            return {}
+                        return await self._qdrant.search_multi_collection_async(
+                            collection_types=coll_types,
+                            query_vector=embedding,
+                            tenant_id=tenant,
+                            user_id=user,
+                            top_k=self.config.max_results_per_source,
+                            scopes=scopes_value,
+                            sigilo_levels=sigilo_levels,
+                            group_ids=group_ids,
+                            case_id=case_id,
+                            metadata_filters=metadata_filters,
                         )
-                    if pecas_collections:
-                        multi.update(
-                            await self._qdrant.search_multi_collection_async(
-                                collection_types=pecas_collections,
-                                query_vector=embedding,
-                                tenant_id=tenant,
-                                user_id=user,
-                                top_k=self.config.max_results_per_source,
-                                scopes=scopes,
-                                sigilo_levels=sigilo_levels,
-                                group_ids=group_ids,
-                                case_id=case_id,
-                                metadata_filters={"tipo_peca": str(tipo_peca)},
+
+                    def _merge_multi(target: Dict[str, Any], patch: Dict[str, Any]) -> None:
+                        for key, items in (patch or {}).items():
+                            if key not in target:
+                                target[key] = list(items or [])
+                            else:
+                                target[key].extend(list(items or []))
+
+                    def _merge_meta(base: Optional[Dict[str, Any]], extra: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+                        if not base and not extra:
+                            return None
+                        merged: Dict[str, Any] = {}
+                        if base:
+                            merged.update(base)
+                        if extra:
+                            merged.update(extra)
+                        return merged
+
+                    global_meta_filter: Dict[str, Any] = {}
+                    if apply_jurisdiction:
+                        global_meta_filter["jurisdiction"] = jurisdictions
+                    if apply_source_ids:
+                        global_meta_filter["source_id"] = source_ids
+                    global_meta_filter_final = global_meta_filter or None
+
+                    # Global scope (jurisdiction applies only here)
+                    if apply_global_only_filters:
+                        if other_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=other_collections,
+                                    scopes_value=scopes_global,
+                                    metadata_filters=global_meta_filter_final,
+                                )
                             )
-                        )
+                        if pecas_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=pecas_collections,
+                                    scopes_value=scopes_global,
+                                    metadata_filters=_merge_meta(
+                                        global_meta_filter_final,
+                                        {"tipo_peca": str(tipo_peca)} if tipo_peca else None,
+                                    ),
+                                )
+                            )
+
+                    # Non-global scopes (do NOT apply jurisdiction filter; avoid excluding private/group/local)
+                    if scopes_other:
+                        if other_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=other_collections,
+                                    scopes_value=scopes_other,
+                                    metadata_filters=None,
+                                )
+                            )
+                        if pecas_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=pecas_collections,
+                                    scopes_value=scopes_other,
+                                    metadata_filters={"tipo_peca": str(tipo_peca)} if tipo_peca else None,
+                                )
+                            )
+
+                    # If no global-only filters are active, keep original behavior (single pass over scopes)
+                    if not apply_global_only_filters:
+                        if other_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=other_collections,
+                                    scopes_value=scopes,
+                                    metadata_filters=None,
+                                )
+                            )
+                        if pecas_collections:
+                            _merge_multi(
+                                multi,
+                                await _search_sets(
+                                    coll_types=pecas_collections,
+                                    scopes_value=scopes,
+                                    metadata_filters={"tipo_peca": str(tipo_peca)} if tipo_peca else None,
+                                )
+                            )
 
                     query_results: List[Dict[str, Any]] = []
                     for coll_type, items in (multi or {}).items():
@@ -1833,6 +2073,94 @@ class RAGPipeline:
                     )
                     continue
                 results.extend(batch or [])
+
+            # Optional: EmbeddingRouter-based vector routing (jurisdiction-aware collections)
+            # - Safe by default: enabled only by env flag and only searches GLOBAL scope.
+            # - Requires that routed collections exist and were indexed with tenant/scope fields.
+            try:
+                router_enabled = os.getenv("RAG_VECTOR_ROUTER_ENABLED", "false").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+            except Exception:
+                router_enabled = False
+
+            if router_enabled and queries and jurisdictions:
+                # Only pass hint when the user's selection implies a single jurisdiction.
+                hint_candidates = [j for j in jurisdictions if str(j).strip().upper() not in ("GB",)]
+                hint_candidates = [str(j).strip().upper() for j in hint_candidates if str(j).strip()]
+                hint_set = set(hint_candidates)
+                if len(hint_set) == 1:
+                    hint = next(iter(hint_set))
+                    # Router enum expects UK (not GB)
+                    if hint == "GB":
+                        hint = "UK"
+                    # Global-only scope for routed collections
+                    effective_scopes = scopes or ["global", "private", "group", "local"]
+                    scopes_global = ["global"] if "global" in effective_scopes else []
+                    if scopes_global and tenant:
+                        global_meta_filter: Dict[str, Any] = {}
+                        global_meta_filter["jurisdiction"] = jurisdictions
+                        if source_ids:
+                            global_meta_filter["source_id"] = source_ids
+                        global_meta_filter_final = global_meta_filter or None
+
+                        try:
+                            from app.services.rag.embedding_router import get_embedding_router
+
+                            router = get_embedding_router()
+                            routed = await router.embed_with_routing(
+                                texts=list(queries),
+                                metadata={"jurisdiction": hint},
+                            )
+                            routed_collection = str(routed.route.decision.collection or "").strip()
+                            routed_vectors = routed.vectors or []
+
+                            if routed_collection and routed_vectors and self._qdrant is not None:
+                                # Search routed collection for each query embedding (GLOBAL only)
+                                async def _router_search_one(vec: List[float]) -> List[Dict[str, Any]]:
+                                    multi = await self._qdrant.search_multi_collection_async(
+                                        collection_types=[routed_collection],
+                                        query_vector=vec,
+                                        tenant_id=tenant,
+                                        user_id=user,
+                                        top_k=self.config.max_results_per_source,
+                                        scopes=scopes_global,
+                                        sigilo_levels=sigilo_levels,
+                                        group_ids=group_ids,
+                                        case_id=case_id,
+                                        metadata_filters=global_meta_filter_final,
+                                    )
+                                    out: List[Dict[str, Any]] = []
+                                    for coll_type, items in (multi or {}).items():
+                                        for item in items or []:
+                                            if hasattr(item, "to_dict"):
+                                                as_dict = item.to_dict()
+                                            else:
+                                                as_dict = dict(item)
+                                            as_dict["collection_type"] = coll_type
+                                            as_dict["_source_type"] = "vector_router"
+                                            out.append(as_dict)
+                                    return out
+
+                                router_tasks = [
+                                    asyncio.create_task(_router_search_one(v))
+                                    for v in routed_vectors[: len(queries)]
+                                ]
+                                router_batches = await asyncio.gather(*router_tasks, return_exceptions=True)
+                                for batch in router_batches:
+                                    if isinstance(batch, Exception):
+                                        continue
+                                    results.extend(batch or [])
+                                # Best-effort: record routed collection
+                                try:
+                                    trace.collections_searched = list(dict.fromkeys((trace.collections_searched or []) + [routed_collection]))
+                                except Exception:
+                                    pass
+                        except Exception as e:
+                            logger.debug(f"EmbeddingRouter routed vector search skipped: {e}")
 
             # Deduplicate by chunk_uid
             seen: Set[str] = set()
@@ -3157,6 +3485,7 @@ class RAGPipeline:
                     hop_count = max(1, min(int(graph_hops or self._base_config.graph_hops or 1), 5))
                     effective_filters: Dict[str, Any] = dict(filters or {})
                     include_global = bool(effective_filters.get("include_global", True))
+                    include_private = bool(effective_filters.get("include_private", True))
                     group_ids = effective_filters.get("group_ids") or []
                     if isinstance(group_ids, str):
                         group_ids = [group_ids]
@@ -3169,17 +3498,20 @@ class RAGPipeline:
                     if normalized_scope in ("global", "private", "group", "local"):
                         if include_global and normalized_scope != "global":
                             allowed_scopes.append("global")
-                        allowed_scopes.append(normalized_scope)
+                        if normalized_scope != "private" or include_private:
+                            allowed_scopes.append(normalized_scope)
                     else:
                         # Empty/"all" scope: derive visibility from filters.
                         if include_global:
                             allowed_scopes.append("global")
-                        if tenant_id:
+                        if include_private and tenant_id:
                             allowed_scopes.append("private")
                         if group_ids:
                             allowed_scopes.append("group")
                         if effective_case_id:
                             allowed_scopes.append("local")
+                    if not include_private:
+                        allowed_scopes = [s for s in allowed_scopes if s != "private"]
                     # Always have at least global to keep queries deterministic.
                     if not allowed_scopes:
                         allowed_scopes = ["global"]

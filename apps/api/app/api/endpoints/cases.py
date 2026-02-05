@@ -227,7 +227,7 @@ async def upload_document_to_case(
 
     except Exception as e:
         logger.error(f"Upload failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+        raise HTTPException(status_code=500, detail="Falha no upload do documento")
 
 
 @router.get("/{case_id}/documents", response_model=List[CaseDocumentResponse])

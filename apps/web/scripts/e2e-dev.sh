@@ -38,4 +38,5 @@ fi
 
 cd "$WEB_DIR"
 export NEXT_PUBLIC_API_URL="http://127.0.0.1:8000"
+export NEXT_PUBLIC_DISABLE_FAVICONS="true"
 npm run dev -- --port 3001

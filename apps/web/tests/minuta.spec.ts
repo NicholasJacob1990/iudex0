@@ -109,12 +109,12 @@ test('carrega campos do modelo e sincroniza JSON avançado', async ({ page }) =>
   await expect(documentType).toHaveValue('PARECER');
 });
 
-test('busca documento base e seleciona resultado', async ({ page }) => {
+test('abre painel de arquivos', async ({ page }) => {
   await page.goto('/minuta');
 
-  await page.getByTestId('fontes-toggle').click();
-  await expect(page.getByTestId('fontes-panel')).toBeVisible();
-  await expect(page.getByText('Nenhum documento no contexto.')).toBeVisible();
+  await page.getByTestId('arquivos-toggle').click();
+  await expect(page.getByTestId('arquivos-panel')).toBeVisible();
+  await expect(page.getByText('Arquivos anexados')).toBeVisible();
 });
 
 test('fluxo de chat responde comando /help', async ({ page }) => {

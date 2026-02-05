@@ -58,7 +58,20 @@ async def init_db() -> None:
         from app.models.rag_trace import RAGTraceEvent
         from app.models.rag_policy import RAGAccessPolicy
         from app.models.tool_permission import ToolPermission
-        
+        from app.models.workflow import Workflow, WorkflowRun  # noqa: F401
+        from app.models.workflow_permission import WorkflowPermission  # noqa: F401
+        from app.models.playbook import Playbook, PlaybookAnalysis, PlaybookRule, PlaybookShare  # noqa: F401
+        from app.models.review_table import ReviewTable, ReviewTableTemplate  # noqa: F401
+        from app.models.dynamic_column import DynamicColumn, CellExtraction  # noqa: F401
+        from app.models.table_chat import TableChatMessage  # noqa: F401
+        from app.models.shared_space import SharedSpace, SpaceInvite, SpaceResource  # noqa: F401
+        from app.models.corpus_project import CorpusProject, CorpusProjectDocument, CorpusProjectShare  # noqa: F401
+        from app.models.corpus_retention import CorpusRetentionConfig  # noqa: F401
+        from app.models.guest_session import GuestSession  # noqa: F401
+        from app.models.audit_log import AuditLog  # noqa: F401
+        from app.models.redline_state import RedlineState  # noqa: F401
+        from app.models.extraction_job import ExtractionJob, ExtractionJobDocument  # noqa: F401
+
         # Testar conexão e criar tabelas
         async with engine.begin() as conn:
             # Cria tabelas se não existirem (útil para desenvolvimento/teste sem Alembic)

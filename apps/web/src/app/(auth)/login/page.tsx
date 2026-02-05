@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { MotionDiv, scaleIn, smoothTransition } from '@/components/ui/motion';
+import { PaintBackground } from '@/components/ui/paint-background';
 
 export default function LoginPage() {
   const router = useRouter();
@@ -54,95 +55,130 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center bg-gradient-to-br from-primary/10 via-background to-secondary/10 p-4 overflow-hidden">
-      {/* Animated gradient mesh background */}
-      <div className="pointer-events-none absolute inset-0">
-        <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/20 blur-3xl animate-drift" />
-        <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/20 blur-3xl animate-float" />
+    <div className="relative min-h-screen grid grid-cols-1 lg:grid-cols-2 overflow-hidden">
+      {/* Left panel — Brand (hidden on mobile) */}
+      <div className="hidden lg:flex relative flex-col items-center justify-center bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white overflow-hidden">
+        {/* Paint worklet background */}
+        <PaintBackground worklet="grid-pulse" color="#6366f1" seed={42} />
+
+        {/* Gradient orbs */}
+        <div className="pointer-events-none absolute inset-0 z-[1]">
+          <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/15 blur-3xl animate-drift" />
+          <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/15 blur-3xl animate-float" />
+        </div>
+
+        <div className="relative z-10 px-12 max-w-lg text-center">
+          {/* Logo */}
+          <div className="flex items-center justify-center gap-3 mb-10">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-600">
+              <span className="text-lg font-bold text-white">V</span>
+            </div>
+            <span className="text-2xl font-semibold tracking-tight">Vorbium</span>
+          </div>
+
+          {/* Headline */}
+          <h1 className="text-3xl xl:text-4xl font-bold heading-section mb-6 text-white">
+            IA Juridica que opera com governanca.
+          </h1>
+          <p className="text-lg text-indigo-200/70 leading-relaxed">
+            Assistentes e agentes especializados para interpretar, decidir e executar com rastreabilidade total.
+          </p>
+        </div>
       </div>
 
-      <MotionDiv
-        variants={scaleIn}
-        initial="hidden"
-        animate="visible"
-        transition={smoothTransition}
-        className="w-full max-w-md relative z-10"
-      >
-      <Card className="w-full max-w-md backdrop-blur-xl bg-white/80 dark:bg-white/5">
-        <CardHeader className="space-y-1 text-center">
-          <CardTitle className="text-3xl font-bold">Iudex</CardTitle>
-          <CardDescription>IA Jurídica Avançada com Multi-Agentes</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <label htmlFor="email" className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                Email
-              </label>
-              <Input
-                id="email"
-                type="email"
-                placeholder="seu@email.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={isLoading}
-                required
-                className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
-              />
-            </div>
+      {/* Right panel — Form */}
+      <div className="flex items-center justify-center bg-white dark:bg-[#0a0a0c] p-4">
+        {/* Mobile-only paint background */}
+        <div className="lg:hidden">
+          <PaintBackground worklet="grid-pulse" color="#6366f1" seed={42} />
+          <div className="pointer-events-none absolute inset-0 z-[1]">
+            <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/15 blur-3xl animate-drift" />
+            <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/15 blur-3xl animate-float" />
+          </div>
+        </div>
 
-            <div className="space-y-2">
-              <label htmlFor="password" className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                Senha
-              </label>
-              <Input
-                id="password"
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                disabled={isLoading}
-                required
-                className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
-              />
-            </div>
+        <MotionDiv
+          variants={scaleIn}
+          initial="hidden"
+          animate="visible"
+          transition={smoothTransition}
+          className="w-full max-w-md relative z-10"
+        >
+          <Card className="w-full max-w-md backdrop-blur-xl bg-white/80 dark:bg-white/5">
+            <CardHeader className="space-y-1 text-center">
+              <CardTitle className="text-3xl font-bold">Iudex</CardTitle>
+              <CardDescription>IA Juridica Avancada com Multi-Agentes</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSubmit} className="space-y-4">
+                <div className="space-y-2">
+                  <label htmlFor="email" className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                    Email
+                  </label>
+                  <Input
+                    id="email"
+                    type="email"
+                    placeholder="seu@email.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    disabled={isLoading}
+                    required
+                    className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
+                  />
+                </div>
 
-            <Button type="submit" className="w-full" disabled={isLoading}>
-              {isLoading ? 'Entrando...' : 'Entrar'}
-            </Button>
+                <div className="space-y-2">
+                  <label htmlFor="password" className="text-sm font-medium text-slate-700 dark:text-slate-200">
+                    Senha
+                  </label>
+                  <Input
+                    id="password"
+                    type="password"
+                    placeholder="••••••••"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={isLoading}
+                    required
+                    className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
+                  />
+                </div>
 
-            <div className="relative my-4">
-              <div className="absolute inset-0 flex items-center">
-                <span className="w-full border-t border-slate-200 dark:border-slate-700" />
-              </div>
-              <div className="relative flex justify-center text-xs uppercase">
-                <span className="bg-background px-2 text-muted-foreground">
-                  Ou
-                </span>
-              </div>
-            </div>
+                <Button type="submit" className="w-full" disabled={isLoading}>
+                  {isLoading ? 'Entrando...' : 'Entrar'}
+                </Button>
 
-            <Button
-              type="button"
-              variant="outline"
-              className="w-full"
-              disabled={isLoading}
-              onClick={handleTestLogin}
-            >
-              ⚡ Entrar como Visitante (Teste)
-            </Button>
+                <div className="relative my-4">
+                  <div className="absolute inset-0 flex items-center">
+                    <span className="w-full border-t border-slate-200 dark:border-slate-700" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-background px-2 text-muted-foreground">
+                      Ou
+                    </span>
+                  </div>
+                </div>
 
-            <div className="text-center text-sm mt-4">
-              <span className="text-muted-foreground">Não tem uma conta? </span>
-              <Link href="/register" className="text-primary hover:underline">
-                Cadastre-se
-              </Link>
-            </div>
-          </form>
-        </CardContent>
-      </Card>
-      </MotionDiv>
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  disabled={isLoading}
+                  onClick={handleTestLogin}
+                >
+                  Entrar como Visitante (Teste)
+                </Button>
+
+                <div className="text-center text-sm mt-4">
+                  <span className="text-muted-foreground">Nao tem uma conta? </span>
+                  <Link href="/register" className="text-primary hover:underline">
+                    Cadastre-se
+                  </Link>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        </MotionDiv>
+      </div>
     </div>
   );
 }
-

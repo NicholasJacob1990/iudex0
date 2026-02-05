@@ -43,6 +43,10 @@ from app.services.document_processor import (
     extract_text_from_pdf,
     extract_text_from_docx,
     extract_text_from_odt,
+    extract_text_from_pptx,
+    extract_text_from_xlsx,
+    extract_text_from_csv,
+    extract_text_from_rtf,
     extract_text_from_zip,
 )
 
@@ -206,7 +210,15 @@ async def upload_document(
             doc_type = DocumentType.RTF
         elif file_ext in ['.html', '.htm']:
             doc_type = DocumentType.HTML
-        
+        elif file_ext in ['.pptx']:
+            doc_type = DocumentType.PPTX
+        elif file_ext in ['.xlsx']:
+            doc_type = DocumentType.XLSX
+        elif file_ext in ['.xls']:
+            doc_type = DocumentType.XLS
+        elif file_ext in ['.csv']:
+            doc_type = DocumentType.CSV
+
         # Imagens
         elif file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff']:
             doc_type = DocumentType.IMAGE
@@ -300,7 +312,19 @@ async def upload_document(
                 
             elif doc_type == DocumentType.ODT:
                 extracted_text = await extract_text_from_odt(file_path)
-                
+
+            elif doc_type == DocumentType.PPTX:
+                extracted_text = await extract_text_from_pptx(file_path)
+
+            elif doc_type in (DocumentType.XLSX, DocumentType.XLS):
+                extracted_text = await extract_text_from_xlsx(file_path)
+
+            elif doc_type == DocumentType.CSV:
+                extracted_text = await extract_text_from_csv(file_path)
+
+            elif doc_type == DocumentType.RTF:
+                extracted_text = await extract_text_from_rtf(file_path)
+
             elif doc_type == DocumentType.IMAGE:
                 if ocr_flag is False:
                     logger.info(f"OCR desativado para imagem: {file_path}")

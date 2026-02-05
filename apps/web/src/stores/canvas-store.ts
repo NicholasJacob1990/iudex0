@@ -135,10 +135,44 @@ const mergeOutline = (existing: OutlineSection[], derived: OutlineSection[]) => 
 };
 
 export type CanvasState = 'hidden' | 'normal' | 'expanded';
-export type CanvasTab = 'editor' | 'process' | 'audit' | 'quality';
+export type CanvasTab = 'editor' | 'process' | 'audit' | 'quality' | 'code';
 export type SectionStatus = 'pending' | 'generating' | 'done' | 'review' | 'error';
 export type CitationStatus = 'valid' | 'suspicious' | 'hallucination' | 'warning';
 export type PendingAction = 'improve' | 'shorten' | 'rewrite' | 'formalize' | 'ground' | 'ementa' | 'verify' | null;
+
+// Code Artifacts (Claude/GPT Agent SDK compatible)
+export type ArtifactLanguage =
+    | 'typescript' | 'javascript' | 'jsx' | 'tsx'
+    | 'python' | 'html' | 'css' | 'json'
+    | 'sql' | 'bash' | 'markdown' | 'yaml'
+    | 'rust' | 'go' | 'java' | 'csharp'
+    | 'react' | 'vue' | 'svelte' // Framework-specific
+    | 'other';
+
+export type ArtifactType = 'code' | 'component' | 'diagram' | 'chart' | 'html' | 'markdown';
+export type ArtifactStatus = 'streaming' | 'complete' | 'error' | 'deprecated';
+
+export interface CodeArtifact {
+    id: string;
+    type: ArtifactType;
+    language: ArtifactLanguage;
+    title: string;
+    code: string;
+    description?: string;
+    status: ArtifactStatus;
+    createdAt: number;
+    updatedAt: number;
+    // Agent metadata (Claude/GPT/custom)
+    agent?: string;
+    model?: string;
+    // For streaming updates
+    isStreaming?: boolean;
+    // Execution support
+    executable?: boolean;
+    dependencies?: string[];
+    // Reference to chat message
+    messageId?: string;
+}
 
 interface HistoryEntry {
     content: string;
@@ -197,6 +231,11 @@ interface CanvasStore {
     // Citation audit badges
     citationAudit: CitationAudit[];
 
+    // Code Artifacts (Claude/GPT compatible)
+    codeArtifacts: CodeArtifact[];
+    activeArtifactId: string | null;
+    artifactStreamBuffer: string;
+
     setState: (state: CanvasState) => void;
     setActiveTab: (tab: CanvasTab) => void;
     setContent: (content: string) => void;
@@ -238,6 +277,16 @@ interface CanvasStore {
     // Citation audit actions
     setCitationAudit: (citations: CitationAudit[]) => void;
     clearCitationAudit: () => void;
+
+    // Code Artifact actions
+    addArtifact: (artifact: Omit<CodeArtifact, 'id' | 'createdAt' | 'updatedAt'>) => string;
+    updateArtifact: (id: string, updates: Partial<CodeArtifact>) => void;
+    deleteArtifact: (id: string) => void;
+    setActiveArtifact: (id: string | null) => void;
+    streamArtifactToken: (id: string, token: string) => void;
+    finalizeArtifact: (id: string, finalCode?: string) => void;
+    clearArtifacts: () => void;
+    getArtifactById: (id: string) => CodeArtifact | undefined;
 }
 
 export const useCanvasStore = create<CanvasStore>((set, get) => ({
@@ -259,6 +308,9 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     pendingSuggestions: [],
     highlightedText: null,
     citationAudit: [],
+    codeArtifacts: [],
+    activeArtifactId: null,
+    artifactStreamBuffer: '',
 
     setState: (state) => set({ state }),
     setActiveTab: (tab) => set({ activeTab: tab }),
@@ -499,4 +551,66 @@ export const useCanvasStore = create<CanvasStore>((set, get) => ({
     // Citation audit actions
     setCitationAudit: (citations) => set({ citationAudit: citations }),
     clearCitationAudit: () => set({ citationAudit: [] }),
+
+    // Code Artifact actions
+    addArtifact: (artifact) => {
+        const id = `artifact-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const now = Date.now();
+        const newArtifact: CodeArtifact = {
+            ...artifact,
+            id,
+            createdAt: now,
+            updatedAt: now,
+        };
+        set((store) => ({
+            codeArtifacts: [...store.codeArtifacts, newArtifact],
+            activeArtifactId: id,
+            activeTab: 'code',
+            state: store.state === 'hidden' ? 'normal' : store.state,
+        }));
+        return id;
+    },
+
+    updateArtifact: (id, updates) => set((store) => ({
+        codeArtifacts: store.codeArtifacts.map((a) =>
+            a.id === id ? { ...a, ...updates, updatedAt: Date.now() } : a
+        ),
+    })),
+
+    deleteArtifact: (id) => set((store) => ({
+        codeArtifacts: store.codeArtifacts.filter((a) => a.id !== id),
+        activeArtifactId: store.activeArtifactId === id ? null : store.activeArtifactId,
+    })),
+
+    setActiveArtifact: (id) => set({ activeArtifactId: id }),
+
+    streamArtifactToken: (id, token) => set((store) => ({
+        codeArtifacts: store.codeArtifacts.map((a) =>
+            a.id === id
+                ? { ...a, code: a.code + token, isStreaming: true, updatedAt: Date.now() }
+                : a
+        ),
+    })),
+
+    finalizeArtifact: (id, finalCode) => set((store) => ({
+        codeArtifacts: store.codeArtifacts.map((a) =>
+            a.id === id
+                ? {
+                    ...a,
+                    code: finalCode ?? a.code,
+                    status: 'complete' as const,
+                    isStreaming: false,
+                    updatedAt: Date.now(),
+                }
+                : a
+        ),
+    })),
+
+    clearArtifacts: () => set({
+        codeArtifacts: [],
+        activeArtifactId: null,
+        artifactStreamBuffer: '',
+    }),
+
+    getArtifactById: (id) => get().codeArtifacts.find((a) => a.id === id),
 }));

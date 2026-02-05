@@ -2825,27 +2825,98 @@ Retorne o documento COMPLETO com a formatação corrigida e o relatório no fina
 
 async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None, metrics=None):
     """
-    v2.2: Revisão LEVE de formatação Markdown com VALIDAÇÃO CRUZADA.
+    v2.3: Revisão LEVE de formatação Markdown com VALIDAÇÃO CRUZADA.
     Compara o documento processado com a estrutura de mapeamento inicial.
     Refina títulos, valida hierarquia, e reporta discrepâncias.
     NÃO reorganiza nem mescla conteúdo.
-    
-    Melhorias v2.2:
-    - Limite aumentado para 800k chars
+
+    Melhorias v2.3:
+    - Split paralelo para docs > 400k chars (em vez de truncar)
+    - Melhor tratamento de rate limits
     - Integração com MetricsCollector
-    - Suporte a relatório JSON
     """
     from difflib import SequenceMatcher
     import asyncio
     import time
     import json
-    
-    print(f"{Fore.MAGENTA}  🧹 Revisão Leve de Formatação (IA - Modo Fidelidade v2.2)...{Style.RESET_ALL}")
-    
+
+    print(f"{Fore.MAGENTA}  🧹 Revisão Leve de Formatação (IA - Modo Fidelidade v2.3)...{Style.RESET_ALL}")
+
     start_time = time.time()
-    
-    # Gemini 3 Flash suporta 1M tokens (~4M chars) - usar até 800k chars
-    max_doc_chars = 800000
+
+    # v2.3: Threshold para split (antes era 800k com truncate)
+    split_threshold = int(os.getenv("IUDEX_SPLIT_REVIEW_THRESHOLD", "400000"))
+    max_doc_chars = 800000  # Máximo por parte
+
+    # v2.3: Se documento muito grande, dividir em partes e processar em paralelo
+    if len(texto) > split_threshold:
+        print(f"{Fore.CYAN}   🔀 Documento grande ({len(texto)//1000}k chars), dividindo em partes paralelas...{Style.RESET_ALL}")
+
+        # Dividir em partes de ~350k chars cada, com overlap de 10k para contexto
+        part_size = 350000
+        overlap = 10000
+        parts = []
+        idx = 0
+        while idx < len(texto):
+            end = min(idx + part_size, len(texto))
+            # Tentar cortar em quebra de linha
+            if end < len(texto):
+                newline_pos = texto.rfind('\n', idx + part_size - 5000, end)
+                if newline_pos > idx:
+                    end = newline_pos + 1
+            parts.append(texto[idx:end])
+            idx = end - overlap if end < len(texto) else end
+
+        print(f"   📦 Dividido em {len(parts)} partes para processamento paralelo")
+
+        # Processar partes em paralelo com semaphore
+        semaphore = asyncio.Semaphore(2)  # Max 2 paralelos para evitar rate limit
+
+        async def process_part(part_idx: int, part_text: str) -> tuple:
+            async with semaphore:
+                try:
+                    # Passar parte para processamento (recursivo, mas parte será < threshold)
+                    result = await ai_structure_review_lite(
+                        part_text, client, model, estrutura_mapeada, metrics
+                    )
+                    return (part_idx, result, None)
+                except Exception as e:
+                    return (part_idx, part_text, e)  # Retorna original em caso de erro
+
+        tasks = [process_part(i, p) for i, p in enumerate(parts)]
+        results = await asyncio.gather(*tasks)
+
+        # Ordenar e mesclar resultados
+        results_sorted = sorted(results, key=lambda x: x[0])
+        merged_parts = []
+        for part_idx, result, error in results_sorted:
+            if error:
+                print(f"{Fore.YELLOW}   ⚠️ Erro na parte {part_idx + 1}: {error}. Usando original.{Style.RESET_ALL}")
+            merged_parts.append(result)
+
+        # Remover overlaps duplicados na mesclagem
+        final_text = merged_parts[0]
+        for i in range(1, len(merged_parts)):
+            # Encontrar ponto de sobreposição
+            overlap_start = final_text[-overlap*2:] if len(final_text) > overlap*2 else final_text
+            next_part = merged_parts[i]
+
+            # Buscar melhor ponto de corte
+            best_cut = 0
+            for line in overlap_start.split('\n'):
+                if line.strip() and line.strip() in next_part[:overlap*2]:
+                    pos = next_part.find(line.strip())
+                    if pos >= 0:
+                        best_cut = pos + len(line.strip())
+                        break
+
+            final_text += next_part[best_cut:].lstrip()
+
+        duration = time.time() - start_time
+        print(f"{Fore.GREEN}   ✅ Revisão paralela concluída ({len(parts)} partes, {duration:.1f}s).{Style.RESET_ALL}")
+        return final_text
+
+    # Processamento single-shot para docs menores
     if len(texto) > max_doc_chars:
         print(f"{Fore.YELLOW}   ⚠️ Documento muito longo ({len(texto)} chars), truncando para {max_doc_chars//1000}k...{Style.RESET_ALL}")
         texto_para_revisao = texto[:max_doc_chars] + "\n\n[... documento truncado para revisão ...]"
@@ -3765,10 +3836,108 @@ def garantir_titulo_tabela_banca(texto: str) -> str:
     return '\n'.join(output)
 
 
+def _similaridade_palavras(texto_a: str, texto_b: str) -> float:
+    """
+    v2.33: Calcula similaridade entre dois textos baseado em overlap de palavras.
+    Retorna valor entre 0.0 (nenhuma similaridade) e 1.0 (idênticos).
+    """
+    if not texto_a or not texto_b:
+        return 0.0
+
+    # Normalizar: lowercase e remover pontuação
+    def normalizar(t):
+        t = t.lower()
+        t = re.sub(r'[^\w\s]', '', t)
+        return set(w for w in t.split() if len(w) > 2)  # Ignorar palavras muito curtas
+
+    palavras_a = normalizar(texto_a)
+    palavras_b = normalizar(texto_b)
+
+    if not palavras_a or not palavras_b:
+        return 0.0
+
+    intersecao = palavras_a & palavras_b
+    uniao = palavras_a | palavras_b
+
+    return len(intersecao) / len(uniao) if uniao else 0.0
+
+
+def _buscar_ancora_no_texto(texto_lower: str, titulo: str, transcricao_completa: str) -> int:
+    """
+    v2.33: Busca inteligente de âncora quando o modelo não forneceu citação verbatim.
+
+    Estratégias:
+    1. Buscar palavras-chave do título no texto
+    2. Buscar frases de transição comuns próximas às palavras-chave
+
+    Returns:
+        Posição no texto ou -1 se não encontrar
+    """
+    # Extrair palavras significativas do título (ignorar palavras comuns)
+    STOPWORDS = {'de', 'da', 'do', 'das', 'dos', 'em', 'na', 'no', 'nas', 'nos',
+                 'para', 'por', 'com', 'sem', 'sobre', 'entre', 'até', 'como',
+                 'uma', 'um', 'uns', 'umas', 'aos', 'às', 'e', 'ou', 'que', 'se'}
+
+    titulo_lower = titulo.lower()
+    titulo_clean = re.sub(r'[^\w\s]', ' ', titulo_lower)
+    palavras_titulo = [w for w in titulo_clean.split() if len(w) > 3 and w not in STOPWORDS]
+
+    if not palavras_titulo:
+        return -1
+
+    # Estratégia 1: Buscar sequência de 2-3 palavras-chave consecutivas
+    for n_palavras in [3, 2]:
+        if len(palavras_titulo) >= n_palavras:
+            busca = ' '.join(palavras_titulo[:n_palavras])
+            pos = texto_lower.find(busca)
+            if pos != -1:
+                # Voltar até início da frase/linha
+                while pos > 0 and transcricao_completa[pos - 1] not in '.\n':
+                    pos -= 1
+                    if pos < len(transcricao_completa) - 200:  # Limite de 200 chars para trás
+                        break
+                return pos
+
+    # Estratégia 2: Buscar frases de transição + primeira palavra-chave
+    FRASES_TRANSICAO = [
+        'vamos agora', 'passemos para', 'vamos falar', 'vamos tratar',
+        'o próximo tema', 'o próximo ponto', 'agora vamos',
+        'entrando no', 'entrando em', 'passando para', 'passando ao',
+        'quanto ao', 'quanto à', 'em relação ao', 'em relação à',
+        'no que tange', 'no que diz respeito', 'sobre o tema',
+        'começando por', 'iniciando com', 'primeiro tema',
+        'vamos começar', 'vamos iniciar'
+    ]
+
+    for frase in FRASES_TRANSICAO:
+        pos_transicao = texto_lower.find(frase)
+        if pos_transicao != -1:
+            # Verificar se alguma palavra-chave do título está próxima (até 200 chars depois)
+            zona = texto_lower[pos_transicao:pos_transicao + 200]
+            for palavra in palavras_titulo[:2]:
+                if palavra in zona:
+                    # Voltar até início da linha
+                    while pos_transicao > 0 and transcricao_completa[pos_transicao - 1] not in '\n':
+                        pos_transicao -= 1
+                    return pos_transicao
+
+    # Estratégia 3: Buscar apenas a primeira palavra-chave significativa
+    if palavras_titulo:
+        palavra_principal = max(palavras_titulo[:3], key=len) if len(palavras_titulo) >= 3 else palavras_titulo[0]
+        pos = texto_lower.find(palavra_principal)
+        if pos != -1:
+            # Voltar até início da linha
+            while pos > 0 and transcricao_completa[pos - 1] not in '\n':
+                pos -= 1
+            return pos
+
+    return -1
+
+
 def limpar_estrutura_para_review(mapping: str) -> str:
     """
     v2.25: Remove metadados de âncora (ABRE/FECHA) do mapeamento para uso em ai_structure_review.
-    
+
     Transforma:
         1. Introdução | ABRE: "frase" | FECHA: "frase"
     Em:
@@ -3822,15 +3991,22 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
             frase_abre = match.group(3).strip().lower()
             frase_fecha = match.group(4).strip().lower()
             ancoras_totais += 1
-            
+
             if len(frase_abre) < 10:
                 continue  # Âncora muito curta, pular
-            
+
+            # v2.33: Detectar âncora "fake" (modelo usou título em vez de citação verbatim)
+            similaridade = _similaridade_palavras(titulo, frase_abre)
+            ancora_fake = similaridade > 0.6  # Mais de 60% de overlap = provavelmente fake
+
+            if ancora_fake:
+                print(f"{Fore.YELLOW}   ⚠️  Âncora fake detectada (sim={similaridade:.0%}): '{frase_abre[:30]}...'")
+
             # Buscar a frase ABRE no texto
-            pos_abre = texto_lower.find(frase_abre)
+            pos_abre = texto_lower.find(frase_abre) if not ancora_fake else -1
             pos_fecha = None
-            
-            if pos_abre == -1:
+
+            if pos_abre == -1 and not ancora_fake:
                 # Tentar busca fuzzy com as primeiras 5 palavras
                 palavras = frase_abre.split()[:5]
                 frase_curta = ' '.join(palavras)
@@ -3838,7 +4014,7 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
                 if pos_abre != -1:
                     print(f"{Fore.YELLOW}   📍 Âncora parcial: '{frase_curta}' @ {pos_abre}")
 
-            if pos_abre == -1 and frase_abre:
+            if pos_abre == -1 and frase_abre and not ancora_fake:
                 # Fallback: busca tolerante a quebras de linha (whitespace-insensitive)
                 try:
                     pattern = r'\s+'.join(re.escape(w) for w in frase_abre.split())
@@ -3848,15 +4024,23 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
                         print(f"{Fore.YELLOW}   📍 Âncora com whitespace-flex: '{frase_abre[:40]}...' @ {pos_abre}")
                 except re.error:
                     pass
-            
+
+            # v2.33: Fallback inteligente para âncoras fake ou não encontradas
+            if pos_abre == -1:
+                pos_abre = _buscar_ancora_no_texto(texto_lower, titulo, transcricao_completa)
+                if pos_abre != -1:
+                    metodo = "busca por título" if ancora_fake else "fallback inteligente"
+                    print(f"{Fore.CYAN}   🔍 Âncora via {metodo}: '{titulo[:30]}...' @ {pos_abre}")
+
             if pos_abre != -1:
                 # Voltar até o início da linha/parágrafo
                 while pos_abre > 0 and transcricao_completa[pos_abre - 1] not in '\n':
                     pos_abre -= 1
                 pontos_de_corte.append(pos_abre)
                 ancoras_encontradas += 1
-                print(f"{Fore.GREEN}   📍 Âncora ABRE: '{titulo[:30]}...' @ {pos_abre}")
-                
+                if not ancora_fake:
+                    print(f"{Fore.GREEN}   📍 Âncora ABRE: '{titulo[:30]}...' @ {pos_abre}")
+
                 # v2.26: Buscar FECHA para validação
                 if frase_fecha.lower() != 'fim':
                     pos_fecha = texto_lower.find(frase_fecha)
@@ -3865,7 +4049,7 @@ def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_gl
             else:
                 ancoras_nao_encontradas.append(f"{numero}. {titulo}")
                 print(f"{Fore.RED}   ❌ Âncora não encontrada: '{titulo[:40]}...'")
-            
+
             ancoras_info.append({
                 'numero': numero,
                 'titulo': titulo,
@@ -4379,15 +4563,83 @@ class VomoMLX:
     MAP_CHUNK_OVERLAP_CHARS = 8_000
     MAP_MAX_LINES_PER_CHUNK = 60
     RAW_CONTEXT_OVERLAP_CHARS = 1200
-    
+
+    # ==================== PARALELIZAÇÃO (v2.40) ====================
+    # Número de chunks processados em paralelo. Default=1 (sequencial).
+    # Valores > 1 aceleram mas podem reduzir consistência de estilo entre chunks.
+    # Recomendado: 2-3 para balanço velocidade/qualidade.
+    PARALLEL_CHUNKS = int(os.getenv("IUDEX_PARALLEL_CHUNKS", "1"))
+
+    # ==================== CHUNKING DE ÁUDIO LONGO (v2.32/v2.34) ====================
+    # Áudios maiores que este limite serão divididos em partes para evitar
+    # problemas de memória/processamento do MLX-Whisper com arquivos muito longos
+    AUDIO_MAX_DURATION_SECONDS = 2 * 60 * 60  # 2 horas
+    AUDIO_CHUNK_OVERLAP_SECONDS = 45  # v2.34: 45s de overlap (era 30s) - mais seguro para frases longas
+    # NOTA: Diarização em chunking pode resetar speaker IDs entre chunks.
+    # Para diarização consistente em áudios longos, use AssemblyAI ou diarize o áudio inteiro separadamente.
+
+    # ==================== IDIOMAS SUPORTADOS ====================
+    # Expandido para incluir os principais idiomas suportados por Whisper e AssemblyAI
+    SUPPORTED_LANGUAGES = {
+        "auto": None,   # Whisper detecta automaticamente
+        "pt": "pt",     # Português
+        "en": "en",     # Inglês
+        "es": "es",     # Espanhol
+        "fr": "fr",     # Francês
+        "de": "de",     # Alemão
+        "it": "it",     # Italiano
+        "ja": "ja",     # Japonês
+        "ko": "ko",     # Coreano
+        "zh": "zh",     # Chinês
+        "ru": "ru",     # Russo
+        "ar": "ar",     # Árabe
+        "hi": "hi",     # Hindi
+        "nl": "nl",     # Holandês
+        "pl": "pl",     # Polonês
+        "tr": "tr",     # Turco
+        "sv": "sv",     # Sueco
+        "da": "da",     # Dinamarquês
+        "fi": "fi",     # Finlandês
+        "no": "no",     # Norueguês
+        "uk": "uk",     # Ucraniano
+    }
+
     # ==================== INITIAL PROMPTS POR MODO (v2.29) ====================
     # Contexto do Whisper ajustado ao tipo de áudio para melhor reconhecimento de termos
+    # Chave externa: (modo, idioma). Fallback: só modo (assume pt).
     INITIAL_PROMPTS = {
         "APOSTILA": "Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
         "FIDELIDADE": "Esta é uma transcrição de aula jurídica em português brasileiro sobre direito administrativo, constitucional, civil, penal e processual.",
         "AUDIENCIA": "Esta é uma transcrição de audiência judicial em português brasileiro. Termos forenses, procedimentos processuais e linguagem jurídica formal.",
         "REUNIAO": "Esta é uma transcrição de reunião profissional em português brasileiro.",
         "DEPOIMENTO": "Esta é uma transcrição de depoimento judicial em português brasileiro. Termos forenses e linguagem jurídica formal.",
+    }
+
+    INITIAL_PROMPTS_I18N: dict[tuple[str, str], str] = {
+        # Inglês
+        ("APOSTILA", "en"): "This is a transcription of a legal lecture in English about administrative, constitutional, civil, criminal and procedural law.",
+        ("FIDELIDADE", "en"): "This is a transcription of a legal lecture in English about administrative, constitutional, civil, criminal and procedural law.",
+        ("AUDIENCIA", "en"): "This is a transcription of a court hearing in English. Forensic terms, procedural law and formal legal language.",
+        ("REUNIAO", "en"): "This is a transcription of a professional meeting in English.",
+        ("DEPOIMENTO", "en"): "This is a transcription of a legal deposition in English. Forensic terms and formal legal language.",
+        # Espanhol
+        ("APOSTILA", "es"): "Esta es una transcripción de una clase jurídica en español sobre derecho administrativo, constitucional, civil, penal y procesal.",
+        ("FIDELIDADE", "es"): "Esta es una transcripción de una clase jurídica en español sobre derecho administrativo, constitucional, civil, penal y procesal.",
+        ("AUDIENCIA", "es"): "Esta es una transcripción de una audiencia judicial en español. Términos forenses, procedimientos procesales y lenguaje jurídico formal.",
+        ("REUNIAO", "es"): "Esta es una transcripción de una reunión profesional en español.",
+        ("DEPOIMENTO", "es"): "Esta es una transcripción de una declaración judicial en español. Términos forenses y lenguaje jurídico formal.",
+        # Francês
+        ("APOSTILA", "fr"): "Ceci est une transcription d'un cours juridique en français sur le droit administratif, constitutionnel, civil, pénal et procédural.",
+        ("FIDELIDADE", "fr"): "Ceci est une transcription d'un cours juridique en français sur le droit administratif, constitutionnel, civil, pénal et procédural.",
+        ("AUDIENCIA", "fr"): "Ceci est une transcription d'une audience judiciaire en français. Termes forensiques, procédures judiciaires et langage juridique formel.",
+        ("REUNIAO", "fr"): "Ceci est une transcription d'une réunion professionnelle en français.",
+        ("DEPOIMENTO", "fr"): "Ceci est une transcription d'une déposition judiciaire en français. Termes forensiques et langage juridique formel.",
+        # Alemão
+        ("APOSTILA", "de"): "Dies ist eine Transkription einer juristischen Vorlesung auf Deutsch über Verwaltungs-, Verfassungs-, Zivil-, Straf- und Verfahrensrecht.",
+        ("FIDELIDADE", "de"): "Dies ist eine Transkription einer juristischen Vorlesung auf Deutsch über Verwaltungs-, Verfassungs-, Zivil-, Straf- und Verfahrensrecht.",
+        ("AUDIENCIA", "de"): "Dies ist eine Transkription einer Gerichtsverhandlung auf Deutsch. Forensische Begriffe, Verfahrensrecht und formale juristische Sprache.",
+        ("REUNIAO", "de"): "Dies ist eine Transkription eines professionellen Meetings auf Deutsch.",
+        ("DEPOIMENTO", "de"): "Dies ist eine Transkription einer gerichtlichen Aussage auf Deutsch. Forensische Begriffe und formale juristische Sprache.",
     }
 
     # ==================== MODULAR PROMPT COMPONENTS (v2.22) ====================
@@ -4410,6 +4662,7 @@ VOCÊ É UM EXCELENTÍSSIMO REDATOR JURÍDICO E DIDÁTICO.
 4. **NÃO CRIE PARÁGRAFOS LONGOS**. Máximo 3-6 linhas visuais por parágrafo.
 
 ## ❌ PRESERVE OBRIGATORIAMENTE
+- **IDENTIFICAÇÃO DE FALANTES**: Se houver SPEAKER A/B/C ou similar, identifique o professor pelo contexto (quando ele se apresentar: "Eu sou o professor João", "Meu nome é Maria"). Substitua "SPEAKER X" pelo nome identificado. Se não identificar, use "Professor" ou "Palestrante".
 - **NÚMEROS EXATOS**: Artigos, Leis, Súmulas, Julgados, Temas de Repercussão Geral, Recursos Repetitivos. **NUNCA OMITA NÚMEROS DE TEMAS OU SÚMULAS**.
 - **JURISPRUDÊNCIA**: Se o texto citar "Tema 424", "RE 123", "ADI 555", **MANTENHA O NÚMERO**. Não generalize para "jurisprudência do STJ".
 - **TODO o conteúdo técnico**: exemplos, explicações, analogias, raciocínios.
@@ -4656,15 +4909,15 @@ VOCÊ É UM REDATOR TÉCNICO FORENSE.
 5. **NÃO CONVERTA** em narrativa: não transforme depoimentos em “história”.
 
 ## ✅ PRESERVE OBRIGATORIAMENTE
-- **Identificação de falantes** (SPEAKER 1/2/3, JUIZ, ADVOGADO, TESTEMUNHA, etc.) quando existir.
+- **Identificação de falantes** (SPEAKER 1/2/3, Professor, etc.) quando existir.
 - **Timestamps e marcações**: [inaudível], [risos], [interrupção], [sobreposição] e quaisquer timestamps.
 - **Números exatos**: datas, valores, artigos/leis, números de processos, prazos, nomes próprios.
-- **Negativas e hesitações relevantes** (“não”, “talvez”, “acho que”, “não lembro”) quando impactarem sentido.
+- **Negativas e hesitações relevantes** ("não", "talvez", "acho que", "não lembro") quando impactarem sentido.
 
 ## 🧷 REGRAS CRÍTICAS DE TRANSCRIÇÃO
-1. **NÃO transforme em discurso indireto** (ex.: “o juiz disse que…”). Mantenha fala direta.
+1. **NÃO transforme em discurso indireto** (ex.: "o professor disse que…"). Mantenha fala direta.
 2. **NÃO transforme em ata resumida**. Preserve a sequência real das falas.
-3. **NÃO infira nomes/papéis**: use exatamente os rótulos existentes (ex.: SPEAKER 1/2).
+3. **NÃO infira nomes/papéis**: use exatamente os rótulos existentes (ex.: SPEAKER 1/2, Professor).
 4. **Uma fala por parágrafo**: não fundir falas de pessoas diferentes no mesmo parágrafo.
 5. **Pergunta/Resposta**: mantenha Q&A em blocos consecutivos, sem inserir comentários.
 6. **Verbatim decisório**: quando houver trechos explícitos de decisão/encaminhamento (“defiro/indefiro”, “ficou decidido”, “designo”, “intime-se”, etc.), preserve o trecho **literalmente** (pode isolar em citação curta)."""
@@ -5043,6 +5296,7 @@ VOCÊ É UM EXCELENTÍSSIMO REDATOR JURÍDICO E DIDÁTICO.
 4. **NÃO CRIE PARÁGRAFOS LONGOS**. Máximo 3-6 linhas visuais por parágrafo.
 
 ## ❌ PRESERVE OBRIGATORIAMENTE
+- **IDENTIFICAÇÃO DE FALANTES**: Se houver SPEAKER A/B/C ou similar, identifique o professor pelo contexto (quando ele se apresentar: "Eu sou o professor João", "Meu nome é Maria"). Substitua "SPEAKER X" pelo nome identificado. Se não identificar, use "Professor" ou "Palestrante".
 - **NÚMEROS EXATOS**: Artigos, Leis, Súmulas, Julgados, Temas de Repercussão Geral, Recursos Repetitivos. **NUNCA OMITA NÚMEROS DE TEMAS OU SÚMULAS**.
 - **JURISPRUDÊNCIA**: Se o texto citar "Tema 424", "RE 123", "ADI 555", **MANTENHA O NÚMERO**. Não generalize para "jurisprudência do STJ".
 - **TODO o conteúdo técnico**: exemplos, explicações, analogias, raciocínios.
@@ -5280,6 +5534,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         self,
         mode: str = "APOSTILA",
         custom_style_override: str = None,
+        disable_tables: bool = False,
         allow_indirect: bool = False,
         allow_summary: bool = False,
         include_timestamps: bool = True,
@@ -5326,6 +5581,15 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             structure = self.PROMPT_STRUCTURE_APOSTILA
             table = self.PROMPT_TABLE_APOSTILA
 
+        disable_tables = bool(disable_tables)
+        if disable_tables:
+            table = (
+                "## 🚫 TABELAS / EXTRAS (DESABILITADO)\n"
+                "- **Não gere tabelas em Markdown** (linhas com `| ... |` e separadores `---`).\n"
+                "- **Não inclua** quadro-síntese, pegadinhas, checklists, resumo, fluxograma, mapa mental ou questionário.\n"
+                "- Se precisar destacar informações, use **parágrafos** e **listas**.\n"
+            )
+
         if allow_indirect:
             for line in (
                 "**NÃO transforme em discurso indireto**. Mantenha fala direta.",
@@ -5370,15 +5634,22 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             )
         
         footer = self.PROMPT_FOOTER
-        
-        if custom_style_override:
+
+        custom_override = (custom_style_override or "").strip()
+        if custom_override and disable_tables and mode.upper() in {"APOSTILA", "AUDIENCIA", "REUNIAO"}:
+            print(
+                f"{Fore.YELLOW}⚠️  Tabelas/extras desabilitados: ignorando prompt customizado (ele só afeta tabelas/extras nesses modos).{Style.RESET_ALL}"
+            )
+            custom_override = ""
+
+        if custom_override:
             # Guardrails: custom prompt is intended to be safe and not fight with structure.
             # - For APOSTILA: treat custom prompt as TABLE/EXTRAS customization only (keep original tone/style/structure).
             # - For other modes: keep legacy behavior (override STYLE+TABLE layers).
-            custom_lower = custom_style_override.lower()
+            custom_lower = custom_override.lower()
 
             # Warn only for "structural" headings (#/##/###). ####+ is acceptable for intra-section extras.
-            if re.search(r"(^|\n)\s{0,3}#{1,3}\s", custom_style_override):
+            if re.search(r"(^|\n)\s{0,3}#{1,3}\s", custom_override):
                 print(
                     f"{Fore.YELLOW}⚠️  Seu prompt customizado contém títulos Markdown (#/##/###). "
                     f"Isso pode interferir na estrutura. Ideal: use no máximo #### para anexos/extras.{Style.RESET_ALL}"
@@ -5391,7 +5662,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
             if mode.upper() in {"APOSTILA", "AUDIENCIA", "REUNIAO"}:
                 label = "APOSTILA" if mode.upper() == "APOSTILA" else ("AUDIÊNCIA" if mode.upper() == "AUDIENCIA" else "REUNIÃO")
-                print(f"{Fore.YELLOW}🧩 Usando PROMPT CUSTOMIZADO ({label}: apenas tabelas/extras) ({len(custom_style_override):,} chars)")
+                print(f"{Fore.YELLOW}🧩 Usando PROMPT CUSTOMIZADO ({label}: apenas tabelas/extras) ({len(custom_override):,} chars)")
                 table_with_custom = (
                     f"{table}\n\n"
                     "## 🧩 PERSONALIZAÇÕES (TABELAS / EXTRAS)\n"
@@ -5403,17 +5674,48 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     "- NÃO altere a estrutura principal (##/###/#### do conteúdo). Se precisar de anexos, use apenas `####` após o bloco de encerramento do tópico.\n"
                     "- NÃO resuma o conteúdo principal; anexos são complementares.\n\n"
                     "### Instruções do usuário\n"
-                    f"{custom_style_override}\n"
+                    f"{custom_override}\n"
                 )
                 composed = f"{head}\n\n{style}\n\n{structure}\n\n{table_with_custom}\n\n{footer}"
             else:
                 # Legacy: User provides custom style+table instructions
-                print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO de estilo/tabela ({len(custom_style_override):,} chars)")
-                composed = f"{head}\n\n{custom_style_override}\n\n{structure}\n\n{footer}"
+                print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO de estilo/tabela ({len(custom_override):,} chars)")
+                composed = f"{head}\n\n{custom_override}\n\n{structure}\n\n{table}\n\n{footer}"
         else:
             # Use default components
             composed = f"{head}\n\n{style}\n\n{structure}\n\n{table}\n\n{footer}"
-        
+
+        # Instrução de idioma de saída (padrão: mesmo idioma do áudio de entrada)
+        output_lang = getattr(self, "_output_language", None)
+        input_lang = getattr(self, "_current_language", "pt") or "pt"
+        effective_lang = output_lang or input_lang
+
+        lang_names = {
+            "en": "English",
+            "es": "español",
+            "fr": "français",
+            "de": "Deutsch",
+            "pt": "português",
+        }
+
+        if effective_lang == "auto":
+            # Auto-detect: instruir LLM a manter o idioma do texto de entrada
+            composed += (
+                "\n\n## IDIOMA DE SAÍDA\n"
+                "- O idioma do áudio foi detectado automaticamente.\n"
+                "- Identifique o idioma do texto de entrada e escreva TODA a saída nesse MESMO idioma.\n"
+                "- Títulos, tabelas, legendas e conteúdo devem estar no idioma original.\n"
+                "- NÃO traduza para português se o áudio não for em português.\n"
+            )
+        elif effective_lang and effective_lang != "pt":
+            lang_name = lang_names.get(effective_lang, effective_lang)
+            composed += (
+                f"\n\n## IDIOMA DE SAÍDA\n"
+                f"- O áudio de entrada está em **{lang_name}**.\n"
+                f"- Toda a formatação, títulos, tabelas e conteúdo DEVEM ser escritos em **{lang_name}**.\n"
+                f"- NÃO traduza para português. Mantenha o idioma original do áudio.\n"
+            )
+
         return composed
 
     def create_context_cache(self, transcription, global_structure=None):
@@ -5438,16 +5740,24 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
     def optimize_audio(self, file_path):
         """Extrai áudio otimizado (16kHz mono)"""
         print(f"{Fore.YELLOW}⚡ Verificando áudio...")
-        
+
         mp3_path = Path(file_path).with_suffix('.mp3')
         if mp3_path.exists():
             print(f"   📂 Usando MP3 existente: {mp3_path.name}")
             return str(mp3_path)
-        
-        file_hash = hashlib.md5(file_path.encode()).hexdigest()[:8]
+
+        # Cache baseado em nome do arquivo + tamanho (independente do job ID)
+        file_name = Path(file_path).name
+        try:
+            file_size = os.path.getsize(file_path)
+        except OSError:
+            file_size = 0
+        cache_key = f"{file_name}_{file_size}"
+        file_hash = hashlib.md5(cache_key.encode()).hexdigest()[:8]
         output_path = f"temp_{file_hash}.wav"
-        
+
         if os.path.exists(output_path):
+            print(f"   ♻️ Cache encontrado: {output_path} (mesmo arquivo: {file_name})")
             return output_path
         
         print(f"   🔄 Extraindo áudio...")
@@ -5481,12 +5791,746 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         return output_path
 
+    def _resolve_whisper_language(self) -> Optional[str]:
+        """Resolve o código de idioma para o Whisper. None = auto-detect."""
+        lang = getattr(self, "_current_language", "pt") or "pt"
+        return self.SUPPORTED_LANGUAGES.get(lang, lang if lang != "auto" else None)
+
+    def _detect_speech_segments_silero(self, audio_path: str) -> list[dict]:
+        """
+        Detecta segmentos de fala usando Silero VAD (mais preciso que RMS).
+
+        Returns:
+            Lista de dicts {'start': float, 'end': float} com segmentos de fala em segundos.
+        """
+        try:
+            from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
+
+            model = load_silero_vad()
+            wav = read_audio(audio_path)
+
+            # Obter timestamps de fala (em segundos)
+            speech_timestamps = get_speech_timestamps(
+                wav,
+                model,
+                return_seconds=True,
+                min_speech_duration_ms=500,   # Ignora sons < 0.5s
+                min_silence_duration_ms=500,  # Une pausas < 0.5s
+            )
+
+            return speech_timestamps
+
+        except Exception as e:
+            print(f"{Fore.YELLOW}   ⚠️ Silero VAD falhou: {e}{Style.RESET_ALL}")
+            return []
+
+    def _detect_speech_start_silero(self, audio_path: str) -> float:
+        """
+        Detecta onde a fala começa usando Silero VAD.
+
+        Returns:
+            Offset em segundos onde a fala começa (0 se não detectar silêncio inicial)
+        """
+        segments = self._detect_speech_segments_silero(audio_path)
+
+        if segments and len(segments) > 0:
+            first_speech = segments[0].get('start', 0)
+            if first_speech > 0:
+                print(f"{Fore.YELLOW}   🔇 Silero VAD: Detectado silêncio inicial de {first_speech:.0f}s{Style.RESET_ALL}")
+            return first_speech
+
+        return 0.0
+
+    def _detect_speech_start_rms(self, audio_path: str, chunk_seconds: float = 30.0, threshold_db: float = -40.0) -> float:
+        """
+        Fallback: Detecta onde a fala começa usando RMS (energia do sinal).
+        Usado se Silero VAD não estiver disponível.
+        """
+        import subprocess
+        import re
+
+        try:
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+            ]
+            duration_result = subprocess.run(probe_cmd, capture_output=True, text=True)
+            total_duration = float(duration_result.stdout.strip())
+
+            speech_start = 0.0
+            max_chunks_to_check = min(20, int(total_duration / chunk_seconds))
+
+            for i in range(max_chunks_to_check):
+                offset = i * chunk_seconds
+                cmd = [
+                    "ffmpeg", "-ss", str(offset), "-t", str(chunk_seconds),
+                    "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, stderr=subprocess.STDOUT)
+                output = result.stdout + result.stderr if result.stderr else result.stdout
+
+                match = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", output)
+                if match:
+                    mean_vol = float(match.group(1))
+                    if mean_vol > threshold_db:
+                        if i > 0:
+                            fine_start = max(0, (i - 1) * chunk_seconds)
+                            fine_chunk = 5.0
+                            for j in range(int(chunk_seconds / fine_chunk) + 2):
+                                fine_offset = fine_start + j * fine_chunk
+                                if fine_offset >= offset + chunk_seconds:
+                                    break
+                                cmd_fine = [
+                                    "ffmpeg", "-ss", str(fine_offset), "-t", str(fine_chunk),
+                                    "-i", audio_path, "-af", "volumedetect", "-f", "null", "-"
+                                ]
+                                result_fine = subprocess.run(cmd_fine, capture_output=True, text=True, stderr=subprocess.STDOUT)
+                                output_fine = result_fine.stdout + (result_fine.stderr or "")
+                                match_fine = re.search(r"mean_volume:\s*([-\d.]+)\s*dB", output_fine)
+                                if match_fine and float(match_fine.group(1)) > threshold_db:
+                                    speech_start = fine_offset
+                                    break
+                            else:
+                                speech_start = offset
+                        break
+
+            if speech_start > 0:
+                print(f"{Fore.YELLOW}   🔇 RMS VAD: Detectado silêncio inicial de {speech_start:.0f}s{Style.RESET_ALL}")
+
+            return speech_start
+
+        except Exception as e:
+            print(f"{Fore.YELLOW}   ⚠️ RMS VAD falhou: {e}{Style.RESET_ALL}")
+            return 0.0
+
+    # ==================== CHUNKING DE ÁUDIO LONGO (v2.32) ====================
+
+    def _get_audio_duration(self, audio_path: str) -> float:
+        """
+        Obtém a duração do áudio em segundos usando ffprobe.
+
+        v2.34: Melhorada robustez com validação e fallback por tamanho.
+        """
+        duration = 0.0
+
+        # Método 1: ffprobe
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1", audio_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode == 0 and result.stdout.strip():
+                duration = float(result.stdout.strip())
+                if duration > 0:
+                    return duration
+        except subprocess.TimeoutExpired:
+            print(f"{Fore.YELLOW}   ⚠️ ffprobe timeout para {audio_path}{Style.RESET_ALL}")
+        except (ValueError, Exception) as e:
+            print(f"{Fore.YELLOW}   ⚠️ Erro ffprobe: {e}{Style.RESET_ALL}")
+
+        # Método 2: wave module (apenas para WAV)
+        if audio_path.lower().endswith('.wav'):
+            try:
+                import wave
+                with wave.open(audio_path, 'rb') as wav:
+                    frames = wav.getnframes()
+                    rate = wav.getframerate()
+                    if rate > 0:
+                        duration = float(frames) / float(rate)
+                        if duration > 0:
+                            print(f"{Fore.CYAN}   📏 Duração via wave: {duration/3600:.2f}h{Style.RESET_ALL}")
+                            return duration
+            except Exception:
+                pass
+
+        # Método 3: Estimativa por tamanho do arquivo (fallback)
+        # MP3 ~128kbps = ~960KB/min, WAV 16kHz mono = ~1.92MB/min
+        try:
+            file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
+            if audio_path.lower().endswith('.wav'):
+                # WAV 16kHz mono 16-bit = ~1.92 MB/min
+                estimated_minutes = file_size_mb / 1.92
+            else:
+                # MP3 ~128kbps = ~0.96 MB/min (conservador)
+                estimated_minutes = file_size_mb / 0.96
+
+            estimated_seconds = estimated_minutes * 60
+            if estimated_seconds > self.AUDIO_MAX_DURATION_SECONDS:
+                print(f"{Fore.YELLOW}   ⚠️ Duração estimada por tamanho: {estimated_seconds/3600:.1f}h (arquivo: {file_size_mb:.0f}MB){Style.RESET_ALL}")
+                return estimated_seconds
+        except Exception:
+            pass
+
+        return duration
+
+    def _split_audio_into_chunks(self, audio_path: str, chunk_duration: float, overlap: float = 30.0) -> list:
+        """
+        Divide áudio longo em chunks temporários.
+
+        v2.32: Evita problemas de memória do MLX-Whisper com arquivos muito longos.
+
+        Args:
+            audio_path: Caminho do arquivo de áudio
+            chunk_duration: Duração de cada chunk em segundos
+            overlap: Overlap entre chunks em segundos (para continuidade)
+
+        Returns:
+            Lista de dicts: [{'path': str, 'start': float, 'end': float, 'is_temp': bool}]
+        """
+        import tempfile
+
+        total_duration = self._get_audio_duration(audio_path)
+        if total_duration <= 0:
+            return [{'path': audio_path, 'start': 0, 'end': 0, 'is_temp': False}]
+
+        # Se áudio é menor que o limite, retorna sem dividir
+        if total_duration <= chunk_duration:
+            return [{'path': audio_path, 'start': 0, 'end': total_duration, 'is_temp': False}]
+
+        chunks = []
+        current_start = 0.0
+        chunk_index = 0
+
+        print(f"{Fore.CYAN}   🔪 Dividindo áudio longo ({total_duration/3600:.1f}h) em chunks de {chunk_duration/3600:.1f}h...{Style.RESET_ALL}")
+
+        while current_start < total_duration:
+            chunk_end = min(current_start + chunk_duration, total_duration)
+            actual_duration = chunk_end - current_start
+
+            # Criar arquivo temporário para o chunk
+            base_name = Path(audio_path).stem
+            temp_dir = tempfile.gettempdir()
+            chunk_path = os.path.join(temp_dir, f"{base_name}_chunk{chunk_index}.wav")
+
+            # Extrair chunk com ffmpeg
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", str(current_start),
+                "-i", audio_path,
+                "-t", str(actual_duration),
+                "-ar", "16000",
+                "-ac", "1",
+                "-acodec", "pcm_s16le",
+                chunk_path,
+                "-hide_banner",
+                "-loglevel", "error"
+            ]
+
+            try:
+                subprocess.run(cmd, check=True, capture_output=True)
+                chunks.append({
+                    'path': chunk_path,
+                    'start': current_start,
+                    'end': chunk_end,
+                    'is_temp': True
+                })
+                print(f"{Fore.GREEN}      ✂️ Chunk {chunk_index + 1}: {self._format_timestamp(current_start)} → {self._format_timestamp(chunk_end)}{Style.RESET_ALL}")
+            except subprocess.CalledProcessError as e:
+                print(f"{Fore.RED}      ❌ Erro ao criar chunk {chunk_index}: {e}{Style.RESET_ALL}")
+
+            # Próximo chunk com overlap
+            current_start = chunk_end - overlap
+            if current_start >= total_duration - overlap:
+                break
+            chunk_index += 1
+
+        print(f"{Fore.GREEN}   ✅ Criados {len(chunks)} chunks de áudio{Style.RESET_ALL}")
+        return chunks
+
+    def _cleanup_audio_chunks(self, chunks: list):
+        """Remove arquivos temporários de chunks."""
+        for chunk in chunks:
+            if chunk.get('is_temp') and os.path.exists(chunk['path']):
+                try:
+                    os.unlink(chunk['path'])
+                except Exception:
+                    pass
+
+    def _merge_chunk_segments(self, all_segments: list, overlap_seconds: float = 30.0) -> list:
+        """
+        Mescla segmentos de múltiplos chunks, removendo duplicatas do overlap.
+
+        v2.32: Usa fingerprinting de texto para detectar e remover duplicatas.
+        v2.34: Melhorado algoritmo de detecção de duplicatas com múltiplas estratégias.
+        """
+        if not all_segments:
+            return []
+
+        merged = []
+        last_end_time = 0.0
+        recent_texts = []  # Buffer das últimas N frases para detectar duplicatas
+
+        def normalize_for_compare(text: str) -> str:
+            """Normaliza texto para comparação (lowercase, sem pontuação extra)."""
+            import re
+            text = (text or '').strip().lower()
+            text = re.sub(r'[^\w\s]', '', text)  # Remove pontuação
+            text = re.sub(r'\s+', ' ', text)  # Normaliza espaços
+            return text
+
+        def is_duplicate(new_text: str, recent: list) -> bool:
+            """Verifica se texto é duplicata de algum texto recente."""
+            new_norm = normalize_for_compare(new_text)
+            if not new_norm or len(new_norm) < 10:
+                return False
+
+            for old_text in recent:
+                old_norm = normalize_for_compare(old_text)
+                if not old_norm:
+                    continue
+
+                # Estratégia 1: Texto exatamente igual
+                if new_norm == old_norm:
+                    return True
+
+                # Estratégia 2: Um contém o outro (substring)
+                if len(new_norm) > 20 and len(old_norm) > 20:
+                    if new_norm in old_norm or old_norm in new_norm:
+                        return True
+
+                # Estratégia 3: Similaridade alta (Jaccard de palavras)
+                new_words = set(new_norm.split())
+                old_words = set(old_norm.split())
+                if new_words and old_words:
+                    intersection = len(new_words & old_words)
+                    union = len(new_words | old_words)
+                    if union > 0 and intersection / union > 0.8:  # 80% similaridade
+                        return True
+
+                # Estratégia 4: Início igual (primeiras N palavras)
+                new_start = ' '.join(new_norm.split()[:8])
+                old_start = ' '.join(old_norm.split()[:8])
+                if len(new_start) > 20 and new_start == old_start:
+                    return True
+
+            return False
+
+        for chunk_idx, segments in enumerate(all_segments):
+            chunk_start_time = segments[0].get('start', 0) if segments else 0
+
+            for seg in segments:
+                seg_start = seg.get('start', 0)
+                seg_text = (seg.get('text') or '').strip()
+
+                if not seg_text:
+                    continue
+
+                # Para segmentos no período de overlap, verificar duplicatas mais rigorosamente
+                in_overlap_zone = seg_start < last_end_time + overlap_seconds * 0.5
+
+                if in_overlap_zone and chunk_idx > 0:
+                    # Verificar se é duplicata
+                    if is_duplicate(seg_text, recent_texts):
+                        continue
+
+                merged.append(seg)
+                last_end_time = max(last_end_time, seg.get('end', seg_start))
+
+                # Manter buffer das últimas 10 frases para comparação
+                recent_texts.append(seg_text)
+                if len(recent_texts) > 10:
+                    recent_texts.pop(0)
+
+        print(f"{Fore.CYAN}   🔗 Merge: {sum(len(s) for s in all_segments)} → {len(merged)} segmentos (removidas duplicatas do overlap){Style.RESET_ALL}")
+        return merged
+
+    def _transcribe_chunked(self, audio_path: str, *, beam_size: Optional[int] = None, cache_file: str = None, initial_prompt: str = "") -> str:
+        """
+        Transcreve áudio longo dividindo em chunks de 3h cada.
+
+        v2.32: Evita degradação do MLX-Whisper com arquivos muito longos.
+        O Whisper pode gerar apenas pontuação quando processa áudios > 3-4h de uma vez.
+        """
+        print(f"{Fore.CYAN}   🎬 Iniciando transcrição em chunks (máx {self.AUDIO_MAX_DURATION_SECONDS/3600:.0f}h cada)...{Style.RESET_ALL}")
+        start_time = time.time()
+
+        # Dividir áudio em chunks
+        chunks = self._split_audio_into_chunks(
+            audio_path,
+            chunk_duration=self.AUDIO_MAX_DURATION_SECONDS,
+            overlap=self.AUDIO_CHUNK_OVERLAP_SECONDS
+        )
+
+        if not chunks:
+            print(f"{Fore.RED}   ❌ Falha ao dividir áudio em chunks{Style.RESET_ALL}")
+            return ""
+
+        all_segments = []
+        whisper_lang = self._resolve_whisper_language()
+        no_speech_thresh = float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8"))
+
+        mlx_kwargs = dict(
+            path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
+            **({"language": whisper_lang} if whisper_lang else {}),
+            temperature=0.0,
+            initial_prompt=(initial_prompt or None),
+            word_timestamps=True,
+            fp16=True,
+            no_speech_threshold=no_speech_thresh,
+            logprob_threshold=-0.5,
+            compression_ratio_threshold=2.2,
+            condition_on_previous_text=self._condition_on_previous,
+            suppress_tokens=[-1],
+            verbose=False,
+        )
+        if beam_size and beam_size > 1:
+            mlx_kwargs["beam_size"] = int(beam_size)
+
+        try:
+            for i, chunk in enumerate(chunks):
+                chunk_path = chunk['path']
+                chunk_start = chunk['start']
+                chunk_end = chunk['end']
+
+                print(f"{Fore.CYAN}   📝 Transcrevendo chunk {i+1}/{len(chunks)} ({self._format_timestamp(chunk_start)} → {self._format_timestamp(chunk_end)})...{Style.RESET_ALL}")
+
+                try:
+                    result = self._transcribe_with_vad(chunk_path, mlx_kwargs, skip_silence=True)
+                except TypeError:
+                    mlx_kwargs_copy = dict(mlx_kwargs)
+                    mlx_kwargs_copy.pop("beam_size", None)
+                    mlx_kwargs_copy.pop("best_of", None)
+                    result = self._transcribe_with_vad(chunk_path, mlx_kwargs_copy, skip_silence=True)
+
+                segments = result.get("segments", [])
+
+                # Ajustar timestamps para o offset do chunk (segmentos E words)
+                for seg in segments:
+                    seg['start'] = seg.get('start', 0) + chunk_start
+                    seg['end'] = seg.get('end', 0) + chunk_start
+                    # v2.33: Ajustar também timestamps das words individuais
+                    if 'words' in seg and seg['words']:
+                        for word in seg['words']:
+                            if 'start' in word:
+                                word['start'] = word['start'] + chunk_start
+                            if 'end' in word:
+                                word['end'] = word['end'] + chunk_start
+
+                all_segments.append(segments)
+                print(f"{Fore.GREEN}      ✅ Chunk {i+1}: {len(segments)} segmentos{Style.RESET_ALL}")
+
+        finally:
+            # Limpar arquivos temporários
+            self._cleanup_audio_chunks(chunks)
+
+        # Mesclar segmentos de todos os chunks
+        merged_segments = self._merge_chunk_segments(all_segments, overlap_seconds=self.AUDIO_CHUNK_OVERLAP_SECONDS)
+
+        # Filtrar segmentos
+        segments, filter_stats = self._filter_asr_segments(merged_segments)
+        if filter_stats.get("dropped"):
+            reasons = ", ".join(
+                f"{k}={v}" for k, v in sorted((filter_stats.get("reason_counts") or {}).items())
+            )
+            print(f"{Fore.YELLOW}   🧹 ASR: removidos {filter_stats['dropped']} segmento(s) suspeitos ({reasons}){Style.RESET_ALL}")
+
+        # Formatar resultado
+        lines = []
+        current_block = []
+        last_timestamp = None
+
+        for segment in segments:
+            start = segment['start']
+            text = segment['text'].strip()
+
+            if not text:
+                continue
+
+            text = self._normalize_raw_text(text)
+
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=self._get_timestamp_interval_for_mode()):
+                if current_block:
+                    lines.append(" ".join(current_block))
+                    current_block = []
+
+                ts = self._format_timestamp(start)
+                current_block.append(f"[{ts}] {text}")
+                last_timestamp = start
+            else:
+                current_block.append(text)
+
+        if current_block:
+            lines.append(" ".join(current_block))
+
+        transcript_result = "\n\n".join(lines).strip()
+        transcript_result = self._strip_leaked_initial_prompt(transcript_result, initial_prompt)
+
+        elapsed = time.time() - start_time
+        print(f"{Fore.GREEN}   ✅ Transcrição chunked concluída em {elapsed:.1f}s ({len(chunks)} chunks, {len(segments)} segmentos){Style.RESET_ALL}")
+
+        # Salvar cache
+        if cache_file:
+            try:
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'transcript': transcript_result,
+                        'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                        'chunks': len(chunks)
+                    }, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print(f"Erro ao salvar cache: {e}")
+
+        return transcript_result
+
+    def _transcribe_with_segments_chunked(self, audio_path: str, *, beam_size: Optional[int] = None) -> dict:
+        """
+        v2.33: Transcreve áudio longo em chunks com suporte a segmentos e diarização.
+
+        Divide o áudio em chunks menores, transcreve cada um, ajusta timestamps,
+        e opcionalmente aplica diarização por chunk para evitar estouro de memória.
+        """
+        import gc
+
+        print(f"{Fore.CYAN}   🎬 Iniciando transcrição chunked com segmentos (máx {self.AUDIO_MAX_DURATION_SECONDS/3600:.0f}h cada)...{Style.RESET_ALL}")
+        start_time = time.time()
+
+        # Dividir áudio em chunks
+        chunks = self._split_audio_into_chunks(
+            audio_path,
+            chunk_duration=self.AUDIO_MAX_DURATION_SECONDS,
+            overlap=self.AUDIO_CHUNK_OVERLAP_SECONDS
+        )
+
+        if not chunks:
+            print(f"{Fore.RED}   ❌ Falha ao dividir áudio em chunks{Style.RESET_ALL}")
+            return {"text": "", "segments": [], "words": [], "diarization": []}
+
+        # Preparar kwargs do Whisper
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        whisper_lang = self._resolve_whisper_language()
+        mlx_kwargs = dict(
+            path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
+            **({"language": whisper_lang} if whisper_lang else {}),
+            temperature=0.0,
+            initial_prompt=(initial_prompt or None),
+            word_timestamps=True,
+            fp16=True,
+            no_speech_threshold=float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8")),
+            logprob_threshold=-1.0,
+            compression_ratio_threshold=float(os.getenv("VOMO_COMPRESSION_THRESHOLD", "2.2")),
+            condition_on_previous_text=self._condition_on_previous,
+            suppress_tokens=[-1],
+            verbose=False,
+        )
+        if beam_size and beam_size > 1:
+            mlx_kwargs["beam_size"] = int(beam_size)
+            mlx_kwargs["best_of"] = int(beam_size)
+
+        all_segments = []
+        all_diarization = []
+        token = self._get_hf_token() if self._diarization_enabled else None
+        diarization_pipeline = None
+
+        # Inicializar pipeline de diarização uma vez (se habilitado)
+        if self._diarization_enabled and Pipeline and token:
+            try:
+                self._ensure_diarization_available_or_raise()
+                diarization_pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    token=token
+                )
+                device = "mps" if torch.backends.mps.is_available() else "cpu"
+                diarization_pipeline.to(torch.device(device))
+                print(f"{Fore.GREEN}   ✅ Pipeline de diarização inicializado ({device}){Style.RESET_ALL}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}   ⚠️ Erro ao inicializar diarização: {e}{Style.RESET_ALL}")
+                diarization_pipeline = None
+
+        try:
+            for i, chunk in enumerate(chunks):
+                chunk_path = chunk['path']
+                chunk_start = chunk['start']
+                chunk_end = chunk['end']
+
+                print(f"{Fore.CYAN}   📝 Transcrevendo chunk {i+1}/{len(chunks)} ({self._format_timestamp(chunk_start)} → {self._format_timestamp(chunk_end)})...{Style.RESET_ALL}")
+
+                # Transcrever chunk
+                try:
+                    result = self._transcribe_with_vad(chunk_path, mlx_kwargs, skip_silence=True)
+                except TypeError:
+                    mlx_kwargs_copy = dict(mlx_kwargs)
+                    mlx_kwargs_copy.pop("beam_size", None)
+                    mlx_kwargs_copy.pop("best_of", None)
+                    result = self._transcribe_with_vad(chunk_path, mlx_kwargs_copy, skip_silence=True)
+
+                segments = result.get("segments", [])
+
+                # Ajustar timestamps (segmentos e words)
+                for seg in segments:
+                    seg['start'] = seg.get('start', 0) + chunk_start
+                    seg['end'] = seg.get('end', 0) + chunk_start
+                    if 'words' in seg and seg['words']:
+                        for word in seg['words']:
+                            if 'start' in word:
+                                word['start'] = word['start'] + chunk_start
+                            if 'end' in word:
+                                word['end'] = word['end'] + chunk_start
+
+                # Diarização por chunk (se habilitado)
+                if diarization_pipeline:
+                    try:
+                        diarization = diarization_pipeline(chunk_path)
+                        for turn, _, speaker in diarization.itertracks(yield_label=True):
+                            speaker_id = speaker.split('_')[-1]
+                            all_diarization.append({
+                                "start": float(turn.start) + chunk_start,
+                                "end": float(turn.end) + chunk_start,
+                                "speaker_label": f"SPEAKER {int(speaker_id) + 1}"
+                            })
+                        # Criar segmentos temporários com timestamps originais do chunk para atribuição
+                        temp_segments = []
+                        for seg in segments:
+                            temp_seg = dict(seg)
+                            temp_seg['start'] = seg['start'] - chunk_start
+                            temp_seg['end'] = seg['end'] - chunk_start
+                            temp_segments.append(temp_seg)
+                        # Atribuir labels de diarização
+                        labeled_temp = self._assign_diarization_labels(temp_segments, diarization)
+                        # Copiar labels de volta para segments
+                        for seg, labeled in zip(segments, labeled_temp):
+                            seg['speaker_label'] = labeled.get('speaker_label', 'SPEAKER 1')
+                    except Exception as e:
+                        print(f"{Fore.YELLOW}      ⚠️ Diarização chunk {i+1} falhou: {e}{Style.RESET_ALL}")
+                        for seg in segments:
+                            seg['speaker_label'] = "SPEAKER 1"
+                else:
+                    # Sem diarização - atribuir SPEAKER 1
+                    for seg in segments:
+                        seg['speaker_label'] = "SPEAKER 1"
+
+                all_segments.append(segments)
+                print(f"{Fore.GREEN}      ✅ Chunk {i+1}: {len(segments)} segmentos{Style.RESET_ALL}")
+
+                # Liberar memória entre chunks
+                gc.collect()
+                if torch and torch.backends.mps.is_available():
+                    try:
+                        torch.mps.empty_cache()
+                    except Exception:
+                        pass
+
+        finally:
+            # Limpar arquivos temporários
+            self._cleanup_audio_chunks(chunks)
+
+        # Mesclar segmentos de todos os chunks
+        merged_segments = self._merge_chunk_segments(all_segments, overlap_seconds=self.AUDIO_CHUNK_OVERLAP_SECONDS)
+
+        # Filtrar segmentos suspeitos
+        filtered_segments, filter_stats = self._filter_asr_segments(merged_segments)
+        if filter_stats.get("dropped"):
+            reasons = ", ".join(
+                f"{k}={v}" for k, v in sorted((filter_stats.get("reason_counts") or {}).items())
+            )
+            print(f"{Fore.YELLOW}   🧹 ASR: removidos {filter_stats['dropped']} segmento(s) suspeitos ({reasons}){Style.RESET_ALL}")
+
+        # Garantir que todos os segmentos têm speaker_label
+        for seg in filtered_segments:
+            if 'speaker_label' not in seg:
+                seg['speaker_label'] = "SPEAKER 1"
+            if 'words' not in seg:
+                seg['words'] = []
+
+        # Extrair lista flat de words
+        all_words = []
+        for seg in filtered_segments:
+            seg_words = seg.get("words", [])
+            speaker = seg.get("speaker_label", "")
+            for w in seg_words:
+                all_words.append({
+                    "word": w.get("word", w.get("text", "")),
+                    "start": w.get("start", 0),
+                    "end": w.get("end", 0),
+                    "speaker": speaker,
+                })
+
+        # Gerar texto formatado
+        transcript_text = self._segments_to_text(filtered_segments)
+        transcript_text = self._strip_leaked_initial_prompt(transcript_text, initial_prompt)
+
+        elapsed = time.time() - start_time
+        print(f"{Fore.GREEN}   ✅ Transcrição chunked concluída em {elapsed:.1f}s ({len(chunks)} chunks, {len(filtered_segments)} segmentos){Style.RESET_ALL}")
+
+        return {
+            "text": transcript_text,
+            "segments": filtered_segments,
+            "words": all_words,
+            "diarization": all_diarization
+        }
+
+    def _transcribe_with_vad(self, audio_path: str, mlx_kwargs: dict, skip_silence: bool = True) -> dict:
+        """
+        Transcreve áudio com detecção de atividade de voz (VAD).
+
+        Pipeline:
+        1. Silero VAD detecta onde há fala (mais preciso)
+        2. Fallback para RMS se Silero falhar
+        3. Se silêncio inicial > 30s, pula para economizar processamento
+        """
+        import tempfile
+
+        speech_start = 0.0
+        temp_audio = None
+
+        if skip_silence and _env_truthy("VOMO_VAD_SKIP_SILENCE", default=True):
+            # Tentar Silero VAD primeiro (mais preciso)
+            try:
+                speech_start = self._detect_speech_start_silero(audio_path)
+            except Exception as e:
+                print(f"{Fore.YELLOW}   ⚠️ Silero VAD indisponível, usando RMS: {e}{Style.RESET_ALL}")
+                speech_start = self._detect_speech_start_rms(audio_path)
+
+            # Se há mais de 30s de silêncio inicial, criar arquivo sem o silêncio
+            if speech_start > 30:
+                print(f"{Fore.CYAN}   ✂️ Pulando {speech_start:.0f}s de silêncio inicial...{Style.RESET_ALL}")
+
+                # Criar arquivo temporário sem o silêncio
+                temp_fd, temp_audio = tempfile.mkstemp(suffix=".wav")
+                os.close(temp_fd)
+
+                cmd = [
+                    "ffmpeg", "-y", "-ss", str(speech_start), "-i", audio_path,
+                    "-ar", "16000", "-ac", "1", "-acodec", "pcm_s16le",
+                    temp_audio, "-hide_banner", "-loglevel", "error"
+                ]
+                subprocess.run(cmd, check=True, capture_output=True)
+                audio_path = temp_audio
+
+        try:
+            result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+
+            # Ajustar timestamps se pulamos silêncio (segmentos E words)
+            if speech_start > 0 and result.get("segments"):
+                for seg in result["segments"]:
+                    seg["start"] = seg.get("start", 0) + speech_start
+                    seg["end"] = seg.get("end", 0) + speech_start
+                    # v2.34: Ajustar também timestamps das words individuais
+                    if seg.get("words"):
+                        for word in seg["words"]:
+                            if "start" in word:
+                                word["start"] = word["start"] + speech_start
+                            if "end" in word:
+                                word["end"] = word["end"] + speech_start
+                if "duration" in result:
+                    result["duration"] = result["duration"] + speech_start
+
+            return result
+
+        finally:
+            # Limpar arquivo temporário
+            if temp_audio and os.path.exists(temp_audio):
+                try:
+                    os.unlink(temp_audio)
+                except Exception:
+                    pass
+
     def transcribe(self, audio_path, *, beam_size: Optional[int] = None):
         """
         MLX-Whisper OTIMIZADO com GPU acelerado + Diarização
-        
+
         Otimizações v2.0:
-        - VAD filtering (pula silêncio) 
+        - VAD filtering (pula silêncio)
         - Batched inference (múltiplos chunks GPU)
         - condition_on_previous_text (contexto melhorado)
         - Hallucination suppression (evita texto inventado)
@@ -5517,13 +6561,31 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         if not mlx_whisper:
             raise ImportError("mlx_whisper não instalado.")
-        
+
+        # ==================== CHUNKING DE ÁUDIO LONGO (v2.32) ====================
+        audio_duration = self._get_audio_duration(audio_path)
+        max_duration = self.AUDIO_MAX_DURATION_SECONDS
+
+        # v2.34: Log detalhado para debug
+        print(f"{Fore.CYAN}   📏 Duração detectada: {audio_duration/3600:.2f}h (limite: {max_duration/3600:.0f}h){Style.RESET_ALL}")
+
+        if audio_duration > max_duration:
+            print(f"{Fore.YELLOW}   ⚠️ Áudio longo detectado ({audio_duration/3600:.1f}h > {max_duration/3600:.0f}h) - ATIVANDO CHUNKING{Style.RESET_ALL}")
+            return self._transcribe_chunked(audio_path, beam_size=beam_size, cache_file=cache_file, initial_prompt=initial_prompt)
+        elif audio_duration == 0:
+            print(f"{Fore.RED}   ❌ AVISO: Duração não detectada! Chunking desabilitado. Arquivo: {audio_path}{Style.RESET_ALL}")
+
         # ==================== PARÂMETROS OTIMIZADOS ====================
         print("   🔍 Transcrevendo com parâmetros otimizados...")
         
+        whisper_lang = self._resolve_whisper_language()
+
+        # v2.31: Threshold mais alto para filtrar silêncio/ruído melhor
+        no_speech_thresh = float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8"))
+
         mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
-            language="pt",
+            **({"language": whisper_lang} if whisper_lang else {}),
             # === PRECISÃO ===
             temperature=0.0,  # Mais determinístico (desativa sampling estocástico)
             # === CONTEXTO E GLOSSÁRIO (v2.29: contextual por modo) ===
@@ -5532,10 +6594,10 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             word_timestamps=True,
             # === PERFORMANCE ===
             fp16=True,  # Usa float16 (mais rápido na GPU)
-            # === QUALIDADE (Hallucination Suppression) ===
-            no_speech_threshold=0.6,  # Ignora segmentos com prob de silêncio > 60%
-            logprob_threshold=-1.0,  # Rejeita tokens com log prob muito baixo
-            compression_ratio_threshold=2.4,  # Detecta repetição/alucinação
+            # === QUALIDADE (Hallucination Suppression) - v2.31: thresholds ajustados ===
+            no_speech_threshold=no_speech_thresh,  # v2.31: 0.8 (era 0.6) - mais agressivo em silêncio
+            logprob_threshold=-0.5,  # v2.31: -0.5 (era -1.0) - rejeita tokens menos confiantes
+            compression_ratio_threshold=2.2,  # v2.31: 2.2 (era 2.4) - detecta repetição mais cedo
             # === CONTEXTO ===
             condition_on_previous_text=self._condition_on_previous,  # v2.30: configurável via VOMO_CONDITION_PREVIOUS
             # === SUPRESSÃO DE TOKENS PROBLEMÁTICOS ===
@@ -5546,20 +6608,22 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             mlx_kwargs["beam_size"] = int(beam_size)
             # `best_of` só é aceito em algumas implementações; aplicamos best-effort.
             mlx_kwargs["best_of"] = int(beam_size)
+
+        # v2.31: Usar VAD para pular silêncio inicial extenso
         try:
-            result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+            result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
         except TypeError:
             # Compatibilidade: algumas versões aceitam `beam_size` mas não `best_of` (ou vice-versa).
             if "best_of" in mlx_kwargs:
                 mlx_kwargs.pop("best_of", None)
                 try:
-                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                    result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
                 except TypeError:
                     mlx_kwargs.pop("beam_size", None)
-                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                    result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
             else:
                 mlx_kwargs.pop("beam_size", None)
-                result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
 
         segments, filter_stats = self._filter_asr_segments(result.get("segments", []))
         if filter_stats.get("dropped"):
@@ -5615,7 +6679,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 text = self._normalize_raw_text(text)
                 
                 # Timestamp a cada 60 segundos
-                if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+                if self._should_add_timestamp(start, last_timestamp, interval_seconds=self._get_timestamp_interval_for_mode()):
                     # Flush previous block
                     if current_block:
                         lines.append(" ".join(current_block))
@@ -5697,17 +6761,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
         
+        whisper_lang = self._resolve_whisper_language()
         segments, info = model.transcribe(
             audio_path,
-            language="pt",
+            language=whisper_lang,
             beam_size=beam_size,           # Explora múltiplos caminhos de frase
             best_of=beam_size,             # Escolhe o melhor de N candidatos
             patience=1.0,          # Preferência por transcrições completas
             length_penalty=1.0,    # Evita cortes abruptos
             temperature=0.0,       # Determinístico
             condition_on_previous_text=self._condition_on_previous,
-            no_speech_threshold=0.6,
-            compression_ratio_threshold=2.4,
+            no_speech_threshold=float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8")),
+            compression_ratio_threshold=float(os.getenv("VOMO_COMPRESSION_THRESHOLD", "2.2")),
             initial_prompt=(initial_prompt or None),
             word_timestamps=True,
         )
@@ -5741,7 +6806,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     repeat_run = 0
             
             # Timestamp a cada 30 segundos
-            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=self._get_timestamp_interval_for_mode()):
                 ts = self._format_timestamp(start)
                 lines.append(f"[{ts}] {text}")
                 last_timestamp = start
@@ -5784,21 +6849,37 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
     def transcribe_with_segments(self, audio_path, *, beam_size: Optional[int] = None):
         """
         Transcreve e retorna segmentos com timestamps e speaker_label quando diarização estiver disponível.
+
+        v2.33: Suporte a chunking para áudios longos (> AUDIO_MAX_DURATION_SECONDS).
         """
         if not mlx_whisper:
             raise ImportError("mlx_whisper não instalado.")
 
+        # v2.33/v2.34: Verificar se áudio é longo e precisa de chunking
+        audio_duration = self._get_audio_duration(audio_path)
+        max_duration = self.AUDIO_MAX_DURATION_SECONDS
+
+        # v2.34: Log detalhado
+        print(f"{Fore.CYAN}   📏 Duração (segments): {audio_duration/3600:.2f}h (limite: {max_duration/3600:.0f}h){Style.RESET_ALL}")
+
+        if audio_duration > max_duration:
+            print(f"{Fore.YELLOW}   ⚠️ Áudio longo detectado ({audio_duration/3600:.1f}h) - ATIVANDO CHUNKING{Style.RESET_ALL}")
+            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size)
+        elif audio_duration == 0:
+            print(f"{Fore.RED}   ❌ AVISO: Duração não detectada! Arquivo: {audio_path}{Style.RESET_ALL}")
+
         initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        whisper_lang = self._resolve_whisper_language()
         mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
-            language="pt",
+            **({"language": whisper_lang} if whisper_lang else {}),
             temperature=0.0,
             initial_prompt=(initial_prompt or None),
             word_timestamps=True,
             fp16=True,
-            no_speech_threshold=0.6,
+            no_speech_threshold=float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8")),
             logprob_threshold=-1.0,
-            compression_ratio_threshold=2.4,
+            compression_ratio_threshold=float(os.getenv("VOMO_COMPRESSION_THRESHOLD", "2.2")),
             condition_on_previous_text=self._condition_on_previous,
             suppress_tokens=[-1],
             verbose=False,
@@ -5807,18 +6888,19 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             mlx_kwargs["beam_size"] = int(beam_size)
             mlx_kwargs["best_of"] = int(beam_size)
         try:
-            result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+            # v2.31: usar VAD também no fluxo com segmentos
+            result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
         except TypeError:
             if "best_of" in mlx_kwargs:
                 mlx_kwargs.pop("best_of", None)
                 try:
-                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                    result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
                 except TypeError:
                     mlx_kwargs.pop("beam_size", None)
-                    result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                    result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
             else:
                 mlx_kwargs.pop("beam_size", None)
-                result = mlx_whisper.transcribe(audio_path, **mlx_kwargs)
+                result = self._transcribe_with_vad(audio_path, mlx_kwargs, skip_silence=True)
 
         diarization_segments = []
         diarization = None
@@ -5865,24 +6947,55 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     "start": seg["start"],
                     "end": seg["end"],
                     "text": seg["text"],
-                    "speaker_label": "SPEAKER 1"
+                    "speaker_label": "SPEAKER 1",
+                    "words": seg.get("words", []),  # Preservar words do Whisper
                 }
                 for seg in asr_segments
             ]
+
+        # Extrair lista flat de todas as words com timestamps
+        all_words = []
+        for seg in labeled_segments:
+            seg_words = seg.get("words", [])
+            speaker = seg.get("speaker_label", "")
+            for w in seg_words:
+                all_words.append({
+                    "word": w.get("word", w.get("text", "")),
+                    "start": w.get("start", 0),
+                    "end": w.get("end", 0),
+                    "speaker": speaker,
+                })
 
         transcript_text = self._segments_to_text(labeled_segments)
         transcript_text = self._strip_leaked_initial_prompt(transcript_text, initial_prompt)
         return {
             "text": transcript_text,
             "segments": labeled_segments,
+            "words": all_words,  # Lista flat de words para o player
             "diarization": diarization_segments
         }
 
     def transcribe_beam_with_segments(self, audio_path):
         """
         Transcrição Beam Search com retorno de segmentos.
+
+        v2.33/v2.34: Suporte a chunking para áudios longos.
         """
         beam_size = self._get_asr_beam_size()
+
+        # v2.33/v2.34: Verificar se áudio é longo - delegar para versão com chunking
+        audio_duration = self._get_audio_duration(audio_path)
+        max_duration = self.AUDIO_MAX_DURATION_SECONDS
+
+        # v2.34: Log detalhado
+        print(f"{Fore.CYAN}   📏 Duração (beam+segments): {audio_duration/3600:.2f}h (limite: {max_duration/3600:.0f}h){Style.RESET_ALL}")
+
+        if audio_duration > max_duration:
+            print(f"{Fore.YELLOW}   ⚠️ Áudio longo detectado ({audio_duration/3600:.1f}h) - ATIVANDO CHUNKING{Style.RESET_ALL}")
+            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size)
+        elif audio_duration == 0:
+            print(f"{Fore.RED}   ❌ AVISO: Duração não detectada! Arquivo: {audio_path}{Style.RESET_ALL}")
+
         if not FASTER_WHISPER_AVAILABLE:
             print(f"{Fore.YELLOW}⚠️ faster-whisper não instalado. Tentando Beam Search via MLX ({beam_size})...")
             return self.transcribe_with_segments(audio_path, beam_size=beam_size)
@@ -5890,17 +7003,18 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         model_size = "large-v3-turbo"
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
         initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=True) or ""
+        whisper_lang = self._resolve_whisper_language()
         segments, info = model.transcribe(
             audio_path,
-            language="pt",
+            language=whisper_lang,
             beam_size=beam_size,
             best_of=beam_size,
             patience=1.0,
             length_penalty=1.0,
             temperature=0.0,
             condition_on_previous_text=self._condition_on_previous,
-            no_speech_threshold=0.6,
-            compression_ratio_threshold=2.4,
+            no_speech_threshold=float(os.getenv("VOMO_NO_SPEECH_THRESHOLD", "0.8")),
+            compression_ratio_threshold=float(os.getenv("VOMO_COMPRESSION_THRESHOLD", "2.2")),
             initial_prompt=(initial_prompt or None),
             word_timestamps=True,
         )
@@ -5909,7 +7023,11 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             {
                 "start": float(seg.start),
                 "end": float(seg.end),
-                "text": seg.text
+                "text": seg.text,
+                "words": [
+                    {"word": w.word, "start": float(w.start), "end": float(w.end)}
+                    for w in (seg.words or [])
+                ] if hasattr(seg, 'words') and seg.words else [],
             }
             for seg in segments
         ]
@@ -5946,64 +7064,121 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     "start": seg["start"],
                     "end": seg["end"],
                     "text": seg["text"],
-                    "speaker_label": "SPEAKER 1"
+                    "speaker_label": "SPEAKER 1",
+                    "words": seg.get("words", []),  # Preservar words
                 }
                 for seg in asr_segments
             ]
+
+        # Extrair lista flat de todas as words com timestamps
+        all_words = []
+        for seg in labeled_segments:
+            seg_words = seg.get("words", [])
+            speaker = seg.get("speaker_label", "")
+            for w in seg_words:
+                all_words.append({
+                    "word": w.get("word", ""),
+                    "start": w.get("start", 0),
+                    "end": w.get("end", 0),
+                    "speaker": speaker,
+                })
 
         transcript_text = self._segments_to_text(labeled_segments)
         transcript_text = self._strip_leaked_initial_prompt(transcript_text, initial_prompt)
         return {
             "text": transcript_text,
             "segments": labeled_segments,
+            "words": all_words,  # Lista flat de words para o player
             "diarization": diarization_segments
         }
 
-    def _segments_to_text(self, segments, timestamp_interval_seconds=60):
+    def _segments_to_text(self, segments, timestamp_interval_seconds=None):
         """
         Converte segmentos em texto pré-formatado para melhor chunking.
-        
-        v2.28: Pré-formatação orientada a segmentos:
-        - 1 segmento = 1 linha (melhora chunking)
+
+        v2.29: Pré-formatação com agrupamento por intervalo de tempo:
+        - APOSTILA/FIDELIDADE: agrupa segmentos no mesmo intervalo de 60s em parágrafos
+        - AUDIENCIA/REUNIAO: 1 segmento = 1 linha (por utterance)
         - Mudança de speaker → quebra dupla + header
-        - Timestamps a cada 30s (não 20 min)
         - Normalizações leves de ruído
         """
         if not segments:
             return ""
-        
+
         lines = []
         current_speaker = None
         last_timestamp = None
-        
+
+        # v2.29: Determinar intervalo de agrupamento baseado no modo
+        mode = getattr(self, "_current_mode", "APOSTILA").upper()
+        group_by_interval = mode in ("APOSTILA", "FIDELIDADE")
+        interval = timestamp_interval_seconds if timestamp_interval_seconds is not None else self._get_timestamp_interval_for_mode()
+
+        # Buffer para acumular texto no mesmo intervalo de timestamp
+        current_paragraph = []
+        paragraph_timestamp = None
+
         for segment in segments:
             speaker_label = segment.get("speaker_label", "")
             text = (segment.get("text") or "").strip()
             start = segment.get("start") or 0
-            
+
             # Pular segmentos vazios
             if not text:
                 continue
-            
+
             # Normalização leve de ruído
             text = self._normalize_raw_text(text)
-            
-            # Mudança de speaker → quebra dupla + header
+
+            # Mudança de speaker → flush buffer e quebra dupla + header
             if speaker_label and speaker_label != current_speaker:
+                # Flush buffer atual antes de mudar de speaker
+                if current_paragraph:
+                    para_text = " ".join(current_paragraph)
+                    ts_str = f"[{self._format_timestamp(paragraph_timestamp)}] " if paragraph_timestamp is not None else ""
+                    lines.append(f"{ts_str}{para_text}")
+                    current_paragraph = []
+                    paragraph_timestamp = None
+
                 if lines:  # Não adiciona linha em branco se for o primeiro
                     lines.append("")  # Linha em branco para separar
                 lines.append(f"{speaker_label}")
                 current_speaker = speaker_label
                 last_timestamp = None  # Reset timestamp para novo speaker
-            
-            # Timestamp a cada N segundos ou em mudança de speaker
-            if self._should_add_timestamp(start, last_timestamp, interval_seconds=timestamp_interval_seconds):
-                timestamp_str = f"[{self._format_timestamp(start)}] "
-                last_timestamp = start
+
+            # v2.29: Agrupamento por intervalo para APOSTILA/FIDELIDADE
+            if group_by_interval and interval > 0:
+                # Verificar se deve iniciar novo parágrafo
+                should_new_paragraph = self._should_add_timestamp(start, last_timestamp, interval_seconds=interval)
+
+                if should_new_paragraph:
+                    # Flush buffer atual
+                    if current_paragraph:
+                        para_text = " ".join(current_paragraph)
+                        ts_str = f"[{self._format_timestamp(paragraph_timestamp)}] " if paragraph_timestamp is not None else ""
+                        lines.append(f"{ts_str}{para_text}")
+                        current_paragraph = []
+
+                    # Iniciar novo parágrafo
+                    paragraph_timestamp = start
+                    last_timestamp = start
+
+                current_paragraph.append(text)
             else:
-                timestamp_str = ""
-            
-            lines.append(f"{timestamp_str}{text}")
+                # Modo por utterance (AUDIENCIA, REUNIAO, etc.) - 1 segmento = 1 linha
+                if self._should_add_timestamp(start, last_timestamp, interval_seconds=timestamp_interval_seconds):
+                    timestamp_str = f"[{self._format_timestamp(start)}] "
+                    last_timestamp = start
+                else:
+                    timestamp_str = ""
+
+                lines.append(f"{timestamp_str}{text}")
+
+        # v2.29: Flush buffer final para modo agrupado
+        if current_paragraph:
+            para_text = " ".join(current_paragraph)
+            ts_str = f"[{self._format_timestamp(paragraph_timestamp)}] " if paragraph_timestamp is not None else ""
+            lines.append(f"{ts_str}{para_text}")
 
         transcript = "\n".join(lines).strip()
         if _env_truthy("VOMO_ASR_NORMALIZE_TEMAS", default=True):
@@ -6209,6 +7384,9 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         normalized = re.sub(r"\s+", " ", str(text)).strip()
         if not normalized:
             return True
+        # Se não houver nenhum caractere alfanumérico, trata como ruído (ex.: ".", "..." ou "?!")
+        if not re.search(r"[\wÀ-ÖØ-öø-ÿ0-9]", normalized):
+            return True
         # Depois de _normalize_raw_text, os ruídos ficam padronizados como [xxx]
         noise = r"(?:inaudível|risos|pausa|música|aplausos)"
         return bool(re.fullmatch(rf"(?:\[(?:{noise})\]\s*)+", normalized, flags=re.IGNORECASE))
@@ -6270,6 +7448,12 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         else:
             mode_key = "FIDELIDADE"
 
+        lang = getattr(self, "_current_language", "pt") or "pt"
+        # Tenta prompt i18n primeiro, depois fallback para pt
+        if lang != "pt" and lang != "auto":
+            i18n_prompt = self.INITIAL_PROMPTS_I18N.get((mode_key, lang))
+            if i18n_prompt:
+                return i18n_prompt
         return self.INITIAL_PROMPTS.get(mode_key, self.INITIAL_PROMPTS["FIDELIDADE"])
 
     def _get_whisper_initial_prompt(self) -> Optional[str]:
@@ -6492,30 +7676,50 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         h, m = divmod(m, 60)
         return f"{int(h):02d}:{int(m):02d}:{int(s):02d}" if h > 0 else f"{int(m):02d}:{int(s):02d}"
     
+    def _get_timestamp_interval_for_mode(self) -> int:
+        """
+        Retorna o intervalo de timestamps baseado no modo atual.
+
+        - APOSTILA/FIDELIDADE: 60s (aulas longas, menos interrupções)
+        - AUDIENCIA/REUNIAO/LEGENDA: 0 (por utterance, cada segmento tem timestamp)
+
+        Returns:
+            int: Intervalo em segundos (0 = por utterance)
+        """
+        mode = getattr(self, "_current_mode", "APOSTILA").upper()
+        if mode in ("APOSTILA", "FIDELIDADE"):
+            return 60
+        # AUDIENCIA, REUNIAO, LEGENDA, DEPOIMENTO → por utterance
+        return 0
+
     def _should_add_timestamp(self, current_seconds, last_timestamp_seconds, interval_minutes=None, interval_seconds=None):
         """
         Determina se um timestamp deve ser adicionado baseado no intervalo configurado.
-        
+
         Args:
             current_seconds: Tempo atual em segundos
             last_timestamp_seconds: Último timestamp inserido (None se for o primeiro)
             interval_minutes: Intervalo em minutos entre timestamps (padrão: 20 se nenhum especificado)
             interval_seconds: Intervalo em segundos (tem precedência sobre interval_minutes)
-        
+                              Se None e interval_minutes também None, usa intervalo baseado no modo.
+
         Returns:
             bool: True se deve adicionar timestamp
         """
         if last_timestamp_seconds is None:
             return True  # Sempre adiciona o primeiro timestamp
-        
+
         # interval_seconds tem precedência
         if interval_seconds is not None:
             target_interval = interval_seconds
         elif interval_minutes is not None:
             target_interval = interval_minutes * 60
         else:
-            target_interval = 20 * 60  # Default: 20 minutos
-        
+            # Usar intervalo baseado no modo atual
+            target_interval = self._get_timestamp_interval_for_mode()
+            if target_interval == 0:
+                return True  # Por utterance: sempre adiciona
+
         return (current_seconds - last_timestamp_seconds) >= target_interval
 
     def _align_diarization(self, segments, diarization_output):
@@ -6584,7 +7788,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 last_timestamp = None 
             
             # Timestamp a cada 60 segundos
-            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=self._get_timestamp_interval_for_mode()):
                 if current_block:
                     lines.append(" ".join(current_block))
                     current_block = []
@@ -6649,7 +7853,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 last_timestamp = None
             
             # Timestamp a cada 60 segundos
-            if self._should_add_timestamp(start, last_timestamp, interval_seconds=60):
+            if self._should_add_timestamp(start, last_timestamp, interval_seconds=self._get_timestamp_interval_for_mode()):
                 if current_block:
                     lines.append(" ".join(current_block))
                     current_block = []
@@ -8831,6 +10035,12 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         return (os.getenv("HUGGING_FACE_TOKEN") or os.getenv("HF_TOKEN") or "").strip() or None
 
     def _diarization_available(self) -> tuple[bool, str]:
+        # Se AssemblyAI está configurado como primário, diarização é feita externamente
+        aai_primary = os.getenv("ASSEMBLYAI_PRIMARY", "").strip().lower() in ("1", "true", "yes")
+        aai_key = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
+        if aai_primary and aai_key:
+            return True, "AssemblyAI (externo)"
+        # Fallback: verificar diarização local (pyannote)
         if not Pipeline:
             return False, "pyannote.audio não instalado"
         if "torch" not in globals():
@@ -8858,14 +10068,46 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         high_accuracy: bool = False,
         diarization: Optional[bool] = None,
         diarization_strict: Optional[bool] = None,
+        language: Optional[str] = None,
     ) -> str:
         """
         Transcrição com política de diarização por modo (ponto único de entrada).
+        Retorna apenas o texto. Use transcribe_file_full() para obter words também.
         """
-        # Mantém o modo atual para:
-        # - escolher `initial_prompt` por modo (quando habilitado)
-        # - consistência de logs/caches
+        result = self.transcribe_file_full(
+            audio_path,
+            mode=mode,
+            high_accuracy=high_accuracy,
+            diarization=diarization,
+            diarization_strict=diarization_strict,
+            language=language,
+        )
+        return result["text"]
+
+    def transcribe_file_full(
+        self,
+        audio_path: str,
+        *,
+        mode: str = "APOSTILA",
+        high_accuracy: bool = False,
+        diarization: Optional[bool] = None,
+        diarization_strict: Optional[bool] = None,
+        language: Optional[str] = None,
+    ) -> dict:
+        """
+        Transcrição com política de diarização por modo.
+        Retorna dict com: text, words, segments.
+
+        Returns:
+            dict: {
+                "text": str,           # Texto formatado com timestamps a cada 60s
+                "words": list,         # Lista de {word, start, end, speaker} para player
+                "segments": list,      # Segmentos originais
+            }
+        """
+        # Mantém o modo atual
         self._current_mode = (mode or "FIDELIDADE").strip().upper()
+        self._current_language = (language or "pt").strip().lower()
         enabled, required = self.resolve_diarization_policy(
             mode, diarization=diarization, diarization_strict=diarization_strict
         )
@@ -8874,12 +10116,21 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         if enabled:
             self._ensure_diarization_available_or_raise()
             if high_accuracy:
-                return self.transcribe_beam_with_segments(audio_path)["text"]
-            return self.transcribe_with_segments(audio_path)["text"]
+                return self.transcribe_beam_with_segments(audio_path)
+            return self.transcribe_with_segments(audio_path)
 
-        if high_accuracy:
-            return self.transcribe_beam_search(audio_path)
-        return self.transcribe(audio_path)
+        # Sem diarização: ainda precisamos obter words para o player
+        # Usar transcribe_with_segments mas forçar diarização desabilitada
+        original_diarization_enabled = self._diarization_enabled
+        try:
+            self._diarization_enabled = False  # Forçar desabilitado para não rodar pyannote
+            if high_accuracy:
+                result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size())
+            else:
+                result = self.transcribe_with_segments(audio_path)
+            return result
+        finally:
+            self._diarization_enabled = original_diarization_enabled
 
     def renumber_headings(self, text):
         """
@@ -9102,6 +10353,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         include_timestamps: bool = True,
         allow_indirect: bool = False,
         allow_summary: bool = False,
+        disable_tables: bool = False,
     ):
         """
         Orquestrador Principal com Checkpoint e Robustez (Sequential Mode)
@@ -9141,6 +10393,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         self.prompt_apostila = self._build_system_prompt(
             mode=mode,
             custom_style_override=custom_prompt,
+            disable_tables=bool(disable_tables),
             allow_indirect=allow_indirect,
             allow_summary=allow_summary,
             include_timestamps=include_timestamps,
@@ -9230,123 +10483,231 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
 
         start_idx = len(ordered_results)
         
-        if start_idx < total_segments:
-            print(f"▶ Iniciando processamento sequencial do segmento {start_idx + 1}...")
-            
-            for i in tqdm(range(start_idx, total_segments), desc="Processando Sequencial"):
-                if total_segments:
-                    progress = 72 + int(((i) / total_segments) * 23)
-                    await emit("formatting", min(progress, 95), f"Formatando segmento {i+1}/{total_segments}...")
-                info = chunks_info[i]
-                chunk_text = transcription[info['inicio']:info['fim']]
-                raw_overlap_chars = int(
-                    os.getenv("IUDEX_RAW_CONTEXT_OVERLAP_CHARS", self.RAW_CONTEXT_OVERLAP_CHARS)
-                )
-                overlap_raw = ""
-                if raw_overlap_chars > 0 and info.get("inicio", 0) > 0:
-                    start_overlap = max(0, info["inicio"] - raw_overlap_chars)
-                    overlap_raw = transcription[start_overlap:info["inicio"]].strip()
+        # v2.40: Helper function for processing a single chunk
+        async def _process_single_chunk(i: int, prev_result: Optional[str] = None) -> str:
+            """Process a single chunk with optional context from previous result."""
+            info = chunks_info[i]
+            chunk_text = transcription[info['inicio']:info['fim']]
+            raw_overlap_chars = int(
+                os.getenv("IUDEX_RAW_CONTEXT_OVERLAP_CHARS", self.RAW_CONTEXT_OVERLAP_CHARS)
+            )
+            overlap_raw = ""
+            if raw_overlap_chars > 0 and info.get("inicio", 0) > 0:
+                start_overlap = max(0, info["inicio"] - raw_overlap_chars)
+                overlap_raw = transcription[start_overlap:info["inicio"]].strip()
 
-                # Context Management
-                contexto_estilo = ""
-                if i > 0 and ordered_results:
-                    raw_context = _extract_style_context(ordered_results[-1], max_chars=2500)
-                    if len(raw_context.split()) > 30 and "[!WARNING]" not in raw_context:
-                        contexto_estilo = raw_context
+            # Context Management - use previous result if available
+            contexto_estilo = ""
+            if prev_result:
+                raw_context = _extract_style_context(prev_result, max_chars=2500)
+                if len(raw_context.split()) > 30 and "[!WARNING]" not in raw_context:
+                    contexto_estilo = raw_context
 
-                # Processing with Rate Limit
-                await rate_limiter.wait_if_needed_async()
-                
-                try:
-                    # Lógica de Estrutura Local (Janela Deslizante)
-                    # Se tiver cache, usamos a Global (que está no cache). Se não, mantemos a Local.
-                    estrutura_referencia = None
-                    if global_structure and not cached_context:
-                        # v2.18: Contexto Localizado - Janela deslizante de ~15% da estrutura
-                        max_lines = int(
-                            os.getenv(
-                                "IUDEX_MAP_MAX_LINES_PER_CHUNK",
-                                self.MAP_MAX_LINES_PER_CHUNK,
-                            )
-                        )
-                        itens_estrutura = [ln for ln in global_structure.split('\n') if ln.strip()]
-                        if len(itens_estrutura) > 8 and total_segments > 1:
-                            ratio = len(itens_estrutura) / total_segments
-                            center_idx = int(i * ratio)
-                            # Mantém janela local, mas limita o tamanho para evitar prompts gigantes em áudios longos.
-                            if len(itens_estrutura) > max_lines:
-                                available = max(4, max_lines - 2)  # reserva marcadores
-                                half = max(2, available // 2)
-                                start_idx_w = max(0, center_idx - half)
-                                end_idx_w = min(len(itens_estrutura), start_idx_w + available)
-                                start_idx_w = max(0, end_idx_w - available)
-                                slice_itens = itens_estrutura[start_idx_w:end_idx_w]
-                                if start_idx_w > 0:
-                                    slice_itens.insert(0, "[... Tópicos anteriores ...]")
-                                if end_idx_w < len(itens_estrutura):
-                                    slice_itens.append("[... Tópicos posteriores ...]")
-                                estrutura_referencia = '\n'.join(slice_itens)
-                            else:
-                                window_size = max(4, int(len(itens_estrutura) * 0.15))
-                                start_idx_w = max(0, center_idx - window_size)
-                                end_idx_w = min(len(itens_estrutura), center_idx + window_size + 2)
-                                slice_itens = itens_estrutura[start_idx_w:end_idx_w]
-                                if start_idx_w > 0:
-                                    slice_itens.insert(0, "[... Tópicos anteriores ...]")
-                                if end_idx_w < len(itens_estrutura):
-                                    slice_itens.append("[... Tópicos posteriores ...]")
-                                estrutura_referencia = '\n'.join(slice_itens)
-                        else:
-                            estrutura_referencia = global_structure
+            # Rate Limit
+            await rate_limiter.wait_if_needed_async()
 
-                    # v2.26: Adicionar contexto de continuidade de instituto
-                    continuidade_nota = ""
-                    if info.get('instituto_continua') and info.get('instituto_nome'):
-                        continuidade_nota = f"\n\n⚠️ AVISO: O instituto '{info['instituto_nome']}' continua no próximo chunk. NÃO gere o Quadro-síntese final ainda — ele será completado na próxima parte."
-                    
-                    # v2.27: Detectar se chunk anterior terminou com tabela/quadro aberto
-                    tabela_aberta_nota = ""
-                    if i > 0 and ordered_results:
-                        table_state = self._detect_open_table_state(ordered_results[-1])
-                        if table_state.get('needs_table_continuation'):
-                            tabela_aberta_nota = table_state.get('context_hint', '')
-                            print(f"{Fore.YELLOW}   📋 Tabela aberta detectada: {table_state.get('open_section_title', '')[:50]}...")
-                    
-                    # Contexto final com notas de continuidade (se aplicável)
-                    contexto_final = contexto_estilo + continuidade_nota + tabela_aberta_nota
-
-                    # v2.19: Process Chunk Async (New Interface)
-                    formatted = await self.process_chunk_async(
-                        chunk_text=chunk_text,
-                        idx=i+1,
-                        total=total_segments,
-                        previous_context=contexto_final,
-                        depth=0,
-                        global_structure=estrutura_referencia, # None se usar cache
-                        overlap_text=overlap_raw,
-                        cached_content=cached_context
+            # Lógica de Estrutura Local (Janela Deslizante)
+            estrutura_referencia = None
+            if global_structure and not cached_context:
+                max_lines = int(
+                    os.getenv(
+                        "IUDEX_MAP_MAX_LINES_PER_CHUNK",
+                        self.MAP_MAX_LINES_PER_CHUNK,
                     )
+                )
+                itens_estrutura = [ln for ln in global_structure.split('\n') if ln.strip()]
+                if len(itens_estrutura) > 8 and total_segments > 1:
+                    ratio = len(itens_estrutura) / total_segments
+                    center_idx = int(i * ratio)
+                    if len(itens_estrutura) > max_lines:
+                        available = max(4, max_lines - 2)
+                        half = max(2, available // 2)
+                        start_idx_w = max(0, center_idx - half)
+                        end_idx_w = min(len(itens_estrutura), start_idx_w + available)
+                        start_idx_w = max(0, end_idx_w - available)
+                        slice_itens = itens_estrutura[start_idx_w:end_idx_w]
+                        if start_idx_w > 0:
+                            slice_itens.insert(0, "[... Tópicos anteriores ...]")
+                        if end_idx_w < len(itens_estrutura):
+                            slice_itens.append("[... Tópicos posteriores ...]")
+                        estrutura_referencia = '\n'.join(slice_itens)
+                    else:
+                        window_size = max(4, int(len(itens_estrutura) * 0.15))
+                        start_idx_w = max(0, center_idx - window_size)
+                        end_idx_w = min(len(itens_estrutura), center_idx + window_size + 2)
+                        slice_itens = itens_estrutura[start_idx_w:end_idx_w]
+                        if start_idx_w > 0:
+                            slice_itens.insert(0, "[... Tópicos anteriores ...]")
+                        if end_idx_w < len(itens_estrutura):
+                            slice_itens.append("[... Tópicos posteriores ...]")
+                        estrutura_referencia = '\n'.join(slice_itens)
+                else:
+                    estrutura_referencia = global_structure
 
-                    # v2.24: Smart stitching leve — evita repetir título no início do chunk
-                    if ordered_results:
-                        try:
-                            formatted = limpar_inicio_redundante(formatted, ordered_results[-1])
-                        except Exception:
-                            pass
-                    
-                    ordered_results.append(formatted)
+            # v2.26: Contexto de continuidade
+            continuidade_nota = ""
+            if info.get('instituto_continua') and info.get('instituto_nome'):
+                continuidade_nota = f"\n\n⚠️ AVISO: O instituto '{info['instituto_nome']}' continua no próximo chunk. NÃO gere o Quadro-síntese final ainda — ele será completado na próxima parte."
+
+            # v2.27: Tabela aberta
+            tabela_aberta_nota = ""
+            if prev_result:
+                table_state = self._detect_open_table_state(prev_result)
+                if table_state.get('needs_table_continuation'):
+                    tabela_aberta_nota = table_state.get('context_hint', '')
+
+            contexto_final = contexto_estilo + continuidade_nota + tabela_aberta_nota
+
+            formatted = await self.process_chunk_async(
+                chunk_text=chunk_text,
+                idx=i+1,
+                total=total_segments,
+                previous_context=contexto_final,
+                depth=0,
+                global_structure=estrutura_referencia,
+                overlap_text=overlap_raw,
+                cached_content=cached_context
+            )
+            return formatted
+
+        # v2.40: Parallel or Sequential Processing
+        parallel_chunks = int(os.getenv("IUDEX_PARALLEL_CHUNKS", self.PARALLEL_CHUNKS))
+        try:
+            heartbeat_every = float(os.getenv("IUDEX_PROGRESS_HEARTBEAT_SECONDS", "12"))
+        except Exception:
+            heartbeat_every = 12.0
+        try:
+            segment_timeout_seconds = int(os.getenv("IUDEX_FORMAT_SEGMENT_TIMEOUT_SECONDS", "0"))
+        except Exception:
+            segment_timeout_seconds = 0
+
+        if start_idx < total_segments:
+            if parallel_chunks <= 1 or total_segments - start_idx <= 2:
+                # Sequential mode (original behavior)
+                print(f"▶ Iniciando processamento sequencial do segmento {start_idx + 1}...")
+
+                for i in tqdm(range(start_idx, total_segments), desc="Processando Sequencial"):
+                    base_msg = f"Formatando segmento {i+1}/{total_segments}..."
+                    display_progress = 72
                     if total_segments:
-                        progress = 72 + int(((i + 1) / total_segments) * 23)
-                        await emit("formatting", min(progress, 95), f"Segmento {i+1}/{total_segments} concluído")
-                    
-                    # Save Checkpoint after each chunk
-                    save_checkpoint(video_name, output_folder, ordered_results, chunks_info, i + 1)
-                    
-                except Exception as e:
-                    print(f"{Fore.RED}❌ Falha Fatal no segmento {i+1}: {e}")
-                    # Save what we have
-                    save_checkpoint(video_name, output_folder, ordered_results, chunks_info, i)
-                    raise e
+                        progress = 72 + int(((i) / total_segments) * 23)
+                        display_progress = min(progress, 95)
+                        await emit("formatting", display_progress, base_msg)
+
+                    hb_done = asyncio.Event()
+                    hb_task = None
+                    hb_start = time.time()
+                    if heartbeat_every and heartbeat_every > 0:
+                        async def _heartbeat():
+                            while not hb_done.is_set():
+                                try:
+                                    await asyncio.wait_for(hb_done.wait(), timeout=heartbeat_every)
+                                except asyncio.TimeoutError:
+                                    elapsed = time.time() - hb_start
+                                    msg = f"{base_msg} ({elapsed:.0f}s)"
+                                    await emit("formatting", display_progress, msg)
+                        hb_task = asyncio.create_task(_heartbeat())
+
+                    try:
+                        prev_result = ordered_results[-1] if ordered_results else None
+                        if segment_timeout_seconds and segment_timeout_seconds > 0:
+                            formatted = await asyncio.wait_for(
+                                _process_single_chunk(i, prev_result),
+                                timeout=segment_timeout_seconds,
+                            )
+                        else:
+                            formatted = await _process_single_chunk(i, prev_result)
+
+                        # Smart stitching
+                        if ordered_results:
+                            try:
+                                formatted = limpar_inicio_redundante(formatted, ordered_results[-1])
+                            except Exception:
+                                pass
+
+                        ordered_results.append(formatted)
+                        if total_segments:
+                            progress = 72 + int(((i + 1) / total_segments) * 23)
+                            await emit("formatting", min(progress, 95), f"Segmento {i+1}/{total_segments} concluído")
+
+                        save_checkpoint(video_name, output_folder, ordered_results, chunks_info, i + 1)
+
+                    except Exception as e:
+                        print(f"{Fore.RED}❌ Falha Fatal no segmento {i+1}: {e}")
+                        save_checkpoint(video_name, output_folder, ordered_results, chunks_info, i)
+                        raise e
+                    finally:
+                        hb_done.set()
+                        if hb_task:
+                            try:
+                                await hb_task
+                            except Exception:
+                                pass
+            else:
+                # Parallel mode (v2.40): Process in batches with semaphore
+                print(f"▶ Iniciando processamento PARALELO ({parallel_chunks} workers) do segmento {start_idx + 1}...")
+                semaphore = asyncio.Semaphore(parallel_chunks)
+
+                async def process_with_semaphore(idx: int, prev_res: Optional[str]) -> tuple:
+                    async with semaphore:
+                        try:
+                            if segment_timeout_seconds and segment_timeout_seconds > 0:
+                                result = await asyncio.wait_for(
+                                    _process_single_chunk(idx, prev_res),
+                                    timeout=segment_timeout_seconds,
+                                )
+                            else:
+                                result = await _process_single_chunk(idx, prev_res)
+                            return (idx, result, None)
+                        except Exception as e:
+                            return (idx, None, e)
+
+                # Process in waves: first chunk sequential, then batches
+                remaining = list(range(start_idx, total_segments))
+
+                while remaining:
+                    batch_size = min(parallel_chunks, len(remaining))
+                    batch = remaining[:batch_size]
+                    remaining = remaining[batch_size:]
+
+                    await emit("formatting", 72 + int((total_segments - len(remaining) - batch_size) / total_segments * 23),
+                              f"Processando batch de {len(batch)} segmentos...")
+
+                    # First chunk in batch gets context from previous result
+                    first_idx = batch[0]
+                    prev_result = ordered_results[-1] if ordered_results else None
+
+                    # Process batch in parallel
+                    tasks = []
+                    for j, idx in enumerate(batch):
+                        # Only first chunk gets previous context for better stitching
+                        ctx = prev_result if j == 0 else None
+                        tasks.append(process_with_semaphore(idx, ctx))
+
+                    results = await asyncio.gather(*tasks)
+
+                    # Sort by index and append
+                    results_sorted = sorted(results, key=lambda x: x[0])
+                    for idx, result, error in results_sorted:
+                        if error:
+                            print(f"{Fore.RED}❌ Falha no segmento {idx+1}: {error}")
+                            save_checkpoint(video_name, output_folder, ordered_results, chunks_info, idx)
+                            raise error
+
+                        # Apply stitching
+                        if ordered_results:
+                            try:
+                                result = limpar_inicio_redundante(result, ordered_results[-1])
+                            except Exception:
+                                pass
+
+                        ordered_results.append(result)
+                        print(f"   ✅ Segmento {idx+1}/{total_segments} concluído")
+
+                    # Checkpoint after batch
+                    save_checkpoint(video_name, output_folder, ordered_results, chunks_info, batch[-1] + 1)
+
+                await emit("formatting", 95, f"Todos os {total_segments} segmentos processados")
         
         await emit("formatting", 96, "Consolidando resultados...")
 

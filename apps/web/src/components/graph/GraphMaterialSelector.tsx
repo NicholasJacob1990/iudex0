@@ -56,6 +56,7 @@ export function GraphMaterialSelector() {
         addCase,
         removeCase,
         toggleFilterByMaterials,
+        setIncludeGlobal,
     } = useGraphStore();
 
     const [activeTab, setActiveTab] = useState('documents');
@@ -196,6 +197,17 @@ export function GraphMaterialSelector() {
                         checked={filters.filterByMaterials}
                         onCheckedChange={toggleFilterByMaterials}
                         disabled={totalSelected === 0}
+                    />
+                </div>
+
+                <div className="flex items-center justify-between">
+                    <Label htmlFor="include-global" className="text-xs text-muted-foreground">
+                        Incluir corpus global
+                    </Label>
+                    <Switch
+                        id="include-global"
+                        checked={filters.includeGlobal}
+                        onCheckedChange={setIncludeGlobal}
                     />
                 </div>
 

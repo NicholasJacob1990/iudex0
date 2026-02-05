@@ -1816,12 +1816,22 @@ async def start_job(
     request_id = str(client_request_id).strip() if client_request_id else ""
     if not request_id:
         request_id = f"{jobid}:{uuid.uuid4().hex}"
+    from app.core.security import get_org_context
+
+    org_ctx = await get_org_context(current_user=current_user, db=db)
+    # Segurança: derive grupos por membership + policy (não por request.context).
     scope_groups, allow_global_scope, allow_group_scope = await resolve_rag_scope(
         db,
-        tenant_id=str(getattr(current_user, "id", "") or ""),
-        user_id=str(getattr(current_user, "id", "") or ""),
+        tenant_id=str(org_ctx.tenant_id),
+        user_id=str(org_ctx.user.id),
         user_role=current_user.role,
-        chat_context=context,
+        chat_context={
+            "rag_groups": list(org_ctx.team_ids or []),
+            "rag_selected_groups": request.get("rag_selected_groups"),
+            "rag_allow_global": None,
+            "rag_allow_private": request.get("rag_allow_private"),
+            "rag_allow_groups": request.get("rag_allow_groups"),
+        },
     )
 
     # Initial State
@@ -1834,9 +1844,10 @@ async def start_job(
         "tese": request.get("thesis", ""),
         "job_id": jobid,
         "request_id": request_id,
-        "tenant_id": str(getattr(current_user, "id", "") or ""),
+        "tenant_id": str(org_ctx.tenant_id),
         "rag_scope_groups": scope_groups,
         "rag_allow_global": allow_global_scope,
+        "rag_allow_private": request.get("rag_allow_private"),
         "rag_allow_groups": allow_group_scope,
         "messages": rag_messages,
         "conversation_id": conversation_id,
@@ -1884,6 +1895,7 @@ async def start_job(
         "thinking_level": thinking_level,
         "auto_approve_hil": bool(auto_approve_hil),
         "chat_personality": request.get("chat_personality", "juridico"),
+        "playbook_prompt": request.get("playbook_prompt") or None,
         "temperature": temperature,
         "deep_research_search_focus": request.get("deep_research_search_focus"),
         "deep_research_domain_filter": request.get("deep_research_domain_filter"),
@@ -1914,6 +1926,7 @@ async def start_job(
         "crag_min_avg_score": float(profile_config.get("crag_min_avg_score", 0.35)),
         "rag_sources": rag_sources,
         "rag_top_k": rag_top_k_value,
+        "rag_jurisdictions": request.get("rag_jurisdictions"),
         "max_web_search_requests": max_web_search_requests,
         "max_granular_passes": max_granular_passes,
         "max_final_review_loops": final_review_loops,

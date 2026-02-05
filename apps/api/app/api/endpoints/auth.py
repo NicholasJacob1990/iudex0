@@ -181,7 +181,13 @@ async def login_test(
 ):
     """
     Login especial para testes/demonstração (Cria usuário se não existir)
+    Apenas disponível em ambiente de desenvolvimento/debug.
     """
+    if not settings.DEBUG and settings.ENVIRONMENT != "development":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found"
+        )
     print("[Login Test] Iniciando endpoint login-test")
     test_email = "teste@iudex.ai"
     
@@ -286,7 +292,7 @@ async def login_test(
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao realizar login de teste: {str(e)}"
+            detail="Erro interno no login de teste"
         )
 
 

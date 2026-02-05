@@ -38,9 +38,11 @@ function getProxyTimeoutMs(method: string, targetPath: string): number {
   const m = (method || '').toUpperCase();
   const p = String(targetPath || '').toLowerCase();
 
-  // Long-running endpoints (LLM calls, exports, recomputes) can legitimately exceed 30s.
+  // Long-running endpoints (LLM calls, exports, recomputes, large file uploads) can legitimately exceed 30s.
   const isLong =
     p.includes('transcription/apply-revisions')
+    || p.includes('transcription/vomo/jobs')  // Large file uploads
+    || p.includes('transcription/hearing/jobs')  // Large file uploads
     || p.includes('transcription/jobs') && (p.includes('recompute') || p.includes('export') || p.includes('quality'))
     || p.includes('quality/apply-unified-hil')
     || p.includes('quality/convert-to-hil')
@@ -61,7 +63,12 @@ async function proxy(request: NextRequest, pathParts: string[]) {
     const targetBase = getTargetBase().replace(/\/+$/, '');
     const normalizedParts = Array.isArray(pathParts) ? pathParts : String(pathParts || '').split('/').filter(Boolean);
     const targetPath = normalizedParts.map(encodeURIComponent).join('/');
-    const url = new URL(`${targetBase}/api/${targetPath}`);
+    // Backend exposes a root `/health` (no `/api` prefix) plus many `/api/*` routes.
+    // Map `/api/health` -> `${targetBase}/health` for compatibility.
+    const url =
+      normalizedParts.length === 1 && normalizedParts[0] === 'health'
+        ? new URL(`${targetBase}/health`)
+        : new URL(`${targetBase}/api/${targetPath}`);
     // Preserve querystring
     request.nextUrl.searchParams.forEach((value, key) => {
       url.searchParams.append(key, value);
@@ -75,7 +82,9 @@ async function proxy(request: NextRequest, pathParts: string[]) {
     const transferEncoding = request.headers.get('transfer-encoding');
     const hasData = hasBody && ((contentLength && parseInt(contentLength) > 0) || transferEncoding === 'chunked');
 
+    const contentType = request.headers.get('content-type');
     console.log(`[Proxy] ${method} ${url.toString()} - Start`);
+    console.log(`[Proxy] Content-Type: ${contentType}`);
     console.log(`[Proxy] Reading body? ${hasData} (CL: ${contentLength}, TE: ${transferEncoding})`);
 
     // Buffer once (keeps request retry-safe for redirects).
@@ -116,6 +125,8 @@ async function proxy(request: NextRequest, pathParts: string[]) {
 
     let res;
     try {
+      const bodySize = bodyBytes ? bodyBytes.length : 0;
+      console.log(`[Proxy] Sending ${method} to ${url.toString()} (body: ${bodySize} bytes, timeout: ${timeoutMs}ms)`);
       res = await fetch(url.toString(), init);
       console.log(`[Proxy] Response: ${res.status} ${res.statusText}`);
       // Follow a single redirect manually (common in FastAPI when trailing slashes differ).

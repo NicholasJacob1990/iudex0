@@ -3,6 +3,7 @@ import { AISimulationService } from '@/services/ai-simulation';
 import { AgentOrchestrator, AgentStep } from '@/services/agents/agent-orchestrator';
 import { nanoid } from 'nanoid';
 import apiClient, { apiBaseUrl } from '@/lib/api-client';
+import { resolveAutoAttachmentMode } from '@/lib/attachment-limits';
 import { toast } from 'sonner';
 import { useCanvasStore } from '@/stores/canvas-store';
 import { useBillingStore } from '@/stores/billing-store';
@@ -56,6 +57,11 @@ const PERPLEXITY_RETURN_IMAGES_STORAGE_KEY = 'iudex_perplexity_return_images';
 const PERPLEXITY_RETURN_VIDEOS_STORAGE_KEY = 'iudex_perplexity_return_videos';
 const MINUTA_OUTLINE_TEMPLATE_STORAGE_KEY = 'iudex_minuta_outline_template';
 const MINUTA_OUTLINE_TEMPLATES_BY_SUBTYPE_STORAGE_KEY = 'iudex_minuta_outline_templates_by_subtype';
+const SOURCE_SELECTION_STORAGE_KEY = 'iudex_source_selection';
+const RAG_SELECTED_GROUPS_STORAGE_KEY = 'iudex_rag_selected_groups';
+const RAG_ALLOW_GROUPS_STORAGE_KEY = 'iudex_rag_allow_groups';
+const RAG_GLOBAL_JURISDICTIONS_STORAGE_KEY = 'iudex_rag_global_jurisdictions';
+const RAG_GLOBAL_SOURCE_IDS_STORAGE_KEY = 'iudex_rag_global_source_ids';
 const DEFAULT_USD_PER_POINT = 0.00003;
 
 const describeApiError = (error: unknown) => {
@@ -140,6 +146,51 @@ const INITIAL_MINUTA_OUTLINE_TEMPLATE = (() => {
     DEFAULT_MINUTA_OUTLINE_TEMPLATES_BY_SUBTYPE.PETICAO_INICIAL
   );
 })();
+
+// Source Selection Types
+export interface CorpusGlobalSelection {
+  legislacao: boolean;
+  jurisprudencia: boolean;
+  pecasModelo: boolean;
+  doutrina: boolean;
+  sei: boolean;
+}
+
+export interface SourceSelection {
+  webSearch: boolean;
+  attachments: Record<string, boolean>; // fileId -> enabled
+  corpusGlobal: CorpusGlobalSelection;
+  corpusPrivado: Record<string, boolean>; // projectId -> enabled
+  mcpConnectors: Record<string, boolean>; // label -> enabled
+}
+
+export type SourceCategory = 'webSearch' | 'attachments' | 'corpusGlobal' | 'corpusPrivado' | 'mcpConnectors';
+
+const DEFAULT_SOURCE_SELECTION: SourceSelection = {
+  webSearch: false,
+  attachments: {},
+  corpusGlobal: {
+    legislacao: true,
+    jurisprudencia: true,
+    pecasModelo: true,
+    doutrina: true,
+    sei: true,
+  },
+  corpusPrivado: {},
+  mcpConnectors: {},
+};
+
+const SOURCE_ICONS: Record<string, string> = {
+  webSearch: '🌐',
+  attachments: '📎',
+  legislacao: '📜',
+  jurisprudencia: '⚖️',
+  pecasModelo: '📄',
+  doutrina: '📚',
+  sei: '🏛️',
+  corpusPrivado: '🔒',
+  mcpConnectors: '🔌',
+};
 
 // CogGRAG Types
 export type CogRAGNodeState = 'pending' | 'decomposing' | 'retrieving' | 'retrieved' | 'verifying' | 'verified' | 'rejected' | 'complete' | 'error';
@@ -426,6 +477,86 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
       return;
     }
 
+    // Code Artifact: artifact_start creates a new artifact
+    if (eventType === 'artifact_start' && payload) {
+      try {
+        const canvas = useCanvasStore.getState();
+        const artifactId = canvas.addArtifact({
+          type: payload.artifact_type || 'code',
+          language: payload.language || 'typescript',
+          title: payload.title || 'Artifact',
+          code: '',
+          description: payload.description,
+          status: 'streaming',
+          agent: payload.agent || payload.model,
+          model: payload.model,
+          isStreaming: true,
+          executable: payload.executable,
+          dependencies: payload.dependencies,
+          messageId: payload.message_id,
+        });
+        // Store artifact ID for subsequent tokens
+        (window as any).__currentArtifactId = artifactId;
+        canvas.setActiveTab('code');
+      } catch {
+        // noop
+      }
+      return;
+    }
+
+    // Code Artifact: artifact_token streams code
+    if (eventType === 'artifact_token' && payload?.delta) {
+      try {
+        const canvas = useCanvasStore.getState();
+        const artifactId = payload.artifact_id || (window as any).__currentArtifactId;
+        if (artifactId) {
+          canvas.streamArtifactToken(artifactId, String(payload.delta));
+        }
+      } catch {
+        // noop
+      }
+      return;
+    }
+
+    // Code Artifact: artifact_done finalizes the artifact
+    if (eventType === 'artifact_done' && payload) {
+      try {
+        const canvas = useCanvasStore.getState();
+        const artifactId = payload.artifact_id || (window as any).__currentArtifactId;
+        if (artifactId) {
+          canvas.finalizeArtifact(artifactId, payload.code);
+        }
+        delete (window as any).__currentArtifactId;
+      } catch {
+        // noop
+      }
+      return;
+    }
+
+    // Code Artifact: artifact (single-shot, non-streaming)
+    if (eventType === 'artifact' && payload) {
+      try {
+        const canvas = useCanvasStore.getState();
+        canvas.addArtifact({
+          type: payload.artifact_type || payload.type || 'code',
+          language: payload.language || 'typescript',
+          title: payload.title || 'Artifact',
+          code: payload.code || '',
+          description: payload.description,
+          status: 'complete',
+          agent: payload.agent || payload.model,
+          model: payload.model,
+          executable: payload.executable,
+          dependencies: payload.dependencies,
+          messageId: payload.message_id,
+        });
+        canvas.setActiveTab('code');
+      } catch {
+        // noop
+      }
+      return;
+    }
+
     const shouldStoreEvent = eventType !== 'token' && eventType !== 'meta' && eventType !== 'thinking';
     set((state: any) => ({
       ...(shouldStoreEvent ? { jobEvents: [...state.jobEvents, data] } : {}),
@@ -687,6 +818,29 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
           riskLevel: payload?.risk_level || 'medium',
         },
       });
+    }
+
+    if (eventType === 'code_execution') {
+      set({
+        lastToolCall: {
+          tool: 'code_interpreter',
+          status: 'running',
+          language: payload?.language || 'python',
+          code: payload?.code || '',
+        },
+      });
+    }
+
+    if (eventType === 'code_execution_result') {
+      set((state: any) => ({
+        lastToolCall: state.lastToolCall
+          ? {
+              ...state.lastToolCall,
+              status: payload?.outcome === 'OUTCOME_OK' ? 'success' : 'error',
+              result: payload?.output || '',
+            }
+          : null,
+      }));
     }
 
     if (eventType === 'context_warning') {
@@ -990,6 +1144,97 @@ function loadJsonPreference<T>(key: string, fallback: T): T {
     return JSON.parse(raw) as T;
   } catch {
     return fallback;
+  }
+}
+
+function loadRagSelectedGroups(): string[] {
+  const raw = loadJsonPreference<unknown>(RAG_SELECTED_GROUPS_STORAGE_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+function persistRagSelectedGroups(groupIds: string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(RAG_SELECTED_GROUPS_STORAGE_KEY, JSON.stringify(groupIds));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadRagAllowGroups(): boolean {
+  return loadBooleanPreference(RAG_ALLOW_GROUPS_STORAGE_KEY, true);
+}
+
+function persistRagAllowGroups(allow: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(RAG_ALLOW_GROUPS_STORAGE_KEY, String(Boolean(allow)));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadRagGlobalJurisdictions(): string[] {
+  const raw = loadJsonPreference<unknown>(RAG_GLOBAL_JURISDICTIONS_STORAGE_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v) => String(v || '').trim().toUpperCase()).filter(Boolean);
+}
+
+function persistRagGlobalJurisdictions(jurisdictions: string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(RAG_GLOBAL_JURISDICTIONS_STORAGE_KEY, JSON.stringify(jurisdictions));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadRagGlobalSourceIds(): string[] {
+  const raw = loadJsonPreference<unknown>(RAG_GLOBAL_SOURCE_IDS_STORAGE_KEY, []);
+  if (!Array.isArray(raw)) return [];
+  return raw.map((v) => String(v || '').trim()).filter(Boolean);
+}
+
+function persistRagGlobalSourceIds(sourceIds: string[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(RAG_GLOBAL_SOURCE_IDS_STORAGE_KEY, JSON.stringify(sourceIds));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function loadSourceSelection(): SourceSelection {
+  if (typeof window === 'undefined') return { ...DEFAULT_SOURCE_SELECTION };
+  try {
+    const raw = localStorage.getItem(SOURCE_SELECTION_STORAGE_KEY);
+    if (!raw) return { ...DEFAULT_SOURCE_SELECTION };
+    const parsed = JSON.parse(raw) as Partial<SourceSelection>;
+    return {
+      webSearch: typeof parsed.webSearch === 'boolean' ? parsed.webSearch : DEFAULT_SOURCE_SELECTION.webSearch,
+      attachments: parsed.attachments && typeof parsed.attachments === 'object' ? parsed.attachments : {},
+      corpusGlobal: {
+        legislacao: parsed.corpusGlobal?.legislacao ?? DEFAULT_SOURCE_SELECTION.corpusGlobal.legislacao,
+        jurisprudencia: parsed.corpusGlobal?.jurisprudencia ?? DEFAULT_SOURCE_SELECTION.corpusGlobal.jurisprudencia,
+        pecasModelo: parsed.corpusGlobal?.pecasModelo ?? DEFAULT_SOURCE_SELECTION.corpusGlobal.pecasModelo,
+        doutrina: parsed.corpusGlobal?.doutrina ?? DEFAULT_SOURCE_SELECTION.corpusGlobal.doutrina,
+        sei: parsed.corpusGlobal?.sei ?? DEFAULT_SOURCE_SELECTION.corpusGlobal.sei,
+      },
+      corpusPrivado: parsed.corpusPrivado && typeof parsed.corpusPrivado === 'object' ? parsed.corpusPrivado : {},
+      mcpConnectors: parsed.mcpConnectors && typeof parsed.mcpConnectors === 'object' ? parsed.mcpConnectors : {},
+    };
+  } catch {
+    return { ...DEFAULT_SOURCE_SELECTION };
+  }
+}
+
+function persistSourceSelection(selection: SourceSelection): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(SOURCE_SELECTION_STORAGE_KEY, JSON.stringify(selection));
+  } catch {
+    // ignore storage errors
   }
 }
 
@@ -1383,8 +1628,11 @@ interface ChatState {
   setMcpServerLabels: (labels: string[]) => void;
   webSearch: boolean;
   webSearchModel: string;
+  /** @deprecated UI moved to SourcesBadge - state kept for API compatibility */
   multiQuery: boolean;
+  /** @deprecated UI moved to SourcesBadge - state kept for API compatibility */
   breadthFirst: boolean;
+  /** @deprecated UI moved to SourcesBadge - state kept for API compatibility */
   searchMode: 'shared' | 'native' | 'hybrid' | 'perplexity';
   perplexitySearchMode: 'web' | 'academic' | 'sec';
   perplexitySearchType: 'fast' | 'pro' | 'auto';
@@ -1409,9 +1657,14 @@ interface ChatState {
   perplexitySearchLongitude: string;
   perplexityReturnImages: boolean;
   perplexityReturnVideos: boolean;
+  /** @deprecated UI moved to SourcesBadge - state kept for API compatibility */
   researchPolicy: 'auto' | 'force';
   ragTopK: number;
   ragSources: string[];
+  /** Optional narrowing: filter Global Corpus by jurisdiction codes (empty = all). */
+  ragGlobalJurisdictions: string[];
+  /** Optional narrowing: filter Global Corpus by regional source IDs (empty = all). */
+  ragGlobalSourceIds: string[];
   minPages: number;
   maxPages: number;
   attachmentMode: 'auto' | 'rag_local' | 'prompt_injection';
@@ -1515,7 +1768,21 @@ interface ChatState {
   graphRagEnabled: boolean;
   argumentGraphEnabled: boolean;
   graphHops: number;
+  /** @deprecated UI moved to SourcesBadge with granular checkboxes - state kept for API compatibility */
   ragScope: 'case_only' | 'case_and_global' | 'global_only';
+  /** Optional narrowing: subset of user's org teams to search within (empty = all teams user belongs to). */
+  ragSelectedGroups: string[];
+  /** Explicit allow/deny for department-scoped corpus (group scope). */
+  ragAllowGroups: boolean;
+  setRagGlobalJurisdictions: (jurisdictions: string[]) => void;
+  toggleRagGlobalJurisdiction: (jurisdiction: string) => void;
+  clearRagGlobalJurisdictions: () => void;
+  setRagGlobalSourceIds: (sourceIds: string[]) => void;
+  toggleRagGlobalSourceId: (sourceId: string) => void;
+  clearRagGlobalSourceIds: () => void;
+
+  // Granular Source Selection
+  sourceSelection: SourceSelection;
 
   // Chat Personality: 'juridico' for legal language, 'geral' for general/free chat
   chatPersonality: 'juridico' | 'geral';
@@ -1638,10 +1905,36 @@ interface ChatState {
   setArgumentGraphEnabled: (enabled: boolean) => void;
   setGraphHops: (hops: number) => void;
   setRagScope: (scope: 'case_only' | 'case_and_global' | 'global_only') => void;
+  setRagSelectedGroups: (groupIds: string[]) => void;
+  toggleRagSelectedGroup: (groupId: string) => void;
+  clearRagSelectedGroups: () => void;
+  setRagAllowGroups: (allow: boolean) => void;
+
+  // Source Selection Actions
+  setSourceSelection: (selection: SourceSelection) => void;
+  toggleSource: (category: SourceCategory, id?: string) => void;
+  selectAllInCategory: (category: SourceCategory) => void;
+  deselectAllInCategory: (category: SourceCategory) => void;
+  setAttachmentEnabled: (fileId: string, enabled: boolean) => void;
+  setCorpusGlobalEnabled: (key: keyof CorpusGlobalSelection, enabled: boolean) => void;
+  setCorpusPrivadoEnabled: (projectId: string, enabled: boolean) => void;
+  setMcpConnectorEnabled: (label: string, enabled: boolean) => void;
+  getActiveSourcesCount: () => number;
+  getActiveSourceIcons: () => string[];
+
   setChatPersonality: (personality: 'juridico' | 'geral') => void;
   setCreativityMode: (mode: 'rigoroso' | 'padrao' | 'criativo') => void;
   setTemperatureOverride: (value: number | null) => void;
   setChatOutlineReviewEnabled: (enabled: boolean) => void;
+
+  // Playbook integration (for /minuta contract review)
+  selectedPlaybookId: string | null;
+  selectedPlaybookName: string | null;
+  selectedPlaybookPrompt: string | null;
+  isPlaybookLoading: boolean;
+  setSelectedPlaybook: (id: string | null, name: string | null, prompt: string | null) => void;
+  clearPlaybook: () => void;
+
   // Audit State
   audit: boolean;
   setAudit: (enabled: boolean) => void;
@@ -2050,6 +2343,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
   researchPolicy: loadResearchPolicy(),
   ragTopK: 8,
   ragSources: ['lei', 'juris'],
+  ragGlobalJurisdictions: loadRagGlobalJurisdictions(),
+  ragGlobalSourceIds: loadRagGlobalSourceIds(),
   minPages: 0,
   maxPages: 0,
   attachmentMode: 'auto',
@@ -2154,10 +2449,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
   argumentGraphEnabled: true,
   graphHops: 2,
   ragScope: 'case_and_global', // case_only, case_and_global, global_only
+  ragSelectedGroups: loadRagSelectedGroups(),
+  ragAllowGroups: loadRagAllowGroups(),
+  sourceSelection: loadSourceSelection(),
   chatPersonality: loadChatPersonality(), // Default to persisted or legal
   creativityMode: 'padrao',
   temperatureOverride: null,
   audit: true,
+
+  // Playbook integration
+  selectedPlaybookId: null,
+  selectedPlaybookName: null,
+  selectedPlaybookPrompt: null,
+  isPlaybookLoading: false,
 
   currentJobId: null,
   jobEvents: [],
@@ -2169,6 +2473,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setContext: (context) => set({ activeContext: context }),
   setPendingCanvasContext: (context) => set({ pendingCanvasContext: context }),
+
+  // Playbook setters
+  setSelectedPlaybook: (id, name, prompt) =>
+    set({
+      selectedPlaybookId: id,
+      selectedPlaybookName: name,
+      selectedPlaybookPrompt: prompt,
+      isPlaybookLoading: false,
+    }),
+  clearPlaybook: () =>
+    set({
+      selectedPlaybookId: null,
+      selectedPlaybookName: null,
+      selectedPlaybookPrompt: null,
+      isPlaybookLoading: false,
+    }),
   setEffortLevel: (level) => set({ effortLevel: level }),
   setSelectedModel: (model) => {
     const current = get();
@@ -2594,6 +2914,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   setRagTopK: (k) => set({ ragTopK: k }),
   setRagSources: (sources) => set({ ragSources: sources }),
+  setRagGlobalJurisdictions: (jurisdictions) => {
+    const normalized = (Array.isArray(jurisdictions) ? jurisdictions : [])
+      .map((v) => String(v || '').trim().toUpperCase())
+      .filter(Boolean);
+    persistRagGlobalJurisdictions(normalized);
+    set({ ragGlobalJurisdictions: normalized });
+  },
+  toggleRagGlobalJurisdiction: (jurisdiction) => {
+    const id = String(jurisdiction || '').trim().toUpperCase();
+    if (!id) return;
+    set((state) => {
+      const current = new Set(state.ragGlobalJurisdictions || []);
+      if (current.has(id)) current.delete(id);
+      else current.add(id);
+      const next = Array.from(current);
+      persistRagGlobalJurisdictions(next);
+      return { ragGlobalJurisdictions: next };
+    });
+  },
+  clearRagGlobalJurisdictions: () => {
+    persistRagGlobalJurisdictions([]);
+    set({ ragGlobalJurisdictions: [] });
+  },
+  setRagGlobalSourceIds: (sourceIds) => {
+    const normalized = (Array.isArray(sourceIds) ? sourceIds : [])
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    persistRagGlobalSourceIds(normalized);
+    set({ ragGlobalSourceIds: normalized });
+  },
+  toggleRagGlobalSourceId: (sourceId) => {
+    const id = String(sourceId || '').trim();
+    if (!id) return;
+    set((state) => {
+      const current = new Set(state.ragGlobalSourceIds || []);
+      if (current.has(id)) current.delete(id);
+      else current.add(id);
+      const next = Array.from(current);
+      persistRagGlobalSourceIds(next);
+      return { ragGlobalSourceIds: next };
+    });
+  },
+  clearRagGlobalSourceIds: () => {
+    persistRagGlobalSourceIds([]);
+    set({ ragGlobalSourceIds: [] });
+  },
   setPageRange: (range) =>
     set((state) =>
       normalizePageRange(range.minPages ?? state.minPages, range.maxPages ?? state.maxPages)
@@ -2831,6 +3197,197 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setArgumentGraphEnabled: () => set({ argumentGraphEnabled: true, graphRagEnabled: true }),
   setGraphHops: (hops) => set({ graphHops: hops }),
   setRagScope: (scope) => set({ ragScope: scope }),
+  setRagSelectedGroups: (groupIds) => {
+    const normalized = (Array.isArray(groupIds) ? groupIds : [])
+      .map((v) => String(v || '').trim())
+      .filter(Boolean);
+    persistRagSelectedGroups(normalized);
+    set({ ragSelectedGroups: normalized });
+  },
+  setRagAllowGroups: (allow) => {
+    persistRagAllowGroups(Boolean(allow));
+    set({ ragAllowGroups: Boolean(allow) });
+  },
+  toggleRagSelectedGroup: (groupId) => {
+    const id = String(groupId || '').trim();
+    if (!id) return;
+    set((state) => {
+      const current = new Set(state.ragSelectedGroups || []);
+      if (current.has(id)) current.delete(id);
+      else current.add(id);
+      const next = Array.from(current);
+      persistRagSelectedGroups(next);
+      return { ragSelectedGroups: next };
+    });
+  },
+  clearRagSelectedGroups: () => {
+    persistRagSelectedGroups([]);
+    set({ ragSelectedGroups: [] });
+  },
+
+  // Source Selection Actions
+  setSourceSelection: (selection) => {
+    persistSourceSelection(selection);
+    set({ sourceSelection: selection });
+  },
+
+  toggleSource: (category, id) => {
+    set((state) => {
+      const next = { ...state.sourceSelection };
+      if (category === 'webSearch') {
+        next.webSearch = !next.webSearch;
+      } else if (category === 'attachments' && id) {
+        next.attachments = { ...next.attachments, [id]: !next.attachments[id] };
+      } else if (category === 'corpusGlobal' && id) {
+        const key = id as keyof CorpusGlobalSelection;
+        next.corpusGlobal = { ...next.corpusGlobal, [key]: !next.corpusGlobal[key] };
+      } else if (category === 'corpusPrivado' && id) {
+        next.corpusPrivado = { ...next.corpusPrivado, [id]: !next.corpusPrivado[id] };
+      } else if (category === 'mcpConnectors' && id) {
+        next.mcpConnectors = { ...next.mcpConnectors, [id]: !next.mcpConnectors[id] };
+      }
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  selectAllInCategory: (category) => {
+    set((state) => {
+      const next = { ...state.sourceSelection };
+      if (category === 'webSearch') {
+        next.webSearch = true;
+      } else if (category === 'attachments') {
+        next.attachments = Object.fromEntries(
+          Object.keys(next.attachments).map((k) => [k, true])
+        );
+      } else if (category === 'corpusGlobal') {
+        next.corpusGlobal = {
+          legislacao: true,
+          jurisprudencia: true,
+          pecasModelo: true,
+          doutrina: true,
+          sei: true,
+        };
+      } else if (category === 'corpusPrivado') {
+        next.corpusPrivado = Object.fromEntries(
+          Object.keys(next.corpusPrivado).map((k) => [k, true])
+        );
+      } else if (category === 'mcpConnectors') {
+        next.mcpConnectors = Object.fromEntries(
+          Object.keys(next.mcpConnectors).map((k) => [k, true])
+        );
+      }
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  deselectAllInCategory: (category) => {
+    set((state) => {
+      const next = { ...state.sourceSelection };
+      if (category === 'webSearch') {
+        next.webSearch = false;
+      } else if (category === 'attachments') {
+        next.attachments = Object.fromEntries(
+          Object.keys(next.attachments).map((k) => [k, false])
+        );
+      } else if (category === 'corpusGlobal') {
+        next.corpusGlobal = {
+          legislacao: false,
+          jurisprudencia: false,
+          pecasModelo: false,
+          doutrina: false,
+          sei: false,
+        };
+      } else if (category === 'corpusPrivado') {
+        next.corpusPrivado = Object.fromEntries(
+          Object.keys(next.corpusPrivado).map((k) => [k, false])
+        );
+      } else if (category === 'mcpConnectors') {
+        next.mcpConnectors = Object.fromEntries(
+          Object.keys(next.mcpConnectors).map((k) => [k, false])
+        );
+      }
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  setAttachmentEnabled: (fileId, enabled) => {
+    set((state) => {
+      const next = {
+        ...state.sourceSelection,
+        attachments: { ...state.sourceSelection.attachments, [fileId]: enabled },
+      };
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  setCorpusGlobalEnabled: (key, enabled) => {
+    set((state) => {
+      const next = {
+        ...state.sourceSelection,
+        corpusGlobal: { ...state.sourceSelection.corpusGlobal, [key]: enabled },
+      };
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  setCorpusPrivadoEnabled: (projectId, enabled) => {
+    set((state) => {
+      const next = {
+        ...state.sourceSelection,
+        corpusPrivado: { ...state.sourceSelection.corpusPrivado, [projectId]: enabled },
+      };
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  setMcpConnectorEnabled: (label, enabled) => {
+    set((state) => {
+      const next = {
+        ...state.sourceSelection,
+        mcpConnectors: { ...state.sourceSelection.mcpConnectors, [label]: enabled },
+      };
+      persistSourceSelection(next);
+      return { sourceSelection: next };
+    });
+  },
+
+  getActiveSourcesCount: () => {
+    const state = get();
+    const sel = state.sourceSelection;
+    let count = 0;
+
+    if (sel.webSearch) count++;
+    count += Object.values(sel.attachments).filter(Boolean).length;
+    count += Object.values(sel.corpusGlobal).filter(Boolean).length;
+    count += Object.values(sel.corpusPrivado).filter(Boolean).length;
+    count += Object.values(sel.mcpConnectors).filter(Boolean).length;
+
+    return count;
+  },
+
+  getActiveSourceIcons: () => {
+    const state = get();
+    const sel = state.sourceSelection;
+    const icons: string[] = [];
+
+    if (sel.webSearch) icons.push(SOURCE_ICONS.webSearch);
+    if (Object.values(sel.attachments).some(Boolean)) icons.push(SOURCE_ICONS.attachments);
+    if (sel.corpusGlobal.legislacao) icons.push(SOURCE_ICONS.legislacao);
+    if (sel.corpusGlobal.jurisprudencia) icons.push(SOURCE_ICONS.jurisprudencia);
+    if (sel.corpusGlobal.pecasModelo) icons.push(SOURCE_ICONS.pecasModelo);
+    if (sel.corpusGlobal.doutrina) icons.push(SOURCE_ICONS.doutrina);
+    if (sel.corpusGlobal.sei) icons.push(SOURCE_ICONS.sei);
+    if (Object.values(sel.corpusPrivado).some(Boolean)) icons.push(SOURCE_ICONS.corpusPrivado);
+    if (Object.values(sel.mcpConnectors).some(Boolean)) icons.push(SOURCE_ICONS.mcpConnectors);
+
+    return icons;
+  },
 
   // V2 Setters
   setChatMode: (mode) =>
@@ -3155,6 +3712,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     if (retry.kind === 'generate') {
       await get().generateDocumentWithResult(retry.prompt, retry.caseId, { budgetOverridePoints: budgetPoints });
+      return;
+    }
+
+    if (retry.kind === 'agent_legacy') {
+      await get().startAgentGeneration(retry.prompt, retry.canvasContext, { budgetOverridePoints: budgetPoints });
     }
   },
 
@@ -3371,6 +3933,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         get().mcpToolCalling && !get().mcpUseAllServers && (get().mcpServerLabels || []).length > 0
           ? get().mcpServerLabels
           : undefined;
+      const playbookPrompt = get().selectedPlaybookPrompt;
+      // Resolve 'auto' attachment mode based on model context window and file count
+      const resolvedAttachmentMode =
+        attachmentMode === 'auto'
+          ? resolveAutoAttachmentMode([fastModel], attachmentDocs.length)
+          : attachmentMode;
       const payload: Record<string, any> = {
         content,
         attachments: attachmentDocs,
@@ -3393,7 +3961,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         research_policy: get().researchPolicy,
         rag_top_k: ragTopK,
         rag_sources: ragSources,
-        attachment_mode: attachmentMode,
+        attachment_mode: resolvedAttachmentMode,
         context_mode: contextMode,
         context_files: shouldSendContextFiles ? contextFiles : undefined,
         cache_ttl: shouldSendContextFiles ? cacheTTL : undefined,
@@ -3405,6 +3973,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         argument_graph_enabled: true,
         graph_hops: graphHops,
         rag_scope: get().ragScope,
+        rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_groups: get().ragAllowGroups,
+        rag_jurisdictions:
+          (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
+        rag_source_ids:
+          (get().ragGlobalSourceIds || []).length > 0 ? get().ragGlobalSourceIds : undefined,
         dense_research: denseResearch,
         use_templates: useTemplates,
         template_filters: normalizeTemplateFilters(templateFilters),
@@ -3423,6 +3997,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
           : {}),
         ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
+        ...(playbookPrompt ? { playbook_prompt: playbookPrompt } : {}),
       };
       if (outline.length > 0) {
         payload.outline = outline;
@@ -3509,7 +4084,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (!String(nextText || '').trim()) return;
         if (isFinal && canvasFinalApplied) return;
         const now = Date.now();
-        const minIntervalMs = canvasWriteMode ? 40 : 120;
+        // Adaptive throttle: longer docs get less frequent updates to reduce flickering
+        const docLength = String(nextText || '').length;
+        const minIntervalMs = canvasWriteMode
+          ? (docLength > 20000 ? 200 : docLength > 8000 ? 100 : 40)
+          : 120;
         if (!isFinal && now - lastCanvasUpdateAt < minIntervalMs) return;
         lastCanvasUpdateAt = now;
         const canvasStore = useCanvasStore.getState();
@@ -3542,7 +4121,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       const upsertActivityStep = (
         message: Message,
-        step: { id: string; title: string; status?: 'running' | 'done' | 'error'; detail?: string; tags?: string[] },
+        step: {
+          id: string;
+          title: string;
+          status?: 'running' | 'done' | 'error';
+          detail?: string;
+          tags?: string[];
+          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'generic';
+          attachments?: Array<{ name: string; kind?: string; ext?: string }>;
+          terms?: string[];
+          sources?: Array<{ title?: string; url: string }>;
+        },
         op?: 'add' | 'update' | 'append' | 'done' | 'error' | 'tags'
       ) => {
         const meta: any = { ...(message.metadata || {}) };
@@ -3554,6 +4143,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Handle different operations
         let nextDetail = typeof step.detail === 'string' ? step.detail : prev?.detail ?? '';
         let nextTags = step.tags ?? prev?.tags ?? [];
+        const nextKind = step.kind ?? prev?.kind;
+
+        const mergeStrings = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: string[] = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const v = String(item || '').trim();
+            if (!v) continue;
+            const k = v.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            out.push(v);
+          }
+          return out;
+        };
+
+        const mergeSources = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: Array<{ title?: string; url: string }> = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const url = String(item?.url || '').trim();
+            if (!url) continue;
+            const key = url.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ url, title: item?.title ? String(item.title) : undefined });
+          }
+          return out;
+        };
+
+        const mergeAttachments = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: Array<{ name: string; kind?: string; ext?: string }> = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const name = String(item?.name || '').trim();
+            if (!name) continue;
+            const ext = item?.ext ? String(item.ext).trim() : undefined;
+            const key = `${name.toLowerCase()}|${String(ext || '').toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ name, kind: item?.kind ? String(item.kind) : undefined, ext });
+          }
+          return out;
+        };
 
         if (op === 'append' && prev?.detail && step.detail) {
           // Append to existing detail text
@@ -3571,6 +4204,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status: op === 'done' ? 'done' : op === 'error' ? 'error' : (step.status ?? prev?.status ?? 'running'),
           detail: nextDetail,
           tags: nextTags,
+          kind: nextKind,
+          attachments: mergeAttachments(prev?.attachments, step.attachments),
+          terms: mergeStrings(prev?.terms, step.terms),
+          sources: mergeSources(prev?.sources, step.sources),
           t: Date.now(),
         };
         if (idx >= 0) steps[idx] = next;
@@ -3598,6 +4235,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
             status: step.status || 'running',
             detail: step.detail || '',
             tags: step.tags || [],
+            kind: step.kind,
+            attachments: step.attachments,
+            terms: step.terms,
+            sources: step.sources,
           }, op),
         }));
       };
@@ -3606,24 +4247,39 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const handleStepEvent = (data: any): boolean => {
         if (data.type === 'step.start') {
           hasActivityEvents = true;
+          const rawName = String(data.step_name || '').trim();
+          const rawId = String(data.step_id || '').trim();
+          const nameLower = rawName.toLowerCase();
+          const idLower = rawId.toLowerCase();
+          const isWeb =
+            nameLower.includes('web') ||
+            nameLower.includes('internet') ||
+            idLower.includes('web_search') ||
+            idLower.includes('openai_web_search') ||
+            idLower.includes('pplx');
           updateAssistant((message) => ({
             ...message,
             metadata: upsertActivityStep(message, {
-              id: data.step_id || data.step_name || 'search',
-              title: data.step_name || 'Pesquisando',
+              id: isWeb ? 'web_search' : (data.step_id || data.step_name || 'search'),
+              title: rawName || 'Pesquisando',
               status: 'running',
+              kind: isWeb ? 'web_search' : undefined,
             }, 'add'),
           }));
           return true;
         }
         if (data.type === 'step.add_query') {
           hasActivityEvents = true;
+          const rawId = String(data.step_id || '').trim();
+          const idLower = rawId.toLowerCase();
+          const isWeb = idLower.includes('web_search') || idLower.includes('openai_web_search') || idLower.includes('pplx');
           updateAssistant((message) => ({
             ...message,
             metadata: upsertActivityStep(message, {
-              id: data.step_id || 'search',
+              id: isWeb ? 'web_search' : (data.step_id || 'search'),
               title: 'Pesquisa',
               tags: data.query ? [String(data.query).slice(0, 100)] : [],
+              kind: isWeb ? 'web_search' : undefined,
             }, 'tags'),
           }));
           return true;
@@ -3645,15 +4301,31 @@ export const useChatStore = create<ChatState>((set, get) => ({
               metadata: { ...(message.metadata || {}), citations },
             };
           });
+          const src = data.source;
+          if (src?.url) {
+            updateAssistant((message) => ({
+              ...message,
+              metadata: upsertActivityStep(message, {
+                id: 'web_search',
+                title: 'Pesquisando na web',
+                kind: 'web_search',
+                sources: [{ url: String(src.url), title: src.title ? String(src.title) : undefined }],
+              }, 'update'),
+            }));
+          }
           return true;
         }
         if (data.type === 'step.done') {
           hasActivityEvents = true;
+          const rawId = String(data.step_id || '').trim();
+          const idLower = rawId.toLowerCase();
+          const isWeb = idLower.includes('web_search') || idLower.includes('openai_web_search') || idLower.includes('pplx') || rawId === 'web_search';
           updateAssistant((message) => ({
             ...message,
             metadata: upsertActivityStep(message, {
-              id: data.step_id || 'search',
+              id: isWeb ? 'web_search' : (data.step_id || 'search'),
               title: 'Pesquisa',
+              kind: isWeb ? 'web_search' : undefined,
             }, 'done'),
           }));
           return true;
@@ -3754,10 +4426,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               updateAssistant((message) => ({
                 ...message,
                 metadata: upsertActivityStep(message, {
-                  id: 'search',
+                  id: 'web_search',
                   title: 'Pesquisando na web',
                   status: 'running',
                   detail: data.query ? `Consulta: ${String(data.query)}` : '',
+                  kind: 'web_search',
                 }),
               }));
             }
@@ -3769,10 +4442,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
               updateAssistant((message) => ({
                 ...message,
                 metadata: upsertActivityStep(message, {
-                  id: 'search',
+                  id: 'web_search',
                   title: 'Pesquisando na web',
                   status: 'done',
                   detail: `Fontes: ${count}${cached}`,
+                  kind: 'web_search',
                 }),
               }));
             }
@@ -3971,6 +4645,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 };
               });
               applyCanvasWrite(finalText);
+              // Auto-open canvas when backend detects document-like response
+              if (!canvasWriteMode && data.canvas_suggestion && finalText.length > 600) {
+                try {
+                  const canvasStore = useCanvasStore.getState();
+                  canvasStore.setContent(finalText);
+                  canvasStore.showCanvas();
+                  canvasStore.setActiveTab('editor');
+                } catch (_) { /* canvas store may not be available */ }
+              }
               set({ isSending: false });
             } else if (data.type === 'error') {
               streamCompleted = true;
@@ -4072,10 +4755,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   updateAssistant((message) => ({
                     ...message,
                     metadata: upsertActivityStep(message, {
-                      id: 'search',
+                      id: 'web_search',
                       title: 'Pesquisando na web',
                       status: 'running',
                       detail: data.query ? `Consulta: ${String(data.query)}` : '',
+                      kind: 'web_search',
                     }),
                   }));
                 }
@@ -4087,10 +4771,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   updateAssistant((message) => ({
                     ...message,
                     metadata: upsertActivityStep(message, {
-                      id: 'search',
+                      id: 'web_search',
                       title: 'Pesquisando na web',
                       status: 'done',
                       detail: `Fontes: ${count}${cached}`,
+                      kind: 'web_search',
                     }),
                   }));
                 }
@@ -4223,6 +4908,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 };
               });
               applyCanvasWrite(finalText);
+              // Auto-open canvas when backend detects document-like response
+              if (!canvasWriteMode && data.canvas_suggestion && finalText.length > 600) {
+                try {
+                  const canvasStore = useCanvasStore.getState();
+                  canvasStore.setContent(finalText);
+                  canvasStore.showCanvas();
+                  canvasStore.setActiveTab('editor');
+                } catch (_) { /* canvas store may not be available */ }
+              }
             } else if (data.type === 'thinking' && data.delta && thinkingEnabled) {
               const now = Date.now();
               updateAssistant((message) => ({
@@ -4373,6 +5067,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const temperature = resolveTemperature(get().creativityMode, get().temperatureOverride);
       const perplexityPayload = buildPerplexityPayload(get());
       const deepResearchPayload = buildDeepResearchPayload(get());
+      // Resolve 'auto' attachment mode based on model context window and file count
+      const resolvedAttachmentMode =
+        attachmentMode === 'auto'
+          ? resolveAutoAttachmentMode([get().selectedModel], contextDocumentIds.length)
+          : attachmentMode;
 
       const response = await apiClient.generateDocument(currentChat.id, {
         prompt,
@@ -4382,7 +5081,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? { min_pages: normalizedRange.minPages, max_pages: normalizedRange.maxPages }
           : {}),
         ...(hasContextDocs ? { context_documents: contextDocumentIds } : {}),
-        attachment_mode: attachmentMode,
+        attachment_mode: resolvedAttachmentMode,
         chat_personality: chatPersonality,
         model: get().selectedModel,
         model_gpt: get().gptModel,
@@ -4410,6 +5109,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
         citation_style: get().citationStyle,
         rag_top_k: get().ragTopK,
         rag_sources: get().ragSources,
+        rag_jurisdictions:
+          (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
+        rag_source_ids:
+          (get().ragGlobalSourceIds || []).length > 0 ? get().ragGlobalSourceIds : undefined,
         hil_outline_enabled: get().hilOutlineEnabled,
         hil_target_sections: get().hilTargetSections,
         auto_approve_hil: get().autoApproveHil,
@@ -4443,9 +5146,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
         template_document_id: get().templateDocumentId || undefined,
         variables: get().templateVariables,
         ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
+        ...(get().selectedPlaybookPrompt ? { playbook_prompt: get().selectedPlaybookPrompt } : {}),
 	        rag_config: {
 	          top_k: get().ragTopK,
 	          sources: get().ragSources,
+            jurisdictions:
+              (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
 	          tenant_id: get().tenantId,
 	          use_templates: get().useTemplates,
 	          template_filters: get().templateFilters,
@@ -4464,11 +5170,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	            : {}),
 	          hyde_enabled: true,
 	          graph_rag_enabled: true,
-	          argument_graph_enabled: true,
-	          graph_hops: get().graphHops,
-	          rag_scope: get().ragScope,
-	        },
-	      } as any);
+          argument_graph_enabled: true,
+          graph_hops: get().graphHops,
+          rag_scope: get().ragScope,
+          rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+          rag_allow_groups: get().ragAllowGroups,
+        },
+      } as any);
 
       clearInterval(stepsInterval);
 
@@ -4618,6 +5326,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const hasContextDocs = contextDocumentIds.length > 0;
 
       const deepResearchPayload = buildDeepResearchPayload(get());
+      // Resolve 'auto' attachment mode based on model context window and file count
+      const resolvedAttachmentMode =
+        get().attachmentMode === 'auto'
+          ? resolveAutoAttachmentMode([get().selectedModel], contextDocumentIds.length)
+          : get().attachmentMode;
 
       const jobRes = await apiClient.startJob({
         prompt,
@@ -4637,7 +5350,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? { min_pages: normalizedRange.minPages, max_pages: normalizedRange.maxPages }
           : {}),
         ...(hasContextDocs ? { context_documents: contextDocumentIds } : {}),
-        attachment_mode: get().attachmentMode,
+        attachment_mode: resolvedAttachmentMode,
         chat_personality: get().chatPersonality,
         reasoning_level: get().reasoningLevel,
         thinking_level: get().reasoningLevel,
@@ -4696,13 +5409,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	          : {}),
 	        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
 	        hyde_enabled: true,
-	        graph_rag_enabled: true,
-	        argument_graph_enabled: true,
-	        graph_hops: get().graphHops,
-	        rag_scope: get().ragScope,
-	        stream_tokens: true,
-	        stream_token_chunk_chars: 40,
+        graph_rag_enabled: true,
+        argument_graph_enabled: true,
+        graph_hops: get().graphHops,
+        rag_scope: get().ragScope,
+        rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_groups: get().ragAllowGroups,
+        rag_jurisdictions:
+          (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
+        rag_source_ids:
+          (get().ragGlobalSourceIds || []).length > 0 ? get().ragGlobalSourceIds : undefined,
+        stream_tokens: true,
+        stream_token_chunk_chars: 40,
 	        ...(options.budgetOverridePoints ? { budget_override_points: options.budgetOverridePoints } : {}),
+	        ...(get().selectedPlaybookPrompt ? { playbook_prompt: get().selectedPlaybookPrompt } : {}),
       } as any);
 
       const jobId = jobRes.job_id;
@@ -4778,6 +5498,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	      const outlineOverride = parseOutlineTemplate(get().minutaOutlineTemplate);
 
 	      const deepResearchPayload = buildDeepResearchPayload(get());
+      // Resolve 'auto' attachment mode based on model context window and file count
+      const resolvedAttachmentMode =
+        attachmentMode === 'auto'
+          ? resolveAutoAttachmentMode([get().selectedModel], contextDocumentIds.length)
+          : attachmentMode;
 
       const response = await apiClient.generateDocument(currentChat.id, {
         prompt,
@@ -4788,7 +5513,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ? { min_pages: normalizedRange.minPages, max_pages: normalizedRange.maxPages }
           : {}),
         ...(hasContextDocs ? { context_documents: contextDocumentIds } : {}),
-        attachment_mode: attachmentMode,
+        attachment_mode: resolvedAttachmentMode,
         chat_personality: chatPersonality,
         model: get().selectedModel,
 
@@ -4849,6 +5574,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	        // RAG Config (Flattened for Backend Adapter)
 	        rag_top_k: get().ragTopK,
 	        rag_sources: get().ragSources,
+          rag_jurisdictions:
+            (get().ragGlobalJurisdictions || []).length > 0 ? get().ragGlobalJurisdictions : undefined,
+          rag_source_ids:
+            (get().ragGlobalSourceIds || []).length > 0 ? get().ragGlobalSourceIds : undefined,
         tenant_id: get().tenantId,
         use_templates: get().useTemplates,
         template_filters: get().templateFilters,
@@ -4863,12 +5592,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 	          : {}),
 	        ...(cragMinAvgScoreOverride != null ? { crag_min_avg_score: cragMinAvgScoreOverride } : {}),
 	        hyde_enabled: true,
-	        graph_rag_enabled: true,
-	        argument_graph_enabled: true,
-	        graph_hops: get().graphHops,
-	        rag_scope: get().ragScope,
+        graph_rag_enabled: true,
+        argument_graph_enabled: true,
+        graph_hops: get().graphHops,
+        rag_scope: get().ragScope,
+        rag_selected_groups: (get().ragSelectedGroups || []).length > 0 ? get().ragSelectedGroups : undefined,
+        rag_allow_groups: get().ragAllowGroups,
 
-	        // Context Caching (v3.4)
+        // Context Caching (v3.4)
         // Only send if mode is upload_cache or auto.
         context_files: ['upload_cache', 'auto'].includes(get().contextMode)
           ? get().contextFiles
@@ -5195,12 +5926,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
       );
     });
 
+    // Resolve 'auto' attachment mode based on model context window and file count
+    const resolvedAttachmentMode =
+      attachmentMode === 'auto'
+        ? resolveAutoAttachmentMode(targetModels, attachmentDocs.length)
+        : attachmentMode;
+
     try {
       const streamPayload = {
         message: actualContent,
         models: targetModels,
         attachments: attachmentDocs,
-        attachment_mode: attachmentMode,
+        attachment_mode: resolvedAttachmentMode,
         chat_personality: chatPersonality,
         reasoning_level: get().reasoningLevel,
         verbosity: get().verbosity,
@@ -5290,6 +6027,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status?: 'running' | 'done' | 'error';
           detail?: string;
           tags?: string[];
+          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'generic';
+          attachments?: Array<{ name: string; kind?: string; ext?: string }>;
+          terms?: string[];
+          sources?: Array<{ title?: string; url: string }>;
         },
         op?: 'add' | 'update' | 'append' | 'done' | 'error' | 'tags'
       ) => {
@@ -5301,6 +6042,50 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
         let nextDetail = typeof step.detail === 'string' ? step.detail : prev?.detail ?? '';
         let nextTags = step.tags ?? prev?.tags ?? [];
+        const nextKind = step.kind ?? prev?.kind;
+
+        const mergeStrings = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: string[] = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const v = String(item || '').trim();
+            if (!v) continue;
+            const k = v.toLowerCase();
+            if (seen.has(k)) continue;
+            seen.add(k);
+            out.push(v);
+          }
+          return out;
+        };
+
+        const mergeSources = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: Array<{ title?: string; url: string }> = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const url = String(item?.url || '').trim();
+            if (!url) continue;
+            const key = url.toLowerCase();
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ url, title: item?.title ? String(item.title) : undefined });
+          }
+          return out;
+        };
+
+        const mergeAttachments = (a: any[] | undefined, b: any[] | undefined) => {
+          const out: Array<{ name: string; kind?: string; ext?: string }> = [];
+          const seen = new Set<string>();
+          for (const item of [...(a || []), ...(b || [])]) {
+            const name = String(item?.name || '').trim();
+            if (!name) continue;
+            const ext = item?.ext ? String(item.ext).trim() : undefined;
+            const key = `${name.toLowerCase()}|${String(ext || '').toLowerCase()}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            out.push({ name, kind: item?.kind ? String(item.kind) : undefined, ext });
+          }
+          return out;
+        };
 
         if (op === 'append' && prev?.detail && step.detail) {
           nextDetail = `${prev.detail}${step.detail}`;
@@ -5321,6 +6106,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 : (step.status ?? prev?.status ?? 'running'),
           detail: nextDetail,
           tags: nextTags,
+          kind: nextKind,
+          attachments: mergeAttachments(prev?.attachments, step.attachments),
+          terms: mergeStrings(prev?.terms, step.terms),
+          sources: mergeSources(prev?.sources, step.sources),
         };
 
         if (idx >= 0) steps[idx] = next;
@@ -5473,26 +6262,124 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 continue;
               }
 
+              if (data.type === 'activity' && data.model && data.step) {
+                const step = data.step || {};
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(
+                    m.metadata,
+                    {
+                      id: step.id,
+                      title: step.title || step.id,
+                      status: step.status || 'running',
+                      detail: step.detail || '',
+                      tags: step.tags || [],
+                      kind: step.kind,
+                      attachments: step.attachments,
+                      terms: step.terms,
+                      sources: step.sources,
+                    },
+                    data.op
+                  ),
+                }));
+                continue;
+              }
+
               if (data.type === 'step.start' && data.model) {
+                const rawName = String(data.step_name || '').trim();
+                const rawId = String(data.step_id || '').trim();
+                const nameLower = rawName.toLowerCase();
+                const idLower = rawId.toLowerCase();
+                const isWeb =
+                  nameLower.includes('web') ||
+                  nameLower.includes('internet') ||
+                  idLower.includes('web_search') ||
+                  idLower.includes('openai_web_search') ||
+                  idLower.includes('pplx');
                 updateModelMessage(data.model, (m) => ({
                   ...m,
                   metadata: upsertModelActivityStep(m.metadata, {
-                    id: data.step_id || data.step_name || 'step',
-                    title: data.step_name || 'Processando',
+                    id: isWeb ? 'web_search' : (data.step_id || data.step_name || 'step'),
+                    title: rawName || 'Processando',
                     status: 'running',
+                    kind: isWeb ? 'web_search' : undefined,
                   }, 'add'),
                 }));
                 continue;
               }
               if (data.type === 'step.done' && data.model) {
+                const rawId = String(data.step_id || '').trim();
+                const idLower = rawId.toLowerCase();
+                const isWeb =
+                  idLower.includes('web_search') ||
+                  idLower.includes('openai_web_search') ||
+                  idLower.includes('pplx') ||
+                  rawId === 'web_search';
                 updateModelMessage(data.model, (m) => ({
                   ...m,
                   metadata: upsertModelActivityStep(m.metadata, {
-                    id: data.step_id || 'step',
+                    id: isWeb ? 'web_search' : (data.step_id || 'step'),
                     title: data.step_name || 'Processando',
                     status: 'done',
+                    kind: isWeb ? 'web_search' : undefined,
                   }, 'done'),
                 }));
+                continue;
+              }
+              if (data.type === 'step.add_query' && data.model) {
+                const rawId = String(data.step_id || '').trim();
+                const idLower = rawId.toLowerCase();
+                const isWeb =
+                  idLower.includes('web_search') ||
+                  idLower.includes('openai_web_search') ||
+                  idLower.includes('pplx') ||
+                  rawId === 'web_search';
+                updateModelMessage(data.model, (m) => ({
+                  ...m,
+                  metadata: upsertModelActivityStep(
+                    m.metadata,
+                    {
+                      id: isWeb ? 'web_search' : (data.step_id || 'step'),
+                      title: 'Pesquisa',
+                      tags: data.query ? [String(data.query).slice(0, 100)] : [],
+                      kind: isWeb ? 'web_search' : undefined,
+                    },
+                    'tags'
+                  ),
+                }));
+                continue;
+              }
+              if (data.type === 'step.add_source' && data.model) {
+                const src = data.source;
+                if (src?.url) {
+                  updateModelMessage(data.model, (m) => {
+                    const citations = Array.isArray(m.metadata?.citations) ? [...m.metadata.citations] : [];
+                    if (!citations.some((c: any) => c?.url === src.url)) {
+                      citations.push({
+                        number: String(citations.length + 1),
+                        title: src.title || src.url,
+                        url: src.url,
+                      });
+                    }
+                    return {
+                      ...m,
+                      metadata: { ...(m.metadata || {}), citations },
+                    };
+                  });
+                  updateModelMessage(data.model, (m) => ({
+                    ...m,
+                    metadata: upsertModelActivityStep(
+                      m.metadata,
+                      {
+                        id: 'web_search',
+                        title: 'Pesquisando na web',
+                        kind: 'web_search',
+                        sources: [{ url: String(src.url), title: src.title ? String(src.title) : undefined }],
+                      },
+                      'update'
+                    ),
+                  }));
+                }
                 continue;
               }
               if (data.type === 'tool_call' && data.model && data.step_id) {

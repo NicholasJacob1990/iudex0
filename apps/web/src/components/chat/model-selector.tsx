@@ -23,7 +23,7 @@ import { useChatStore } from "@/stores/chat-store";
 import { useBillingStore } from "@/stores/billing-store";
 import { listModels, ModelId, getModelConfig, listAgents, AgentId, getAgentConfig, isAgentId } from "@/config/models";
 import { getModelDescription } from "@/config/model-tooltips";
-import { ChevronDown, Sparkles, Scale, Zap, Columns2, PanelTop, HelpCircle, Bot } from "lucide-react";
+import { ChevronDown, Sparkles, Columns2, PanelTop, HelpCircle, Bot } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import Image from "next/image";
 import { useModelAttachmentLimits } from "@/lib/use-model-attachment-limits";
@@ -795,7 +795,7 @@ export function ModelSelector() {
                     onClick={() => setChatMode('standard')}
                     title="Modo Padrão (Único Modelo)"
                 >
-                    <Zap className="w-3.5 h-3.5" />
+                    <Bot className="w-3.5 h-3.5" />
                 </Button>
                 <Button
                     variant={chatMode === 'multi-model' ? 'secondary' : 'ghost'}
@@ -804,7 +804,7 @@ export function ModelSelector() {
                     onClick={() => setChatMode('multi-model')}
                     title="Modo Multi-Modelo (Paralelo)"
                 >
-                    <Scale className="w-3.5 h-3.5" />
+                    <Columns2 className="w-3.5 h-3.5" />
                 </Button>
             </div>
         </div>

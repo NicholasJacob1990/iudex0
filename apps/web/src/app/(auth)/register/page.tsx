@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { MotionDiv, scaleIn, smoothTransition } from '@/components/ui/motion';
+import { PaintBackground } from '@/components/ui/paint-background';
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -91,9 +92,12 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="relative flex min-h-screen items-center justify-center bg-[#0F1115] p-4 font-sans overflow-hidden">
+    <div className="relative flex min-h-screen items-center justify-center bg-gradient-to-br from-primary/10 via-background to-secondary/10 p-4 font-sans overflow-hidden">
+      {/* Paint worklet background */}
+      <PaintBackground worklet="grid-pulse" color="#8b5cf6" seed={67} />
+
       {/* Animated gradient mesh background */}
-      <div className="pointer-events-none absolute inset-0">
+      <div className="pointer-events-none absolute inset-0 z-[1]">
         <div className="absolute -top-32 -left-32 h-96 w-96 rounded-full bg-indigo-500/15 blur-3xl animate-drift" />
         <div className="absolute -bottom-32 -right-32 h-96 w-96 rounded-full bg-purple-500/15 blur-3xl animate-float" />
       </div>
@@ -105,12 +109,12 @@ export default function RegisterPage() {
         transition={smoothTransition}
         className="w-full max-w-md relative z-10"
       >
-      <Card className="w-full max-w-md border-white/10 bg-white/5 backdrop-blur-xl">
+      <Card className="w-full max-w-md backdrop-blur-xl bg-white/80 dark:bg-white/5 dark:border-white/10">
         <CardHeader className="space-y-1 text-center">
-          <CardTitle className="text-3xl font-bold text-white">
+          <CardTitle className="text-3xl font-bold">
             {step === 'profile' ? 'Escolha seu Perfil' : 'Criar Conta'}
           </CardTitle>
-          <CardDescription className="text-gray-400">
+          <CardDescription>
             {step === 'profile'
               ? 'Personalize sua experiência no Iudex'
               : 'Preencha seus dados para começar'}
@@ -121,51 +125,51 @@ export default function RegisterPage() {
             <div className="grid gap-4">
               <button
                 onClick={() => { setProfileType('individual'); setStep('details'); }}
-                className="group relative flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 p-4 transition-all hover:border-indigo-500/50 hover:bg-indigo-500/10"
+                className="group relative flex items-center gap-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 p-4 transition-all hover:border-indigo-500/50 hover:bg-indigo-500/10"
               >
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-indigo-500/20 text-indigo-400 group-hover:scale-110 transition-transform">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
                 </div>
                 <div className="text-left">
-                  <h3 className="font-semibold text-white">Individual</h3>
-                  <p className="text-sm text-gray-400">Para advogados autônomos, consultores e estudantes.</p>
+                  <h3 className="font-semibold text-slate-900 dark:text-white">Individual</h3>
+                  <p className="text-sm text-slate-500 dark:text-gray-400">Para advogados autônomos, consultores e estudantes.</p>
                 </div>
               </button>
 
               <button
                 onClick={() => { setProfileType('institutional'); setStep('details'); }}
-                className="group relative flex items-center gap-4 rounded-xl border border-white/10 bg-white/5 p-4 transition-all hover:border-purple-500/50 hover:bg-purple-500/10"
+                className="group relative flex items-center gap-4 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5 p-4 transition-all hover:border-purple-500/50 hover:bg-purple-500/10"
               >
                 <div className="flex h-12 w-12 items-center justify-center rounded-full bg-purple-500/20 text-purple-400 group-hover:scale-110 transition-transform">
                   <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 21h18" /><path d="M5 21V7l8-4 8 4v14" /><path d="M17 21v-8H7v8" /><path d="M9 9h1" /><path d="M9 13h1" /><path d="M9 17h1" /><path d="M14 9h1" /><path d="M14 13h1" /><path d="M14 17h1" /></svg>
                 </div>
                 <div className="text-left">
-                  <h3 className="font-semibold text-white">Institucional</h3>
-                  <p className="text-sm text-gray-400">Para escritórios de advocacia e departamentos jurídicos.</p>
+                  <h3 className="font-semibold text-slate-900 dark:text-white">Institucional</h3>
+                  <p className="text-sm text-slate-500 dark:text-gray-400">Para escritórios de advocacia e departamentos jurídicos.</p>
                 </div>
               </button>
 
               <div className="text-center text-sm mt-4">
-                <span className="text-gray-500">Já tem uma conta? </span>
-                <Link href="/login" className="text-indigo-400 hover:underline">
+                <span className="text-muted-foreground">Já tem uma conta? </span>
+                <Link href="/login" className="text-primary hover:underline">
                   Faça login
                 </Link>
               </div>
             </div>
           ) : (
             <form onSubmit={handleSubmit} className="space-y-4">
-              <div className="flex items-center gap-2 mb-4 text-sm text-gray-400">
-                <button type="button" onClick={() => setStep('profile')} className="hover:text-white transition-colors">
+              <div className="flex items-center gap-2 mb-4 text-sm text-muted-foreground">
+                <button type="button" onClick={() => setStep('profile')} className="hover:text-foreground transition-colors">
                   ← Voltar
                 </button>
-                <span className="text-gray-600">|</span>
-                <span className="text-indigo-400 capitalize">{profileType === 'individual' ? 'Individual' : 'Institucional'}</span>
+                <span className="text-slate-300 dark:text-gray-600">|</span>
+                <span className="text-primary capitalize">{profileType === 'individual' ? 'Individual' : 'Institucional'}</span>
               </div>
 
               <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-300">Nome Completo</label>
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Nome Completo</label>
                 <Input
-                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                  className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                   placeholder="Seu nome"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
@@ -178,9 +182,9 @@ export default function RegisterPage() {
                 <>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">CPF</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">CPF</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="000.000.000-00"
                         value={cpf}
                         onChange={(e) => setCpf(e.target.value)}
@@ -188,9 +192,9 @@ export default function RegisterPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">Telefone</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Telefone</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="(00) 00000-0000"
                         value={phone}
                         onChange={(e) => setPhone(e.target.value)}
@@ -200,9 +204,9 @@ export default function RegisterPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">OAB</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">OAB</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="000000"
                         value={oab}
                         onChange={(e) => setOab(e.target.value)}
@@ -210,9 +214,9 @@ export default function RegisterPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">UF OAB</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">UF OAB</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="SP"
                         value={oabState}
                         onChange={(e) => setOabState(e.target.value)}
@@ -227,9 +231,9 @@ export default function RegisterPage() {
               {profileType === 'institutional' && (
                 <>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-gray-300">Nome da Organização</label>
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Nome da Organização</label>
                     <Input
-                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                      className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                       placeholder="Nome do Escritório ou Empresa"
                       value={orgName}
                       onChange={(e) => setOrgName(e.target.value)}
@@ -239,9 +243,9 @@ export default function RegisterPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">CNPJ</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">CNPJ</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="00.000.000/0000-00"
                         value={cnpj}
                         onChange={(e) => setCnpj(e.target.value)}
@@ -249,9 +253,9 @@ export default function RegisterPage() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">Departamento</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Departamento</label>
                       <Input
-                        className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                        className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                         placeholder="Jurídico"
                         value={department}
                         onChange={(e) => setDepartment(e.target.value)}
@@ -261,42 +265,42 @@ export default function RegisterPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">Setor de Atuação</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Setor de Atuação</label>
                       <select
-                        className="flex h-10 w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-white ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                         value={industry}
                         onChange={(e) => setIndustry(e.target.value)}
                         disabled={isLoading}
                         required
                       >
-                        <option value="" className="bg-[#0F1115]">Selecione...</option>
-                        <option value="law_firm" className="bg-[#0F1115]">Escritório de Advocacia</option>
-                        <option value="corporate_legal" className="bg-[#0F1115]">Jurídico Interno</option>
-                        <option value="government" className="bg-[#0F1115]">Setor Público</option>
-                        <option value="other" className="bg-[#0F1115]">Outro</option>
+                        <option value="" className="bg-background">Selecione...</option>
+                        <option value="law_firm" className="bg-background">Escritório de Advocacia</option>
+                        <option value="corporate_legal" className="bg-background">Jurídico Interno</option>
+                        <option value="government" className="bg-background">Setor Público</option>
+                        <option value="other" className="bg-background">Outro</option>
                       </select>
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-medium text-gray-300">Tamanho da Equipe</label>
+                      <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Tamanho da Equipe</label>
                       <select
-                        className="flex h-10 w-full rounded-md border border-white/10 bg-white/5 px-3 py-2 text-sm text-white ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
                         value={teamSize}
                         onChange={(e) => setTeamSize(e.target.value)}
                         disabled={isLoading}
                         required
                       >
-                        <option value="" className="bg-[#0F1115]">Selecione...</option>
-                        <option value="1-5" className="bg-[#0F1115]">1-5 pessoas</option>
-                        <option value="6-20" className="bg-[#0F1115]">6-20 pessoas</option>
-                        <option value="21-50" className="bg-[#0F1115]">21-50 pessoas</option>
-                        <option value="50+" className="bg-[#0F1115]">50+ pessoas</option>
+                        <option value="" className="bg-background">Selecione...</option>
+                        <option value="1-5" className="bg-background">1-5 pessoas</option>
+                        <option value="6-20" className="bg-background">6-20 pessoas</option>
+                        <option value="21-50" className="bg-background">21-50 pessoas</option>
+                        <option value="50+" className="bg-background">50+ pessoas</option>
                       </select>
                     </div>
                   </div>
                   <div className="space-y-2">
-                    <label className="text-sm font-medium text-gray-300">Seu Cargo</label>
+                    <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Seu Cargo</label>
                     <Input
-                      className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                      className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                       placeholder="Ex: Sócio, Advogado Sênior, Diretor..."
                       value={role}
                       onChange={(e) => setRole(e.target.value)}
@@ -308,9 +312,9 @@ export default function RegisterPage() {
               )}
 
               <div className="space-y-2">
-                <label className="text-sm font-medium text-gray-300">Email Profissional</label>
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Email Profissional</label>
                 <Input
-                  className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                  className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                   type="email"
                   placeholder="seu@email.com"
                   value={email}
@@ -322,9 +326,9 @@ export default function RegisterPage() {
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-gray-300">Senha</label>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Senha</label>
                   <Input
-                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                    className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                     type="password"
                     placeholder="••••••••"
                     value={password}
@@ -334,9 +338,9 @@ export default function RegisterPage() {
                   />
                 </div>
                 <div className="space-y-2">
-                  <label className="text-sm font-medium text-gray-300">Confirmar</label>
+                  <label className="text-sm font-medium text-slate-700 dark:text-slate-200">Confirmar</label>
                   <Input
-                    className="bg-white/5 border-white/10 text-white placeholder:text-gray-600 focus:border-indigo-400 focus:ring-2 focus:ring-indigo-500/30 transition-all duration-300"
+                    className="text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition-all duration-300"
                     type="password"
                     placeholder="••••••••"
                     value={confirmPassword}
@@ -347,7 +351,7 @@ export default function RegisterPage() {
                 </div>
               </div>
 
-              <Button type="submit" className="w-full bg-indigo-600 hover:bg-indigo-700 text-white" disabled={isLoading}>
+              <Button type="submit" className="w-full" disabled={isLoading}>
                 {isLoading ? 'Criando conta...' : 'Finalizar Cadastro'}
               </Button>
             </form>

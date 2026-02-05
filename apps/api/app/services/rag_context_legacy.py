@@ -369,12 +369,16 @@ async def build_rag_context(
     graphs = []
     graph_by_scope = {}
     use_tenant_graph = os.getenv("RAG_GRAPH_TENANT_SCOPED", "false").lower() in ("1", "true", "yes", "on")
+    include_private = True
+    if isinstance(filters, dict):
+        include_private = bool(filters.get("include_private", True))
     if graph_rag_enabled and not neo4j_only:
         private_scope_id = tenant_id if use_tenant_graph else None
-        private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
-        if private_graph:
-            graphs.append(("private", private_scope_id, private_graph))
-            graph_by_scope[("private", private_scope_id)] = private_graph
+        if include_private:
+            private_graph = get_scoped_knowledge_graph(scope="private", scope_id=private_scope_id)
+            if private_graph:
+                graphs.append(("private", private_scope_id, private_graph))
+                graph_by_scope[("private", private_scope_id)] = private_graph
         if allow_global_scope:
             global_graph = get_scoped_knowledge_graph(scope="global", scope_id=None)
             if global_graph:
@@ -414,7 +418,7 @@ async def build_rag_context(
                         allowed_scopes: List[str] = []
                         if allow_global_scope:
                             allowed_scopes.append("global")
-                        if tenant_id:
+                        if include_private and tenant_id:
                             allowed_scopes.append("private")
                         if allow_group_scope and scope_groups:
                             allowed_scopes.append("group")

@@ -6,10 +6,13 @@
 
 import { chromium, type Browser, type BrowserContext, type Page, type Locator, type FrameLocator } from 'playwright';
 import { SEI_SELECTORS } from './selectors.js';
-import type { SEIConfig, CreateDocumentOptions, ForwardOptions } from '../types.js';
+import type { SEIConfig, CreateDocumentOptions, ForwardOptions, ResilienceConfig } from '../types.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { failFast, resolveResilienceConfig } from '../core/resilience.js';
+import { SelectorStore } from '../core/selector-store.js';
+import { createAgentFallback, type AgentFallbackClient, type SelectorDescription } from '../core/agent-fallback.js';
 
 export interface BrowserClientOptions {
   headless?: boolean;
@@ -43,8 +46,18 @@ export class SEIBrowserClient {
   /** Endpoint CDP para reconexão */
   private cdpEndpoint: string | null = null;
 
+  /** Resiliência */
+  private resilience: Required<ResilienceConfig>;
+  private selectorStore: SelectorStore;
+  private agentFallback: AgentFallbackClient | null = null;
+
   constructor(config: SEIConfig) {
     this.config = config;
+    this.resilience = resolveResilienceConfig(config.resilience);
+    this.selectorStore = new SelectorStore();
+    if (config.agentFallback) {
+      this.agentFallback = createAgentFallback(config.agentFallback);
+    }
   }
 
   /** URL base do SEI */
@@ -386,198 +399,491 @@ export class SEIBrowserClient {
   }
 
   // ============================================
-  // Smart Helpers (ARIA primeiro, CSS fallback)
+  // Smart Helpers (ARIA primeiro, CSS fallback, Self-Healing)
   // ============================================
 
-  /** Clica em elemento: tenta ARIA primeiro, fallback CSS */
+  /**
+   * Gera chave para o selector store.
+   */
+  private getSelectorKey(role: string, name: string | RegExp | undefined, context?: string): string {
+    const nameStr = name instanceof RegExp ? name.source : (name ?? 'unknown');
+    return `sei|${context ?? 'default'}|${role}:${nameStr}`;
+  }
+
+  /**
+   * Tenta executar ação via CSS selector no target (Page ou FrameLocator).
+   */
+  private async executeCssAction<T>(
+    target: Page | FrameLocator,
+    cssSelector: string,
+    action: (locator: Locator) => Promise<T>,
+  ): Promise<T> {
+    const locator = 'locator' in target
+      ? (target as Page).locator(cssSelector)
+      : (target as FrameLocator).locator(cssSelector);
+    return await action(locator.first());
+  }
+
+  /**
+   * Tenta agent fallback para descobrir seletor.
+   * Só funciona com target = Page (não FrameLocator).
+   */
+  private async tryAgentFallback(
+    target: Page | FrameLocator,
+    aria: { role: string; name?: RegExp | string },
+    cssFallback?: string,
+  ): Promise<string | null> {
+    if (!this.agentFallback) return null;
+    // Agent só funciona com Page (precisa de screenshot)
+    if (!('screenshot' in target)) return null;
+
+    const page = target as Page;
+    const nameStr = aria.name instanceof RegExp ? aria.name.source : (aria.name ?? '');
+    const description = `${aria.role} com texto "${nameStr}"`;
+    const original: SelectorDescription = {
+      role: aria.role,
+      name: aria.name ?? '',
+      cssFallback,
+    };
+
+    return await this.agentFallback.askForSelector(page, description, 'sei', original);
+  }
+
+  /** Clica em elemento: ARIA → CSS → Store → Agent */
   private async clickSmart(
     target: Page | FrameLocator,
     aria: { role: 'button' | 'link' | 'checkbox' | 'radio' | 'menuitem' | 'tab'; name: RegExp },
     cssFallback?: string
   ): Promise<void> {
+    const t = this.resilience.failFastTimeout;
+    const storeKey = this.getSelectorKey(aria.role, aria.name);
+
+    // 1. ARIA (fail-fast)
     try {
-      await target.getByRole(aria.role, { name: aria.name }).first().click();
+      await failFast(
+        () => target.getByRole(aria.role, { name: aria.name }).first().click(),
+        t,
+      );
+      this.selectorStore.recordSuccess(storeKey);
+      return;
     } catch {
-      if (cssFallback) {
-        if ('click' in target) {
-          await (target as Page).click(cssFallback);
-        } else {
-          await (target as FrameLocator).locator(cssFallback).first().click();
-        }
-      } else {
-        throw new Error(`Elemento não encontrado: ${aria.role} "${aria.name}"`);
+      // continua
+    }
+
+    // 2. CSS fallback (fail-fast)
+    if (cssFallback) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cssFallback, (loc) => loc.click()),
+          t,
+        );
+        return;
+      } catch {
+        // continua
       }
     }
+
+    // 3. Self-healing store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cached, (loc) => loc.click()),
+          t,
+        );
+        this.selectorStore.recordSuccess(storeKey);
+        console.log(`[SELF-HEALING] Usando seletor do cache: ${cached}`);
+        return;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent fallback
+    const discovered = await this.tryAgentFallback(target, aria, cssFallback);
+    if (discovered) {
+      try {
+        await this.executeCssAction(target, discovered, (loc) => loc.click());
+        this.selectorStore.set(storeKey, discovered);
+        console.log(`[SELF-HEALING] Novo seletor descoberto: ${discovered}`);
+        return;
+      } catch {
+        // falhou
+      }
+    }
+
+    throw new Error(`Elemento não encontrado: ${aria.role} "${aria.name}"`);
   }
 
-  /** Preenche campo: tenta ARIA primeiro, fallback CSS */
+  /** Preenche campo: ARIA → CSS → Store → Agent */
   private async fillSmart(
     target: Page | FrameLocator,
     aria: { role?: 'textbox' | 'combobox' | 'searchbox'; name?: RegExp; nth?: number },
     value: string,
     cssFallback?: string
   ): Promise<void> {
+    const t = this.resilience.failFastTimeout;
+    const storeKey = this.getSelectorKey(aria.role ?? 'textbox', aria.name);
+
+    // 1. ARIA (fail-fast)
     try {
-      let locator: Locator;
-      if (aria.role && aria.name) {
-        locator = target.getByRole(aria.role, { name: aria.name });
-      } else if (aria.role) {
-        locator = target.getByRole(aria.role);
-      } else {
-        throw new Error('role é obrigatório');
-      }
-
-      if (aria.nth !== undefined) {
-        locator = locator.nth(aria.nth);
-      } else {
-        locator = locator.first();
-      }
-
-      await locator.fill(value);
-    } catch {
-      if (cssFallback) {
-        if ('fill' in target) {
-          await (target as Page).fill(cssFallback, value);
+      await failFast(async () => {
+        let locator: Locator;
+        if (aria.role && aria.name) {
+          locator = target.getByRole(aria.role, { name: aria.name });
+        } else if (aria.role) {
+          locator = target.getByRole(aria.role);
         } else {
-          await (target as FrameLocator).locator(cssFallback).first().fill(value);
+          throw new Error('role é obrigatório');
         }
-      } else {
-        throw new Error(`Campo não encontrado: ${aria.role} "${aria.name}"`);
+
+        if (aria.nth !== undefined) {
+          locator = locator.nth(aria.nth);
+        } else {
+          locator = locator.first();
+        }
+
+        await locator.fill(value);
+      }, t);
+      this.selectorStore.recordSuccess(storeKey);
+      return;
+    } catch {
+      // continua
+    }
+
+    // 2. CSS fallback (fail-fast)
+    if (cssFallback) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cssFallback, (loc) => loc.fill(value)),
+          t,
+        );
+        return;
+      } catch {
+        // continua
       }
     }
+
+    // 3. Self-healing store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cached, (loc) => loc.fill(value)),
+          t,
+        );
+        this.selectorStore.recordSuccess(storeKey);
+        return;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent fallback
+    const discovered = await this.tryAgentFallback(target, { role: aria.role ?? 'textbox', name: aria.name }, cssFallback);
+    if (discovered) {
+      try {
+        await this.executeCssAction(target, discovered, (loc) => loc.fill(value));
+        this.selectorStore.set(storeKey, discovered);
+        console.log(`[SELF-HEALING] Novo seletor descoberto: ${discovered}`);
+        return;
+      } catch {
+        // falhou
+      }
+    }
+
+    throw new Error(`Campo não encontrado: ${aria.role} "${aria.name}"`);
   }
 
-  /** Seleciona opção: tenta ARIA primeiro, fallback CSS */
+  /** Seleciona opção: ARIA → CSS → Store → Agent */
   private async selectSmart(
     target: Page | FrameLocator,
     aria: { role?: 'combobox' | 'listbox'; name?: RegExp; nth?: number },
     value: string | { label: string },
     cssFallback?: string
   ): Promise<void> {
+    const t = this.resilience.failFastTimeout;
+    const storeKey = this.getSelectorKey(aria.role ?? 'combobox', aria.name);
+
+    // 1. ARIA (fail-fast)
     try {
-      let locator: Locator;
-      if (aria.role && aria.name) {
-        locator = target.getByRole(aria.role, { name: aria.name });
-      } else if (aria.role) {
-        locator = target.getByRole(aria.role);
-      } else {
-        throw new Error('role é obrigatório');
-      }
-
-      if (aria.nth !== undefined) {
-        locator = locator.nth(aria.nth);
-      } else {
-        locator = locator.first();
-      }
-
-      await locator.selectOption(value);
-    } catch {
-      if (cssFallback) {
-        if ('selectOption' in target) {
-          await (target as Page).selectOption(cssFallback, value);
+      await failFast(async () => {
+        let locator: Locator;
+        if (aria.role && aria.name) {
+          locator = target.getByRole(aria.role, { name: aria.name });
+        } else if (aria.role) {
+          locator = target.getByRole(aria.role);
         } else {
-          await (target as FrameLocator).locator(cssFallback).first().selectOption(value);
+          throw new Error('role é obrigatório');
         }
-      } else {
-        throw new Error(`Select não encontrado: ${aria.role} "${aria.name}"`);
+
+        if (aria.nth !== undefined) {
+          locator = locator.nth(aria.nth);
+        } else {
+          locator = locator.first();
+        }
+
+        await locator.selectOption(value);
+      }, t);
+      this.selectorStore.recordSuccess(storeKey);
+      return;
+    } catch {
+      // continua
+    }
+
+    // 2. CSS fallback
+    if (cssFallback) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cssFallback, (loc) => loc.selectOption(value)),
+          t,
+        );
+        return;
+      } catch {
+        // continua
       }
     }
+
+    // 3. Self-healing store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cached, (loc) => loc.selectOption(value)),
+          t,
+        );
+        this.selectorStore.recordSuccess(storeKey);
+        return;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent fallback
+    const discovered = await this.tryAgentFallback(target, { role: aria.role ?? 'combobox', name: aria.name }, cssFallback);
+    if (discovered) {
+      try {
+        await this.executeCssAction(target, discovered, (loc) => loc.selectOption(value));
+        this.selectorStore.set(storeKey, discovered);
+        return;
+      } catch {
+        // falhou
+      }
+    }
+
+    throw new Error(`Select não encontrado: ${aria.role} "${aria.name}"`);
   }
 
-  /** Marca checkbox/radio: tenta ARIA primeiro, fallback CSS */
+  /** Marca checkbox/radio: ARIA → CSS → Store → Agent */
   private async checkSmart(
     target: Page | FrameLocator,
     aria: { role: 'checkbox' | 'radio'; name: RegExp },
     cssFallback?: string
   ): Promise<void> {
+    const t = this.resilience.failFastTimeout;
+    const storeKey = this.getSelectorKey(aria.role, aria.name);
+
+    // 1. ARIA
     try {
-      await target.getByRole(aria.role, { name: aria.name }).first().check();
+      await failFast(
+        () => target.getByRole(aria.role, { name: aria.name }).first().check(),
+        t,
+      );
+      this.selectorStore.recordSuccess(storeKey);
+      return;
     } catch {
-      if (cssFallback) {
-        if ('check' in target) {
-          await (target as Page).check(cssFallback);
-        } else {
-          await (target as FrameLocator).locator(cssFallback).first().check();
-        }
-      } else {
-        throw new Error(`${aria.role} não encontrado: "${aria.name}"`);
+      // continua
+    }
+
+    // 2. CSS
+    if (cssFallback) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cssFallback, (loc) => loc.check()),
+          t,
+        );
+        return;
+      } catch {
+        // continua
       }
     }
+
+    // 3. Store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        await failFast(
+          () => this.executeCssAction(target, cached, (loc) => loc.check()),
+          t,
+        );
+        this.selectorStore.recordSuccess(storeKey);
+        return;
+      } catch {
+        // continua
+      }
+    }
+
+    // 4. Agent
+    const discovered = await this.tryAgentFallback(target, aria, cssFallback);
+    if (discovered) {
+      try {
+        await this.executeCssAction(target, discovered, (loc) => loc.check());
+        this.selectorStore.set(storeKey, discovered);
+        return;
+      } catch {
+        // falhou
+      }
+    }
+
+    throw new Error(`${aria.role} não encontrado: "${aria.name}"`);
   }
 
-  /** Aguarda elemento: tenta ARIA primeiro, fallback CSS */
+  /** Aguarda elemento: ARIA → CSS → Store */
   private async waitForSmart(
     target: Page | FrameLocator,
     aria: { role: string; name?: RegExp },
     cssFallback?: string,
     options?: { timeout?: number; state?: 'visible' | 'hidden' | 'attached' | 'detached' }
   ): Promise<void> {
+    const t = options?.timeout ?? this.resilience.failFastTimeout;
+    const state = options?.state ?? 'visible';
+    const storeKey = this.getSelectorKey(aria.role, aria.name);
+
+    // 1. ARIA
     try {
       const locator = aria.name
         ? target.getByRole(aria.role as any, { name: aria.name })
         : target.getByRole(aria.role as any);
-      await locator.first().waitFor({ timeout: options?.timeout ?? 5000, state: options?.state ?? 'visible' });
+      await failFast(() => locator.first().waitFor({ timeout: t, state }), t + 500);
+      this.selectorStore.recordSuccess(storeKey);
+      return;
     } catch {
-      if (cssFallback) {
-        const locator = 'locator' in target
-          ? (target as Page).locator(cssFallback)
-          : (target as FrameLocator).locator(cssFallback);
-        await locator.first().waitFor({ timeout: options?.timeout ?? 5000, state: options?.state ?? 'visible' });
-      } else {
-        throw new Error(`Elemento não encontrado: ${aria.role} "${aria.name}"`);
-      }
+      // continua
     }
+
+    // 2. CSS
+    if (cssFallback) {
+      const locator = 'locator' in target
+        ? (target as Page).locator(cssFallback)
+        : (target as FrameLocator).locator(cssFallback);
+      await locator.first().waitFor({ timeout: t, state });
+      return;
+    }
+
+    // 3. Store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      const locator = 'locator' in target
+        ? (target as Page).locator(cached)
+        : (target as FrameLocator).locator(cached);
+      await locator.first().waitFor({ timeout: t, state });
+      this.selectorStore.recordSuccess(storeKey);
+      return;
+    }
+
+    throw new Error(`Elemento não encontrado: ${aria.role} "${aria.name}"`);
   }
 
-  /** Obtém texto de elemento: tenta ARIA primeiro, fallback CSS */
+  /** Obtém texto de elemento: ARIA → CSS → Store */
   private async getTextSmart(
     target: Page | FrameLocator,
     aria: { role: string; name?: RegExp },
     cssFallback?: string
   ): Promise<string | null> {
+    const storeKey = this.getSelectorKey(aria.role, aria.name);
+
+    // 1. ARIA
     try {
       const locator = aria.name
         ? target.getByRole(aria.role as any, { name: aria.name })
         : target.getByRole(aria.role as any);
-      return await locator.first().textContent();
+      const text = await locator.first().textContent();
+      this.selectorStore.recordSuccess(storeKey);
+      return text;
     } catch {
-      if (cssFallback) {
+      // continua
+    }
+
+    // 2. CSS
+    if (cssFallback) {
+      try {
         const locator = 'locator' in target
           ? (target as Page).locator(cssFallback)
           : (target as FrameLocator).locator(cssFallback);
         return await locator.first().textContent();
+      } catch {
+        // continua
       }
-      return null;
     }
+
+    // 3. Store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        const locator = 'locator' in target
+          ? (target as Page).locator(cached)
+          : (target as FrameLocator).locator(cached);
+        const text = await locator.first().textContent();
+        this.selectorStore.recordSuccess(storeKey);
+        return text;
+      } catch {
+        // continua
+      }
+    }
+
+    return null;
   }
 
-  /** Verifica se elemento existe: tenta ARIA primeiro, fallback CSS */
+  /** Verifica se elemento existe: ARIA → CSS → Store */
   private async existsSmart(
     target: Page | FrameLocator,
     aria: { role: string; name?: RegExp },
     cssFallback?: string,
     timeout = 2000
   ): Promise<boolean> {
+    const storeKey = this.getSelectorKey(aria.role, aria.name);
+
+    // 1. ARIA
     try {
       const locator = aria.name
         ? target.getByRole(aria.role as any, { name: aria.name })
         : target.getByRole(aria.role as any);
       await locator.first().waitFor({ timeout, state: 'visible' });
+      this.selectorStore.recordSuccess(storeKey);
       return true;
     } catch {
-      if (cssFallback) {
-        try {
-          const locator = 'locator' in target
-            ? (target as Page).locator(cssFallback)
-            : (target as FrameLocator).locator(cssFallback);
-          await locator.first().waitFor({ timeout, state: 'visible' });
-          return true;
-        } catch {
-          return false;
-        }
-      }
-      return false;
+      // continua
     }
+
+    // 2. CSS
+    if (cssFallback) {
+      try {
+        const locator = 'locator' in target
+          ? (target as Page).locator(cssFallback)
+          : (target as FrameLocator).locator(cssFallback);
+        await locator.first().waitFor({ timeout, state: 'visible' });
+        return true;
+      } catch {
+        // continua
+      }
+    }
+
+    // 3. Store
+    const cached = this.selectorStore.get(storeKey);
+    if (cached) {
+      try {
+        const locator = 'locator' in target
+          ? (target as Page).locator(cached)
+          : (target as FrameLocator).locator(cached);
+        await locator.first().waitFor({ timeout, state: 'visible' });
+        this.selectorStore.recordSuccess(storeKey);
+        return true;
+      } catch {
+        // continua
+      }
+    }
+
+    return false;
   }
 
   // ============================================

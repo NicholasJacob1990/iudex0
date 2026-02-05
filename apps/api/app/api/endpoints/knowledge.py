@@ -1,13 +1,26 @@
 """
-Endpoints de conhecimento (legislação, jurisprudência, web)
+Endpoints de conhecimento (legislação, jurisprudência, web, verificação de citações)
 Retornam resultados mockados para demonstração funcional.
 """
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
+
 from app.core.security import get_current_user
 from app.services.legislation_service import legislation_service
 from app.services.jurisprudence_service import jurisprudence_service
 from app.services.web_search_service import web_search_service
+from app.services.jurisprudence_verifier import (
+    jurisprudence_verifier,
+    ExtractedCitation,
+)
+from app.schemas.citation_verification import (
+    VerifyCitationsRequest,
+    VerifyCitationsResponse,
+    ShepardizeRequest,
+    ShepardizeResponse,
+    CitationVerificationItem,
+)
 import hashlib
 
 router = APIRouter()
@@ -161,3 +174,130 @@ async def search_web(
         "source": payload.get("source"),
         "cached": payload.get("cached", False),
     }
+
+
+# ---------------------------------------------------------------------------
+# Verificação de Citações / Shepardização BR
+# ---------------------------------------------------------------------------
+
+
+@router.post("/verify-citations", response_model=VerifyCitationsResponse)
+async def verify_citations(
+    request: VerifyCitationsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Verifica vigência de citações jurídicas (Shepardização BR).
+
+    Aceita texto livre (extrai citações automaticamente) ou lista explícita de citações.
+    Retorna status de cada citação: vigente, superada, revogada, alterada, inconstitucional.
+    """
+    if not request.text and not request.citations:
+        raise HTTPException(
+            status_code=422,
+            detail="Informe 'text' (texto jurídico) ou 'citations' (lista de citações).",
+        )
+
+    try:
+        if request.text:
+            # Extrai e verifica citações do texto
+            report = await jurisprudence_verifier.verify_text(
+                text=request.text,
+                use_llm_extraction=request.use_llm_extraction,
+                use_cache=request.use_cache,
+            )
+        else:
+            # Verifica lista explícita de citações
+            extracted = [
+                ExtractedCitation(
+                    text=c,
+                    citation_type="outro",
+                    normalized=c,
+                )
+                for c in (request.citations or [])
+            ]
+            results = await jurisprudence_verifier.verify_citations(
+                extracted,
+                use_cache=request.use_cache,
+            )
+
+            vigentes = sum(1 for r in results if r.status == "vigente")
+            problematic = sum(
+                1 for r in results
+                if r.status in ("superada", "revogada", "alterada", "inconstitucional")
+            )
+            nao_verificadas = sum(1 for r in results if r.status == "nao_verificada")
+            from datetime import datetime, timezone
+
+            report_data = {
+                "total_citations": len(results),
+                "verified": len(results) - nao_verificadas,
+                "vigentes": vigentes,
+                "problematic": problematic,
+                "citations": [r.model_dump() for r in results],
+                "summary": (
+                    f"Total: {len(results)}. Vigentes: {vigentes}. "
+                    + (f"Problemas: {problematic}." if problematic else "")
+                ),
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            return VerifyCitationsResponse(**report_data)
+
+        return VerifyCitationsResponse(**report.model_dump())
+
+    except Exception as e:
+        logger.error(f"Erro em verify-citations: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/shepardize", response_model=ShepardizeResponse)
+async def shepardize_document(
+    request: ShepardizeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Shepardização completa de um documento.
+
+    Busca o documento pelo ID, extrai todas as citações e verifica vigência de cada uma.
+    Retorna relatório completo.
+    """
+    from sqlalchemy import select
+    from app.core.database import AsyncSessionLocal
+    from app.models.document import Document
+
+    try:
+        # Buscar documento no banco
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(Document).where(Document.id == request.document_id)
+            )
+            document = result.scalar_one_or_none()
+
+        if not document:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Documento '{request.document_id}' não encontrado.",
+            )
+
+        # Obter texto do documento
+        doc_text = document.extracted_text or document.content or ""
+        if not doc_text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="Documento não possui conteúdo textual extraído.",
+            )
+
+        # Shepardizar
+        report = await jurisprudence_verifier.shepardize_document(
+            document_id=request.document_id,
+            document_text=doc_text,
+            use_cache=request.use_cache,
+        )
+
+        return ShepardizeResponse(**report.model_dump())
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Erro em shepardize: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

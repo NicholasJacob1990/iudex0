@@ -4,31 +4,78 @@ Importa conteúdo de URLs externas
 """
 
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
+import ipaddress
+
 from loguru import logger
 import httpx
 from bs4 import BeautifulSoup
 import re
 
 
+def _is_url_safe(url: str) -> tuple[bool, str]:
+    """
+    Valida se a URL é segura para requisição (anti-SSRF).
+    Bloqueia IPs privados, loopback, link-local e hostnames internos.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return False, "URL vazia."
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False, "URL inválida."
+
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False, "URL deve começar com http:// ou https://"
+
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False, "Host inválido."
+
+    # Bloquear hostnames internos conhecidos
+    blocked_hosts = {"localhost", "metadata.google.internal", "169.254.169.254"}
+    if host in blocked_hosts:
+        return False, "Host não permitido."
+
+    # Bloquear IPs privados/loopback/link-local/reservados
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False, "Host/IP não permitido."
+    except ValueError:
+        # host não é IP; verificar se termina com sufixos internos
+        if host.endswith(".local") or host.endswith(".internal"):
+            return False, "Host não permitido."
+
+    return True, ""
+
+
 class URLScraperService:
     """Serviço para scraping de URLs"""
-    
+
     def __init__(self):
         self.timeout = 30.0
         self.headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
         logger.info("URLScraperService inicializado")
-    
+
     async def extract_content_from_url(self, url: str) -> Dict[str, Any]:
         """
         Extrai conteúdo de uma URL
-        
+
         Returns:
             Dicionário com título, texto extraído, metadata
         """
+        # Validação anti-SSRF
+        safe, reason = _is_url_safe(url)
+        if not safe:
+            logger.warning(f"URL bloqueada por política SSRF: {url} — {reason}")
+            return {"error": reason, "url": url}
+
         logger.info(f"Importando conteúdo de: {url}")
-        
+
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.get(url, headers=self.headers, follow_redirects=True)

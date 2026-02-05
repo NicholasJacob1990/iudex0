@@ -3,6 +3,9 @@
 import React from 'react';
 import { Button } from '@/components/ui/button';
 import Link from 'next/link';
+import { PaintBackground } from '@/components/ui/paint-background';
+
+type WorkletName = 'verbium-particles' | 'nebula-flow' | 'grid-pulse' | 'wave-field';
 
 interface PageHeroProps {
     badge?: string;
@@ -12,6 +15,12 @@ interface PageHeroProps {
     primaryCtaLink: string;
     secondaryCtaText?: string;
     secondaryCtaLink?: string;
+    /** Paint worklet to use as background. Defaults to nebula-flow. */
+    worklet?: WorkletName;
+    /** Custom color for the worklet (hex). */
+    workletColor?: string;
+    /** Seed for the worklet randomness. */
+    workletSeed?: number;
 }
 
 export function PageHero({
@@ -21,14 +30,20 @@ export function PageHero({
     primaryCtaText,
     primaryCtaLink,
     secondaryCtaText,
-    secondaryCtaLink
+    secondaryCtaLink,
+    worklet = 'nebula-flow',
+    workletColor,
+    workletSeed,
 }: PageHeroProps) {
     return (
         <section className="relative min-h-[60dvh] flex items-center justify-center overflow-hidden bg-slate-50 dark:bg-[#0a0a0c] text-slate-900 dark:text-white snap-start pt-20">
+            {/* Paint Worklet Background */}
+            <PaintBackground worklet={worklet} color={workletColor} seed={workletSeed} />
+
             {/* Background Effects */}
-            <div className="absolute inset-0 pointer-events-none">
-                <div className="absolute inset-0 opacity-[0.06] bg-dotted-grid [background-size:24px_24px]" />
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-indigo-500/10 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
+            <div className="absolute inset-0 z-[1] pointer-events-none">
+                <div className="absolute inset-0 opacity-[0.04] bg-dotted-grid [background-size:24px_24px]" />
+                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-indigo-500/8 blur-[120px] rounded-full mix-blend-screen pointer-events-none" />
             </div>
 
             <div className="container relative z-10 px-6 mx-auto text-center">
@@ -39,7 +54,7 @@ export function PageHero({
                         </div>
                     )}
 
-                    <h1 className="text-4xl md:text-6xl font-bold tracking-tight mb-8 max-w-4xl mx-auto leading-tight text-slate-900 dark:text-white">
+                    <h1 className="text-[2.5rem] md:text-[3.5rem] lg:text-[5rem] font-bold heading-section mb-8 max-w-4xl mx-auto text-slate-900 dark:text-white">
                         {title}
                     </h1>
 

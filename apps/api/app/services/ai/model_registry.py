@@ -204,10 +204,9 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_juridico=True,
         default=False,
         icon="anthropic.svg",
-        # Allow overriding the concrete provider model id via env.
         api_model=os.getenv("CLAUDE_4_5_OPUS_API_MODEL", "claude-opus-4-5"),
-        thinking_category="xml",  # Opus uses XML parsing
-        max_output_tokens=8192,
+        thinking_category="native",  # Opus 4.5 supports native extended thinking
+        max_output_tokens=64_000,
     ),
     "claude-4.5-sonnet": ModelConfig(
         id="claude-4.5-sonnet",
@@ -217,15 +216,14 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         context_window=200_000,
         latency_tier="medium",
         cost_tier="medium",
-        capabilities=["chat", "code", "analysis"],
+        capabilities=["chat", "code", "analysis", "agents"],
         for_agents=True,
         for_juridico=True,
         default=True,
         icon="anthropic.svg",
-        # Allow overriding the concrete provider model id via env.
         api_model=os.getenv("CLAUDE_4_5_SONNET_API_MODEL", "claude-sonnet-4-5"),
         thinking_category="native",  # Extended Thinking via API
-        max_output_tokens=8192,
+        max_output_tokens=64_000,
     ),
     "claude-4.5-haiku": ModelConfig(
         id="claude-4.5-haiku",
@@ -235,14 +233,15 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         context_window=200_000,
         latency_tier="low",
         cost_tier="low",
-        capabilities=["chat", "high_volume"],
-        for_agents=False,
+        capabilities=["chat", "code", "high_volume", "agents"],
+        for_agents=True,
         for_juridico=True,
         default=False,
         icon="anthropic.svg",
         # Allow overriding the concrete provider model id via env.
         api_model=os.getenv("CLAUDE_4_5_HAIKU_API_MODEL", "claude-haiku-4-5"),
-        thinking_category="agent",  # Light model: use agent-based
+        thinking_category="native",  # Haiku 4.5 supports extended thinking natively
+        max_output_tokens=64_000,
     ),
 
     # ---------- GEMINI ----------
@@ -294,6 +293,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="gemini.svg",
         api_model=os.getenv("GEMINI_2_5_PRO_API_MODEL", "gemini-2.5-pro"),
+        thinking_category="native",  # Gemini 2.5+ supports native include_thoughts
+        max_output_tokens=8192,
     ),
     "gemini-2.5-flash": ModelConfig(
         id="gemini-2.5-flash",
@@ -309,6 +310,8 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="gemini.svg",
         api_model=os.getenv("GEMINI_2_5_FLASH_API_MODEL", "gemini-2.5-flash"),
+        thinking_category="native",  # Gemini 2.5+ supports native include_thoughts
+        max_output_tokens=8192,
     ),
 
     # ---------- OPENROUTER / META ----------
@@ -491,7 +494,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_agents=True,
         for_juridico=True,
         icon="gemini.svg",
-        api_model="gemini-2.0-flash-exp",
+        api_model=os.getenv("GOOGLE_AGENT_API_MODEL", "gemini-3-flash-preview"),
         thinking_category="native",
         max_output_tokens=8192,
     ),
@@ -609,15 +612,46 @@ def list_available_models(for_juridico: bool = False, for_agents: bool = False) 
         })
     return models
 
-def pick_model_for_job(purpose: str = "juridico", fast: bool = False, cheap: bool = False) -> Optional[str]:
+def pick_model_for_job(
+    purpose: str = "juridico",
+    fast: bool = False,
+    cheap: bool = False,
+    task: Optional[str] = None,
+) -> Optional[str]:
     """
     Pick a model based on purpose and constraints.
-    
+
+    When *task* is provided (e.g. "drafting", "research"), delegates to the
+    intelligent ModelRouter for task-specific selection. Falls back to the
+    legacy heuristic when no task is given, preserving backward compatibility.
+
     Args:
         purpose: 'juridico' or 'agents'
         fast: Prefer low latency
         cheap: Prefer low cost
+        task: Optional task category for intelligent routing (see model_router.TaskCategory)
     """
+    # --- Intelligent routing when task is specified ---
+    if task:
+        try:
+            from app.services.ai.model_router import model_router, RouteRequest, TaskCategory
+            task_enum = TaskCategory(task)
+            req = RouteRequest(task=task_enum, prefer_fast=fast, prefer_cheap=cheap)
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            if loop and loop.is_running():
+                # Already in an event loop — use sync fallback
+                result = model_router.route_sync(task_enum)
+            else:
+                result = asyncio.run(model_router.route(req))
+            return result.model_id
+        except (ValueError, ImportError):
+            pass  # Fall through to legacy heuristic
+
+    # --- Legacy heuristic ---
     candidates = []
     for mid, cfg in MODEL_REGISTRY.items():
         if purpose == "juridico" and not cfg.for_juridico:
@@ -625,17 +659,17 @@ def pick_model_for_job(purpose: str = "juridico", fast: bool = False, cheap: boo
         if purpose == "agents" and not cfg.for_agents:
             continue
         candidates.append((mid, cfg))
-    
+
     if fast:
         candidates = [(m, c) for m, c in candidates if c.latency_tier in ("low", "medium")]
     if cheap:
         candidates = [(m, c) for m, c in candidates if c.cost_tier in ("low", "medium")]
-    
+
     # Prioritize defaults
     for mid, cfg in candidates:
         if cfg.default:
             return mid
-    
+
     return candidates[0][0] if candidates else None
 
 # Default models for different use cases

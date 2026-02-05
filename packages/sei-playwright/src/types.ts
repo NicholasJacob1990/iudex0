@@ -216,6 +216,39 @@ export interface DocumentoBloco {
 }
 
 // ============================================
+// Resiliência e Self-Healing
+// ============================================
+
+export interface ResilienceConfig {
+  /** Timeout curto para fail-fast antes de tentar próximo método (ms) */
+  failFastTimeout?: number;
+  /** Número máximo de retries para erros transitórios */
+  maxRetries?: number;
+  /** Backoff base entre retries (ms), cresce exponencialmente */
+  retryBackoff?: number;
+  /** Execução especulativa: roda script e agent em paralelo */
+  speculative?: boolean;
+}
+
+export interface AgentFallbackConfig {
+  /** Ativa agent fallback via Claude API */
+  enabled?: boolean;
+  /** Anthropic API key (ou usa ANTHROPIC_API_KEY do env) */
+  apiKey?: string;
+  /** Modelo a usar */
+  model?: string;
+  /** Max tokens na resposta */
+  maxTokens?: number;
+}
+
+export interface SelectorStoreEntry {
+  discoveredSelector: string;
+  discoveredAt: string;
+  successCount: number;
+  lastSuccess: string;
+}
+
+// ============================================
 // Configuração do Cliente
 // ============================================
 
@@ -267,6 +300,12 @@ export interface SEIConfig {
     /** Manter navegador aberto após close() - útil para sessões longas */
     keepAlive?: boolean;
   };
+
+  /** Configuração de resiliência (fail-fast, retry, speculative) */
+  resilience?: ResilienceConfig;
+
+  /** Configuração de agent fallback (Claude API) para self-healing */
+  agentFallback?: AgentFallbackConfig;
 }
 
 /** Opções para criação de processo */

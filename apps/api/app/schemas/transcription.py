@@ -1,5 +1,14 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal
+
+# Áreas de conhecimento suportadas para keyterms
+AreaType = Literal["juridico", "medicina", "ti", "engenharia", "financeiro", "geral"]
+
+# Motor de transcrição
+TranscriptionEngineType = Literal["whisper", "assemblyai"]
+
+# Tipos de identificação de falantes (AssemblyAI Speaker Identification)
+SpeakerIdentificationType = Literal["name", "role"]
 
 class TranscriptionRequest(BaseModel):
     """Schema para requisição de transcrição via MLX Vomo"""
@@ -7,6 +16,27 @@ class TranscriptionRequest(BaseModel):
     thinking_level: str = Field(default="medium", pattern="^(none|minimal|low|medium|high|xhigh)$", description="Nível de pensamento (thinking budget)")
     custom_prompt: Optional[str] = Field(None, description="Prompt customizado para sobrescrever o padrão")
     model_selection: str = Field(default="gemini-3-flash-preview", description="Modelo LLM para formatação")
+    transcription_engine: TranscriptionEngineType = Field(default="whisper", description="Motor de transcrição: whisper (local) ou assemblyai (nuvem)")
+    high_accuracy: bool = Field(default=False, description="Usa Beam Search para Whisper (mais lento, melhor para termos complexos)")
+    # Novos campos para melhorar transcrição bruta (ASR)
+    area: Optional[AreaType] = Field(
+        default=None,
+        description="Área de conhecimento: juridico, medicina, ti, engenharia, financeiro, geral. Melhora reconhecimento de termos técnicos."
+    )
+    custom_keyterms: Optional[list[str]] = Field(
+        default=None,
+        description="Lista de termos específicos (nomes, siglas, termos técnicos) para melhorar reconhecimento. Max 100 termos.",
+        max_length=100
+    )
+    # Speaker Identification (AssemblyAI)
+    speaker_id_type: Optional[SpeakerIdentificationType] = Field(
+        default=None,
+        description="Tipo de identificação de falantes: 'name' para nomes reais, 'role' para papéis (ex: Juiz, Advogado). Requer speaker_id_values."
+    )
+    speaker_id_values: Optional[list[str]] = Field(
+        default=None,
+        description="Lista de nomes ou papéis para identificar os falantes. Max 35 caracteres cada. Ex: ['Juiz', 'Advogado da Defesa', 'Promotor']"
+    )
 
 
 class HearingTranscriptionRequest(BaseModel):
@@ -33,6 +63,25 @@ class HearingTranscriptionRequest(BaseModel):
     skip_legal_audit: bool = Field(default=False, description="Pula auditoria jurídica")
     skip_fidelity_audit: bool = Field(default=False, description="Pula auditoria preventiva de fidelidade")
     skip_sources_audit: bool = Field(default=False, description="Pula auditoria de fontes integrada")
+    # Novos campos para melhorar transcrição bruta (ASR)
+    area: Optional[AreaType] = Field(
+        default=None,
+        description="Área de conhecimento: juridico, medicina, ti, engenharia, financeiro, geral. Default: juridico para AUDIENCIA/DEPOIMENTO."
+    )
+    custom_keyterms: Optional[list[str]] = Field(
+        default=None,
+        description="Lista de termos específicos (nomes das partes, números de processo, etc.) para melhorar reconhecimento. Max 100 termos.",
+        max_length=100
+    )
+    # Speaker Identification (AssemblyAI)
+    speaker_id_type: Optional[SpeakerIdentificationType] = Field(
+        default=None,
+        description="Tipo de identificação de falantes: 'name' para nomes reais, 'role' para papéis (ex: Juiz, Advogado). Requer speaker_id_values."
+    )
+    speaker_id_values: Optional[list[str]] = Field(
+        default=None,
+        description="Lista de nomes ou papéis para identificar os falantes. Max 35 caracteres cada. Ex: ['Juiz', 'Advogado da Defesa', 'Promotor']"
+    )
 
 
 class HearingSpeakerUpdate(BaseModel):

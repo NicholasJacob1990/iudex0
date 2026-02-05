@@ -122,6 +122,10 @@ class OrganizationMember(Base):
         SQLEnum(OrgRole), default=OrgRole.ADVOGADO, nullable=False
     )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    workflow_role: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True, default=None,
+        doc="Workflow builder role: workflow_admin, workflow_builder, workflow_user"
+    )
     joined_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
     __table_args__ = (

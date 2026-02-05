@@ -21,6 +21,12 @@ from app.services.diagram_generator_service import DiagramGeneratorService
 
 diagram_generator_service = DiagramGeneratorService()
 
+def _int_env(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except Exception:
+        return int(default)
+
 
 async def _get_document(document_id: str) -> Document | None:
     async with AsyncSessionLocal() as session:
@@ -371,3 +377,176 @@ def generate_diagram_task(document_id: str, diagram_type: str = "flowchart"):
             )
         )
         return {"success": False, "document_id": document_id, "error": str(e)}
+
+
+@celery_app.task(
+    name="transcription_job",
+    bind=True,
+    max_retries=2,
+    default_retry_delay=60,
+    queue=os.getenv("IUDEX_CELERY_TRANSCRIPTION_QUEUE", "transcription"),
+    soft_time_limit=_int_env("IUDEX_CELERY_TRANSCRIPTION_SOFT_TIME_LIMIT_SECONDS", 21600),  # 6 horas
+    time_limit=_int_env("IUDEX_CELERY_TRANSCRIPTION_TIME_LIMIT_SECONDS", 22800),  # 6h20m (hard limit)
+)
+def transcription_job_task(
+    self,
+    job_id: str,
+    file_paths: list[str],
+    file_names: list[str],
+    config: dict,
+):
+    """
+    Task Celery para transcrição completa (APOSTILA, FIDELIDADE, etc).
+
+    Roda em worker separado, sobrevive a restarts do servidor web.
+    Suporta retry automático e checkpoints.
+    """
+    from app.services.transcription_service import TranscriptionService
+    from app.services.job_manager import job_manager
+    from app.services.api_call_tracker import job_context
+    from pathlib import Path
+    import json
+
+    logger.info(f"[CELERY] Iniciando transcrição job {job_id}, files={file_names}")
+
+    service = TranscriptionService()
+
+    def sync_on_progress(stage: str, progress: int, message: str):
+        """Callback síncrono para atualizar progresso."""
+        job_manager.update_transcription_job(
+            job_id,
+            status="running",
+            progress=progress,
+            stage=stage,
+            message=message,
+        )
+
+    async def async_on_progress(stage: str, progress: int, message: str):
+        """Wrapper async para o callback."""
+        sync_on_progress(stage, progress, message)
+
+    async def run_transcription():
+        """Executa a transcrição de forma assíncrona."""
+        mode = config.get("mode", "APOSTILA")
+
+        with job_context(job_id):
+            if len(file_paths) == 1:
+                result = await service.process_file_with_progress(
+                    file_path=file_paths[0],
+                    mode=mode,
+                    thinking_level=config.get("thinking_level", "medium"),
+                    custom_prompt=config.get("custom_prompt"),
+                    disable_tables=bool(config.get("disable_tables", False)),
+                    high_accuracy=config.get("high_accuracy", False),
+                    transcription_engine=config.get("transcription_engine", "whisper"),
+                    diarization=config.get("diarization"),
+                    diarization_strict=config.get("diarization_strict", False),
+                    on_progress=async_on_progress,
+                    model_selection=config.get("model_selection", "gemini-3-flash-preview"),
+                    use_cache=config.get("use_cache", True),
+                    auto_apply_fixes=config.get("auto_apply_fixes", True),
+                    auto_apply_content_fixes=config.get("auto_apply_content_fixes", False),
+                    skip_legal_audit=config.get("skip_legal_audit", False),
+                    skip_audit=config.get("skip_legal_audit", False),
+                    skip_fidelity_audit=config.get("skip_fidelity_audit", False),
+                    skip_sources_audit=config.get("skip_sources_audit", False),
+                    language=config.get("language", "pt"),
+                    output_language=config.get("output_language", ""),
+                    speaker_roles=config.get("speaker_roles"),
+                    speakers_expected=config.get("speakers_expected"),
+                    subtitle_format=config.get("subtitle_format"),
+                    area=config.get("area"),
+                    custom_keyterms=config.get("custom_keyterms"),
+                )
+            else:
+                result = await service.process_batch_with_progress(
+                    file_paths=file_paths,
+                    file_names=file_names,
+                    mode=mode,
+                    thinking_level=config.get("thinking_level", "medium"),
+                    custom_prompt=config.get("custom_prompt"),
+                    disable_tables=bool(config.get("disable_tables", False)),
+                    high_accuracy=config.get("high_accuracy", False),
+                    transcription_engine=config.get("transcription_engine", "whisper"),
+                    diarization=config.get("diarization"),
+                    diarization_strict=config.get("diarization_strict", False),
+                    model_selection=config.get("model_selection", "gemini-3-flash-preview"),
+                    on_progress=async_on_progress,
+                    use_cache=config.get("use_cache", True),
+                    auto_apply_fixes=config.get("auto_apply_fixes", True),
+                    auto_apply_content_fixes=config.get("auto_apply_content_fixes", False),
+                    skip_legal_audit=config.get("skip_legal_audit", False),
+                    skip_audit=config.get("skip_legal_audit", False),
+                    skip_fidelity_audit=config.get("skip_fidelity_audit", False),
+                    skip_sources_audit=config.get("skip_sources_audit", False),
+                    language=config.get("language", "pt"),
+                    output_language=config.get("output_language", ""),
+                )
+        return result
+
+    try:
+        job_manager.update_transcription_job(
+            job_id,
+            status="running",
+            progress=0,
+            stage="starting",
+            message="Iniciando processamento (Celery worker)",
+            celery_task_id=getattr(self.request, "id", None),
+        )
+
+        # Executa a transcrição
+        result = asyncio.run(run_transcription())
+
+        # Salva resultado
+        job_dir = Path(file_paths[0]).parent.parent
+        result_path = job_dir / "result.json"
+
+        # Prepara dados para salvar
+        mode = config.get("mode", "APOSTILA")
+        save_data = {
+            "mode": mode,
+            "file_names": file_names,
+            "content": result if isinstance(result, str) else result.get("content", ""),
+            "raw_content": result.get("raw_content") if isinstance(result, dict) else None,
+            "validation_report": result.get("validation_report") if isinstance(result, dict) else None,
+            "analysis_result": result.get("analysis_result") if isinstance(result, dict) else None,
+        }
+        result_path.write_text(json.dumps(save_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        job_manager.update_transcription_job(
+            job_id,
+            status="completed",
+            progress=100,
+            stage="complete",
+            message="Concluído",
+            result_path=str(result_path.resolve()),
+        )
+
+        logger.info(f"[CELERY] Transcrição {job_id} concluída com sucesso")
+        return {
+            "success": True,
+            "job_id": job_id,
+            "result_path": str(result_path),
+        }
+
+    except Exception as e:
+        logger.error(f"[CELERY] Erro na transcrição {job_id}: {e}")
+
+        # Tenta retry se não excedeu o limite
+        if self.request.retries < self.max_retries:
+            logger.info(f"[CELERY] Tentando retry {self.request.retries + 1}/{self.max_retries}")
+            raise self.retry(exc=e)
+
+        job_manager.update_transcription_job(
+            job_id,
+            status="error",
+            progress=100,
+            stage="error",
+            message=str(e),
+            error=str(e),
+        )
+        return {
+            "success": False,
+            "job_id": job_id,
+            "error": str(e),
+        }

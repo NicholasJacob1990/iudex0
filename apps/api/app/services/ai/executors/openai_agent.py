@@ -39,6 +39,10 @@ from app.services.ai.shared.sse_protocol import (
     thinking_event,
     done_event,
     error_event,
+    # Code Artifacts
+    artifact_start_event,
+    artifact_token_event,
+    artifact_done_event,
 )
 
 # OpenAI imports
@@ -68,7 +72,7 @@ except ImportError:
 HOSTED_TOOLS = {
     "file_search": {"type": "file_search"},  # Busca em vector stores
     "web_search": {"type": "web_search_preview"},  # Busca web (preview)
-    "code_interpreter": {"type": "code_interpreter"},  # Execução de código
+    "code_interpreter": {"type": "code_interpreter", "container": {"type": "auto"}},  # Execução de código (container reusável)
 }
 
 
@@ -90,10 +94,13 @@ MODEL_CONTEXT_WINDOWS = {
     "o1": 200_000,
     "o1-mini": 128_000,
     "o1-preview": 128_000,
-    # Modelos futuros
+    # GPT-5.x
     "gpt-5": 400_000,
     "gpt-5-mini": 400_000,
     "gpt-5.2": 400_000,
+    "gpt-5.2-instant": 400_000,
+    "gpt-5.2-pro": 400_000,
+    "gpt-5.2-codex": 400_000,
 }
 
 
@@ -115,7 +122,7 @@ class OpenAIAgentConfig(ExecutorConfig):
     # Hosted tools (OpenAI managed)
     enable_file_search: bool = False  # RAG via vector stores OpenAI
     enable_web_search: bool = False  # Web search (preview)
-    enable_code_interpreter: bool = False  # Code execution
+    enable_code_interpreter: bool = True  # Code execution
 
     # Responses API config
     vector_store_ids: List[str] = field(default_factory=list)  # Para file_search

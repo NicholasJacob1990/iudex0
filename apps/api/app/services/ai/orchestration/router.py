@@ -404,27 +404,73 @@ class OrchestrationRouter:
         try:
             # Import dinâmico para evitar circular imports
             from app.services.ai.claude_agent.executor import ClaudeAgentExecutor
+            from app.services.ai.shared import ToolExecutionContext
 
             executor = ClaudeAgentExecutor()
+
+            # Load unified tools (search_jurisprudencia, search_rag, etc.)
+            db_session = getattr(self, "db", None)
+            tenant_id = context.user_id or "anonymous"
+            if context.user_id and db_session:
+                try:
+                    from sqlalchemy import select
+                    from app.models.user import User
+
+                    res = await db_session.execute(
+                        select(User.organization_id).where(User.id == context.user_id)
+                    )
+                    org_id = res.scalar_one_or_none()
+                    if org_id:
+                        tenant_id = str(org_id)
+                except Exception as e:
+                    logger.debug(f"[{job_id}] tenant_id resolve failed: {e}")
+
+            tool_context = ToolExecutionContext(
+                user_id=context.user_id or "anonymous",
+                tenant_id=tenant_id,
+                case_id=(
+                    context.case_bundle.processo_id
+                    if context.case_bundle and hasattr(context.case_bundle, "processo_id")
+                    else None
+                ),
+                chat_id=context.chat_id,
+                job_id=job_id,
+                db_session=db_session,
+            )
+            executor.load_unified_tools(include_mcp=True, execution_context=tool_context)
 
             # Build system prompt jurídico
             system_prompt = self._build_legal_system_prompt(context)
 
-            # Executar agent
-            async for event in executor.execute(
+            # Build context string for the agent
+            context_parts = []
+            if context.rag_context:
+                context_parts.append(f"## Contexto RAG\n{context.rag_context}")
+            if context.template_structure:
+                context_parts.append(f"## Estrutura de Template\n{context.template_structure}")
+            if context.extra_instructions:
+                context_parts.append(f"## Instruções Adicionais\n{context.extra_instructions}")
+            context_str = "\n\n".join(context_parts) if context_parts else None
+
+            # Executar agent (method is 'run', not 'execute')
+            async for event in executor.run(
                 prompt=context.prompt,
                 system_prompt=system_prompt,
                 job_id=job_id,
-                context={
-                    "case_bundle": context.case_bundle,
-                    "rag_context": context.rag_context,
-                    "template_structure": context.template_structure,
-                    "conversation_history": context.conversation_history,
-                    "chat_personality": context.chat_personality,
-                    "reasoning_level": context.reasoning_level,
-                    "temperature": context.temperature,
-                    "web_search": context.web_search,
-                },
+                context=context_str,
+                initial_messages=(
+                    [{"role": m["role"], "content": m["content"]}
+                     for m in (context.conversation_history or [])
+                     if isinstance(m, dict) and "role" in m and "content" in m]
+                    or None
+                ),
+                user_id=context.user_id,
+                case_id=(
+                    context.case_bundle.processo_id
+                    if context.case_bundle and hasattr(context.case_bundle, "processo_id")
+                    else None
+                ),
+                db=getattr(self, 'db', None),
             ):
                 yield event
 
@@ -553,11 +599,29 @@ class OrchestrationRouter:
                 raise ImportError("OpenAI SDK not available")
 
             # Criar contexto de execução para tools
+            db_session = getattr(self, "db", None)
+            tenant_id = context.user_id or "anonymous"
+            if context.user_id and db_session:
+                try:
+                    from sqlalchemy import select
+                    from app.models.user import User
+
+                    res = await db_session.execute(
+                        select(User.organization_id).where(User.id == context.user_id)
+                    )
+                    org_id = res.scalar_one_or_none()
+                    if org_id:
+                        tenant_id = str(org_id)
+                except Exception as e:
+                    logger.debug(f"[{job_id}] tenant_id resolve failed: {e}")
+
             tool_context = ToolExecutionContext(
                 user_id=context.user_id or "anonymous",
+                tenant_id=tenant_id,
                 case_id=context.case_bundle.processo_id if context.case_bundle and hasattr(context.case_bundle, "processo_id") else None,
                 chat_id=context.chat_id,
                 job_id=job_id,
+                db_session=db_session,
             )
 
             # Configurar executor
@@ -566,6 +630,7 @@ class OrchestrationRouter:
                 temperature=context.temperature,
                 max_tokens=context.max_tokens,
                 max_iterations=30,
+                enable_code_interpreter=True,
             )
             executor = OpenAIAgentExecutor(config=config)
 
@@ -756,11 +821,29 @@ class OrchestrationRouter:
                 raise ImportError("Google GenAI/Vertex SDK not available")
 
             # Criar contexto de execução para tools
+            db_session = getattr(self, "db", None)
+            tenant_id = context.user_id or "anonymous"
+            if context.user_id and db_session:
+                try:
+                    from sqlalchemy import select
+                    from app.models.user import User
+
+                    res = await db_session.execute(
+                        select(User.organization_id).where(User.id == context.user_id)
+                    )
+                    org_id = res.scalar_one_or_none()
+                    if org_id:
+                        tenant_id = str(org_id)
+                except Exception as e:
+                    logger.debug(f"[{job_id}] tenant_id resolve failed: {e}")
+
             tool_context = ToolExecutionContext(
                 user_id=context.user_id or "anonymous",
+                tenant_id=tenant_id,
                 case_id=context.case_bundle.processo_id if context.case_bundle and hasattr(context.case_bundle, "processo_id") else None,
                 chat_id=context.chat_id,
                 job_id=job_id,
+                db_session=db_session,
             )
 
             # Configurar executor
@@ -771,6 +854,7 @@ class OrchestrationRouter:
                 max_iterations=30,
                 use_vertex=VERTEX_AVAILABLE,
                 use_adk=True,  # Preferir ADK se disponível
+                enable_code_execution=True,
             )
             executor = GoogleAgentExecutor(config=config)
 
@@ -1328,24 +1412,32 @@ Responda com uma análise estruturada.
         """
         personality = context.chat_personality.lower()
 
-        if personality == "geral":
-            base_prompt = """Você é um assistente inteligente e versátil.
+        interaction_rules = """
+REGRA DE INTERAÇÃO:
+- Para mensagens casuais (oi, olá, bom dia, obrigado, tudo bem), responda brevemente e de forma natural
+- NÃO gere templates, minutas ou peças jurídicas a menos que explicitamente solicitado
+- Adapte a extensão da resposta à complexidade da pergunta
+- Se a mensagem for uma saudação simples, cumprimente de volta e pergunte como pode ajudar
+"""
 
+        if personality == "geral":
+            base_prompt = f"""Você é um assistente inteligente e versátil.
+{interaction_rules}
 ESTILO:
 - Use linguagem clara e acessível
 - Seja direto e objetivo
 - Explique conceitos quando necessário
 - Adapte o tom ao contexto da pergunta"""
         else:
-            base_prompt = """Você é um especialista jurídico brasileiro altamente qualificado.
-
+            base_prompt = f"""Você é um especialista jurídico brasileiro altamente qualificado.
+{interaction_rules}
 FORMAÇÃO:
 - Especialista em Direito Brasileiro
 - Conhecimento profundo de legislação, jurisprudência e doutrina
 - Experiência em redação de peças processuais
 
 ESTILO:
-- Use linguagem técnica e formal
+- Use linguagem técnica e formal quando o assunto exigir
 - Estruture argumentos de forma clara e lógica
 - Cite fontes quando disponíveis
 - Siga as normas da ABNT para referências

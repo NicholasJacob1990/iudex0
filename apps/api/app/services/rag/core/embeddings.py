@@ -17,7 +17,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import openai
 from openai import OpenAI
@@ -236,13 +236,14 @@ class EmbeddingsService:
     """
     Production-ready embeddings service with caching.
 
-    Uses OpenAI embeddings by default, but supports a local SentenceTransformer
-    fallback for development and integration tests.
+    Supports multiple providers with automatic fallback:
+      - `voyage`: Voyage AI (voyage-law-2, voyage-3-large, etc.)
+      - `openai`: OpenAI (text-embedding-3-large)
+      - `local`: SentenceTransformer
+      - `auto` (default): voyage if VOYAGE_API_KEY, else openai if OPENAI_API_KEY, else local
 
-    Provider selection (env `RAG_EMBEDDINGS_PROVIDER`):
-      - `openai`: always use OpenAI (requires API key)
-      - `local`: always use SentenceTransformer
-      - `auto` (default): use OpenAI if key present, else local
+    Provider selection via env `RAG_EMBEDDINGS_PROVIDER`.
+
     Implements TTL caching for query embeddings and batch processing for ingestion.
     """
 
@@ -253,30 +254,43 @@ class EmbeddingsService:
         dimensions: Optional[int] = None,
         cache_ttl: Optional[int] = None,
         batch_size: Optional[int] = None,
+        provider: Optional[str] = None,
     ):
         """
         Initialize the embeddings service.
 
         Args:
-            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
+            api_key: API key (OpenAI or Voyage, defaults to env var)
             model: Embedding model name (defaults to config)
             dimensions: Embedding dimensions (defaults to config)
             cache_ttl: Cache TTL in seconds (defaults to config)
             batch_size: Batch size for bulk operations (defaults to config)
+            provider: Force a specific provider ("voyage", "openai", "local", "auto")
         """
         config = get_rag_config()
 
-        provider = (os.getenv("RAG_EMBEDDINGS_PROVIDER") or "auto").strip().lower()
-        if provider not in ("auto", "openai", "local"):
-            provider = "auto"
+        provider_str = (
+            provider
+            or os.getenv("RAG_EMBEDDINGS_PROVIDER", "auto")
+        ).strip().lower()
+        if provider_str not in ("auto", "openai", "local", "voyage"):
+            provider_str = "auto"
 
-        # Prefer explicit arg, then env, then whatever config provides.
+        # Check available keys
+        voyage_key = os.getenv("VOYAGE_API_KEY", "").strip()
+        has_voyage_key = bool(voyage_key)
         api_key = api_key if api_key is not None else (os.getenv("OPENAI_API_KEY") or None)
         has_openai_key = bool(api_key and str(api_key).strip())
-        if provider == "auto":
-            provider = "openai" if has_openai_key else "local"
 
-        self._provider = provider
+        if provider_str == "auto":
+            if has_voyage_key:
+                provider_str = "voyage"
+            elif has_openai_key:
+                provider_str = "openai"
+            else:
+                provider_str = "local"
+
+        self._provider = provider_str
 
         self._model = model or config.embedding_model
         self._dimensions = dimensions or config.embedding_dimensions
@@ -285,12 +299,37 @@ class EmbeddingsService:
 
         self._client: Optional[OpenAI] = None
         self._local_model: Optional["SentenceTransformer"] = None
+        self._voyage_provider: Optional[Any] = None
+
+        if self._provider == "voyage":
+            try:
+                from app.services.rag.voyage_embeddings import (
+                    VoyageEmbeddingsProvider,
+                    get_voyage_provider,
+                    MODEL_DIMENSIONS,
+                )
+
+                self._voyage_provider = get_voyage_provider()
+                # Ajustar dimensoes para o modelo Voyage
+                voyage_model = os.getenv("VOYAGE_DEFAULT_MODEL", "voyage-law-2")
+                self._model = voyage_model
+                self._dimensions = MODEL_DIMENSIONS.get(voyage_model, 1024)
+                logger.info(
+                    "EmbeddingsService: Voyage AI provider ativo (model=%s, dim=%d)",
+                    self._model,
+                    self._dimensions,
+                )
+            except Exception as e:
+                logger.warning(
+                    "Falha ao inicializar Voyage AI, fallback para OpenAI: %s", e
+                )
+                self._provider = "openai" if has_openai_key else "local"
 
         if self._provider == "openai":
             if not has_openai_key:
                 raise ValueError("RAG_EMBEDDINGS_PROVIDER=openai requires OPENAI_API_KEY")
             self._client = OpenAI(api_key=api_key)
-        else:
+        elif self._provider == "local":
             if SentenceTransformer is None:
                 raise ImportError(
                     "SentenceTransformer not available. Install: pip install sentence-transformers"
@@ -330,6 +369,32 @@ class EmbeddingsService:
             self._dimensions,
             cache_ttl_seconds,
         )
+
+    def _embed_voyage(self, texts: List[str], input_type: str = "document") -> List[List[float]]:
+        """Generate embeddings via Voyage AI provider."""
+        import asyncio
+
+        if self._voyage_provider is None:
+            raise RuntimeError("Voyage provider not initialized")
+
+        async def _run() -> List[List[float]]:
+            return await self._voyage_provider.embed_batch(
+                texts, input_type=input_type
+            )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is not None and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(asyncio.run, _run())
+                return future.result(timeout=120)
+        else:
+            return asyncio.run(_run())
 
     def _adapt_dimensions(self, vector: List[float]) -> List[float]:
         if not vector:
@@ -387,9 +452,11 @@ class EmbeddingsService:
                 logger.debug(f"Cache hit for query embedding (len={len(text)})")
                 return cached
 
-        # Generate embedding via API
+        # Generate embedding via provider
         try:
-            if self._provider == "openai":
+            if self._provider == "voyage":
+                embedding = self._embed_voyage([text], input_type="query")[0]
+            elif self._provider == "openai":
                 embedding = self._call_api([text])[0]
             else:
                 embedding = self._embed_local([text])[0]
@@ -398,7 +465,7 @@ class EmbeddingsService:
             if use_cache:
                 self._cache.set(text, embedding)
 
-            logger.debug(f"Generated embedding for query (len={len(text)})")
+            logger.debug(f"Generated embedding for query (len={len(text)}, provider={self._provider})")
             return embedding
 
         except openai.APIConnectionError as e:
@@ -459,7 +526,12 @@ class EmbeddingsService:
             batch_indices = [t[0] for t in batch]
 
             try:
-                embeddings = self._call_api(batch_texts) if self._provider == "openai" else self._embed_local(batch_texts)
+                if self._provider == "voyage":
+                    embeddings = self._embed_voyage(batch_texts, input_type="document")
+                elif self._provider == "openai":
+                    embeddings = self._call_api(batch_texts)
+                else:
+                    embeddings = self._embed_local(batch_texts)
 
                 for idx, embedding in zip(batch_indices, embeddings):
                     all_embeddings[idx] = embedding
@@ -529,7 +601,12 @@ class EmbeddingsService:
 
         miss_texts = list(misses.keys())
         try:
-            vectors = self._call_api(miss_texts) if self._provider == "openai" else self._embed_local(miss_texts)
+            if self._provider == "voyage":
+                vectors = self._embed_voyage(miss_texts, input_type="query")
+            elif self._provider == "openai":
+                vectors = self._call_api(miss_texts)
+            else:
+                vectors = self._embed_local(miss_texts)
         except Exception:
             # Fallback: per-query embedding to avoid failing the whole request
             vectors = []

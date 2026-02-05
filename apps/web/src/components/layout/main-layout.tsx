@@ -1,6 +1,7 @@
 'use client';
 
 import { SidebarPro } from './sidebar-pro';
+import { GuestBanner } from '@/components/guest-banner';
 import { cn } from '@/lib/utils';
 import { Menu } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -39,6 +40,9 @@ export function MainLayout({ children }: MainLayoutProps) {
 
             {/* Main Content */}
             <div className="flex min-w-0 flex-1 flex-col transition-all duration-300">
+                {/* Guest Banner */}
+                <GuestBanner />
+
                 {/* Mobile Header */}
                 <header className="flex h-16 items-center justify-between border-b border-border bg-background/80 px-4 backdrop-blur-md lg:hidden">
                     <div className="flex items-center gap-3">

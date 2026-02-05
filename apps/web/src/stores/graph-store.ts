@@ -128,6 +128,7 @@ export interface GraphFilters {
     // Display options
     maxNodes: number;
     showRelationships: boolean;
+    includeGlobal: boolean;
 
     // Material selection (documents, cases, library)
     selectedDocuments: string[];
@@ -175,6 +176,7 @@ interface GraphState {
     setLoadingDetail: (loading: boolean) => void;
     setError: (error: string | null) => void;
     setFilters: (filters: Partial<GraphFilters>) => void;
+    setIncludeGlobal: (includeGlobal: boolean) => void;
     setZoomLevel: (zoom: number) => void;
     toggleGroup: (group: 'legislacao' | 'jurisprudencia' | 'doutrina' | 'fatos') => void;
     resetFilters: () => void;
@@ -217,6 +219,7 @@ const defaultFilters: GraphFilters = {
     searchQuery: '',
     maxNodes: 100,
     showRelationships: true,
+    includeGlobal: true,
     // Material selection
     selectedDocuments: [],
     selectedCases: [],
@@ -265,6 +268,10 @@ export const useGraphStore = create<GraphState>((set, get) => ({
 
     setFilters: (newFilters) => set((state) => ({
         filters: { ...state.filters, ...newFilters }
+    })),
+
+    setIncludeGlobal: (includeGlobal) => set((state) => ({
+        filters: { ...state.filters, includeGlobal }
     })),
 
     setZoomLevel: (zoom) => set({ zoomLevel: zoom }),
