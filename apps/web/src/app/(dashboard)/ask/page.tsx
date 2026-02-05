@@ -1,15 +1,13 @@
 'use client';
 
-import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-// useRouter available if needed for navigation
-import { useChatStore, useCanvasStore } from '@/stores';
-import { useAuthStore } from '@/stores/auth-store';
-import { useContextStore } from '@/stores/context-store';
+import React from 'react';
+import { useAskPageState, type GenerationMode } from '@/hooks/use-ask-page-state';
 import { ChatInterface, ChatInput } from '@/components/chat';
 import { SourcesBadge } from '@/components/chat/sources-badge';
-import { CanvasContainer } from '@/components/dashboard';
+import { CanvasContainer, OutlineApprovalModal, MinutaSettingsDrawer } from '@/components/dashboard';
 import { AskSourcesPanel, AskStreamingStatus, AskModeToggle } from '@/components/ask';
 import { Button } from '@/components/ui/button';
+import { RichTooltip } from '@/components/ui/rich-tooltip';
 import {
   PanelRight,
   PanelRightClose,
@@ -23,14 +21,23 @@ import {
   PanelLeft,
   Columns2,
   LayoutTemplate,
+  Sparkles,
+  Users,
+  User,
+  Zap,
+  Scale,
+  Settings2,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  FileSearch,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-// apiClient available for future file upload feature
+import { useChatStore } from '@/stores';
 
-type QueryMode = 'auto' | 'edit' | 'answer';
-
-// Sugestões estáticas para quando não há mensagens
+// Sugestões estáticas para quando não há mensagens (modo individual)
 const INITIAL_SUGGESTIONS = [
   { icon: FileText, label: 'Analise este contrato', desc: 'Upload e análise de documentos' },
   { icon: Search, label: 'Pesquise jurisprudência sobre...', desc: 'Busca em tribunais e legislação' },
@@ -39,391 +46,141 @@ const INITIAL_SUGGESTIONS = [
 ];
 
 export default function AskPage() {
-  const { isAuthenticated } = useAuthStore();
-  const autoCreateAttemptedRef = useRef(false);
-
-  // Refs for resizable panels
-  const pageRootRef = useRef<HTMLDivElement>(null);
-  const splitContainerRef = useRef<HTMLDivElement>(null);
-  const chatPanelRef = useRef<HTMLDivElement>(null);
-  const canvasPanelRef = useRef<HTMLDivElement>(null);
-
-  // Chat store
-  const {
-    currentChat,
-    createChat,
-    sendMessage,
-    isSending,
-    setContext,
-  } = useChatStore();
-
-  // Canvas store
-  const {
-    state: canvasState,
-    showCanvas,
-    hideCanvas,
-    setState: setCanvasState,
-  } = useCanvasStore();
-
-  // Context store
-  const { items: contextItems, removeItem } = useContextStore();
-
-  // Local state
-  const [queryMode, setQueryMode] = useState<QueryMode>('auto');
-  const [showSourcesPanel, setShowSourcesPanel] = useState(true);
-
-  // Resizable panel state
-  const [chatPanelWidth, setChatPanelWidth] = useState(50);
-  const [isResizing, setIsResizing] = useState(false);
-  const dragRectRef = useRef<DOMRect | null>(null);
-  const rafRef = useRef<number | null>(null);
-
-  // Fullscreen state
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [pendingFullscreenTarget, setPendingFullscreenTarget] = useState<'chat' | 'canvas' | 'split' | null>(null);
-
-  // Derived layout mode
-  const layoutMode: 'chat' | 'split' | 'canvas' =
-    canvasState === 'hidden' ? 'chat' : canvasState === 'expanded' ? 'canvas' : 'split';
-
-  // Sync context items to ChatStore
-  useEffect(() => {
-    setContext(contextItems);
-  }, [contextItems, setContext]);
-
-  // Auto-create chat on mount
-  useEffect(() => {
-    if (!isAuthenticated || autoCreateAttemptedRef.current) return;
-    if (currentChat) return;
-
-    autoCreateAttemptedRef.current = true;
-    createChat().catch(() => {
-      toast.error('Erro ao criar conversa');
-    });
-  }, [isAuthenticated, currentChat, createChat]);
-
-  // Track browser fullscreen state
-  useEffect(() => {
-    if (typeof document === 'undefined') return;
-    const onChange = () => setIsFullscreen(!!document.fullscreenElement);
-    onChange();
-    document.addEventListener('fullscreenchange', onChange);
-    return () => document.removeEventListener('fullscreenchange', onChange);
-  }, []);
-
-  // Handle resize cursor state
-  useEffect(() => {
-    if (!isResizing) return;
-    const { style } = document.body;
-    const prevCursor = style.cursor;
-    const prevUserSelect = style.userSelect;
-    style.cursor = 'col-resize';
-    style.userSelect = 'none';
-    return () => {
-      style.cursor = prevCursor;
-      style.userSelect = prevUserSelect;
-    };
-  }, [isResizing]);
-
-  // Clamp width on window resize
-  useEffect(() => {
-    const container = splitContainerRef.current;
-    if (!container) return;
-
-    const handleResize = () => {
-      const rect = container.getBoundingClientRect();
-      if (!rect.width) return;
-      const minPx = 300;
-      const maxPx = Math.max(minPx, rect.width * 0.7); // Ensure max >= min
-      const currentPx = (chatPanelWidth / 100) * rect.width;
-      if (currentPx < minPx) {
-        setChatPanelWidth((minPx / rect.width) * 100);
-      } else if (currentPx > maxPx) {
-        setChatPanelWidth((maxPx / rect.width) * 100);
-      }
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [chatPanelWidth]);
-
-  // Fullscreen API
-  const fullscreenApi = useMemo(() => {
-    if (typeof document === 'undefined') return { supported: false as const };
-    const supported = typeof document.documentElement?.requestFullscreen === 'function';
-    return { supported };
-  }, []);
-
-  const enterFullscreen = async (target?: HTMLElement | null) => {
-    if (!fullscreenApi.supported) return;
-    try {
-      const el = target || pageRootRef.current || document.documentElement;
-      // @ts-ignore
-      await el.requestFullscreen?.();
-    } catch {
-      // ignore
-    }
-  };
-
-  const exitFullscreen = async () => {
-    if (typeof document === 'undefined') return;
-    if (!document.fullscreenElement) return;
-    try {
-      await document.exitFullscreen();
-    } catch {
-      // ignore
-    }
-  };
-
-  // Handle pending fullscreen target
-  useEffect(() => {
-    if (!pendingFullscreenTarget) return;
-    if (typeof document === 'undefined') return;
-
-    void (async () => {
-      let targetEl: HTMLElement | null = null;
-      if (pendingFullscreenTarget === 'chat') {
-        targetEl = chatPanelRef.current;
-      } else if (pendingFullscreenTarget === 'canvas') {
-        targetEl = canvasPanelRef.current;
-      } else {
-        targetEl = pageRootRef.current;
-      }
-      await enterFullscreen(targetEl);
-      setPendingFullscreenTarget(null);
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingFullscreenTarget, layoutMode]);
-
-  // Resize handlers - using cached rect and RAF for performance
-  const updateChatWidthFromPointer = useCallback((clientX: number) => {
-    const rect = dragRectRef.current;
-    if (!rect || !rect.width) return;
-
-    const minPx = 300;
-    const maxPx = Math.max(minPx, rect.width * 0.7); // Ensure max >= min
-    const rawPx = clientX - rect.left;
-    const clampedPx = Math.min(Math.max(rawPx, minPx), maxPx);
-    setChatPanelWidth((clampedPx / rect.width) * 100);
-  }, []);
-
-  const handleDividerPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (canvasState !== 'normal') return;
-    event.preventDefault();
-
-    // Cache rect at drag start for performance
-    const container = splitContainerRef.current;
-    if (container) {
-      dragRectRef.current = container.getBoundingClientRect();
-    }
-
-    setIsResizing(true);
-  };
-
-  // Global listeners for resize (more robust than element listeners)
-  useEffect(() => {
-    if (!isResizing) return;
-
-    const handlePointerMove = (event: PointerEvent) => {
-      // Use RAF for throttling
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      rafRef.current = requestAnimationFrame(() => {
-        updateChatWidthFromPointer(event.clientX);
-      });
-    };
-
-    const handlePointerUp = () => {
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      dragRectRef.current = null;
-      setIsResizing(false);
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', handlePointerUp);
-    window.addEventListener('pointercancel', handlePointerUp);
-    window.addEventListener('blur', handlePointerUp);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-      window.removeEventListener('blur', handlePointerUp);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [isResizing, updateChatWidthFromPointer]);
-
-  // Layout toggle functions
-  const toggleChatMode = () => {
-    if (layoutMode === 'chat') {
-      showCanvas();
-      setCanvasState('normal');
-      return;
-    }
-    hideCanvas();
-  };
-
-  const toggleCanvasMode = () => {
-    if (layoutMode === 'canvas') {
-      showCanvas();
-      setCanvasState('normal');
-      return;
-    }
-    showCanvas();
-    setCanvasState('expanded');
-  };
-
-  const handleToggleFullscreen = () => {
-    if (!fullscreenApi.supported) return;
-    if (isFullscreen) {
-      void exitFullscreen();
-      return;
-    }
-    if (layoutMode === 'chat') {
-      setPendingFullscreenTarget('chat');
-      return;
-    }
-    if (layoutMode === 'canvas') {
-      setPendingFullscreenTarget('canvas');
-      return;
-    }
-    setPendingFullscreenTarget('split');
-  };
-
-  // Extract last assistant message data
-  const { citations, streamingStatus, stepsCount } = useMemo(() => {
-    const msgs = currentChat?.messages || [];
-
-    // Find last assistant message
-    let lastMsg = null;
-    for (let i = msgs.length - 1; i >= 0; i -= 1) {
-      if (msgs[i]?.role === 'assistant') {
-        lastMsg = msgs[i];
-        break;
-      }
-    }
-
-    // Extract activity steps
-    const steps = lastMsg?.metadata?.activity?.steps || [];
-
-    // Extract citations and convert to AskSourcesPanel format
-    const rawCitations = lastMsg?.metadata?.citations || [];
-    const formattedCitations = rawCitations.map((cit: any, idx: number) => {
-      let source = 'Fonte';
-      try {
-        if (cit.url) {
-          source = new URL(cit.url).hostname;
-        }
-      } catch {
-        source = cit.source || 'Fonte';
-      }
-
-      return {
-        id: cit.number || String(idx + 1),
-        title: cit.title || cit.url || `Fonte ${idx + 1}`,
-        source,
-        snippet: cit.quote || cit.excerpt,
-        signal: cit.signal || 'neutral',
-        url: cit.url,
-      };
-    });
-
-    // Determine streaming status from steps
-    const runningStep = steps.find((s: any) => s?.status === 'running');
-    const completedSteps = steps.filter((s: any) => s?.status === 'done').length;
-
-    let status = '';
-    if (runningStep) {
-      status = runningStep.title || 'Processando...';
-    } else if (completedSteps > 0 && !isSending) {
-      status = `Concluído em ${completedSteps} etapa${completedSteps > 1 ? 's' : ''}`;
-    }
-
-    return {
-      citations: formattedCitations,
-      streamingStatus: status,
-      stepsCount: steps.length,
-    };
-  }, [currentChat?.messages, isSending]);
-
-  // Handle canvas auto-open based on content type (keywords)
-  const handleMessageSent = useCallback((content: string) => {
-    const draftKeywords = [
-      'redija', 'escreva', 'elabore', 'minuta', 'petição', 'parecer',
-      'draft', 'write', 'memo', 'memorando', 'contrato', 'acordo'
-    ];
-
-    const shouldOpenCanvas = draftKeywords.some(
-      keyword => content.toLowerCase().includes(keyword)
-    );
-
-    if (shouldOpenCanvas && queryMode === 'auto') {
-      showCanvas();
-      setCanvasState('normal');
-    }
-  }, [queryMode, showCanvas, setCanvasState]);
-
-  // Handle sending a message
-  const handleSend = useCallback(async (content: string) => {
-    handleMessageSent(content);
-
-    // Create chat if it doesn't exist
-    if (!currentChat) {
-      try {
-        await createChat();
-      } catch {
-        toast.error('Erro ao criar conversa');
-        return;
-      }
-    }
-
-    sendMessage(content);
-  }, [handleMessageSent, sendMessage, currentChat, createChat]);
-
-  // Generate contextual suggestions based on selected sources
-  const contextualSuggestions = useMemo(() => {
-    if (contextItems.length === 0) return [];
-
-    const firstItem = contextItems[0];
-    return [
-      `Analise ${firstItem.name}`,
-      `Resuma os pontos principais`,
-      `Compare com a legislação vigente`,
-    ];
-  }, [contextItems]);
-
-  // Check if chat is empty
-  const isChatEmpty = !currentChat?.messages || currentChat.messages.length === 0;
+  const s = useAskPageState('/ask');
 
   return (
-    <div ref={pageRootRef} className="flex h-[calc(100vh-64px)] bg-background">
+    <div ref={s.pageRootRef} className="flex h-[calc(100vh-64px)] bg-background">
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Header */}
-        <header className="flex items-center justify-between px-4 py-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold">Ask</h1>
-            {currentChat && (
-              <span className="text-sm text-muted-foreground">
-                {currentChat.title || 'Nova conversa'}
-              </span>
-            )}
+        {/* ── Toolbar ── */}
+        <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+          {/* Left: Mode controls + streaming status */}
+          <div className="flex flex-wrap items-center gap-3">
+            {/* Generation Mode Toggle: Rápido / Comitê */}
+            <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
+              <RichTooltip
+                title="Modo Chat (Rápido)"
+                description="Conversa livre e rápida. Ideal para tirar dúvidas pontuais ou pedir resumos."
+                badge="1 modelo"
+                icon={<Zap className="h-3.5 w-3.5" />}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    s.setMode('individual');
+                    s.hideCanvas();
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    s.mode === 'individual'
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  Rápido
+                </button>
+              </RichTooltip>
+              <RichTooltip
+                title="Modo Minuta (Comitê)"
+                description="Geração de documentos complexos com múltiplos agentes verificando a consistência jurídica."
+                badge="Multi‑agente"
+                icon={<Users className="h-3.5 w-3.5" />}
+              >
+                <button
+                  type="button"
+                  onClick={() => {
+                    s.setMode('multi-agent');
+                    s.showCanvas();
+                  }}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    s.mode === 'multi-agent'
+                      ? "bg-indigo-600 text-white shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Users className="h-3.5 w-3.5" />
+                  Comitê
+                </button>
+              </RichTooltip>
+            </div>
+
+            <div className="h-5 w-px bg-border hidden sm:block" />
+
+            {/* Chat Mode Toggle: Normal / Comparar */}
+            <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
+              <RichTooltip
+                title="Chat Normal"
+                description="Conversa com um único modelo. Ideal para iterações rápidas."
+                badge="1 resposta"
+                icon={<User className="h-3.5 w-3.5" />}
+              >
+                <button
+                  type="button"
+                  onClick={() => s.handleSetChatMode('standard')}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    s.chatMode !== 'multi-model'
+                      ? "bg-background text-foreground shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <User className="h-3.5 w-3.5" />
+                  Normal
+                </button>
+              </RichTooltip>
+              <RichTooltip
+                title="Comparar modelos"
+                description="Respostas paralelas para avaliar argumentos e escolher a melhor abordagem."
+                badge="2–3 respostas"
+                icon={<Scale className="h-3.5 w-3.5" />}
+              >
+                <button
+                  type="button"
+                  onClick={() => s.handleSetChatMode('multi-model')}
+                  className={cn(
+                    "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
+                    s.chatMode === 'multi-model'
+                      ? "bg-amber-500 text-white shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  <Scale className="h-3.5 w-3.5" />
+                  Comparar
+                </button>
+              </RichTooltip>
+            </div>
+
+            {/* Streaming Status */}
+            <AskStreamingStatus
+              status={s.streamingStatus}
+              stepsCount={s.stepsCount}
+              isStreaming={s.isSending}
+            />
           </div>
 
+          {/* Right: Actions */}
           <div className="flex items-center gap-2">
-            <AskStreamingStatus
-              status={streamingStatus}
-              stepsCount={stepsCount}
-              isStreaming={isSending}
-            />
+            {/* Auditoria */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg text-xs"
+              onClick={s.handleOpenQuality}
+            >
+              <Scale className="mr-1.5 h-3.5 w-3.5" />
+              Auditoria
+            </Button>
 
-            {/* Layout Toggle */}
+            {/* Layout Toggle: Chat / Split / Canvas */}
             <div className="flex items-center rounded-md border border-border bg-muted/50 p-0.5">
               <button
                 type="button"
-                onClick={toggleChatMode}
+                onClick={s.toggleChatMode}
                 className={cn(
                   "rounded px-2 py-1 text-xs font-medium transition-all",
-                  layoutMode === 'chat'
+                  s.layoutMode === 'chat'
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 )}
@@ -434,12 +191,12 @@ export default function AskPage() {
               <button
                 type="button"
                 onClick={() => {
-                  showCanvas();
-                  setCanvasState('normal');
+                  s.showCanvas();
+                  s.setCanvasState('normal');
                 }}
                 className={cn(
                   "rounded px-2 py-1 text-xs font-medium transition-all",
-                  layoutMode === 'split'
+                  s.layoutMode === 'split'
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 )}
@@ -449,10 +206,10 @@ export default function AskPage() {
               </button>
               <button
                 type="button"
-                onClick={toggleCanvasMode}
+                onClick={s.toggleCanvasMode}
                 className={cn(
                   "rounded px-2 py-1 text-xs font-medium transition-all",
-                  layoutMode === 'canvas'
+                  s.layoutMode === 'canvas'
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
                 )}
@@ -462,15 +219,16 @@ export default function AskPage() {
               </button>
             </div>
 
-            {fullscreenApi.supported && (
+            {/* Fullscreen */}
+            {s.fullscreenApi.supported && (
               <Button
                 variant="ghost"
                 size="icon"
-                onClick={handleToggleFullscreen}
+                onClick={s.handleToggleFullscreen}
                 className="h-8 w-8"
-                title={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
+                title={s.isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
               >
-                {isFullscreen ? (
+                {s.isFullscreen ? (
                   <Minimize2 className="h-4 w-4" />
                 ) : (
                   <Maximize2 className="h-4 w-4" />
@@ -478,23 +236,58 @@ export default function AskPage() {
               </Button>
             )}
 
+            {/* Settings gear */}
+            <Button
+              variant="ghost"
+              size="icon"
+              className={cn("h-8 w-8", s.showSettings && "bg-accent")}
+              onClick={() => s.setShowSettings(!s.showSettings)}
+            >
+              <Settings2 className="h-4 w-4" />
+            </Button>
+
+            {/* Novo chat */}
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 rounded-lg text-xs"
+              onClick={s.handleStartNewChat}
+            >
+              <FileText className="mr-1.5 h-3.5 w-3.5" />
+              Novo chat
+            </Button>
+
+            {/* Gerar (multi-agent) */}
+            {s.mode === 'multi-agent' && (
+              <Button
+                size="sm"
+                className="h-8 rounded-lg bg-indigo-600 text-xs hover:bg-indigo-700"
+                onClick={s.handleGenerate}
+                disabled={s.isSending || s.isLoading}
+              >
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                Gerar
+              </Button>
+            )}
+
+            {/* Share & Export */}
             <Button variant="ghost" size="sm" className="gap-2">
               <Share2 className="h-4 w-4" />
               Share
             </Button>
-
             <Button variant="ghost" size="sm" className="gap-2">
               <Download className="h-4 w-4" />
               Export
             </Button>
 
+            {/* Sources panel toggle */}
             <Button
               variant="ghost"
               size="icon"
-              onClick={() => setShowSourcesPanel(!showSourcesPanel)}
-              className={cn(showSourcesPanel && 'bg-accent')}
+              onClick={() => s.setShowSourcesPanel(!s.showSourcesPanel)}
+              className={cn(s.showSourcesPanel && 'bg-accent')}
             >
-              {showSourcesPanel ? (
+              {s.showSourcesPanel ? (
                 <PanelRightClose className="h-4 w-4" />
               ) : (
                 <PanelRight className="h-4 w-4" />
@@ -503,30 +296,129 @@ export default function AskPage() {
           </div>
         </header>
 
-        {/* Split View: Thread + Canvas */}
+        {/* ── Split View: Thread + Canvas ── */}
         <div
-          ref={splitContainerRef}
+          ref={s.splitContainerRef}
           className="flex-1 flex flex-row gap-0 min-h-0 overflow-hidden"
         >
-          {/* Thread Area - Resizable */}
+          {/* Chat Panel (resizable) */}
           <div
-            ref={chatPanelRef}
+            ref={s.chatPanelRef}
             className={cn(
               "relative flex flex-col min-w-0 bg-background transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
-              layoutMode === 'split' ? 'border-r border-border' : '',
-              canvasState === 'expanded' ? 'hidden w-0 opacity-0' : '',
-              isFullscreen && pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full' : ''
+              s.layoutMode === 'split' ? 'border-r border-border' : '',
+              s.canvasState === 'expanded' ? 'hidden w-0 opacity-0' : '',
+              s.isFullscreen && s.pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full' : ''
             )}
             style={{
-              width: canvasState === 'normal' ? `${chatPanelWidth}%` : '100%',
+              width: s.canvasState === 'normal' ? `${s.chatPanelWidth}%` : '100%',
             }}
           >
-            {/* Chat Messages or Empty State */}
+            {/* Mode Status Bar */}
+            <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b bg-muted/30">
+              <div className="flex items-center gap-2">
+                <div className={cn(
+                  "flex h-2 w-2 rounded-full",
+                  s.mode === 'multi-agent' ? "bg-indigo-500 animate-pulse" : "bg-emerald-500"
+                )} />
+                <span className={cn(
+                  "text-xs font-medium",
+                  s.mode === 'multi-agent' ? "text-indigo-600" : "text-emerald-600"
+                )}>
+                  {s.mode === 'multi-agent' ? 'Comitê de Agentes' : 'Modo Direto'}
+                </span>
+              </div>
+              {s.canvasState === 'hidden' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-[11px]"
+                  onClick={() => s.showCanvas()}
+                >
+                  <FileText className="mr-1 h-3.5 w-3.5" />
+                  Abrir canvas
+                </Button>
+              )}
+            </div>
+
+            {/* Agent Steps Progress (multi-agent only) */}
+            {s.mode === 'multi-agent' && s.isAgentRunning && s.agentSteps.length > 0 && (
+              <div className="border-b border-indigo-100 bg-indigo-50/50 dark:bg-indigo-950/20 p-3">
+                <h3 className="mb-2 text-[10px] font-semibold text-indigo-600 uppercase tracking-wider flex items-center justify-between">
+                  <span>Processo Multi-Agente</span>
+                  {s.agentSteps.some((step: any) => step.status === 'working') && (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  )}
+                </h3>
+                <div className="space-y-1.5 max-h-[120px] overflow-y-auto">
+                  {s.agentSteps.map((step: any) => (
+                    <div key={step.id} className="flex items-center gap-2">
+                      <div className={cn(
+                        "flex h-4 w-4 items-center justify-center rounded-full flex-shrink-0",
+                        step.status === 'completed' && "bg-emerald-100 text-emerald-600",
+                        step.status === 'working' && "bg-indigo-100 text-indigo-600",
+                        step.status === 'pending' && "bg-muted text-muted-foreground",
+                      )}>
+                        {step.status === 'completed' && <CheckCircle2 className="h-3 w-3" />}
+                        {step.status === 'working' && <Loader2 className="h-3 w-3 animate-spin" />}
+                        {step.status === 'pending' && <Circle className="h-3 w-3" />}
+                      </div>
+                      <span className={cn(
+                        "text-xs truncate",
+                        step.status === 'working' ? "text-indigo-700 font-medium" : "text-muted-foreground"
+                      )}>
+                        {s.getAgentLabel(step.agent)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {/* Retry Progress */}
+                {s.retryProgress?.isRetrying && (
+                  <div className="mt-2 pt-2 border-t border-indigo-200/50">
+                    <div className="flex items-center gap-2 text-xs">
+                      <div className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-100 text-amber-600 flex-shrink-0">
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      </div>
+                      <span className="text-amber-700 font-medium">
+                        Tentando novamente ({s.retryProgress?.progress || '...'})
+                      </span>
+                    </div>
+                    {s.retryProgress?.reason && (
+                      <p className="text-[10px] text-amber-600/80 mt-1 ml-6">
+                        Razão: {s.retryProgress?.reason === 'missing_citations_for_jurisprudence'
+                          ? 'Faltam citações de jurisprudência'
+                          : s.retryProgress?.reason}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Chat Content - conditional by mode */}
             <div className="flex-1 overflow-y-auto min-h-0">
-              {currentChat && !isChatEmpty ? (
-                <ChatInterface chatId={currentChat.id} hideInput />
+              {s.currentChat && !s.isChatEmpty ? (
+                <ChatInterface
+                  chatId={s.currentChat.id}
+                  hideInput={s.mode === 'individual'}
+                  autoCanvasOnDocumentRequest={s.mode === 'multi-agent'}
+                  showCanvasButton={s.mode === 'multi-agent'}
+                />
+              ) : s.mode === 'multi-agent' ? (
+                /* Multi-agent empty state */
+                <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center h-full">
+                  <div className="rounded-2xl p-5 bg-indigo-100 dark:bg-indigo-950/30">
+                    <Users className="h-10 w-10 text-indigo-400" />
+                  </div>
+                  <div>
+                    <p className="text-base font-semibold text-foreground mb-1">Pronto para começar</p>
+                    <p className="text-sm text-muted-foreground max-w-[280px]">
+                      O comitê de agentes irá colaborar para gerar seu documento jurídico.
+                    </p>
+                  </div>
+                </div>
               ) : (
-                /* Empty State with Suggestions */
+                /* Individual empty state (Ask-style suggestions) */
                 <div className="flex flex-col items-center justify-center h-full p-8">
                   <div className="text-center mb-8">
                     <h2 className="text-2xl font-semibold text-foreground mb-2">
@@ -537,13 +429,12 @@ export default function AskPage() {
                     </p>
                   </div>
 
-                  {/* Initial Suggestions Grid */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full max-w-lg">
                     {INITIAL_SUGGESTIONS.map((item) => (
                       <button
                         key={item.label}
                         type="button"
-                        onClick={() => handleSend(item.label)}
+                        onClick={() => s.handleSend(item.label)}
                         className="group flex items-start gap-3 rounded-xl border border-border p-4 text-left hover:border-emerald-300 hover:bg-emerald-50/50 dark:hover:bg-emerald-950/20 transition-all"
                       >
                         <item.icon className="h-5 w-5 text-muted-foreground group-hover:text-emerald-600 transition-colors mt-0.5" />
@@ -555,17 +446,17 @@ export default function AskPage() {
                     ))}
                   </div>
 
-                  {/* Contextual Suggestions (when sources are selected) */}
-                  {contextualSuggestions.length > 0 && (
+                  {s.contextualSuggestions.length > 0 && (
                     <div className="mt-6 w-full max-w-lg">
                       <p className="text-xs text-muted-foreground mb-2">
                         Baseado nas fontes selecionadas:
                       </p>
                       <div className="flex flex-wrap gap-2">
-                        {contextualSuggestions.map((suggestion) => (
+                        {s.contextualSuggestions.map((suggestion) => (
                           <button
                             key={suggestion}
-                            onClick={() => handleSend(suggestion)}
+                            type="button"
+                            onClick={() => s.handleSend(suggestion)}
                             className="px-3 py-1.5 text-sm rounded-full border border-border hover:border-emerald-300 hover:bg-emerald-50/50 dark:hover:bg-emerald-950/20 transition-all"
                           >
                             {suggestion}
@@ -578,34 +469,67 @@ export default function AskPage() {
               )}
             </div>
 
-            {/* Input Area */}
-            <div className="border-t p-4 pb-6 shrink-0">
-              <div className="max-w-3xl mx-auto space-y-3">
-                {/* Main Input */}
-                <ChatInput onSend={handleSend} />
-
-                {/* Sources & Mode Toggle */}
-                <div className="flex items-center justify-between mt-2">
-                  <div className="flex items-center gap-2">
-                    <SourcesBadge />
-                    {contextItems.length > 0 && (
-                      <span className="text-xs text-muted-foreground">
-                        {contextItems.length} fonte(s) selecionada(s)
-                      </span>
-                    )}
+            {/* Input Area (individual mode only — multi-agent uses ChatInterface built-in input) */}
+            {s.mode === 'individual' && (
+              <div className="border-t p-4 pb-6 shrink-0">
+                <div className="max-w-3xl mx-auto space-y-3">
+                  <ChatInput onSend={s.handleSend} />
+                  <div className="flex items-center justify-between mt-2">
+                    <div className="flex items-center gap-2">
+                      <SourcesBadge />
+                      {s.contextItems.length > 0 && (
+                        <span className="text-xs text-muted-foreground">
+                          {s.contextItems.length} fonte(s) selecionada(s)
+                        </span>
+                      )}
+                    </div>
+                    <AskModeToggle
+                      mode={s.queryMode}
+                      onChange={s.setQueryMode}
+                    />
                   </div>
-
-                  <AskModeToggle
-                    mode={queryMode}
-                    onChange={setQueryMode}
-                  />
                 </div>
               </div>
+            )}
+
+            {/* Fontes Panel (Collapsible) */}
+            <div className="border-t">
+              <button
+                type="button"
+                onClick={() => s.setShowFontes(!s.showFontes)}
+                className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors"
+              >
+                <div className="flex items-center gap-2">
+                  <FileSearch className="h-4 w-4" />
+                  <span>Fontes RAG</span>
+                  <span className="text-[10px] bg-muted px-2 py-0.5 rounded-full">
+                    {s.contextItems.length}
+                  </span>
+                </div>
+                {s.showFontes ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+              </button>
+
+              {s.showFontes && (
+                <div className="max-h-[150px] overflow-y-auto p-3 bg-muted/30 space-y-1.5">
+                  {s.contextItems.length > 0 ? (
+                    s.contextItems.map((item: any, idx: number) => (
+                      <div key={idx} className="flex items-center gap-2 text-sm p-2.5 rounded-lg bg-background border">
+                        <BookOpen className="h-4 w-4 text-indigo-500 flex-shrink-0" />
+                        <span className="truncate text-muted-foreground">{item.name || `Documento ${idx + 1}`}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-xs text-muted-foreground text-center py-3">
+                      Nenhum documento no contexto.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
           {/* Resizable Divider */}
-          {canvasState === 'normal' && (
+          {s.canvasState === 'normal' && (
             <div
               role="separator"
               aria-orientation="vertical"
@@ -615,18 +539,17 @@ export default function AskPage() {
                 "relative w-3 cursor-col-resize bg-transparent touch-none",
                 "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2 before:bg-border",
                 "hover:before:w-0.5 hover:before:bg-primary/50",
-                isResizing && "bg-muted before:bg-primary"
+                s.isResizing && "bg-muted before:bg-primary"
               )}
-              onPointerDown={handleDividerPointerDown}
+              onPointerDown={s.handleDividerPointerDown}
               onKeyDown={(e) => {
-                // Keyboard accessibility for resize
                 const step = e.shiftKey ? 5 : 1;
                 if (e.key === 'ArrowLeft') {
                   e.preventDefault();
-                  setChatPanelWidth((w) => Math.max(20, w - step));
+                  s.setChatPanelWidth((w: number) => Math.max(20, w - step));
                 } else if (e.key === 'ArrowRight') {
                   e.preventDefault();
-                  setChatPanelWidth((w) => Math.min(70, w + step));
+                  s.setChatPanelWidth((w: number) => Math.min(70, w + step));
                 }
               }}
             >
@@ -635,28 +558,139 @@ export default function AskPage() {
           )}
 
           {/* Canvas Area */}
-          {canvasState !== 'hidden' && (
+          {s.canvasState !== 'hidden' && (
             <div
-              ref={canvasPanelRef}
+              ref={s.canvasPanelRef}
               className="min-h-0 h-full flex-1 bg-background overflow-hidden transition-[flex-grow,width,opacity,transform] duration-300 ease-in-out"
             >
-              <CanvasContainer />
+              <CanvasContainer mode={s.mode === 'multi-agent' ? 'full' : 'chat'} />
             </div>
           )}
         </div>
       </div>
 
-      {/* Sources Panel */}
-      {showSourcesPanel && (
+      {/* Sources Panel (lateral) */}
+      {s.showSourcesPanel && (
         <div className="w-80 shrink-0 border-l">
           <AskSourcesPanel
-            citations={citations}
-            onClose={() => setShowSourcesPanel(false)}
-            contextItems={contextItems}
-            onRemoveItem={removeItem}
+            citations={s.citations}
+            onClose={() => s.setShowSourcesPanel(false)}
+            contextItems={s.contextItems}
+            onRemoveItem={s.removeItem}
           />
         </div>
       )}
+
+      {/* HIL Modal */}
+      <OutlineApprovalModal
+        isOpen={s.showOutlineModal}
+        onClose={s.handleOutlineReject}
+        onApprove={s.handleOutlineApprove}
+        onReject={s.handleOutlineReject}
+        initialSections={s.initialSections}
+        documentType={useChatStore.getState().documentType || 'Documento'}
+      />
+
+      {/* Settings Drawer (lateral direita) */}
+      <MinutaSettingsDrawer
+        open={s.showSettings}
+        onOpenChange={s.setShowSettings}
+        mode={s.mode}
+        chatMode={s.chatMode}
+        onSetChatMode={s.handleSetChatMode}
+        chatPersonality={s.chatPersonality}
+        setChatPersonality={s.setChatPersonality}
+        documentType={useChatStore.getState().documentType || 'PETICAO_INICIAL'}
+        setDocumentType={(t: string) => useChatStore.getState().setDocumentType(t)}
+        minPages={s.minPages}
+        maxPages={s.maxPages}
+        setPageRange={s.setPageRange}
+        resetPageRange={s.resetPageRange}
+        formattingOptions={s.formattingOptions}
+        setFormattingOptions={s.setFormattingOptions}
+        reasoningLevel={(['low', 'medium', 'high'].includes(s.reasoningLevel) ? s.reasoningLevel : 'medium') as 'low' | 'medium' | 'high'}
+        setReasoningLevel={s.setReasoningLevel}
+        effortLevel={s.effortLevel}
+        setEffortLevel={s.setEffortLevel}
+        creativityMode={s.creativityMode}
+        setCreativityMode={s.setCreativityMode}
+        temperatureOverride={s.temperatureOverride}
+        setTemperatureOverride={s.setTemperatureOverride}
+        qualityProfile={s.qualityProfile}
+        setQualityProfile={s.setQualityProfile}
+        qualityTargetSectionScore={s.qualityTargetSectionScore}
+        setQualityTargetSectionScore={s.setQualityTargetSectionScore}
+        qualityTargetFinalScore={s.qualityTargetFinalScore}
+        setQualityTargetFinalScore={s.setQualityTargetFinalScore}
+        qualityMaxRounds={s.qualityMaxRounds}
+        setQualityMaxRounds={s.setQualityMaxRounds}
+        researchPolicy={s.researchPolicy}
+        setResearchPolicy={s.setResearchPolicy}
+        webSearch={s.webSearch}
+        setWebSearch={(v: boolean) => useChatStore.getState().setWebSearch(v)}
+        denseResearch={s.denseResearch}
+        setDenseResearch={(v: boolean) => useChatStore.getState().setDenseResearch(v)}
+        searchMode={s.searchMode}
+        setSearchMode={s.setSearchMode}
+        multiQuery={s.multiQuery}
+        setMultiQuery={s.setMultiQuery}
+        breadthFirst={s.breadthFirst}
+        setBreadthFirst={s.setBreadthFirst}
+        deepResearchProvider={s.deepResearchProvider}
+        setDeepResearchProvider={s.setDeepResearchProvider}
+        deepResearchModel={s.deepResearchModel}
+        setDeepResearchModel={s.setDeepResearchModel}
+        webSearchModel={s.webSearchModel}
+        setWebSearchModel={s.setWebSearchModel}
+        auditMode={s.auditMode}
+        setAuditMode={s.setAuditMode}
+        selectedModel={s.selectedModel}
+        setSelectedModel={s.setSelectedModel}
+        agentStrategistModel={s.agentStrategistModel}
+        agentDrafterModels={s.agentDrafterModels}
+        setAgentDrafterModels={s.setAgentDrafterModels}
+        agentReviewerModels={s.agentReviewerModels}
+        setAgentReviewerModels={s.setAgentReviewerModels}
+        selectedModels={s.selectedModels}
+        setSelectedModels={s.setSelectedModels}
+        setShowMultiModelComparator={s.setShowMultiModelComparator}
+        baseModelOptions={s.baseModelOptions}
+        agentModelOptions={s.agentModelOptions}
+        hilOutlineEnabled={s.hilOutlineEnabled}
+        setHilOutlineEnabled={s.setHilOutlineEnabled}
+        autoApproveHil={s.autoApproveHil}
+        setAutoApproveHil={s.setAutoApproveHil}
+        chatOutlineReviewEnabled={s.chatOutlineReviewEnabled}
+        setChatOutlineReviewEnabled={s.setChatOutlineReviewEnabled}
+        hilSectionPolicyOverride={s.hilSectionPolicyOverride}
+        setHilSectionPolicyOverride={s.setHilSectionPolicyOverride}
+        hilFinalRequiredOverride={s.hilFinalRequiredOverride}
+        setHilFinalRequiredOverride={s.setHilFinalRequiredOverride}
+        qualityMaxFinalReviewLoops={s.qualityMaxFinalReviewLoops}
+        setQualityMaxFinalReviewLoops={s.setQualityMaxFinalReviewLoops}
+        qualityStyleRefineMaxRounds={s.qualityStyleRefineMaxRounds}
+        setQualityStyleRefineMaxRounds={s.setQualityStyleRefineMaxRounds}
+        qualityMaxResearchVerifierAttempts={s.qualityMaxResearchVerifierAttempts}
+        setQualityMaxResearchVerifierAttempts={s.setQualityMaxResearchVerifierAttempts}
+        qualityMaxRagRetries={s.qualityMaxRagRetries}
+        setQualityMaxRagRetries={s.setQualityMaxRagRetries}
+        qualityRagRetryExpandScope={s.qualityRagRetryExpandScope}
+        setQualityRagRetryExpandScope={s.setQualityRagRetryExpandScope}
+        recursionLimitOverride={s.recursionLimitOverride}
+        setRecursionLimitOverride={s.setRecursionLimitOverride}
+        strictDocumentGateOverride={s.strictDocumentGateOverride}
+        setStrictDocumentGateOverride={s.setStrictDocumentGateOverride}
+        forceGranularDebate={s.forceGranularDebate}
+        setForceGranularDebate={s.setForceGranularDebate}
+        maxDivergenceHilRounds={s.maxDivergenceHilRounds}
+        setMaxDivergenceHilRounds={s.setMaxDivergenceHilRounds}
+        cragMinBestScoreOverride={s.cragMinBestScoreOverride}
+        setCragMinBestScoreOverride={s.setCragMinBestScoreOverride}
+        cragMinAvgScoreOverride={s.cragMinAvgScoreOverride}
+        setCragMinAvgScoreOverride={s.setCragMinAvgScoreOverride}
+        documentChecklist={s.documentChecklist}
+        setDocumentChecklist={s.setDocumentChecklist}
+      />
     </div>
   );
 }
