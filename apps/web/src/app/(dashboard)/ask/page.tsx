@@ -33,6 +33,7 @@ import {
   FileSearch,
   ChevronDown,
   ChevronUp,
+  ChevronsUpDown,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useChatStore } from '@/stores';
@@ -53,6 +54,7 @@ export default function AskPage() {
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* ── Toolbar ── */}
+        {s.showToolbar ? (
         <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
           {/* Left: Mode controls + streaming status */}
           <div className="flex flex-wrap items-center gap-3">
@@ -293,8 +295,31 @@ export default function AskPage() {
                 <PanelRight className="h-4 w-4" />
               )}
             </Button>
+
+            {/* Hide toolbar toggle */}
+            <button
+              type="button"
+              onClick={() => s.setShowToolbar(false)}
+              className="ml-1 p-1 rounded text-muted-foreground/40 hover:text-muted-foreground transition-colors"
+              title="Esconder barra"
+            >
+              <ChevronUp className="h-3.5 w-3.5" />
+            </button>
           </div>
         </header>
+        ) : (
+          /* Collapsed toolbar: thin bar with expand button */
+          <div className="flex items-center justify-center border-b bg-background/95">
+            <button
+              type="button"
+              onClick={() => s.setShowToolbar(true)}
+              className="w-full py-0.5 flex items-center justify-center text-muted-foreground/30 hover:text-muted-foreground/60 transition-colors"
+              title="Mostrar barra de ferramentas"
+            >
+              <ChevronDown className="h-3 w-3" />
+            </button>
+          </div>
+        )}
 
         {/* ── Split View: Thread + Canvas ── */}
         <div

@@ -138,6 +138,7 @@ export function useAskPageState(basePath: string) {
   const [mode, setMode] = useState<GenerationMode>('individual');
   const [queryMode, setQueryMode] = useState<QueryMode>('auto');
   const [showSettings, setShowSettings] = useState(false);
+  const [showToolbar, setShowToolbar] = useState(true);
   const [showFontes, setShowFontes] = useState(false);
   const [showSourcesPanel, setShowSourcesPanel] = useState(true);
   const [chatPanelWidth, setChatPanelWidth] = useState(50);
@@ -780,6 +781,8 @@ export function useAskPageState(basePath: string) {
     setQueryMode,
     showSettings,
     setShowSettings,
+    showToolbar,
+    setShowToolbar,
     showFontes,
     setShowFontes,
     showSourcesPanel,
