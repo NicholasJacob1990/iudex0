@@ -4,7 +4,7 @@ import React from 'react';
 import { useAskPageState } from '@/hooks/use-ask-page-state';
 import { ChatInterface, ChatInput } from '@/components/chat';
 import { CanvasContainer, OutlineApprovalModal, MinutaSettingsDrawer } from '@/components/dashboard';
-import { AskSourcesPanel, AskStreamingStatus, AskModeToggle } from '@/components/ask';
+import { AskSourcesPanel, AskStreamingStatus } from '@/components/ask';
 import { Button } from '@/components/ui/button';
 import { RichTooltip } from '@/components/ui/rich-tooltip';
 import {
@@ -468,15 +468,7 @@ export default function AskPage() {
             {s.mode === 'individual' && (
               <div className="border-t p-4 pb-5 shrink-0">
                 <div className="max-w-3xl mx-auto">
-                  <ChatInput
-                    onSend={s.handleSend}
-                    extraActions={
-                      <AskModeToggle
-                        mode={s.queryMode}
-                        onChange={s.setQueryMode}
-                      />
-                    }
-                  />
+                  <ChatInput onSend={s.handleSend} />
                 </div>
               </div>
             )}
@@ -554,6 +546,8 @@ export default function AskPage() {
         onSetChatMode={s.handleSetChatMode}
         chatPersonality={s.chatPersonality}
         setChatPersonality={s.setChatPersonality}
+        queryMode={s.queryMode}
+        setQueryMode={s.setQueryMode}
         documentType={useChatStore.getState().documentType || 'PETICAO_INICIAL'}
         setDocumentType={(t: string) => useChatStore.getState().setDocumentType(t)}
         minPages={s.minPages}

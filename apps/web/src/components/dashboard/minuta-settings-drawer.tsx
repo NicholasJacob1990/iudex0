@@ -114,6 +114,8 @@ interface MinutaSettingsDrawerProps {
   onSetChatMode: (mode: 'standard' | 'multi-model') => void;
   chatPersonality: string;
   setChatPersonality: (p: any) => void;
+  queryMode?: 'auto' | 'edit' | 'answer';
+  setQueryMode?: (mode: 'auto' | 'edit' | 'answer') => void;
 
   // Document
   documentType: string;
@@ -356,6 +358,8 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
     onSetChatMode,
     chatPersonality,
     setChatPersonality,
+    queryMode,
+    setQueryMode,
     documentType,
     setDocumentType,
     minPages,
@@ -688,6 +692,24 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
                     </TooltipProvider>
                   </div>
                 </div>
+
+                {/* Query mode (optional, Ask page only) */}
+                {setQueryMode && (
+                  <div className="space-y-1.5">
+                    <SectionLabel>Comportamento de resposta</SectionLabel>
+                    <div className="flex items-center gap-1">
+                      <Pill active={queryMode === 'auto'} onClick={() => setQueryMode('auto')}>
+                        Automático
+                      </Pill>
+                      <Pill active={queryMode === 'edit'} onClick={() => setQueryMode('edit')}>
+                        Editar
+                      </Pill>
+                      <Pill active={queryMode === 'answer'} onClick={() => setQueryMode('answer')}>
+                        Responder
+                      </Pill>
+                    </div>
+                  </div>
+                )}
               </AccordionContent>
             </AccordionItem>
 
