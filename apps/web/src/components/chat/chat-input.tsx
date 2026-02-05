@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
@@ -53,9 +53,10 @@ interface ChatInputProps {
   onSend: (content: string) => void;
   disabled?: boolean;
   placeholder?: string;
+  extraActions?: React.ReactNode;
 }
 
-export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, placeholder, extraActions }: ChatInputProps) {
   const [content, setContent] = useState('');
   const [style, setStyle] = useState('Formal');
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1999,6 +2000,9 @@ export function ChatInput({ onSend, disabled, placeholder }: ChatInputProps) {
               </Tooltip>
             </TooltipProvider>
           </div>
+
+          {/* Extra actions (slot for page-specific controls) */}
+          {extraActions}
 
           {/* Context bar compacta + Send */}
           <div className="ml-auto flex items-center gap-2">
