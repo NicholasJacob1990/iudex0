@@ -33,7 +33,8 @@ import {
   FileSearch,
   ChevronDown,
   ChevronUp,
-  ChevronsUpDown,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useChatStore } from '@/stores';
@@ -339,33 +340,6 @@ export default function AskPage() {
               width: s.canvasState === 'normal' ? `${s.chatPanelWidth}%` : '100%',
             }}
           >
-            {/* Mode Status Bar */}
-            <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b bg-muted/30">
-              <div className="flex items-center gap-2">
-                <div className={cn(
-                  "flex h-2 w-2 rounded-full",
-                  s.mode === 'multi-agent' ? "bg-indigo-500 animate-pulse" : "bg-emerald-500"
-                )} />
-                <span className={cn(
-                  "text-xs font-medium",
-                  s.mode === 'multi-agent' ? "text-indigo-600" : "text-emerald-600"
-                )}>
-                  {s.mode === 'multi-agent' ? 'Comitê de Agentes' : 'Modo Direto'}
-                </span>
-              </div>
-              {s.canvasState === 'hidden' && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="h-7 text-[11px]"
-                  onClick={() => s.showCanvas()}
-                >
-                  <FileText className="mr-1 h-3.5 w-3.5" />
-                  Abrir canvas
-                </Button>
-              )}
-            </div>
-
             {/* Agent Steps Progress (multi-agent only) */}
             {s.mode === 'multi-agent' && s.isAgentRunning && s.agentSteps.length > 0 && (
               <div className="border-b border-indigo-100 bg-indigo-50/50 dark:bg-indigo-950/20 p-3">
@@ -494,24 +468,60 @@ export default function AskPage() {
               )}
             </div>
 
-            {/* Input Area (individual mode only — multi-agent uses ChatInterface built-in input) */}
+            {/* Input Area (individual mode: standalone input; multi-agent: built-in in ChatInterface) */}
             {s.mode === 'individual' && (
-              <div className="border-t p-4 pb-6 shrink-0">
-                <div className="max-w-3xl mx-auto space-y-3">
+              <div className="border-t p-4 pb-5 shrink-0">
+                <div className="max-w-3xl mx-auto space-y-2">
                   <ChatInput onSend={s.handleSend} />
-                  <div className="flex items-center justify-between mt-2">
+                  <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <SourcesBadge />
                       {s.contextItems.length > 0 && (
                         <span className="text-xs text-muted-foreground">
-                          {s.contextItems.length} fonte(s) selecionada(s)
+                          {s.contextItems.length} fonte(s)
                         </span>
                       )}
+
+                      {/* Canvas toggle */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (s.canvasState === 'hidden') {
+                            s.showCanvas();
+                            s.setCanvasState('normal');
+                          } else {
+                            s.hideCanvas();
+                          }
+                        }}
+                        className={cn(
+                          "flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors",
+                          s.canvasState !== 'hidden'
+                            ? "bg-indigo-50 text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400"
+                            : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                        )}
+                        title={s.canvasState !== 'hidden' ? 'Fechar editor' : 'Abrir editor'}
+                      >
+                        {s.canvasState !== 'hidden' ? (
+                          <PanelLeftClose className="h-3.5 w-3.5" />
+                        ) : (
+                          <PanelLeftOpen className="h-3.5 w-3.5" />
+                        )}
+                        <span className="hidden sm:inline">Editor</span>
+                      </button>
                     </div>
-                    <AskModeToggle
-                      mode={s.queryMode}
-                      onChange={s.setQueryMode}
-                    />
+
+                    <div className="flex items-center gap-2">
+                      {/* Mode indicator (discrete) */}
+                      <div className="flex items-center gap-1.5">
+                        <div className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                        <span className="text-[10px] text-muted-foreground">Direto</span>
+                      </div>
+
+                      <AskModeToggle
+                        mode={s.queryMode}
+                        onChange={s.setQueryMode}
+                      />
+                    </div>
                   </div>
                 </div>
               </div>
