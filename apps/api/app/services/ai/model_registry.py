@@ -57,8 +57,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         default=False,
         icon="openai.svg",
         # Allow overriding the concrete provider model id via env.
-        # Default uses a widely available model to avoid "offline fallback" in local setups.
-        api_model=os.getenv("GPT_5_2_API_MODEL", "gpt-4o"),
+        api_model=os.getenv("GPT_5_2_API_MODEL", "gpt-5.2"),
         thinking_category="xml",  # Uses XML parsing
         max_output_tokens=16384,
     ),
@@ -191,6 +190,23 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
     ),
 
     # ---------- ANTHROPIC ----------
+    "claude-4.6-opus": ModelConfig(
+        id="claude-4.6-opus",
+        provider="anthropic",
+        family="claude-4.6",
+        label="Claude 4.6 Opus",
+        context_window=200_000,
+        latency_tier="high",
+        cost_tier="high",
+        capabilities=["chat", "code", "agents", "deep_reasoning"],
+        for_agents=True,
+        for_juridico=True,
+        default=False,
+        icon="anthropic.svg",
+        api_model=os.getenv("CLAUDE_4_6_OPUS_API_MODEL", "claude-opus-4-6"),
+        thinking_category="native",
+        max_output_tokens=64_000,
+    ),
     "claude-4.5-opus": ModelConfig(
         id="claude-4.5-opus",
         provider="anthropic",
@@ -462,7 +478,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_agents=True,
         for_juridico=True,
         icon="anthropic.svg",
-        api_model=os.getenv("CLAUDE_AGENT_API_MODEL", "claude-sonnet-4-20250514"),
+        api_model=os.getenv("CLAUDE_AGENT_API_MODEL", "claude-opus-4-6"),
         thinking_category="native",
         max_output_tokens=16384,
     ),
@@ -478,7 +494,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_agents=True,
         for_juridico=True,
         icon="openai.svg",
-        api_model="gpt-4o",
+        api_model=os.getenv("OPENAI_AGENT_API_MODEL", "gpt-5.2"),
         thinking_category="xml",
         max_output_tokens=16384,
     ),
@@ -494,7 +510,7 @@ MODEL_REGISTRY: Dict[str, ModelConfig] = {
         for_agents=True,
         for_juridico=True,
         icon="gemini.svg",
-        api_model=os.getenv("GOOGLE_AGENT_API_MODEL", "gemini-3-flash-preview"),
+        api_model=os.getenv("GOOGLE_AGENT_API_MODEL", "gemini-3-pro-preview"),
         thinking_category="native",
         max_output_tokens=8192,
     ),

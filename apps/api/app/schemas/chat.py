@@ -221,7 +221,10 @@ class GenerateDocumentRequest(BaseModel):
     drafter_models: List[str] = Field(default_factory=list)
     reviewer_models: List[str] = Field(default_factory=list)
     chat_personality: str = Field(default="juridico", pattern="^(juridico|geral)$")
-    citation_style: Optional[str] = Field(default="forense", pattern="^(forense|abnt|hibrido)$")
+    citation_style: Optional[str] = Field(
+        default="forense",
+        pattern="^(forense|hibrido|abnt|forense_br|bluebook|harvard|apa|chicago|oscola|ecli|vancouver|inline|numeric|alwd)$",
+    )
     temperature: Optional[float] = Field(default=None, ge=0, le=1, description="Temperatura (criatividade)")
     use_multi_agent: bool = False
     context_documents: List[str] = Field(default_factory=list)

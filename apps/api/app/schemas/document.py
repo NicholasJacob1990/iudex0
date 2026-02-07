@@ -169,7 +169,11 @@ class DocumentGenerationRequest(BaseModel):
     research_policy: str = Field(default="auto", pattern="^(auto|force)$", description="Política de pesquisa (auto|force)")
     thesis: Optional[str] = Field(None, description="Tese jurídica ou instruções livres")
     formatting_options: Dict[str, bool] = Field(default_factory=dict, description="Opções de formatação (include_toc, include_summaries, include_summary_table)")
-    citation_style: str = Field(default="forense", pattern="^(forense|abnt|hibrido)$", description="Estilo de citação (forense|abnt|hibrido)")
+    citation_style: str = Field(
+        default="forense",
+        pattern="^(forense|hibrido|abnt|forense_br|bluebook|harvard|apa|chicago|oscola|ecli|vancouver|inline|numeric|alwd)$",
+        description="Estilo de citação",
+    )
     use_templates: bool = Field(default=False, description="Ativar uso de modelos de peça (RAG)")
     template_filters: Dict[str, Any] = Field(default_factory=dict, description="Filtros para busca de modelos (tipo_peca, area, rito, apenas_clause_bank)")
     rag_sources: Optional[List[str]] = Field(default=None, description="Fontes RAG (lei, juris, pecas_modelo)")

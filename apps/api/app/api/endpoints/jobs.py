@@ -54,14 +54,8 @@ from app.services.ai.checklist_parser import (
     merge_document_checklist_hints,
 )
 from app.services.context_strategy import summarize_documents
-from app.services.document_processor import (
-    extract_text_from_pdf,
-    extract_text_from_pdf_with_ocr,
-    extract_text_from_docx,
-    extract_text_from_odt,
-    extract_text_from_image,
-    extract_text_from_zip,
-)
+from app.services.document_processor import extract_text_from_pdf_with_ocr
+from app.services.docling_adapter import get_docling_adapter
 from app.services.model_registry import get_model_config as get_budget_model_config
 from app.services.token_budget_service import TokenBudgetService
 from app.core.config import settings
@@ -356,37 +350,20 @@ def _expand_context_file_paths(paths: list[str], max_files: int) -> list[str]:
 
 async def _extract_text_for_context_file(path: str) -> str:
     ext = Path(path).suffix.lower()
-    if ext == ".pdf":
-        text = await extract_text_from_pdf(path)
-        if text and len(text.strip()) >= 50:
-            return text
-        if settings.ENABLE_OCR:
-            return await extract_text_from_pdf_with_ocr(path)
-        return text
-    if ext == ".docx":
-        return await extract_text_from_docx(path)
-    if ext == ".odt":
-        return await extract_text_from_odt(path)
-    if ext in {".txt", ".md", ".rtf"}:
+    adapter = get_docling_adapter()
+    result = await adapter.extract(path)
+    text = str(result.text or "")
+
+    ocr_enabled = bool(getattr(settings, "DOCLING_OCR_ENABLED", True)) and bool(settings.ENABLE_OCR)
+    if ext == ".pdf" and (not text or len(text.strip()) < 50) and ocr_enabled:
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-        except OSError:
-            return ""
-    if ext in {".html", ".htm"}:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return InputValidator.sanitize_html(f.read())
-        except OSError:
-            return ""
-    if ext == ".zip":
-        zip_result = await extract_text_from_zip(path)
-        return (zip_result or {}).get("extracted_text", "")
-    if ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}:
-        if settings.ENABLE_OCR:
-            return await extract_text_from_image(path)
-        return ""
-    return ""
+            ocr_text = await extract_text_from_pdf_with_ocr(path)
+            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
+                return ocr_text
+        except Exception as exc:
+            logger.warning(f"OCR fallback falhou em context_file PDF {path}: {exc}")
+
+    return text
 
 
 async def _build_local_rag_context_from_paths(
@@ -596,6 +573,10 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                     "reasoning_level": _state_vals.get("thinking_level", "medium"),
                     "temperature": float(_state_vals.get("temperature", 0.3)),
                     "web_search": bool(_state_vals.get("web_search_enabled", False)),
+                    "target_pages": int(_state_vals.get("target_pages") or 0),
+                    "min_pages": int(_state_vals.get("min_pages") or 0),
+                    "max_pages": int(_state_vals.get("max_pages") or 0),
+                    "estimated_pages": int((_state_vals.get("document_size_warning") or {}).get("estimated_pages") or 0),
                 }
 
                 _mode = _state_vals.get("mode", "PETICAO")
@@ -1335,7 +1316,11 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
                 final_markdown = final_snapshot.values.get("final_markdown")
                 if not isinstance(final_markdown, str) or not final_markdown.strip():
                     final_markdown = resolve_full_document(final_snapshot.values or {})
-                final_markdown = append_sources_section(final_markdown or "", final_snapshot.values.get("citations_map"))
+                final_markdown = append_sources_section(
+                    final_markdown or "",
+                    final_snapshot.values.get("citations_map"),
+                    citation_style=final_snapshot.values.get("citation_style"),
+                )
                 final_markdown = append_autos_references_section(final_markdown, attachment_docs=None)
 
                 # v5.7: Persist WorkflowState for auditability

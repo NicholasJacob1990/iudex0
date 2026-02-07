@@ -49,6 +49,7 @@ from app.services.ai.perplexity_config import (
     parse_csv_list,
     normalize_float,
 )
+from app.services.ai.citations.style_registry import normalize_citation_style
 
 # Import JuridicoGeminiAdapter (primary generation engine)
 try:
@@ -685,7 +686,8 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
 
         # Estilo de citação (ABNT/Híbrido) — instruções para o gerador
         citation_style = (getattr(request, "citation_style", None) or "forense").lower()
-        if citation_style in ("abnt", "hibrido"):
+        citation_style_normalized = normalize_citation_style(citation_style, default="forense_br")
+        if citation_style_normalized != "forense_br":
             enhanced_prompt += "\n\n" + (
                 "## ESTILO DE CITAÇÃO (ABNT/HÍBRIDO)\n"
                 "- Autos/peças: ao citar fatos dos autos, mantenha [TIPO - Doc. X, p. Y].\n"
@@ -703,7 +705,7 @@ REGRA ESPECIAL – USO DE MODELOS / CLAUSE BANK:
             )
 
         if shared_web_context:
-            if citation_style in ("abnt", "hibrido"):
+            if citation_style_normalized != "forense_br":
                 search_instruction = (
                     "## ORIENTAÇÕES PARA FONTES DA WEB (ABNT)\n"
                     "- Use notas de rodapé [n] no texto.\n"

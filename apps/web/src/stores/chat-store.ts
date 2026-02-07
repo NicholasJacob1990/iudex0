@@ -1748,7 +1748,21 @@ interface ChatState {
     includeSummaries: boolean;
     includeSummaryTable: boolean;
   };
-  citationStyle: 'forense' | 'abnt' | 'hibrido';
+  citationStyle:
+    | 'forense'
+    | 'hibrido'
+    | 'abnt'
+    | 'forense_br'
+    | 'bluebook'
+    | 'harvard'
+    | 'apa'
+    | 'chicago'
+    | 'oscola'
+    | 'ecli'
+    | 'vancouver'
+    | 'inline'
+    | 'numeric'
+    | 'alwd';
   useTemplates: boolean;
   templateFilters: {
     tipoPeca: string;

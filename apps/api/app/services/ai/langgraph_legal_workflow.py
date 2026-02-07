@@ -52,7 +52,11 @@ from app.services.web_search_service import web_search_service, build_web_contex
 from app.services.web_rag_service import web_rag_service
 from app.services.ai.citations import extract_perplexity
 from app.services.ai.rag_helpers import evaluate_crag_gate
-from app.services.ai.citations.base import sources_to_citations, format_reference_abnt
+from app.services.ai.citations.base import sources_to_citations, format_reference
+from app.services.ai.citations.style_registry import (
+    default_heading_for_style,
+    normalize_citation_style,
+)
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.ai.perplexity_config import (
     build_perplexity_chat_kwargs,
@@ -69,6 +73,14 @@ from app.services.ai.audit_service import AuditService
 from app.services.ai.hil_decision_engine import HILDecisionEngine, HILChecklist, hil_engine
 from app.services.ai.model_registry import get_api_model_name, get_model_config, DEFAULT_JUDGE_MODEL, DEFAULT_DEBATE_MODELS, ModelConfig
 from app.services.ai.document_store import resolve_full_document, store_full_document_state
+from app.services.ai.document_chunker import (
+    estimate_pages as estimate_document_pages,
+    classify_document_route,
+    split_text_for_multi_pass,
+    build_chunk_summary_prompt,
+    merge_chunk_summaries,
+)
+from app.services.ai.observability import langsmith_trace
 
 # Quality Pipeline (v2.25)
 from app.services.ai.quality_gate import quality_gate_node
@@ -277,7 +289,13 @@ def build_web_citation_policy(citations_map: Any) -> str:
     )
 
 
-def append_sources_section(markdown_text: str, citations_map: Any, *, max_sources: int = 20) -> str:
+def append_sources_section(
+    markdown_text: str,
+    citations_map: Any,
+    *,
+    citation_style: str | None = None,
+    max_sources: int = 20,
+) -> str:
     """
     Append a copy-friendly references section (ABNT-like) to the final markdown using citations_map.
     Only includes sources that were actually cited in the document ([n]).
@@ -312,15 +330,15 @@ def append_sources_section(markdown_text: str, citations_map: Any, *, max_source
 
     ordered_keys = ordered_keys[: max(1, min(20, int(max_sources or 20)))]
 
-    lines = ["", "---", "", "## Referências"]
+    normalized_style = normalize_citation_style(citation_style, default="abnt")
+    lines = ["", "---", "", f"## {default_heading_for_style(normalized_style)}"]
     for key in ordered_keys:
         item = citations_map.get(key) or {}
         title = (item.get("title") or f"Fonte {key}").strip()
         url = (item.get("url") or "").strip()
-        if url:
-            lines.append(f"[{key}] {format_reference_abnt(title=title, url=url)}".strip())
-        else:
-            lines.append(f"[{key}] {format_reference_abnt(title=title, url='')}".strip())
+        lines.append(
+            f"[{key}] {format_reference(style=normalized_style, title=title, url=url, source=item, number=int(key))}".strip()
+        )
 
     return text + "\n" + "\n".join(lines).rstrip() + "\n"
 
@@ -1046,6 +1064,53 @@ def validate_citations(text: str, citations_map: Any) -> Dict[str, Any]:
         "total_orphans": len(orphan_keys),
     }
 
+
+async def _maybe_run_citation_subagent(
+    state: "DocumentState",
+    full_document: str,
+    citations_map: Any,
+) -> Dict[str, Any]:
+    """
+    Optional citation validation with persistent Haiku subagent.
+
+    Soft-enrichment by default: failures never break workflow.
+    """
+    enabled = os.getenv("IUDEX_CITATION_SUBAGENT_ENABLED", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+    if not enabled:
+        return {
+            "subagent_enabled": False,
+            "subagent_status": "disabled",
+            "summary": "Citation subagent disabled by flag.",
+        }
+
+    try:
+        from app.services.ai.claude_agent.tools.citation_validator_agent import (
+            validate_citations_with_subagent,
+        )
+
+        return await validate_citations_with_subagent(
+            document_text=full_document or "",
+            citations_map=citations_map or {},
+            session_key=str(state.get("job_id") or "citation-validator"),
+            user_id=str(state.get("tenant_id") or state.get("job_id") or "citation-validator"),
+            case_id=(str(state.get("processo_id")) if state.get("processo_id") else None),
+        )
+    except Exception as exc:
+        logger.warning(f"Citation subagent validation skipped due error: {exc}")
+        return {
+            "subagent_enabled": True,
+            "subagent_status": "error",
+            "summary": f"Citation subagent unavailable: {exc}",
+            "claims_without_citation": [],
+            "suspicious_citations": [],
+        }
+
 def build_section_record(
     *,
     section_title: str,
@@ -1710,6 +1775,8 @@ class DocumentState(TypedDict):
     target_pages: int
     min_pages: int
     max_pages: int
+    estimated_pages: int
+    document_route: str
     audit_mode: str
     quality_profile: str
     target_section_score: float
@@ -1800,6 +1867,8 @@ class DocumentState(TypedDict):
     
     # Sections (processed)
     processed_sections: List[Dict[str, Any]]
+    original_input_text: Optional[str]
+    multi_pass_report: Optional[Dict[str, Any]]
     full_document: str
     full_document_ref: Optional[str]
     full_document_preview: Optional[str]
@@ -1826,6 +1895,7 @@ class DocumentState(TypedDict):
     citation_used_keys: List[str]
     citation_missing_keys: List[str]
     citation_orphan_keys: List[str]
+    citation_subagent_report: Optional[Dict[str, Any]]
 
     # Citer/Verifier (B2 - Pre-Debate Gate)
     citer_verifier_result: Optional[Dict[str, Any]]
@@ -2111,6 +2181,181 @@ def _build_chat_context(messages: List[Dict[str, Any]], max_user_msgs: int = 8) 
     block = "\n".join([f"- {str(m.get('content', '')).strip()[:500]}" for m in recent])
 
     return f"## Instruções do Usuário (Chat Recente)\n{block}"
+
+
+def _resolve_document_route_from_state(state: Mapping[str, Any]) -> Tuple[str, int]:
+    """Resolve document routing strategy using explicit state or inferred size."""
+    explicit_route = str(state.get("document_route") or "").strip().lower()
+    allowed_routes = {"default", "direct", "rag_enhanced", "chunked_rag", "multi_pass"}
+
+    try:
+        explicit_pages = int(state.get("estimated_pages") or 0)
+    except Exception:
+        explicit_pages = 0
+    explicit_pages = max(0, explicit_pages)
+
+    if explicit_route in allowed_routes and explicit_pages > 0:
+        return explicit_route, explicit_pages
+
+    input_text = state.get("input_text", "") or ""
+    inferred_pages = explicit_pages or estimate_document_pages(input_text)
+    inferred_route = explicit_route if explicit_route in allowed_routes else classify_document_route(inferred_pages)
+    if inferred_route == "default":
+        inferred_route = classify_document_route(inferred_pages)
+    return inferred_route, inferred_pages
+
+
+def _safe_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)) or default)
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _fallback_chunk_summary(text: str, max_chars: int = 1200) -> str:
+    clean = re.sub(r"\s+", " ", text or "").strip()
+    if len(clean) <= max_chars:
+        return clean
+    return (clean[:max_chars].rsplit(" ", 1)[0].strip() or clean[:max_chars]).strip()
+
+
+async def multi_pass_prepare_node(state: DocumentState) -> DocumentState:
+    """
+    Pre-process large documents using split -> summarize -> merge before outline.
+
+    Activated when router classifies document_route as chunked_rag or multi_pass.
+    """
+    route, estimated_pages = _resolve_document_route_from_state(state)
+    if route not in ("chunked_rag", "multi_pass"):
+        return {
+            **state,
+            "document_route": route,
+            "estimated_pages": estimated_pages,
+        }
+
+    source_text = (state.get("input_text") or "").strip()
+    if not source_text:
+        return {
+            **state,
+            "document_route": route,
+            "estimated_pages": estimated_pages,
+            "multi_pass_report": {
+                "status": "skipped_empty_input",
+                "document_route": route,
+                "estimated_pages": estimated_pages,
+            },
+        }
+
+    chunk_chars = _safe_env_int("IUDEX_MULTIPASS_CHUNK_CHARS", default=24000, minimum=6000, maximum=120000)
+    chunk_overlap = _safe_env_int("IUDEX_MULTIPASS_CHUNK_OVERLAP", default=800, minimum=0, maximum=8000)
+    max_chunks = _safe_env_int("IUDEX_MULTIPASS_MAX_CHUNKS", default=64, minimum=1, maximum=200)
+    summary_max_chars = _safe_env_int("IUDEX_MULTIPASS_SUMMARY_MAX_CHARS", default=48000, minimum=6000, maximum=200000)
+    summary_model = (os.getenv("IUDEX_MULTIPASS_SUMMARY_MODEL", "claude-4.5-haiku") or "claude-4.5-haiku").strip()
+    summary_max_tokens = _safe_env_int("IUDEX_MULTIPASS_SUMMARY_MAX_TOKENS", default=700, minimum=200, maximum=4096)
+
+    chunks = split_text_for_multi_pass(
+        source_text,
+        max_chunk_chars=chunk_chars,
+        overlap_chars=chunk_overlap,
+        max_chunks=max_chunks,
+    )
+    if not chunks:
+        return {
+            **state,
+            "document_route": route,
+            "estimated_pages": estimated_pages,
+            "multi_pass_report": {
+                "status": "skipped_no_chunks",
+                "document_route": route,
+                "estimated_pages": estimated_pages,
+            },
+        }
+
+    _emit_event(
+        state,
+        "multi_pass_start",
+        {
+            "document_route": route,
+            "estimated_pages": estimated_pages,
+            "chunks": len(chunks),
+            "summary_model": summary_model,
+        },
+        phase="outline",
+        node="multi_pass_prepare",
+    )
+
+    chunk_summaries: List[str] = []
+    failed_chunks = 0
+    for i, chunk in enumerate(chunks, start=1):
+        _emit_event(
+            state,
+            "multi_pass_chunk_start",
+            {"chunk_index": i, "total_chunks": len(chunks)},
+            phase="outline",
+            node="multi_pass_prepare",
+        )
+        summary_text = ""
+        try:
+            prompt = build_chunk_summary_prompt(chunk.text, i, len(chunks))
+            with billing_context(node="multi_pass_prepare", size="M"):
+                summary_text = await _call_model_any_async(
+                    summary_model,
+                    prompt,
+                    temperature=0.1,
+                    max_tokens=summary_max_tokens,
+                )
+        except Exception as exc:
+            failed_chunks += 1
+            logger.warning(f"⚠️ [multi_pass_prepare] chunk={i} summary failed: {exc}")
+
+        if not str(summary_text or "").strip():
+            summary_text = _fallback_chunk_summary(chunk.text)
+        chunk_summaries.append(str(summary_text).strip())
+
+        _emit_event(
+            state,
+            "multi_pass_chunk_done",
+            {
+                "chunk_index": i,
+                "total_chunks": len(chunks),
+                "summary_chars": len(str(summary_text or "")),
+            },
+            phase="outline",
+            node="multi_pass_prepare",
+        )
+
+    merged_summary = merge_chunk_summaries(chunk_summaries, max_chars=summary_max_chars)
+    if not merged_summary:
+        merged_summary = _fallback_chunk_summary(source_text, max_chars=min(summary_max_chars, 12000))
+
+    multi_pass_report = {
+        "status": "prepared",
+        "document_route": route,
+        "estimated_pages": estimated_pages,
+        "source_chars": len(source_text),
+        "prepared_chars": len(merged_summary),
+        "chunks_total": len(chunks),
+        "chunks_failed": failed_chunks,
+        "summary_model": summary_model,
+    }
+
+    _emit_event(
+        state,
+        "multi_pass_ready",
+        multi_pass_report,
+        phase="outline",
+        node="multi_pass_prepare",
+    )
+
+    return {
+        **state,
+        "original_input_text": source_text,
+        "input_text": merged_summary,
+        "document_route": route,
+        "estimated_pages": estimated_pages,
+        "multi_pass_report": multi_pass_report,
+    }
 
 
 async def outline_node(state: DocumentState) -> DocumentState:
@@ -4280,9 +4525,10 @@ async def debate_all_sections_node(state: DocumentState) -> DocumentState:
     drafter_models = state.get("drafter_models") or []
     reviewer_models = state.get("reviewer_models") or []
     citation_style = (state.get("citation_style") or "forense").lower()
+    citation_style_normalized = normalize_citation_style(citation_style, default="forense_br")
 
     citation_instr = ""
-    if citation_style in ("abnt", "hibrido"):
+    if citation_style_normalized != "forense_br":
         citation_instr = """
 ## ESTILO DE CITAÇÃO (ABNT/HÍBRIDO) — OBRIGATÓRIO
 1) **Autos/peças do processo**: mantenha o padrão forense **[TIPO - Doc. X, p. Y]** quando citar fatos dos autos.
@@ -4782,8 +5028,9 @@ async def debate_granular_node(state: DocumentState) -> DocumentState:
     gpt_model = state.get("gpt_model") or (DEFAULT_DEBATE_MODELS[0] if DEFAULT_DEBATE_MODELS else "gpt-5.2")
     claude_model = state.get("claude_model") or (DEFAULT_DEBATE_MODELS[1] if len(DEFAULT_DEBATE_MODELS) > 1 else "claude-4.5-sonnet")
     citation_style = (state.get("citation_style") or "forense").lower()
+    citation_style_normalized = normalize_citation_style(citation_style, default="forense_br")
     citation_instr = ""
-    if citation_style in ("abnt", "hibrido"):
+    if citation_style_normalized != "forense_br":
         citation_instr = """
 ## ESTILO DE CITAÇÃO (ABNT/HÍBRIDO) — OBRIGATÓRIO
 1) Autos: preserve **[TIPO - Doc. X, p. Y]**
@@ -5508,6 +5755,11 @@ async def audit_node(state: DocumentState) -> DocumentState:
     used_keys = citation_report.get("used_keys", [])
     missing_keys = citation_report.get("missing_keys", [])
     orphan_keys = citation_report.get("orphan_keys", [])
+    citation_subagent_report = await _maybe_run_citation_subagent(
+        state,
+        full_document,
+        citations_map,
+    )
     
     if not full_document:
         logger.warning("⚠️ No document to audit")
@@ -5519,11 +5771,33 @@ async def audit_node(state: DocumentState) -> DocumentState:
         "citation_used_keys": used_keys,
         "citation_missing_keys": missing_keys,
         "citation_orphan_keys": orphan_keys,
+        "citation_subagent_report": citation_subagent_report,
     }
     citation_issues = [
         f"Citação [{key}] sem fonte em citations_map"
         for key in missing_keys
     ]
+    enforce_subagent = os.getenv("IUDEX_CITATION_SUBAGENT_ENFORCE", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+        "y",
+    }
+    if enforce_subagent:
+        for claim in (citation_subagent_report.get("claims_without_citation") or [])[:20]:
+            text = str(claim).strip()
+            if text:
+                citation_issues.append(f"Afirmação sem citação: {text[:220]}")
+        for suspicious in (citation_subagent_report.get("suspicious_citations") or [])[:20]:
+            if not isinstance(suspicious, dict):
+                continue
+            key = str(suspicious.get("key") or "").strip()
+            reason = str(suspicious.get("reason") or "inconsistência de citação").strip()
+            if key:
+                citation_issues.append(f"Citação suspeita [{key}]: {reason[:220]}")
+            else:
+                citation_issues.append(f"Citação suspeita: {reason[:220]}")
     
     try:
         # Call real audit service
@@ -5562,6 +5836,7 @@ async def audit_node(state: DocumentState) -> DocumentState:
                 "citations": citations,
                 "issue_count": len(issues),
                 "citation_validation": citation_report,
+                "citation_subagent": citation_subagent_report,
             },
             "audit_issues": issues
         }
@@ -5577,7 +5852,11 @@ async def audit_node(state: DocumentState) -> DocumentState:
         updated_state = {
             **base_state,
             "audit_status": status,
-            "audit_report": {"error": str(e), "citation_validation": citation_report},
+            "audit_report": {
+                "error": str(e),
+                "citation_validation": citation_report,
+                "citation_subagent": citation_subagent_report,
+            },
             "audit_issues": issues,
         }
         if fail_closed:
@@ -6710,7 +6989,11 @@ async def document_gate_node(state: DocumentState) -> DocumentState:
         "document_gate_status": "passed",
         "document_gate_missing": [],
     }
-    final_doc = append_sources_section(full_document, citations_map)
+    final_doc = append_sources_section(
+        full_document,
+        citations_map,
+        citation_style=state.get("citation_style"),
+    )
     if final_doc != full_document:
         return store_full_document_state(updated_state, final_doc)
     return updated_state
@@ -6940,7 +7223,11 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
     force_final_hil = bool(state.get("force_final_hil", False))
 
     if not force_final_hil and not force_hil:
-        final_md = append_sources_section(full_document, citations_map)
+        final_md = append_sources_section(
+            full_document,
+            citations_map,
+            citation_style=state.get("citation_style"),
+        )
         return _with_final_decision({
             **state,
             "human_approved_final": True,
@@ -6957,7 +7244,11 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
         final_doc = full_document
         if decision == "NEED_EVIDENCE":
             final_doc = prepend_need_evidence_notice(state, final_doc)
-        final_md = append_sources_section(final_doc, citations_map)
+        final_md = append_sources_section(
+            final_doc,
+            citations_map,
+            citation_style=state.get("citation_style"),
+        )
         return _with_final_decision(
             {
                 **state,
@@ -6982,7 +7273,11 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
         },
     )
     if skipped:
-        final_md = append_sources_section(full_document, citations_map)
+        final_md = append_sources_section(
+            full_document,
+            citations_map,
+            citation_style=state.get("citation_style"),
+        )
         return _with_final_decision(
             {**state, "human_approved_final": True, "final_markdown": final_md},
             "APPROVED",
@@ -6990,7 +7285,11 @@ async def finalize_hil_node(state: DocumentState) -> DocumentState:
         )
     
     if decision.get("approved"):
-        final_md = append_sources_section(decision.get("edits") or full_document, citations_map)
+        final_md = append_sources_section(
+            decision.get("edits") or full_document,
+            citations_map,
+            citation_style=state.get("citation_style"),
+        )
         return _with_final_decision(
             {**state, "human_approved_final": True, "final_markdown": final_md},
             "APPROVED"
@@ -7153,11 +7452,18 @@ Pergunta do usuário:
     }
 
 
-def entry_router(state: "DocumentState") -> Literal["quick_chat", "gen_outline"]:
-    """Route between quick chat (fast 2-5s) and full pipeline (30-120s)."""
+def entry_router(state: "DocumentState") -> Literal["quick_chat", "multi_pass_prepare", "gen_outline"]:
+    """Route between quick chat and full pipeline, including multi-pass preprocessing."""
     if _is_quick_chat(state):
         logger.info(f"⚡ [entry_router] Quick chat mode (input_len={len(state.get('input_text', ''))})")
         return "quick_chat"
+    route, estimated_pages = _resolve_document_route_from_state(state)
+    if route in ("chunked_rag", "multi_pass"):
+        logger.info(
+            "📚 [entry_router] Multi-pass preprocessing enabled "
+            f"(route={route}, estimated_pages={estimated_pages})"
+        )
+        return "multi_pass_prepare"
     logger.info(f"📋 [entry_router] Full pipeline mode (mode={state.get('mode', 'N/A')})")
     return "gen_outline"
 
@@ -7167,6 +7473,7 @@ def entry_router(state: "DocumentState") -> Literal["quick_chat", "gen_outline"]
 workflow = StateGraph(DocumentState)
 
 # Nodes (renamed to avoid conflict with state keys)
+workflow.add_node("multi_pass_prepare", _wrap_node("multi_pass_prepare", multi_pass_prepare_node))
 workflow.add_node("gen_outline", _wrap_node("gen_outline", outline_node))
 workflow.add_node("outline_hil", _wrap_node("outline_hil", outline_hil_node))
 workflow.add_node("planner", _wrap_node("planner", planner_node))
@@ -7208,10 +7515,12 @@ workflow.add_node("quick_chat", _wrap_node("quick_chat", quick_chat_node))
 # Entry router: quick_chat (2-5s) vs full pipeline (30-120s)
 workflow.add_conditional_edges("__start__", entry_router, {
     "quick_chat": "quick_chat",
+    "multi_pass_prepare": "multi_pass_prepare",
     "gen_outline": "gen_outline",
 })
 workflow.add_edge("quick_chat", END)
 logger.info("⚡ Graph: Quick chat node registered (fast bypass)")
+workflow.add_edge("multi_pass_prepare", "gen_outline")
 
 # Always go through outline_hil (no-op if not enabled)
 workflow.add_edge("gen_outline", "outline_hil")
@@ -7426,5 +7735,18 @@ async def run_workflow_async(initial_state: Dict[str, Any]) -> Dict[str, Any]:
     """
     import uuid as _uuid
     config = {"configurable": {"thread_id": initial_state.get("job_id", str(_uuid.uuid4()))}}
-    final_state = await legal_workflow_app.ainvoke(initial_state, config=config)
+    trace_metadata = {
+        "job_id": initial_state.get("job_id"),
+        "mode": initial_state.get("mode"),
+        "document_route": initial_state.get("document_route"),
+        "estimated_pages": initial_state.get("estimated_pages"),
+        "selected_models": initial_state.get("selected_models"),
+    }
+    with langsmith_trace(
+        "langgraph_legal_workflow",
+        run_type="chain",
+        metadata=trace_metadata,
+        tags=["langgraph", "legal-workflow"],
+    ):
+        final_state = await legal_workflow_app.ainvoke(initial_state, config=config)
     return final_state

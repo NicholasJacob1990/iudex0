@@ -10,6 +10,7 @@ export type ModelId =
     | "grok-4-fast"
     | "grok-4.1-fast"
     | "grok-4.1"
+    | "claude-4.6-opus"
     | "claude-4.5-opus"
     | "claude-4.5-sonnet"
     | "claude-4.5-haiku"
@@ -175,6 +176,19 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
     },
 
     // ---------- ANTHROPIC ----------
+    "claude-4.6-opus": {
+        id: "claude-4.6-opus",
+        provider: "anthropic",
+        family: "claude-4.6",
+        label: "Claude 4.6 Opus",
+        contextWindow: 200_000,
+        latencyTier: "high",
+        costTier: "high",
+        capabilities: ["chat", "code", "agents", "deep_reasoning"],
+        forAgents: true,
+        forJuridico: true,
+        icon: "/logos/anthropic.png",
+    },
     "claude-4.5-opus": {
         id: "claude-4.5-opus",
         provider: "anthropic",
@@ -424,7 +438,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentConfig> = {
         id: "claude-agent",
         label: "Claude Agent",
         provider: "anthropic",
-        baseModel: "claude-4.5-opus",
+        baseModel: "claude-4.6-opus",
         isAgent: true,
         capabilities: ["tools", "autonomous", "permissions", "juridico"],
         description: "Autonomo com tools",
@@ -435,7 +449,7 @@ export const AGENT_REGISTRY: Record<AgentId, AgentConfig> = {
         id: "openai-agent",
         label: "OpenAI Agent",
         provider: "openai",
-        baseModel: "gpt-4o",
+        baseModel: "gpt-5.2",
         isAgent: true,
         capabilities: ["tools", "autonomous", "permissions", "juridico"],
         description: "Autonomo com tools",

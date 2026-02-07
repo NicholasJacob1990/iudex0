@@ -48,6 +48,7 @@ from app.services.mention_parser import MentionService
 from app.services.token_budget_service import TokenBudgetService
 from app.services.command_service import CommandService
 from app.services.ai.orchestrator import MultiAgentOrchestrator
+from app.services.ai.orchestration.router import get_orchestration_router
 from app.services.ai.agent_clients import (
     get_gpt_client,
     get_gemini_client,
@@ -116,19 +117,15 @@ from app.services.context_strategy import decide_context_mode_from_paths, suppor
 from app.utils.validators import InputValidator
 from app.services.rag_policy import resolve_rag_scope
 from app.services.corpus_chat_tool import search_corpus_for_chat, should_search_corpus
-from app.services.document_processor import (
-    extract_text_from_pdf,
-    extract_text_from_pdf_with_ocr,
-    extract_text_from_docx,
-    extract_text_from_odt,
-    extract_text_from_image,
-    extract_text_from_zip,
-)
+from app.services.document_processor import extract_text_from_pdf_with_ocr
+from app.services.docling_adapter import get_docling_adapter
 from app.services.ai.citations import extract_perplexity
 from app.services.ai.citations.base import (
     render_perplexity,
     stable_numbering,
     sources_to_citations,
+    normalize_citation_item,
+    citation_merge_key,
     append_references_section,
     append_autos_references_section,
 )
@@ -146,6 +143,10 @@ from app.services.ai.deep_research_hard_service import deep_research_hard_servic
 from app.services.web_rag_service import web_rag_service
 from app.services.ai.agent_clients import _is_anthropic_vertex_client
 from app.services.ai.genai_utils import extract_genai_text
+from app.services.ai.claude_agent.permissions import PermissionManager
+from app.services.ai.shared.feature_flags import FeatureFlagManager
+from app.services.ai.observability.metrics import get_observability_metrics
+from app.services.ai.observability.audit_log import get_tool_audit_log
 
 chat_service = ChatService()
 
@@ -686,37 +687,20 @@ def _expand_context_file_paths(paths: List[str], max_files: int) -> List[str]:
 
 async def _extract_text_for_context_file(path: str) -> str:
     ext = Path(path).suffix.lower()
-    if ext == ".pdf":
-        text = await extract_text_from_pdf(path)
-        if text and len(text.strip()) >= 50:
-            return text
-        if settings.ENABLE_OCR:
-            return await extract_text_from_pdf_with_ocr(path)
-        return text
-    if ext == ".docx":
-        return await extract_text_from_docx(path)
-    if ext == ".odt":
-        return await extract_text_from_odt(path)
-    if ext in {".txt", ".md", ".rtf"}:
+    adapter = get_docling_adapter()
+    result = await adapter.extract(path)
+    text = str(result.text or "")
+
+    ocr_enabled = bool(getattr(settings, "DOCLING_OCR_ENABLED", True)) and bool(settings.ENABLE_OCR)
+    if ext == ".pdf" and (not text or len(text.strip()) < 50) and ocr_enabled:
         try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
-        except OSError:
-            return ""
-    if ext in {".html", ".htm"}:
-        try:
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                return InputValidator.sanitize_html(f.read())
-        except OSError:
-            return ""
-    if ext == ".zip":
-        zip_result = await extract_text_from_zip(path)
-        return (zip_result or {}).get("extracted_text", "")
-    if ext in {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif"}:
-        if settings.ENABLE_OCR:
-            return await extract_text_from_image(path)
-        return ""
-    return ""
+            ocr_text = await extract_text_from_pdf_with_ocr(path)
+            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
+                return ocr_text
+        except Exception as exc:
+            logger.warning(f"OCR fallback falhou em context_file PDF {path}: {exc}")
+
+    return text
 
 
 async def _build_local_rag_context_from_paths(
@@ -926,6 +910,32 @@ def _build_template_instruction(meta: Optional[Dict[str, Any]], body: str) -> st
         parts.append("TEXTO BASE (EXCERTO):\n" + snippet)
 
     return "\n\n".join([p for p in parts if p]).strip()
+
+
+async def _resolve_matched_skill_prompt(
+    *,
+    user_id: str,
+    user_input: str,
+    db: AsyncSession,
+) -> tuple[str, Optional[str]]:
+    """Resolve a skill prompt block for the given user input (best-effort)."""
+    if not user_id or not user_input:
+        return "", None
+    try:
+        from app.services.ai.skills.matcher import match_user_skill, render_skill_prompt
+
+        match = await match_user_skill(
+            user_id=str(user_id),
+            user_input=str(user_input),
+            db=db,
+            include_builtin=True,
+        )
+        if not match:
+            return "", None
+        return render_skill_prompt(match), match.skill.name
+    except Exception as e:
+        logger.warning(f"Falha ao resolver skill no chat rápido: {e}")
+        return "", None
 
 
 def _estimate_token_usage(prompt: str, output: str, model_id: str, label: Optional[str] = None) -> dict:
@@ -1549,10 +1559,21 @@ async def send_message(
     clean_content, system_context, mentions_meta = await mention_service.parse_mentions(
         message_in.content, db, current_user.id, sticky_docs=sticky_docs
     )
-    
+    matched_skill_prompt, matched_skill_name = await _resolve_matched_skill_prompt(
+        user_id=str(current_user.id),
+        user_input=clean_content,
+        db=db,
+    )
+
     current_context = chat.context.copy()
     if system_context:
         current_context["referenced_content"] = system_context
+    if matched_skill_prompt:
+        skill_block = f"# SKILL CORRESPONDENTE\n\n{matched_skill_prompt}"
+        current_context["extra_agent_instructions"] = _join_context_parts(
+            current_context.get("extra_agent_instructions"),
+            skill_block,
+        )
 
     current_context["chat_personality"] = message_in.chat_personality
     current_context["conversation_history"] = conversation_history
@@ -1837,6 +1858,8 @@ async def send_message(
     final_metadata = {"turn_id": turn_id, "request_id": request_id}
     if mentions_meta: final_metadata["mentions"] = mentions_meta
     if item_telemetry: final_metadata["token_usage"] = item_telemetry
+    if matched_skill_name:
+        final_metadata["matched_skill"] = matched_skill_name
     final_metadata["thinking_enabled"] = thinking_enabled_simple
     
     # Salvar resposta da IA
@@ -2152,6 +2175,11 @@ async def send_message_stream(
     clean_content, system_context, mentions_meta = await mention_service.parse_mentions(
         message_in.content, db, current_user.id, sticky_docs=sticky_docs
     )
+    matched_skill_prompt, matched_skill_name = await _resolve_matched_skill_prompt(
+        user_id=str(current_user.id),
+        user_input=clean_content,
+        db=db,
+    )
 
     template_filters = message_in.template_filters or chat.context.get("template_filters") or {}
     use_templates = bool(message_in.use_templates) or bool(chat.context.get("use_templates"))
@@ -2218,6 +2246,8 @@ async def send_message_stream(
         base_instruction += "\n- Aprofunde a análise e considere nuances importantes."
     elif reasoning_level == "low":
         base_instruction += "\n- Seja direto e conciso."
+    if matched_skill_prompt:
+        base_instruction += f"\n\n# SKILL CORRESPONDENTE\n\n{matched_skill_prompt}"
     history_block = _build_history_block(chat.context.get("conversation_summary"), conversation_history)
     fallback_model = "claude-4.5-sonnet" if chat_personality == "juridico" else "gpt-5.2"
     budget_model_id = _resolve_budget_model_id(clean_content, context_model or None, fallback_model)
@@ -3219,6 +3249,8 @@ async def send_message_stream(
                 "outline_pipeline": True,
                 "outline": outline_items,
             }
+            if matched_skill_name:
+                final_metadata["matched_skill"] = matched_skill_name
             if upload_cache_summary:
                 final_metadata["outline_pipeline_hybrid"] = True
                 final_metadata["outline_pipeline_summary_chars"] = len(upload_cache_summary)
@@ -3264,6 +3296,7 @@ async def send_message_stream(
                 "token_usage": token_usage,
                 "thinking": thinking_summary if thinking_enabled else None,
                 "thinking_enabled": thinking_enabled,
+                "matched_skill": matched_skill_name,
             })
 
         return StreamingResponse(
@@ -3397,6 +3430,11 @@ async def send_message_stream(
     model_overrides: dict = {}
     gpt_override_provider: Optional[str] = None
     use_native_tools = False  # Enabled for agent models with tool calling
+    feature_flags = FeatureFlagManager()
+    quick_agent_bridge_enabled = (
+        feature_flags.is_global_enabled() and feature_flags.quick_agent_bridge_enabled()
+    )
+    quick_agent_bridge_model_id: Optional[str] = None
     if requested_model and not explicit_mentions:
         try:
             requested_model = validate_model_id(
@@ -3446,6 +3484,9 @@ async def send_message_stream(
         use_native_tools = bool(model_cfg and getattr(model_cfg, "for_agents", False) and "agent" in requested_model)
         if use_native_tools:
             logger.info(f"🔧 Native tool calling enabled for agent model: {requested_model}")
+            if quick_agent_bridge_enabled and requested_model in ("claude-agent", "openai-agent", "google-agent"):
+                quick_agent_bridge_model_id = requested_model
+                logger.info(f"🛣️ Quick Agent Bridge enabled for model: {requested_model}")
 
         current_context["model"] = requested_model
         if chat.context.get("model") != requested_model:
@@ -3514,6 +3555,64 @@ async def send_message_stream(
             gpt_mcp_client = openrouter_async_client
         else:
             gpt_mcp_client = get_async_openai_client()
+
+    chat_tool_permission_manager: Optional[PermissionManager] = None
+    if use_native_tools or mcp_enabled:
+        try:
+            chat_tool_permission_manager = PermissionManager(
+                db=db,
+                user_id=str(current_user.id),
+                session_id=str(chat_id),
+                project_id=str(chat.case_id) if getattr(chat, "case_id", None) else None,
+            )
+        except Exception as exc:
+            logger.warning(f"Falha ao inicializar PermissionManager do chat rápido: {exc}")
+
+    async def _check_chat_tool_permission(tool_name: str, tool_input: Dict[str, Any]) -> str:
+        if not chat_tool_permission_manager:
+            try:
+                get_observability_metrics().record_tool_approval("allow")
+            except Exception:
+                pass
+            try:
+                get_tool_audit_log().record_permission_decision(
+                    tool_name=tool_name,
+                    decision="allow",
+                    user_id=str(current_user.id),
+                    session_id=str(chat_id),
+                    project_id=str(chat.case_id) if getattr(chat, "case_id", None) else None,
+                    source="chat_quick_default",
+                    rule_scope="chat_quick_default",
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
+            return "allow"
+        try:
+            result = await chat_tool_permission_manager.check(tool_name, tool_input or {})
+            decision = str(getattr(result, "decision", "") or "").strip().lower()
+            if decision in ("allow", "deny", "ask"):
+                return decision
+        except Exception as exc:
+            logger.warning(f"PermissionManager check falhou no chat rápido ({tool_name}): {exc}")
+        try:
+            get_observability_metrics().record_tool_approval("ask")
+        except Exception:
+            pass
+        try:
+            get_tool_audit_log().record_permission_decision(
+                tool_name=tool_name,
+                decision="ask",
+                user_id=str(current_user.id),
+                session_id=str(chat_id),
+                project_id=str(chat.case_id) if getattr(chat, "case_id", None) else None,
+                source="chat_quick_fallback",
+                rule_scope="chat_quick_fallback",
+                tool_input=tool_input,
+            )
+        except Exception:
+            pass
+        return "ask"
 
     gpt_call_client = gpt_client
     gpt_stream_client = gpt_client
@@ -3649,6 +3748,7 @@ async def send_message_stream(
     model_label = "+".join(
         [model_overrides.get(model_key, model_key) for model_key in target_models]
     )
+    model_label_display = model_label or "modelo"
     native_search_by_model = {
         "gpt": bool(gpt_client and hasattr(gpt_client, "responses") and gpt_override_provider in (None, "openai")),
         "claude": bool(claude_client),
@@ -3669,6 +3769,8 @@ async def send_message_stream(
     async def stream_response():
         full_text_parts: List[str] = []
         full_thinking_parts: List[str] = []  # NEW: Accumulate real thinking from models
+        execution_mode = "lite"
+        execution_path = "chat_native"
         system_instruction = base_instruction
         if history_block:
             system_instruction += "\n\n## CONTEXTO DA CONVERSA\n" + history_block
@@ -3683,6 +3785,15 @@ async def send_message_stream(
         yield sse_keepalive()
         
         yield sse_event({"type": "meta", "phase": "start", "t": start_ms, "turn_id": turn_id, "request_id": request_id})
+        yield sse_event({
+            "type": "meta",
+            "phase": "execution_mode",
+            "execution_mode": execution_mode,
+            "execution_path": execution_path,
+            "turn_id": turn_id,
+            "request_id": request_id,
+            "matched_skill": matched_skill_name,
+        })
         
         # Activity (Harvey-like): assessing + attachments/terms + web search
         yield sse_activity_event(
@@ -3735,17 +3846,27 @@ async def send_message_stream(
 
         def _merge_citations(items: List[Dict[str, Any]]):
             for item in items or []:
-                url = str(item.get("url") or "").strip()
-                # Source numbers are not globally unique across providers/streams.
-                # Prefer URL as the merge key to avoid silently dropping citations.
-                key = url
-                if not key:
-                    number = item.get("number")
-                    key = str(number).strip() if number is not None else ""
+                normalized = normalize_citation_item(
+                    item if isinstance(item, dict) else {},
+                    default_number=len(citations_by_url) + 1,
+                )
+                key = citation_merge_key(normalized)
                 if not key:
                     continue
                 if key not in citations_by_url:
-                    citations_by_url[key] = item
+                    citations_by_url[key] = normalized
+                else:
+                    current = citations_by_url[key]
+                    merged = dict(current)
+                    for field, value in normalized.items():
+                        if value in (None, "", {}):
+                            continue
+                        if field in {"provenance", "viewer"} and isinstance(value, dict):
+                            base = merged.get(field) if isinstance(merged.get(field), dict) else {}
+                            merged[field] = {**base, **value}
+                        else:
+                            merged[field] = value
+                    citations_by_url[key] = merged
 
         outline_items = []
         if isinstance(message_in.outline, list):
@@ -3840,8 +3961,11 @@ async def send_message_stream(
 
             if hard_sources:
                 try:
-                    from app.services.ai.citations.base import build_abnt_references
-                    refs_section = build_abnt_references(hard_sources)
+                    from app.services.ai.citations.base import build_references_section
+                    refs_section = build_references_section(
+                        hard_sources,
+                        style=getattr(message_in, "citation_style", None),
+                    )
                     if refs_section:
                         system_instruction += "\n" + refs_section
                 except Exception:
@@ -4452,7 +4576,8 @@ async def send_message_stream(
                     lead_text = append_references_section(
                         lead_text,
                         sources_to_citations(sources),
-                        heading="References",
+                        heading=None,
+                        style=getattr(message_in, "citation_style", None),
                         include_all_if_uncited=True,
                     )
                 lead_text = append_autos_references_section(lead_text, attachment_docs=attachment_docs)
@@ -4495,6 +4620,8 @@ async def send_message_stream(
                     "request_id": request_id,
                     "token_usage": token_usage,
                 }
+                if matched_skill_name:
+                    msg_metadata["matched_skill"] = matched_skill_name
                 if citations_payload:
                     msg_metadata["citations"] = citations_payload
                 if grounding_result:
@@ -4521,10 +4648,247 @@ async def send_message_stream(
                     "request_id": request_id,
                     "token_usage": token_usage,
                     "citations": citations_payload,
+                    "matched_skill": matched_skill_name,
                 })
                 return
 
             for idx, model_key in enumerate(target_models):
+                # Bridge: no modo rápido, modelos *-agent podem usar executor dedicado (perfil quick).
+                if (
+                    idx == 0
+                    and len(target_models) == 1
+                    and quick_agent_bridge_model_id
+                    and quick_agent_bridge_model_id == requested_model
+                ):
+                    try:
+                        execution_mode = "full"
+                        execution_path = "quick_agent_bridge"
+                        yield sse_event({
+                            "type": "meta",
+                            "phase": "execution_mode",
+                            "execution_mode": execution_mode,
+                            "execution_path": execution_path,
+                            "turn_id": turn_id,
+                            "request_id": request_id,
+                            "model": quick_agent_bridge_model_id,
+                            "matched_skill": matched_skill_name,
+                        })
+
+                        quick_timeout_s = int(os.getenv("QUICK_AGENT_TIMEOUT_SECONDS", "30") or 30)
+                        quick_timeout_s = max(10, min(120, quick_timeout_s))
+                        bridge_started = time.monotonic()
+
+                        router = get_orchestration_router()
+                        # Populate db on singleton for tenant/case context resolution in executors.
+                        setattr(router, "db", db)
+
+                        bridge_rag_context = _join_context_parts(
+                            rag_context,
+                            graph_context,
+                            system_context,
+                            attachment_injection_context,
+                        )
+                        bridge_ctx = {
+                            "user_id": str(current_user.id),
+                            "chat_id": chat_id,
+                            "rag_context": bridge_rag_context,
+                            "template_structure": template_instruction or "",
+                            "extra_instructions": "",
+                            "conversation_history": conversation_history,
+                            "chat_personality": chat_personality,
+                            "reasoning_level": reasoning_level,
+                            "temperature": temperature,
+                            "web_search": bool(web_search),
+                            "max_tokens": int(max_tokens),
+                            "execution_profile": "quick",
+                        }
+
+                        bridge_text_parts: List[str] = []
+                        bridge_final_text = ""
+                        bridge_thinking_parts: List[str] = []
+
+                        async for orch_event in router.execute(
+                            prompt=clean_content,
+                            selected_models=[quick_agent_bridge_model_id],
+                            context=bridge_ctx,
+                            mode="chat",
+                            job_id=turn_id,
+                        ):
+                            if (time.monotonic() - bridge_started) > float(quick_timeout_s):
+                                raise TimeoutError(f"Quick Agent Bridge timeout ({quick_timeout_s}s)")
+
+                            ev_dict = orch_event.to_dict() if hasattr(orch_event, "to_dict") else (
+                                orch_event if isinstance(orch_event, dict) else {}
+                            )
+                            ev_type = str(ev_dict.get("type", "") or "")
+                            ev_data = ev_dict.get("data") if isinstance(ev_dict.get("data"), dict) else {}
+
+                            if ev_type == "token":
+                                delta = str(ev_data.get("token", "") or "")
+                                if delta:
+                                    bridge_text_parts.append(delta)
+                                    if not answer_started:
+                                        answer_started = True
+                                        yield sse_event({
+                                            "type": "meta",
+                                            "phase": "answer_start",
+                                            "t": int(time.time() * 1000),
+                                            "turn_id": turn_id,
+                                        })
+                                    yield sse_event({
+                                        "type": "token",
+                                        "delta": delta,
+                                        "model": quick_agent_bridge_model_id,
+                                        "turn_id": turn_id,
+                                    })
+                            elif ev_type == "thinking":
+                                thought = str(ev_data.get("content", "") or "")
+                                if thought:
+                                    bridge_thinking_parts.append(thought)
+                                    yield sse_event({
+                                        "type": "thinking",
+                                        "delta": thought,
+                                        "model": quick_agent_bridge_model_id,
+                                        "turn_id": turn_id,
+                                    })
+                            elif ev_type == "tool_call":
+                                yield sse_event({
+                                    "type": "tool_call",
+                                    "model": quick_agent_bridge_model_id,
+                                    "name": ev_data.get("tool_name"),
+                                    "arguments": ev_data.get("tool_input"),
+                                    "turn_id": turn_id,
+                                })
+                            elif ev_type == "tool_result":
+                                yield sse_event({
+                                    "type": "tool_result",
+                                    "model": quick_agent_bridge_model_id,
+                                    "name": ev_data.get("tool_name"),
+                                    "result_preview": str(ev_data.get("result", ""))[:500],
+                                    "turn_id": turn_id,
+                                })
+                            elif ev_type == "done":
+                                maybe_final = str(ev_data.get("final_text", "") or "")
+                                if maybe_final:
+                                    bridge_final_text = maybe_final
+                            elif ev_type == "error":
+                                raise RuntimeError(str(ev_data.get("error") or "Quick Agent Bridge failed"))
+
+                        bridge_text = "".join(bridge_text_parts).strip() or bridge_final_text.strip()
+                        if not bridge_text:
+                            raise RuntimeError("Quick Agent Bridge retornou saída vazia")
+
+                        if sources and not citations_by_url:
+                            _merge_citations(sources_to_citations(sources))
+                        bridge_citations = list(citations_by_url.values())
+                        if bridge_citations:
+                            bridge_text = append_references_section(
+                                bridge_text,
+                                bridge_citations,
+                                heading=None,
+                                style=getattr(message_in, "citation_style", None),
+                            )
+                        bridge_text = append_autos_references_section(bridge_text, attachment_docs=attachment_docs)
+
+                        bridge_usage = _estimate_token_usage(
+                            f"{system_instruction}\n\n{clean_content}",
+                            bridge_text,
+                            quick_agent_bridge_model_id,
+                            quick_agent_bridge_model_id,
+                        )
+                        bridge_thinking = "".join(bridge_thinking_parts).strip()
+                        if not bridge_thinking and thinking_enabled:
+                            bridge_thinking = _build_safe_thinking_summary(
+                                dense_research=bool(effective_dense_research),
+                                web_search=bool(web_search),
+                                used_context=bool(system_context or mentions_meta or rag_context or graph_context),
+                                used_outline=bool(outline_items),
+                            ) or ""
+
+                        bridge_metadata: Dict[str, Any] = {
+                            "turn_id": turn_id,
+                            "request_id": request_id,
+                            "model": quick_agent_bridge_model_id,
+                            "token_usage": bridge_usage,
+                            "thinking_enabled": thinking_enabled,
+                            "execution_mode": execution_mode,
+                            "execution_path": execution_path,
+                        }
+                        if matched_skill_name:
+                            bridge_metadata["matched_skill"] = matched_skill_name
+                        if mentions_meta:
+                            bridge_metadata["mentions"] = mentions_meta
+                        if bridge_citations:
+                            bridge_metadata["citations"] = bridge_citations
+
+                        history_payload = conversation_history_full + [
+                            {"role": "user", "content": message_in.content},
+                            {"role": "assistant", "content": bridge_text},
+                        ]
+                        if _maybe_update_conversation_summary(chat, history_payload):
+                            flag_modified(chat, "context")
+                        await _store_rag_memory(chat_id, history_payload)
+
+                        ai_msg = ChatMessage(
+                            id=str(uuid.uuid4()),
+                            chat_id=chat_id,
+                            role="assistant",
+                            content=bridge_text,
+                            thinking=bridge_thinking if thinking_enabled else None,
+                            msg_metadata=bridge_metadata,
+                            created_at=utcnow(),
+                        )
+                        db.add(ai_msg)
+                        chat.updated_at = utcnow()
+                        await db.commit()
+
+                        yield sse_activity_event(
+                            turn_id=turn_id,
+                            op="done",
+                            step_id="call",
+                            title=f"Chamando {model_label_display}",
+                            status="done",
+                        )
+                        yield sse_event({
+                            "type": "done",
+                            "full_text": bridge_text,
+                            "model": quick_agent_bridge_model_id,
+                            "message_id": ai_msg.id,
+                            "turn_id": turn_id,
+                            "request_id": request_id,
+                            "token_usage": bridge_usage,
+                            "thinking": bridge_thinking if thinking_enabled else None,
+                            "thinking_enabled": thinking_enabled,
+                            "citations": bridge_citations,
+                            "execution_mode": execution_mode,
+                            "execution_path": execution_path,
+                            "matched_skill": matched_skill_name,
+                        })
+                        try:
+                            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=False)
+                        except Exception:
+                            pass
+                        return
+                    except Exception as bridge_exc:
+                        try:
+                            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=True)
+                        except Exception:
+                            pass
+                        execution_mode = "lite"
+                        execution_path = "chat_native_fallback"
+                        logger.warning(f"Quick Agent Bridge falhou, fallback para fluxo nativo: {bridge_exc}")
+                        yield sse_event({
+                            "type": "meta",
+                            "phase": "execution_mode",
+                            "execution_mode": execution_mode,
+                            "execution_path": execution_path,
+                            "turn_id": turn_id,
+                            "request_id": request_id,
+                            "model": quick_agent_bridge_model_id,
+                            "fallback_reason": str(bridge_exc),
+                            "matched_skill": matched_skill_name,
+                        })
+
                 model_id = None
                 if model_key == "gpt":
                     model_id = gpt_model_id
@@ -4602,6 +4966,7 @@ async def send_message_stream(
                                 user_prompt=clean_content,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
+                                permission_checker=_check_chat_tool_permission,
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -4612,6 +4977,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -4646,6 +5013,10 @@ async def send_message_stream(
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 allowed_server_labels=mcp_allowed_labels,
+                                permission_checker=_check_chat_tool_permission,
+                                tenant_id=current_user.tenant_id or "default",
+                                user_id=str(current_user.id),
+                                session_id=str(chat_id),
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -4656,6 +5027,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -5063,6 +5436,8 @@ async def send_message_stream(
                                 user_prompt=clean_content,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
+                                reasoning_level=reasoning_level,
+                                permission_checker=_check_chat_tool_permission,
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -5073,6 +5448,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -5107,6 +5484,10 @@ async def send_message_stream(
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 allowed_server_labels=mcp_allowed_labels,
+                                permission_checker=_check_chat_tool_permission,
+                                tenant_id=current_user.tenant_id or "default",
+                                user_id=str(current_user.id),
+                                session_id=str(chat_id),
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -5117,6 +5498,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -5264,6 +5647,7 @@ async def send_message_stream(
                                 user_prompt=clean_content,
                                 max_tokens=max_tokens,
                                 temperature=temperature,
+                                permission_checker=_check_chat_tool_permission,
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -5274,6 +5658,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -5308,6 +5694,10 @@ async def send_message_stream(
                                 max_tokens=max_tokens,
                                 temperature=temperature,
                                 allowed_server_labels=mcp_allowed_labels,
+                                permission_checker=_check_chat_tool_permission,
+                                tenant_id=current_user.tenant_id or "default",
+                                user_id=str(current_user.id),
+                                session_id=str(chat_id),
                             )
                             for item in tool_trace:
                                 yield sse_event(
@@ -5318,6 +5708,8 @@ async def send_message_stream(
                                         "name": item.get("name"),
                                         "arguments": item.get("arguments"),
                                         "result_preview": item.get("result_preview"),
+                                        "permission_mode": item.get("permission_mode", "allow"),
+                                        "blocked": bool(item.get("blocked", False)),
                                         "turn_id": turn_id,
                                     }
                                 )
@@ -5771,6 +6163,8 @@ async def send_message_stream(
                 final_metadata["mentions"] = mentions_meta
             if model_label:
                 final_metadata["model"] = model_label
+            if matched_skill_name:
+                final_metadata["matched_skill"] = matched_skill_name
             citations_payload = list(citations_by_url.values())
             if citations_payload:
                 final_metadata["citations"] = citations_payload
@@ -5778,7 +6172,12 @@ async def send_message_stream(
                 final_metadata["grounding"] = grounding_result.to_dict()
 
             if citations_payload:
-                full_text = append_references_section(full_text, citations_payload, heading="References")
+                full_text = append_references_section(
+                    full_text,
+                    citations_payload,
+                    heading=None,
+                    style=getattr(message_in, "citation_style", None),
+                )
             # Referências dos autos/anexos (citações forenses) — seção separada no final.
             full_text = append_autos_references_section(full_text, attachment_docs=attachment_docs)
             actual_points = get_points_total()
@@ -5825,6 +6224,8 @@ async def send_message_stream(
             await _store_rag_memory(chat_id, history_payload)
 
             final_metadata["thinking_enabled"] = thinking_enabled
+            final_metadata["execution_mode"] = execution_mode
+            final_metadata["execution_path"] = execution_path
 
             ai_msg = ChatMessage(
                 id=str(uuid.uuid4()),
@@ -5869,6 +6270,9 @@ async def send_message_stream(
                 "thinking_enabled": thinking_enabled,
                 "citations": citations_payload,
                 "billing": billing_snapshot,
+                "execution_mode": execution_mode,
+                "execution_path": execution_path,
+                "matched_skill": matched_skill_name,
             })
         except Exception as e:
             logger.error(f"Erro na IA (stream): {e}")
@@ -5889,6 +6293,9 @@ async def send_message_stream(
                     "request_id": request_id,
                     "token_usage": offline_usage,
                     "thinking_enabled": thinking_enabled,
+                    "execution_mode": execution_mode,
+                    "execution_path": execution_path,
+                    "matched_skill": matched_skill_name,
                 },
                 created_at=utcnow()
             )
@@ -5917,6 +6324,9 @@ async def send_message_stream(
                 "request_id": request_id,
                 "token_usage": offline_usage,
                 "thinking_enabled": thinking_enabled,
+                "execution_mode": execution_mode,
+                "execution_path": execution_path,
+                "matched_skill": matched_skill_name,
             })
 
     async def event_generator():

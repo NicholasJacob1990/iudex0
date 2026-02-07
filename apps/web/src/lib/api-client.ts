@@ -272,7 +272,21 @@ interface GenerateDocumentRequest {
     includeSummaries?: boolean;
     includeSummaryTable?: boolean;
   };
-  citation_style?: 'forense' | 'abnt' | 'hibrido';
+  citation_style?:
+    | 'forense'
+    | 'hibrido'
+    | 'abnt'
+    | 'forense_br'
+    | 'bluebook'
+    | 'harvard'
+    | 'apa'
+    | 'chicago'
+    | 'oscola'
+    | 'ecli'
+    | 'vancouver'
+    | 'inline'
+    | 'numeric'
+    | 'alwd';
 
   // Other
   thesis?: string;

@@ -1,4 +1,11 @@
-from .base import Source, render_perplexity, format_abnt_full_reference, build_abnt_references
+from .base import (
+    Source,
+    render_perplexity,
+    format_abnt_full_reference,
+    build_abnt_references,
+    build_references_section,
+    format_reference,
+)
 from .openai import openai_extract_perplexity
 from .gemini import gemini_extract_perplexity
 from .claude import claude_extract_perplexity
@@ -14,6 +21,14 @@ from .grounding import (
     GroundingResult,
     CitationVerification,
     VerificationStatus,
+)
+from .style_registry import (
+    CANONICAL_CITATION_STYLES,
+    LEGACY_CITATION_STYLE_ALIASES,
+    normalize_citation_style,
+    is_valid_citation_style,
+    citation_style_regex_pattern,
+    default_heading_for_style,
 )
 
 

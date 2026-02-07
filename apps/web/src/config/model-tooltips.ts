@@ -27,6 +27,8 @@ export const MODEL_DESCRIPTIONS: Partial<Record<ModelId, string>> = {
     "Modelo rapido e barato, ideal para passos curtos (planner, HyDE e tarefas auxiliares).",
   "gpt-4o":
     "Modelo multimodal equilibrado para chat, visao e codigo.",
+  "claude-4.6-opus":
+    "Claude Opus 4.6 com foco em tarefas agenticas complexas e raciocinio profundo, com janela de contexto ampla.",
   "claude-4.5-opus":
     "Claude Opus 4.5 da Anthropic suporta orçamento de pensamento personalizável (até 64 mil tokens) e janela de contexto de 200 mil. Para instruir o bot a usar mais esforço de pensamento, adicione --thinking_budget e um número entre 0 e 63999 ao final da sua mensagem.",
   "claude-4.5-sonnet":

@@ -1,10 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple, Any, Optional
+from typing import Dict, Iterable, List, Tuple, Any, Optional, Callable
 from datetime import datetime
 import re
 import os
+
+from app.services.ai.citations.style_registry import (
+    default_heading_for_style,
+    normalize_citation_style,
+)
+from app.services.ai.citations.forense_br_formatter import format_forense_br_reference
+from app.services.ai.citations.bluebook_formatter import format_bluebook_reference
+from app.services.ai.citations.apa_formatter import format_apa_reference
+from app.services.ai.citations.chicago_formatter import format_chicago_reference
+from app.services.ai.citations.harvard_formatter import format_harvard_reference
+from app.services.ai.citations.oscola_formatter import format_oscola_reference
+from app.services.ai.citations.ecli_formatter import format_ecli_reference
+from app.services.ai.citations.vancouver_formatter import format_vancouver_reference
+from app.services.ai.citations.inline_formatter import format_inline_reference
+from app.services.ai.citations.numeric_formatter import format_numeric_reference
+from app.services.ai.citations.alwd_formatter import format_alwd_reference
 
 
 @dataclass(frozen=True)
@@ -17,6 +33,14 @@ class Source:
     line_end: Optional[int] = None
     source_file: Optional[str] = None
     doc_id: Optional[str] = None
+    chunk_uid: Optional[str] = None
+    chunk_index: Optional[int] = None
+    source_page: Optional[int] = None
+    highlight_text: Optional[str] = None
+    viewer_url: Optional[str] = None
+    download_url: Optional[str] = None
+    source_url: Optional[str] = None
+    viewer_kind: Optional[str] = None
 
 
 def stable_numbering(items: Iterable[Tuple[str, str]]) -> Tuple[Dict[str, int], List[Source]]:
@@ -44,22 +68,221 @@ def render_perplexity(text: str, sources: List[Source]) -> str:
 def sources_to_citations(sources: List[Source]) -> List[dict]:
     citations: List[dict] = []
     for s in sources or []:
+        normalized_page = (
+            s.page_number
+            if s.page_number is not None
+            else (s.source_page if s.source_page is not None else None)
+        )
+        normalized_source_url = s.source_url or s.url
         citation: dict = {
             "number": s.n,
             "title": s.title,
-            "url": s.url,
+            "url": s.url or normalized_source_url,
         }
+        if normalized_page is not None:
+            citation["source_page"] = normalized_page
+        if s.highlight_text:
+            citation["highlight_text"] = s.highlight_text
+            citation["quote"] = s.highlight_text
         # Incluir proveniência se disponível
-        if s.page_number is not None or s.source_file:
+        if (
+            normalized_page is not None
+            or s.source_file
+            or s.doc_id
+            or s.chunk_uid
+            or s.chunk_index is not None
+        ):
             citation["provenance"] = {
-                "page_number": s.page_number,
+                "doc_id": s.doc_id,
+                "chunk_uid": s.chunk_uid,
+                "chunk_index": s.chunk_index,
+                "page_number": normalized_page,
                 "line_start": s.line_start,
                 "line_end": s.line_end,
                 "source_file": s.source_file,
-                "doc_id": s.doc_id,
+            }
+        if any([s.viewer_url, s.download_url, normalized_source_url, s.viewer_kind, normalized_page, s.highlight_text]):
+            citation["viewer"] = {
+                "viewer_url": s.viewer_url,
+                "download_url": s.download_url,
+                "source_url": normalized_source_url,
+                "source_page": normalized_page,
+                "highlight_text": s.highlight_text,
+                "viewer_kind": s.viewer_kind,
             }
         citations.append(citation)
     return citations
+
+
+def _clean_str(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _as_int_allow_zero(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        parsed = int(str(value).strip())
+    except Exception:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def normalize_citation_item(item: Dict[str, Any], *, default_number: Optional[int] = None) -> Dict[str, Any]:
+    """
+    Normaliza citação para contrato rico (compatível com legado).
+    """
+    raw = item if isinstance(item, dict) else {}
+    provenance_in = raw.get("provenance") if isinstance(raw.get("provenance"), dict) else {}
+    viewer_in = raw.get("viewer") if isinstance(raw.get("viewer"), dict) else {}
+
+    number = _clean_str(raw.get("number") or raw.get("n") or raw.get("id"))
+    if number is None and default_number is not None:
+        number = str(default_number)
+
+    page_number = (
+        _as_int(provenance_in.get("page_number"))
+        or _as_int(raw.get("page_number"))
+        or _as_int(raw.get("source_page"))
+        or _as_int(viewer_in.get("source_page"))
+    )
+    line_start = _as_int(provenance_in.get("line_start") or raw.get("line_start"))
+    line_end = _as_int(provenance_in.get("line_end") or raw.get("line_end"))
+    chunk_index = _as_int_allow_zero(provenance_in.get("chunk_index") or raw.get("chunk_index"))
+
+    source_file = _clean_str(provenance_in.get("source_file") or raw.get("source_file"))
+    doc_id = _clean_str(
+        provenance_in.get("doc_id")
+        or raw.get("doc_id")
+        or raw.get("document_id")
+    )
+    chunk_uid = _clean_str(provenance_in.get("chunk_uid") or raw.get("chunk_uid"))
+
+    highlight_text = _clean_str(
+        raw.get("highlight_text")
+        or viewer_in.get("highlight_text")
+        or raw.get("quote")
+        or raw.get("excerpt")
+        or raw.get("snippet")
+    )
+
+    source_url = _clean_str(
+        viewer_in.get("source_url")
+        or raw.get("source_url")
+        or raw.get("url")
+    )
+    viewer_url = _clean_str(viewer_in.get("viewer_url") or raw.get("viewer_url"))
+    download_url = _clean_str(viewer_in.get("download_url") or raw.get("download_url"))
+    viewer_kind = _clean_str(viewer_in.get("viewer_kind") or raw.get("viewer_kind"))
+
+    citation: Dict[str, Any] = {}
+    if number is not None:
+        citation["number"] = number
+    if _clean_str(raw.get("title")):
+        citation["title"] = _clean_str(raw.get("title"))
+    if source_url is not None:
+        citation["url"] = source_url
+    if highlight_text is not None:
+        citation["quote"] = highlight_text
+        citation["highlight_text"] = highlight_text
+    if page_number is not None:
+        citation["source_page"] = page_number
+
+    provenance: Dict[str, Any] = {}
+    if doc_id is not None:
+        provenance["doc_id"] = doc_id
+    if chunk_uid is not None:
+        provenance["chunk_uid"] = chunk_uid
+    if chunk_index is not None:
+        provenance["chunk_index"] = chunk_index
+    if page_number is not None:
+        provenance["page_number"] = page_number
+    if line_start is not None:
+        provenance["line_start"] = line_start
+    if line_end is not None:
+        provenance["line_end"] = line_end
+    if source_file is not None:
+        provenance["source_file"] = source_file
+    if provenance:
+        citation["provenance"] = provenance
+
+    viewer: Dict[str, Any] = {}
+    if viewer_url is not None:
+        viewer["viewer_url"] = viewer_url
+    if download_url is not None:
+        viewer["download_url"] = download_url
+    if source_url is not None:
+        viewer["source_url"] = source_url
+    if page_number is not None:
+        viewer["source_page"] = page_number
+    if highlight_text is not None:
+        viewer["highlight_text"] = highlight_text
+    if viewer_kind is not None:
+        viewer["viewer_kind"] = viewer_kind
+    if viewer:
+        citation["viewer"] = viewer
+
+    # Preserve additional keys not covered above (backward compat with existing payloads).
+    for k, v in raw.items():
+        if k in citation:
+            continue
+        if k in {"provenance", "viewer"}:
+            continue
+        citation[k] = v
+
+    return citation
+
+
+def citation_merge_key(item: Dict[str, Any]) -> Optional[str]:
+    """
+    Chave estável de merge para evitar perda de citações.
+
+    Prioridade:
+    1. doc_id + chunk_index + page_number
+    2. doc_id + chunk_uid + page_number
+    3. url + page_number
+    4. url
+    5. number
+    """
+    if not isinstance(item, dict):
+        return None
+    provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+    viewer = item.get("viewer") if isinstance(item.get("viewer"), dict) else {}
+
+    doc_id = _clean_str(provenance.get("doc_id") or item.get("doc_id") or item.get("document_id"))
+    chunk_index = _as_int_allow_zero(provenance.get("chunk_index") or item.get("chunk_index"))
+    chunk_uid = _clean_str(provenance.get("chunk_uid") or item.get("chunk_uid"))
+    page_number = _as_int(
+        provenance.get("page_number")
+        or item.get("source_page")
+        or item.get("page_number")
+        or viewer.get("source_page")
+    )
+    url = _clean_str(viewer.get("source_url") or item.get("url") or item.get("source_url"))
+    number = _clean_str(item.get("number"))
+
+    if doc_id and chunk_index is not None:
+        return f"doc:{doc_id}|chunk_index:{chunk_index}|page:{page_number or 0}"
+    if doc_id and chunk_uid:
+        return f"doc:{doc_id}|chunk_uid:{chunk_uid}|page:{page_number or 0}"
+    if url and page_number is not None:
+        return f"url:{url}|page:{page_number}"
+    if url:
+        return f"url:{url}"
+    if number:
+        return f"number:{number}"
+    return None
 
 
 def _pt_br_access_date(now: datetime | None = None) -> str:
@@ -83,6 +306,65 @@ def format_reference_abnt(*, title: str, url: str, accessed_at: datetime | None 
     acesso = _pt_br_access_date(accessed_at)
     # Mantém simples: Título + Disponível em + Acesso em
     return f"{t}. Disponível em: {u}. Acesso em: {acesso}."
+
+
+def _parse_reference_number(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return None
+
+
+def format_reference(
+    *,
+    style: str | None,
+    title: str,
+    url: str,
+    source: Optional[Dict[str, Any]] = None,
+    number: int | None = None,
+    accessed_at: datetime | None = None,
+) -> str:
+    """
+    Formata referência conforme o estilo solicitado.
+    Fallback seguro: ABNT simplificado.
+    """
+    normalized_style = normalize_citation_style(style, default="abnt")
+    payload: Dict[str, Any] = dict(source or {})
+    payload.setdefault("title", title)
+    payload.setdefault("url", url)
+
+    if number is None:
+        number = _parse_reference_number(payload.get("number"))
+
+    if normalized_style == "abnt":
+        try:
+            return format_abnt_full_reference(payload)
+        except Exception:
+            return format_reference_abnt(title=title, url=url, accessed_at=accessed_at)
+
+    formatter_map: Dict[str, Callable[..., str]] = {
+        "forense_br": format_forense_br_reference,
+        "bluebook": format_bluebook_reference,
+        "harvard": format_harvard_reference,
+        "apa": format_apa_reference,
+        "chicago": format_chicago_reference,
+        "oscola": format_oscola_reference,
+        "ecli": format_ecli_reference,
+        "vancouver": format_vancouver_reference,
+        "inline": format_inline_reference,
+        "numeric": format_numeric_reference,
+        "alwd": format_alwd_reference,
+    }
+    formatter = formatter_map.get(normalized_style)
+    if formatter is None:
+        return format_reference_abnt(title=title, url=url, accessed_at=accessed_at)
+
+    try:
+        return formatter(payload, accessed_at=accessed_at, number=number)
+    except Exception:
+        return format_reference_abnt(title=title, url=url, accessed_at=accessed_at)
 
 
 def _clean_spaces(value: str) -> str:
@@ -322,25 +604,40 @@ def build_abnt_references(
     Build a complete ABNT references section.
     Uses the classifier for type-specific formatting.
     """
-    try:
-        from app.services.ai.citations.abnt_classifier import build_full_references_section
-        return build_full_references_section(sources, heading=heading)
-    except ImportError:
-        # Fallback to existing append_references_section logic
-        lines = [f"\n---\n\n## {heading}\n"]
-        for i, s in enumerate(sources, 1):
-            n = s.get("number", i)
-            t = s.get("title", f"Fonte {n}")
-            u = s.get("url", "")
-            lines.append(f"[{n}] {format_reference_abnt(title=t, url=u)}")
-        return "\n".join(lines) + "\n"
+    return build_references_section(sources, style="abnt", heading=heading)
+
+
+def build_references_section(
+    sources: List[dict],
+    *,
+    style: str | None,
+    heading: Optional[str] = None,
+) -> str:
+    """
+    Gera seção de referências no estilo solicitado.
+    """
+    if not sources:
+        return ""
+
+    normalized_style = normalize_citation_style(style, default="abnt")
+    resolved_heading = heading or default_heading_for_style(normalized_style)
+    lines = [f"\n---\n\n## {resolved_heading}\n"]
+    for i, source in enumerate(sources, 1):
+        n = _parse_reference_number(source.get("number")) or i
+        t = str(source.get("title") or f"Fonte {n}")
+        u = str(source.get("url") or "")
+        lines.append(
+            f"[{n}] {format_reference(style=normalized_style, title=t, url=u, source=source, number=n)}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def append_references_section(
     text: str,
     citations: List[dict],
     *,
-    heading: str = "References",
+    heading: Optional[str] = None,
+    style: str | None = None,
     max_sources: int = 20,
     include_all_if_uncited: bool = False,
 ) -> str:
@@ -384,11 +681,16 @@ def append_references_section(
     if not ordered:
         return text
 
-    lines: List[str] = ["", "", f"{heading}:", ""]
+    normalized_style = normalize_citation_style(style, default="abnt")
+    resolved_heading = heading or default_heading_for_style(normalized_style)
+
+    lines: List[str] = ["", "", f"{resolved_heading}:", ""]
     for n in ordered:
         item = by_number.get(n) or {}
         title = str(item.get("title") or f"Fonte {n}").strip()
         url = str(item.get("url") or "").strip()
-        lines.append(f"[{n}] {format_reference_abnt(title=title, url=url)}")
+        lines.append(
+            f"[{n}] {format_reference(style=normalized_style, title=title, url=url, source=item, number=n)}"
+        )
 
     return body + "\n" + "\n".join(lines).rstrip() + "\n"
