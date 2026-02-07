@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   Sheet,
   SheetContent,
@@ -22,8 +22,9 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { Users, Scale, Sparkles } from 'lucide-react';
+import { Users, Scale, Sparkles, ShieldCheck, Download, Clock3 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useChatStore } from '@/stores/chat-store';
 
 // ---------------------------------------------------------------------------
 // Constants & helpers
@@ -77,6 +78,15 @@ const QUALITY_PROFILE_SPECS = [
 ] as const;
 
 type QualityProfileSpec = (typeof QUALITY_PROFILE_SPECS)[number];
+
+interface ToolAuditTrailEntry {
+  id: string;
+  timestamp: string;
+  tool: string;
+  decision: 'allow' | 'deny' | 'ask';
+  status: 'running' | 'done' | 'error';
+  detail?: string;
+}
 
 const formatScoreLabel = (value: number) => value.toFixed(1);
 const formatRoundsLabel = (value: number) => `${value} rodada${value === 1 ? '' : 's'}`;
@@ -465,6 +475,8 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
       .map((i) => i.label)
       .join('\n'),
   );
+  const currentChat = useChatStore((state) => state.currentChat);
+  const toolPermissions = useChatStore((state) => state.toolPermissions);
 
   // Derived values
   const selectedProfileSpec =
@@ -607,6 +619,136 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
     mode === 'multi-agent'
       ? `Outline: ${hilOutlineEnabled ? 'Sim' : 'Não'}${autoApproveHil ? ' • Auto-aprovar' : ''}`
       : `Outline: ${chatOutlineReviewEnabled ? 'Sim' : 'Não'}`;
+
+  const toolAuditTrail = useMemo<ToolAuditTrailEntry[]>(() => {
+    const messages = Array.isArray(currentChat?.messages) ? currentChat.messages : [];
+    const entries: ToolAuditTrailEntry[] = [];
+
+    for (const message of messages) {
+      const metadata: any = message?.metadata || {};
+      const messageTsRaw = Date.parse(String(message?.timestamp || ''));
+      const fallbackTimestamp = Number.isFinite(messageTsRaw)
+        ? new Date(messageTsRaw).toISOString()
+        : new Date().toISOString();
+
+      const directTrail = Array.isArray(metadata?.tool_audit_trail)
+        ? metadata.tool_audit_trail
+        : [];
+      for (const item of directTrail) {
+        const tool = String(item?.tool || '').trim();
+        if (!tool) continue;
+        const decision = String(item?.decision || '').toLowerCase();
+        const normalizedDecision: ToolAuditTrailEntry['decision'] =
+          decision === 'allow' || decision === 'deny' || decision === 'ask'
+            ? (decision as ToolAuditTrailEntry['decision'])
+            : (toolPermissions[tool] || 'ask');
+        const status = String(item?.status || '').toLowerCase();
+        const normalizedStatus: ToolAuditTrailEntry['status'] =
+          status === 'running' || status === 'error' || status === 'done'
+            ? (status as ToolAuditTrailEntry['status'])
+            : 'done';
+        const ts = Date.parse(String(item?.timestamp || ''));
+        entries.push({
+          id: String(item?.id || `${tool}-${ts || Date.now()}`),
+          timestamp: Number.isFinite(ts) ? new Date(ts).toISOString() : fallbackTimestamp,
+          tool,
+          decision: normalizedDecision,
+          status: normalizedStatus,
+          detail: item?.detail ? String(item.detail) : undefined,
+        });
+      }
+
+      const steps = Array.isArray(metadata?.activity?.steps) ? metadata.activity.steps : [];
+      for (const step of steps) {
+        const rawTags = Array.isArray(step?.tags) ? step.tags : [];
+        const stepId = String(step?.id || '').trim();
+        const stepTitle = String(step?.title || '').trim();
+        const isLikelyToolStep =
+          rawTags.length > 0 ||
+          stepId.toLowerCase().includes('tool') ||
+          stepId.toLowerCase().includes('delegate') ||
+          stepTitle.toLowerCase().includes('mcp tools');
+        if (!isLikelyToolStep) continue;
+
+        const candidates = rawTags.length > 0 ? rawTags : [stepId];
+        for (const candidate of candidates) {
+          const rawTool = String(candidate || '').trim();
+          if (!rawTool) continue;
+          const normalizedTool =
+            rawTool.toLowerCase().includes('haiku') ? 'delegate_subtask' : rawTool;
+          const decision = (toolPermissions[normalizedTool] || toolPermissions[rawTool] || 'ask') as ToolAuditTrailEntry['decision'];
+          const statusRaw = String(step?.status || 'done').toLowerCase();
+          const status: ToolAuditTrailEntry['status'] =
+            statusRaw === 'running' || statusRaw === 'error' || statusRaw === 'done'
+              ? (statusRaw as ToolAuditTrailEntry['status'])
+              : 'done';
+          const stepTs = Number(step?.t);
+          entries.push({
+            id: `${message.id}-${stepId || 'tool'}-${normalizedTool}`,
+            timestamp:
+              Number.isFinite(stepTs) && stepTs > 0
+                ? new Date(stepTs).toISOString()
+                : fallbackTimestamp,
+            tool: normalizedTool,
+            decision,
+            status,
+            detail: step?.detail ? String(step.detail) : undefined,
+          });
+        }
+      }
+    }
+
+    entries.sort(
+      (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+    );
+
+    const deduped: ToolAuditTrailEntry[] = [];
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      const bucket = Math.floor(new Date(entry.timestamp).getTime() / 1000);
+      const key = `${entry.tool}|${entry.decision}|${entry.status}|${entry.detail || ''}|${bucket}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(entry);
+    }
+    return deduped;
+  }, [currentChat, toolPermissions]);
+
+  const toolAuditSummary = toolAuditTrail.length > 0 ? `${toolAuditTrail.length} eventos` : 'Sem eventos';
+
+  const handleExportToolAudit = useCallback(async () => {
+    if (toolAuditTrail.length === 0) {
+      toast.info('Nenhum evento para exportar.');
+      return;
+    }
+    const filename = `tool-audit-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+    const payload = JSON.stringify(toolAuditTrail, null, 2);
+    try {
+      const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      toast.success('Audit trail exportado em JSON.');
+      return;
+    } catch {
+      // fallback abaixo
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(payload);
+        toast.success('JSON copiado para a area de transferencia.');
+        return;
+      }
+    } catch {
+      // noop
+    }
+    toast.error('Nao foi possivel exportar o audit trail.');
+  }, [toolAuditTrail]);
 
   // =========================================================================
   // RENDER
@@ -1507,7 +1649,73 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
             </AccordionItem>
 
             {/* ============================================================= */}
-            {/* 7. AVANÇADO */}
+            {/* 7. AUDIT TRAIL */}
+            {/* ============================================================= */}
+            <AccordionItem value="audit-trail">
+              <AccordionTrigger className="text-xs font-semibold hover:no-underline">
+                <div className="flex flex-col items-start gap-0.5">
+                  <span>Audit Trail</span>
+                  <span className="text-[10px] font-normal text-slate-400">{toolAuditSummary}</span>
+                </div>
+              </AccordionTrigger>
+              <AccordionContent className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] text-slate-500">
+                    Registro de tool calls com decisão allow/ask/deny.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleExportToolAudit}
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 text-[10px] font-medium text-slate-600 hover:bg-slate-50"
+                  >
+                    <Download className="h-3 w-3" />
+                    Exportar JSON
+                  </button>
+                </div>
+                {toolAuditTrail.length === 0 ? (
+                  <div className="rounded-md border border-dashed border-slate-200 p-3 text-[10px] text-slate-500">
+                    Nenhum tool call registrado nesta conversa.
+                  </div>
+                ) : (
+                  <div className="max-h-56 space-y-2 overflow-y-auto pr-1">
+                    {toolAuditTrail.map((entry) => {
+                      const decisionStyle =
+                        entry.decision === 'allow'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : entry.decision === 'deny'
+                            ? 'border-rose-200 bg-rose-50 text-rose-700'
+                            : 'border-amber-200 bg-amber-50 text-amber-700';
+                      return (
+                        <div key={entry.id} className="rounded-md border border-slate-200 bg-white p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="inline-flex min-w-0 items-center gap-1.5 text-[11px] font-medium text-slate-700">
+                              <ShieldCheck className="h-3.5 w-3.5 text-slate-400" />
+                              <span className="truncate">{entry.tool}</span>
+                            </div>
+                            <span className={cn('rounded-full border px-1.5 py-0.5 text-[10px] font-semibold uppercase', decisionStyle)}>
+                              {entry.decision}
+                            </span>
+                          </div>
+                          <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-slate-500">
+                            <span className="inline-flex items-center gap-1">
+                              <Clock3 className="h-3 w-3" />
+                              {new Date(entry.timestamp).toLocaleString('pt-BR')}
+                            </span>
+                            <span className="uppercase">{entry.status}</span>
+                          </div>
+                          {entry.detail && (
+                            <p className="mt-1 text-[10px] text-slate-500 line-clamp-2">{entry.detail}</p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </AccordionContent>
+            </AccordionItem>
+
+            {/* ============================================================= */}
+            {/* 8. AVANÇADO */}
             {/* ============================================================= */}
             <AccordionItem value="avancado">
               <AccordionTrigger className="text-xs font-semibold hover:no-underline">
@@ -1748,7 +1956,7 @@ export default function MinutaSettingsDrawer(props: MinutaSettingsDrawerProps) {
             </AccordionItem>
 
             {/* ============================================================= */}
-            {/* 8. CHECKLIST */}
+            {/* 9. CHECKLIST */}
             {/* ============================================================= */}
             <AccordionItem value="checklist">
               <AccordionTrigger className="text-xs font-semibold hover:no-underline">

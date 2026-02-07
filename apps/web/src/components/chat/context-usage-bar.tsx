@@ -27,6 +27,12 @@ interface ContextBreakdown {
   attachmentCount: number;
   ragChunks: number;
   ragChunkCount: number;
+  cacheSavedTokens: number;
+  cacheSavedPercent: number;
+  quotaUsedPoints: number;
+  quotaLimitPoints: number;
+  quotaRemainingPoints: number;
+  haikuDelegations: number;
   responseReserve: number;
   totalUsed: number;
   available: number;
@@ -62,6 +68,25 @@ function formatTokens(tokens: number): string {
   return tokens.toString();
 }
 
+function readUsageMetric(usage: any, paths: string[]): number {
+  for (const path of paths) {
+    const parts = path.split('.');
+    let current: any = usage;
+    for (const part of parts) {
+      if (current == null || typeof current !== 'object') {
+        current = undefined;
+        break;
+      }
+      current = current[part];
+    }
+    const value = Number(current);
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+  return 0;
+}
+
 interface ContextUsageBarProps {
   className?: string;
   compact?: boolean;
@@ -93,6 +118,12 @@ export function ContextUsageBar({ className, compact = false }: ContextUsageBarP
         attachmentCount: 0,
         ragChunks: 0,
         ragChunkCount: 0,
+        cacheSavedTokens: 0,
+        cacheSavedPercent: 0,
+        quotaUsedPoints: 0,
+        quotaLimitPoints: 0,
+        quotaRemainingPoints: 0,
+        haikuDelegations: 0,
         responseReserve: RESPONSE_RESERVE_TOKENS,
         totalUsed: 0,
         available: 200000,
@@ -121,6 +152,79 @@ export function ContextUsageBar({ className, compact = false }: ContextUsageBarP
     const historyTokens = estimateHistoryTokens(messages);
     const systemAndHistory = DEFAULT_SYSTEM_PROMPT_TOKENS + historyTokens;
 
+    // Estimate cache savings from message telemetry (if available)
+    let cacheSavedTokens = 0;
+    let measuredInputTokens = 0;
+    let quotaUsedPoints = 0;
+    let quotaLimitPoints = 0;
+    let quotaRemainingPoints = 0;
+    let haikuDelegations = 0;
+    for (const message of messages) {
+      const usage = (message as any)?.metadata?.token_usage;
+      if (!usage || typeof usage !== 'object') continue;
+      measuredInputTokens += readUsageMetric(usage, ['usage.input_tokens', 'input_tokens']);
+      cacheSavedTokens += readUsageMetric(usage, [
+        'usage.cached_tokens_in',
+        'cached_tokens_in',
+        'usage.cached_input_tokens',
+        'cached_input_tokens',
+        'usage.cache_read_input_tokens',
+        'cache_read_input_tokens',
+        'usage.cached_content_token_count',
+        'cached_content_token_count',
+      ]);
+    }
+    for (const message of messages) {
+      const billing = (message as any)?.metadata?.billing;
+      if (billing && typeof billing === 'object') {
+        const used = readUsageMetric(billing, [
+          'points_used',
+          'points_total',
+          'total_points',
+          'usage.points_used',
+          'usage.points_total',
+        ]);
+        const limit = readUsageMetric(billing, [
+          'points_limit',
+          'points_budget',
+          'budget_points',
+          'quota.points_limit',
+          'quota.limit',
+        ]);
+        const remaining = readUsageMetric(billing, [
+          'points_available',
+          'available_points',
+          'remaining_points',
+          'quota.remaining',
+        ]);
+        if (used > 0) quotaUsedPoints = used;
+        if (limit > 0) quotaLimitPoints = limit;
+        if (remaining > 0) quotaRemainingPoints = remaining;
+      }
+
+      const steps = Array.isArray((message as any)?.metadata?.activity?.steps)
+        ? (message as any).metadata.activity.steps
+        : [];
+      haikuDelegations += steps.filter((step: any) => {
+        const kind = String(step?.kind || '').toLowerCase();
+        const id = String(step?.id || '').toLowerCase();
+        const title = String(step?.title || '').toLowerCase();
+        return (
+          kind === 'delegate_subtask' ||
+          id === 'delegate_subtask' ||
+          id.includes('delegate') ||
+          title.includes('delegado para haiku')
+        );
+      }).length;
+    }
+    if (quotaLimitPoints > 0 && quotaRemainingPoints <= 0 && quotaUsedPoints > 0) {
+      quotaRemainingPoints = Math.max(0, quotaLimitPoints - quotaUsedPoints);
+    }
+    const cacheSavedPercent =
+      measuredInputTokens > 0
+        ? Math.min(99, (cacheSavedTokens / measuredInputTokens) * 100)
+        : 0;
+
     // Estimate attachment tokens (files in context)
     const attachmentCount = contextItems.filter((item) => item.type === 'file').length;
     // Rough estimate: each attached file adds ~2K tokens on average (depends on size)
@@ -148,6 +252,12 @@ export function ContextUsageBar({ className, compact = false }: ContextUsageBarP
       attachmentCount,
       ragChunks: ragTokens,
       ragChunkCount,
+      cacheSavedTokens,
+      cacheSavedPercent,
+      quotaUsedPoints,
+      quotaLimitPoints,
+      quotaRemainingPoints,
+      haikuDelegations,
       responseReserve: RESPONSE_RESERVE_TOKENS,
       totalUsed,
       available,
@@ -202,6 +312,36 @@ export function ContextUsageBar({ className, compact = false }: ContextUsageBarP
             <span className="font-mono">
               {formatTokens(breakdown.ragChunks)} ({((breakdown.ragChunks / breakdown.contextWindow) * 100).toFixed(1)}%)
             </span>
+          </div>
+        )}
+
+        {breakdown.cacheSavedTokens > 0 && (
+          <div className="flex justify-between">
+            <span>💾 Cache:</span>
+            <span className="font-mono text-emerald-600 dark:text-emerald-400">
+              -{formatTokens(breakdown.cacheSavedTokens)} (-{breakdown.cacheSavedPercent.toFixed(0)}%)
+            </span>
+          </div>
+        )}
+
+        {(breakdown.quotaLimitPoints > 0 || breakdown.quotaUsedPoints > 0) && (
+          <div className="flex justify-between">
+            <span>📊 Quota:</span>
+            <span className="font-mono">
+              {breakdown.quotaLimitPoints > 0
+                ? `${Math.round(breakdown.quotaUsedPoints)}/${Math.round(breakdown.quotaLimitPoints)} pts`
+                : `${Math.round(breakdown.quotaUsedPoints)} pts`}
+              {breakdown.quotaRemainingPoints > 0
+                ? ` (${Math.round(breakdown.quotaRemainingPoints)} disp.)`
+                : ''}
+            </span>
+          </div>
+        )}
+
+        {breakdown.haikuDelegations > 0 && (
+          <div className="flex justify-between">
+            <span>⚡ Delegações Haiku:</span>
+            <span className="font-mono">{breakdown.haikuDelegations}</span>
           </div>
         )}
 

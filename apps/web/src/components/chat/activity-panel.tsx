@@ -14,6 +14,7 @@ import {
   ListFilter,
   Sparkles,
   Brain,
+  Zap,
 } from 'lucide-react';
 import { resolveUiLang, type UiLang } from '@/lib/ui-lang';
 
@@ -23,7 +24,7 @@ export interface ActivityStep {
   status?: 'running' | 'done' | 'error';
   detail?: string;
   tags?: string[];
-  kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'generic';
+  kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'delegate_subtask' | 'generic';
   attachments?: Array<{ name: string; kind?: string; ext?: string }>;
   terms?: string[];
   sources?: Array<{ title?: string; url: string }>;
@@ -88,6 +89,7 @@ function normalizeStepKind(step: ActivityStep): ActivityStep['kind'] {
   if (id === 'reviewing_attached_file') return 'attachment_review';
   if (id === 'checking_terms') return 'file_terms';
   if (id === 'web_search') return 'web_search';
+  if (id === 'delegate_subtask' || id.includes('delegate')) return 'delegate_subtask';
   return 'generic';
 }
 
@@ -99,6 +101,7 @@ function normalizeStepTitle(step: ActivityStep, lang: UiLang): string {
       reviewing_attached_file: 'Revisando arquivo anexado',
       checking_terms: 'Buscando termos no anexo',
       web_search: 'Pesquisando na web por informações relevantes',
+      delegate_subtask: 'Delegado para Haiku',
       response_clarity: 'Preparando a resposta',
     },
     en: {
@@ -106,6 +109,7 @@ function normalizeStepTitle(step: ActivityStep, lang: UiLang): string {
       reviewing_attached_file: 'Reviewing attached file',
       checking_terms: 'Checking for terms in attached file',
       web_search: 'Searching the web for relevant information',
+      delegate_subtask: 'Delegated to Haiku',
       response_clarity: 'Preparing response clarity',
     },
   } as const;
@@ -150,6 +154,9 @@ function StepIcon({ step, isStreaming }: { step: ActivityStep; isStreaming?: boo
   }
   if (kind === 'web_search' || id.includes('web') || id.includes('search') || id.includes('pesquis')) {
     return <Globe className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />;
+  }
+  if (kind === 'delegate_subtask' || id.includes('delegate')) {
+    return <Zap className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />;
   }
   if (id.includes('evaluat') || id.includes('evidence') || id.includes('avalia')) {
     return <Brain className="h-3.5 w-3.5 text-slate-400 dark:text-slate-500" />;

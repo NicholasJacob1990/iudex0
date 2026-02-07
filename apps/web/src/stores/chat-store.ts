@@ -4140,7 +4140,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status?: 'running' | 'done' | 'error';
           detail?: string;
           tags?: string[];
-          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'generic';
+          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'delegate_subtask' | 'generic';
           attachments?: Array<{ name: string; kind?: string; ext?: string }>;
           terms?: string[];
           sources?: Array<{ title?: string; url: string }>;
@@ -4302,11 +4302,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
           updateAssistant((message) => {
             const citations = Array.isArray(message.metadata?.citations) ? [...message.metadata.citations] : [];
             const src = data.source;
-            if (src?.url && !citations.some((c: any) => c.url === src.url)) {
+            const srcUrl =
+              (typeof src?.url === 'string' && src.url.trim()) ||
+              (typeof src?.source_url === 'string' && src.source_url.trim()) ||
+              '';
+            const srcDocId =
+              String(src?.provenance?.doc_id || src?.doc_id || src?.document_id || '').trim();
+            const srcChunk =
+              String(src?.provenance?.chunk_uid || src?.chunk_uid || '').trim();
+            const srcChunkIndex = src?.provenance?.chunk_index ?? src?.chunk_index;
+            const srcPage =
+              src?.viewer?.source_page ?? src?.provenance?.page_number ?? src?.page_number ?? src?.source_page;
+            const sourceKey = srcDocId
+              ? `${srcDocId}|${String(srcChunkIndex ?? '')}|${String(srcPage ?? '')}|${srcChunk}`
+              : srcUrl.toLowerCase();
+            if (
+              sourceKey &&
+              !citations.some((c: any) => {
+                const cDocId = String(c?.provenance?.doc_id || c?.doc_id || c?.document_id || '').trim();
+                const cChunk = String(c?.provenance?.chunk_uid || c?.chunk_uid || '').trim();
+                const cChunkIndex = c?.provenance?.chunk_index ?? c?.chunk_index;
+                const cPage =
+                  c?.viewer?.source_page ?? c?.provenance?.page_number ?? c?.page_number ?? c?.source_page;
+                const cUrl =
+                  (typeof c?.url === 'string' && c.url.trim()) ||
+                  (typeof c?.source_url === 'string' && c.source_url.trim()) ||
+                  '';
+                const candidateKey = cDocId
+                  ? `${cDocId}|${String(cChunkIndex ?? '')}|${String(cPage ?? '')}|${cChunk}`
+                  : cUrl.toLowerCase();
+                return candidateKey === sourceKey;
+              })
+            ) {
               citations.push({
                 number: String(citations.length + 1),
-                title: src.title || src.url,
-                url: src.url,
+                title: src?.title || srcUrl || `Fonte ${citations.length + 1}`,
+                url: srcUrl || undefined,
+                quote:
+                  (typeof src?.quote === 'string' && src.quote) ||
+                  (typeof src?.highlight_text === 'string' && src.highlight_text) ||
+                  undefined,
+                ...(src?.provenance && typeof src.provenance === 'object' ? { provenance: src.provenance } : {}),
+                ...(src?.viewer && typeof src.viewer === 'object' ? { viewer: src.viewer } : {}),
+                ...(src?.doc_id ? { doc_id: src.doc_id } : {}),
+                ...(src?.document_id ? { document_id: src.document_id } : {}),
+                ...(src?.chunk_uid ? { chunk_uid: src.chunk_uid } : {}),
+                ...(src?.chunk_index != null ? { chunk_index: src.chunk_index } : {}),
+                ...(src?.source_page != null ? { source_page: src.source_page } : {}),
+                ...(src?.source_url ? { source_url: src.source_url } : {}),
               });
             }
             return {
@@ -4315,14 +4358,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             };
           });
           const src = data.source;
-          if (src?.url) {
+          const srcUrl =
+            (typeof src?.url === 'string' && src.url.trim()) ||
+            (typeof src?.source_url === 'string' && src.source_url.trim()) ||
+            '';
+          if (srcUrl) {
             updateAssistant((message) => ({
               ...message,
               metadata: upsertActivityStep(message, {
                 id: 'web_search',
                 title: 'Pesquisando na web',
                 kind: 'web_search',
-                sources: [{ url: String(src.url), title: src.title ? String(src.title) : undefined }],
+                sources: [{ url: srcUrl, title: src?.title ? String(src.title) : undefined }],
               }, 'update'),
             }));
           }
@@ -4410,8 +4457,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // Handled by handleStepEvent
           } else if (data.type === 'tool_call' && data.step_id) {
             hasActivityEvents = true;
-            const stepId = String(data.step_id || 'mcp_tools');
             const toolName = String(data.name || '').trim() || 'tool';
+            const toolNameLower = toolName.toLowerCase();
+            const delegatedModel =
+              String(
+                data?.arguments?.model ??
+                data?.args?.model ??
+                data?.input?.model ??
+                '',
+              ).trim();
+            const isDelegateSubtask = toolNameLower === 'delegate_subtask' || toolNameLower.includes('delegate');
+            const stepId = isDelegateSubtask ? 'delegate_subtask' : String(data.step_id || 'mcp_tools');
+            const stepTitle = isDelegateSubtask ? 'Delegado para Haiku' : 'MCP tools';
+            const tagLabel = isDelegateSubtask
+              ? (delegatedModel || 'claude-4.5-haiku')
+              : toolName;
             const previewRaw = data.result_preview != null ? String(data.result_preview) : '';
             const preview = previewRaw ? previewRaw.slice(0, 220) : '';
             const line = `\n${toolName}${preview ? `: ${preview}` : ''}`;
@@ -4420,16 +4480,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ...message,
               metadata: upsertActivityStep(message, {
                 id: stepId,
-                title: 'MCP tools',
-                tags: [toolName],
+                title: stepTitle,
+                tags: [tagLabel],
+                kind: isDelegateSubtask ? 'delegate_subtask' : undefined,
               }, 'tags'),
             }));
             updateAssistant((message) => ({
               ...message,
               metadata: upsertActivityStep(message, {
                 id: stepId,
-                title: 'MCP tools',
+                title: stepTitle,
                 detail: line,
+                kind: isDelegateSubtask ? 'delegate_subtask' : undefined,
               }, 'append'),
             }));
           } else if (data.type === 'search_started') {
@@ -4645,6 +4707,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       ...(data.token_usage ? { token_usage: data.token_usage } : {}),
                       ...(data.citations ? { citations: data.citations } : {}),
                       ...(data.billing ? { billing: data.billing } : {}),
+                      ...(typeof data.execution_mode === 'string'
+                        ? { execution_mode: data.execution_mode }
+                        : {}),
+                      ...(typeof data.execution_path === 'string'
+                        ? { execution_path: data.execution_path }
+                        : {}),
                       ...(typeof data.thinking_enabled === 'boolean'
                         ? { thinking_enabled: data.thinking_enabled }
                         : {}),
@@ -4908,6 +4976,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       ...(data.token_usage ? { token_usage: data.token_usage } : {}),
                       ...(data.citations ? { citations: data.citations } : {}),
                       ...(data.billing ? { billing: data.billing } : {}),
+                      ...(typeof data.execution_mode === 'string'
+                        ? { execution_mode: data.execution_mode }
+                        : {}),
+                      ...(typeof data.execution_path === 'string'
+                        ? { execution_path: data.execution_path }
+                        : {}),
                       ...(typeof data.thinking_enabled === 'boolean'
                         ? { thinking_enabled: data.thinking_enabled }
                         : {}),
@@ -6043,7 +6117,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           status?: 'running' | 'done' | 'error';
           detail?: string;
           tags?: string[];
-          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'generic';
+          kind?: 'assess' | 'attachment_review' | 'file_terms' | 'web_search' | 'delegate_subtask' | 'generic';
           attachments?: Array<{ name: string; kind?: string; ext?: string }>;
           terms?: string[];
           sources?: Array<{ title?: string; url: string }>;
@@ -6367,14 +6441,54 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
               if (data.type === 'step.add_source' && data.model) {
                 const src = data.source;
-                if (src?.url) {
+                const srcUrl =
+                  (typeof src?.url === 'string' && src.url.trim()) ||
+                  (typeof src?.source_url === 'string' && src.source_url.trim()) ||
+                  '';
+                if (srcUrl) {
                   updateModelMessage(data.model, (m) => {
                     const citations = Array.isArray(m.metadata?.citations) ? [...m.metadata.citations] : [];
-                    if (!citations.some((c: any) => c?.url === src.url)) {
+                    const srcDocId =
+                      String(src?.provenance?.doc_id || src?.doc_id || src?.document_id || '').trim();
+                    const srcChunk =
+                      String(src?.provenance?.chunk_uid || src?.chunk_uid || '').trim();
+                    const srcChunkIndex = src?.provenance?.chunk_index ?? src?.chunk_index;
+                    const srcPage =
+                      src?.viewer?.source_page ?? src?.provenance?.page_number ?? src?.page_number ?? src?.source_page;
+                    const sourceKey = srcDocId
+                      ? `${srcDocId}|${String(srcChunkIndex ?? '')}|${String(srcPage ?? '')}|${srcChunk}`
+                      : srcUrl.toLowerCase();
+                    if (!citations.some((c: any) => {
+                      const cDocId = String(c?.provenance?.doc_id || c?.doc_id || c?.document_id || '').trim();
+                      const cChunk = String(c?.provenance?.chunk_uid || c?.chunk_uid || '').trim();
+                      const cChunkIndex = c?.provenance?.chunk_index ?? c?.chunk_index;
+                      const cPage =
+                        c?.viewer?.source_page ?? c?.provenance?.page_number ?? c?.page_number ?? c?.source_page;
+                      const cUrl =
+                        (typeof c?.url === 'string' && c.url.trim()) ||
+                        (typeof c?.source_url === 'string' && c.source_url.trim()) ||
+                        '';
+                      const candidateKey = cDocId
+                        ? `${cDocId}|${String(cChunkIndex ?? '')}|${String(cPage ?? '')}|${cChunk}`
+                        : cUrl.toLowerCase();
+                      return candidateKey === sourceKey;
+                    })) {
                       citations.push({
                         number: String(citations.length + 1),
-                        title: src.title || src.url,
-                        url: src.url,
+                        title: src?.title || srcUrl || `Fonte ${citations.length + 1}`,
+                        url: srcUrl || undefined,
+                        quote:
+                          (typeof src?.quote === 'string' && src.quote) ||
+                          (typeof src?.highlight_text === 'string' && src.highlight_text) ||
+                          undefined,
+                        ...(src?.provenance && typeof src.provenance === 'object' ? { provenance: src.provenance } : {}),
+                        ...(src?.viewer && typeof src.viewer === 'object' ? { viewer: src.viewer } : {}),
+                        ...(src?.doc_id ? { doc_id: src.doc_id } : {}),
+                        ...(src?.document_id ? { document_id: src.document_id } : {}),
+                        ...(src?.chunk_uid ? { chunk_uid: src.chunk_uid } : {}),
+                        ...(src?.chunk_index != null ? { chunk_index: src.chunk_index } : {}),
+                        ...(src?.source_page != null ? { source_page: src.source_page } : {}),
+                        ...(src?.source_url ? { source_url: src.source_url } : {}),
                       });
                     }
                     return {
@@ -6390,7 +6504,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         id: 'web_search',
                         title: 'Pesquisando na web',
                         kind: 'web_search',
-                        sources: [{ url: String(src.url), title: src.title ? String(src.title) : undefined }],
+                        sources: [{ url: srcUrl, title: src?.title ? String(src.title) : undefined }],
                       },
                       'update'
                     ),
@@ -6399,8 +6513,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 continue;
               }
               if (data.type === 'tool_call' && data.model && data.step_id) {
-                const stepId = String(data.step_id || 'mcp_tools');
                 const toolName = String(data.name || '').trim() || 'tool';
+                const toolNameLower = toolName.toLowerCase();
+                const delegatedModel =
+                  String(
+                    data?.arguments?.model ??
+                    data?.args?.model ??
+                    data?.input?.model ??
+                    '',
+                  ).trim();
+                const isDelegateSubtask =
+                  toolNameLower === 'delegate_subtask' || toolNameLower.includes('delegate');
+                const stepId = isDelegateSubtask ? 'delegate_subtask' : String(data.step_id || 'mcp_tools');
+                const stepTitle = isDelegateSubtask ? 'Delegado para Haiku' : 'MCP tools';
+                const tagLabel = isDelegateSubtask
+                  ? (delegatedModel || 'claude-4.5-haiku')
+                  : toolName;
                 const previewRaw = data.result_preview != null ? String(data.result_preview) : '';
                 const preview = previewRaw ? previewRaw.slice(0, 220) : '';
                 const line = `\n${toolName}${preview ? `: ${preview}` : ''}`;
@@ -6409,7 +6537,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...m,
                   metadata: upsertModelActivityStep(
                     m.metadata,
-                    { id: stepId, title: 'MCP tools', tags: [toolName] },
+                    {
+                      id: stepId,
+                      title: stepTitle,
+                      tags: [tagLabel],
+                      kind: isDelegateSubtask ? 'delegate_subtask' : undefined,
+                    },
                     'tags'
                   ),
                 }));
@@ -6417,7 +6550,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   ...m,
                   metadata: upsertModelActivityStep(
                     m.metadata,
-                    { id: stepId, title: 'MCP tools', detail: line },
+                    {
+                      id: stepId,
+                      title: stepTitle,
+                      detail: line,
+                      kind: isDelegateSubtask ? 'delegate_subtask' : undefined,
+                    },
                     'append'
                   ),
                 }));
@@ -6499,6 +6637,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       next.stream_t_answer_start = now;
                     next.stream_t_done = now;
                     if (data.citations) next.citations = data.citations;
+                    if (typeof data.execution_mode === 'string') {
+                      next.execution_mode = data.execution_mode;
+                    }
+                    if (typeof data.execution_path === 'string') {
+                      next.execution_path = data.execution_path;
+                    }
                     if (typeof data.thinking_enabled === 'boolean') {
                       next.thinking_enabled = data.thinking_enabled;
                     }
