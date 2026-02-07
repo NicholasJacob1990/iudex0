@@ -38,7 +38,7 @@ import {
     PanelLeft,
     Filter,
 } from 'lucide-react';
-import { GraphMaterialSelector, GraphLexicalSearch } from '@/components/graph';
+import { GraphMaterialSelector, GraphLexicalSearch, GraphAuraAgentChat } from '@/components/graph';
 import { cn } from '@/lib/utils';
 import { toast } from 'sonner';
 import {
@@ -1088,6 +1088,11 @@ export default function GraphPage() {
                     </div>
                 )}
             </div>
+
+            <GraphAuraAgentChat
+                selectedNodeId={selectedNode?.id ?? null}
+                onNavigateToNode={navigateToNode}
+            />
         </div>
     );
 }
