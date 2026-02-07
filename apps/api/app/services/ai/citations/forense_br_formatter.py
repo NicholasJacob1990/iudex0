@@ -3,6 +3,10 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping
 
+from app.services.ai.citations.metadata import (
+    build_numeric_prefix,
+    extract_reference_metadata,
+)
 
 def format_forense_br_reference(
     source: Mapping[str, Any],
@@ -10,19 +14,27 @@ def format_forense_br_reference(
     accessed_at: datetime | None = None,
     number: int | None = None,
 ) -> str:
-    title = str(source.get("title") or "Fonte").strip()
-    tribunal = str(source.get("tribunal") or "").strip()
-    url = str(source.get("url") or source.get("source_url") or "").strip()
-    page = source.get("source_page")
+    meta = extract_reference_metadata(source, accessed_at=accessed_at)
+    dt = meta["accessed_at"] if isinstance(meta.get("accessed_at"), datetime) else datetime.now()
 
-    prefix = f"[{number}] " if number is not None else ""
+    title = str(meta.get("title") or "Fonte").strip()
+    tribunal = str(meta.get("court") or "").strip()
+    processo = str(meta.get("docket") or "").strip()
+    year = str(meta.get("year") or "").strip()
+    url = str(meta.get("url") or "").strip()
+    page = meta.get("pin_cite")
+    prefix = build_numeric_prefix(number)
+
     parts = [f"{prefix}{title}."]
     if tribunal:
-        parts.append(f"Tribunal: {tribunal}.")
+        parts.append(f"{tribunal}.")
+    if processo:
+        parts.append(f"Processo {processo}.")
+    if year and year != "n.d.":
+        parts.append(f"{year}.")
     if page:
-        parts.append(f"Página: {page}.")
+        parts.append(f"p. {page}.")
     if url:
-        dt = accessed_at or datetime.now()
         parts.append(f"Disponível em: {url}.")
         parts.append(f"Acesso em: {dt.day:02d}/{dt.month:02d}/{dt.year}.")
-    return " ".join(parts)
+    return " ".join(parts).replace("..", ".")

@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Mapping
 
-
-_MONTHS = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-]
+from app.services.ai.citations.metadata import (
+    build_numeric_prefix,
+    extract_reference_metadata,
+    long_month_name,
+)
 
 
 def format_harvard_reference(
@@ -16,15 +16,22 @@ def format_harvard_reference(
     accessed_at: datetime | None = None,
     number: int | None = None,
 ) -> str:
-    title = str(source.get("title") or "Untitled").strip()
-    author = str(source.get("author") or source.get("institution") or "").strip()
-    year = str(source.get("year") or source.get("ano") or "n.d.").strip()
-    url = str(source.get("url") or source.get("source_url") or "").strip()
-    dt = accessed_at or datetime.now()
-    month = _MONTHS[max(0, min(11, dt.month - 1))]
-    prefix = f"[{number}] " if number is not None else ""
+    meta = extract_reference_metadata(source, accessed_at=accessed_at)
+    dt = meta["accessed_at"] if isinstance(meta.get("accessed_at"), datetime) else datetime.now()
+    month = long_month_name(dt.month)
+    prefix = build_numeric_prefix(number)
+
+    author = str(meta.get("author") or "").strip()
+    title = str(meta.get("title") or "Untitled").strip()
+    year = str(meta.get("year") or "n.d.").strip()
+    url = str(meta.get("url") or "").strip()
+    site = str(meta.get("site") or "").strip()
 
     author_part = f"{author} " if author else ""
+    container_part = f", {site}" if site else ""
     if not url:
-        return f"{prefix}{author_part}({year}) {title}."
-    return f"{prefix}{author_part}({year}) {title}. Available at: {url} (Accessed: {dt.day} {month} {dt.year})."
+        return f"{prefix}{author_part}({year}) '{title}'{container_part}."
+    return (
+        f"{prefix}{author_part}({year}) '{title}'{container_part}. "
+        f"Available at: {url} (Accessed: {dt.day} {month} {dt.year})."
+    )
