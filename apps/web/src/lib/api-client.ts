@@ -349,6 +349,83 @@ interface OutlineResponse {
   model?: string;
 }
 
+export interface GenerateSkillRequestPayload {
+  directive: string;
+  name?: string;
+  description?: string;
+  version?: string;
+  audience?: 'beginner' | 'advanced' | 'both';
+  triggers?: string[];
+  tools_required?: string[];
+  tools_denied?: string[];
+  subagent_model?: string;
+  citation_style?: string;
+  output_format?: 'chat' | 'document' | 'checklist' | 'json';
+  prefer_workflow?: boolean;
+  prefer_agent?: boolean;
+  guardrails?: string[];
+  examples?: Array<string | { prompt: string; expected_behavior: string }>;
+  negative_examples?: string[];
+  tools_allowed?: string[];
+}
+
+export interface GenerateSkillResponsePayload {
+  draft_id: string;
+  status: string;
+  version: number;
+  schema_version: string;
+  quality_score: number;
+  warnings: string[];
+  suggested_tests?: string[];
+  skill_markdown: string;
+}
+
+export interface ValidateSkillRequestPayload {
+  draft_id?: string;
+  skill_markdown?: string;
+  test_prompts?: {
+    positive: string[];
+    negative: string[];
+  };
+  strict?: boolean;
+}
+
+export interface ValidateSkillResponsePayload {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  quality_score?: number;
+  tpr?: number;
+  fpr?: number;
+  security_violations?: string[];
+  improvements?: string[];
+  routing: Record<string, number>;
+  parsed?: Record<string, unknown> | null;
+}
+
+export interface PublishSkillRequestPayload {
+  draft_id?: string;
+  skill_markdown?: string;
+  activate?: boolean;
+  visibility?: 'personal' | 'organization' | 'public';
+  if_match_version?: number;
+}
+
+export interface PublishSkillResponsePayload {
+  skill_id: string;
+  status: string;
+  version: number;
+  indexed_triggers: number;
+}
+
+export interface SkillLibraryItem {
+  id: string;
+  name: string;
+  description?: string | null;
+  tags: string[];
+  updated_at?: string;
+}
+
 class ApiClient {
   private axios: AxiosInstance;
   private baseUrl: string;
@@ -1178,6 +1255,27 @@ class ApiClient {
     return response.data;
   }
 
+  async generateSkill(data: GenerateSkillRequestPayload): Promise<GenerateSkillResponsePayload> {
+    const response = await this.axios.post<GenerateSkillResponsePayload>('/skills/generate', data);
+    return response.data;
+  }
+
+  async validateSkill(data: ValidateSkillRequestPayload): Promise<ValidateSkillResponsePayload> {
+    const response = await this.axios.post<ValidateSkillResponsePayload>('/skills/validate', data);
+    return response.data;
+  }
+
+  async publishSkill(data: PublishSkillRequestPayload): Promise<PublishSkillResponsePayload> {
+    const response = await this.axios.post<PublishSkillResponsePayload>('/skills/publish', data);
+    return response.data;
+  }
+
+  async listSkillsFromLibrary(): Promise<SkillLibraryItem[]> {
+    const response = await this.axios.get<{ items: SkillLibraryItem[]; total: number }>('/library/items');
+    const items = Array.isArray(response.data?.items) ? response.data.items : [];
+    return items.filter((item) => Array.isArray(item.tags) && item.tags.includes('skill'));
+  }
+
 
 
 
@@ -1669,6 +1767,12 @@ class ApiClient {
       document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
       model_selection?: string;
       high_accuracy?: boolean;
       diarization?: boolean;
@@ -1719,12 +1823,21 @@ class ApiClient {
     if (options.document_font_size !== undefined) {
       formData.append('document_font_size', String(options.document_font_size));
     }
+    if (options.document_table_font_size !== undefined) {
+      formData.append('document_table_font_size', String(options.document_table_font_size));
+    }
     if (options.document_line_height !== undefined) {
       formData.append('document_line_height', String(options.document_line_height));
     }
     if (options.document_paragraph_spacing !== undefined) {
       formData.append('document_paragraph_spacing', String(options.document_paragraph_spacing));
     }
+    if (options.document_table_header_bg) formData.append('document_table_header_bg', options.document_table_header_bg);
+    if (options.document_table_header_text) formData.append('document_table_header_text', options.document_table_header_text);
+    if (options.document_table_row_even_bg) formData.append('document_table_row_even_bg', options.document_table_row_even_bg);
+    if (options.document_table_row_odd_bg) formData.append('document_table_row_odd_bg', options.document_table_row_odd_bg);
+    if (options.document_table_cell_text) formData.append('document_table_cell_text', options.document_table_cell_text);
+    if (options.document_table_border_color) formData.append('document_table_border_color', options.document_table_border_color);
     if (options.model_selection) formData.append('model_selection', options.model_selection);
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
     if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
@@ -1807,6 +1920,12 @@ class ApiClient {
       document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
       model_selection?: string;
       high_accuracy?: boolean;
       diarization?: boolean | null;
@@ -1848,8 +1967,15 @@ class ApiClient {
     if (options.document_show_header_footer !== undefined) payload.document_show_header_footer = options.document_show_header_footer;
     if (options.document_font_family) payload.document_font_family = options.document_font_family;
     if (options.document_font_size !== undefined) payload.document_font_size = options.document_font_size;
+    if (options.document_table_font_size !== undefined) payload.document_table_font_size = options.document_table_font_size;
     if (options.document_line_height !== undefined) payload.document_line_height = options.document_line_height;
     if (options.document_paragraph_spacing !== undefined) payload.document_paragraph_spacing = options.document_paragraph_spacing;
+    if (options.document_table_header_bg) payload.document_table_header_bg = options.document_table_header_bg;
+    if (options.document_table_header_text) payload.document_table_header_text = options.document_table_header_text;
+    if (options.document_table_row_even_bg) payload.document_table_row_even_bg = options.document_table_row_even_bg;
+    if (options.document_table_row_odd_bg) payload.document_table_row_odd_bg = options.document_table_row_odd_bg;
+    if (options.document_table_cell_text) payload.document_table_cell_text = options.document_table_cell_text;
+    if (options.document_table_border_color) payload.document_table_border_color = options.document_table_border_color;
     if (options.diarization !== undefined) payload.diarization = options.diarization;
     if (options.diarization_strict !== undefined) payload.diarization_strict = options.diarization_strict;
     if (options.use_cache !== undefined) payload.use_cache = options.use_cache;
@@ -1866,6 +1992,99 @@ class ApiClient {
     if (options.custom_keyterms) payload.custom_keyterms = options.custom_keyterms;
 
     const response = await this.axios.post('/transcription/vomo/jobs/url', payload);
+    return response.data;
+  }
+
+  async startTranscriptionJobFromUrls(
+    urls: string[],
+    options: {
+      mode: string;
+      thinking_level: string;
+      custom_prompt?: string;
+      disable_tables?: boolean;
+      document_theme?: string;
+      document_header?: string;
+      document_footer?: string;
+      document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
+      document_font_family?: string;
+      document_font_size?: number;
+      document_table_font_size?: number;
+      document_line_height?: number;
+      document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
+      model_selection?: string;
+      high_accuracy?: boolean;
+      diarization?: boolean | null;
+      diarization_strict?: boolean;
+      use_cache?: boolean;
+      auto_apply_fixes?: boolean;
+      auto_apply_content_fixes?: boolean;
+      skip_legal_audit?: boolean;
+      skip_audit?: boolean;
+      skip_fidelity_audit?: boolean;
+      skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      language?: string;
+      output_language?: string;
+      speaker_roles?: string[];
+      speakers_expected?: number;
+      subtitle_format?: 'srt' | 'vtt' | 'both';
+      area?: string;
+      custom_keyterms?: string;
+    }
+  ): Promise<{ job_id: string; status: string }> {
+    const payload: any = {
+      urls,
+      mode: options.mode,
+      thinking_level: options.thinking_level,
+      model_selection: options.model_selection || 'gemini-3-flash-preview',
+      high_accuracy: !!options.high_accuracy,
+      language: options.language || 'pt',
+      output_language: options.output_language || '',
+    };
+    if (options.transcription_engine) payload.transcription_engine = options.transcription_engine;
+    if (options.custom_prompt) payload.custom_prompt = options.custom_prompt;
+    if (options.disable_tables !== undefined) payload.disable_tables = options.disable_tables;
+    if (options.document_theme) payload.document_theme = options.document_theme;
+    if (options.document_header) payload.document_header = options.document_header;
+    if (options.document_footer) payload.document_footer = options.document_footer;
+    if (options.document_margins) payload.document_margins = options.document_margins;
+    if (options.document_page_frame !== undefined) payload.document_page_frame = options.document_page_frame;
+    if (options.document_show_header_footer !== undefined) payload.document_show_header_footer = options.document_show_header_footer;
+    if (options.document_font_family) payload.document_font_family = options.document_font_family;
+    if (options.document_font_size !== undefined) payload.document_font_size = options.document_font_size;
+    if (options.document_table_font_size !== undefined) payload.document_table_font_size = options.document_table_font_size;
+    if (options.document_line_height !== undefined) payload.document_line_height = options.document_line_height;
+    if (options.document_paragraph_spacing !== undefined) payload.document_paragraph_spacing = options.document_paragraph_spacing;
+    if (options.document_table_header_bg) payload.document_table_header_bg = options.document_table_header_bg;
+    if (options.document_table_header_text) payload.document_table_header_text = options.document_table_header_text;
+    if (options.document_table_row_even_bg) payload.document_table_row_even_bg = options.document_table_row_even_bg;
+    if (options.document_table_row_odd_bg) payload.document_table_row_odd_bg = options.document_table_row_odd_bg;
+    if (options.document_table_cell_text) payload.document_table_cell_text = options.document_table_cell_text;
+    if (options.document_table_border_color) payload.document_table_border_color = options.document_table_border_color;
+    if (options.diarization !== undefined) payload.diarization = options.diarization;
+    if (options.diarization_strict !== undefined) payload.diarization_strict = options.diarization_strict;
+    if (options.use_cache !== undefined) payload.use_cache = options.use_cache;
+    if (options.auto_apply_fixes !== undefined) payload.auto_apply_fixes = options.auto_apply_fixes;
+    if (options.auto_apply_content_fixes !== undefined) payload.auto_apply_content_fixes = options.auto_apply_content_fixes;
+    if (options.skip_legal_audit !== undefined) payload.skip_legal_audit = options.skip_legal_audit;
+    if (options.skip_audit !== undefined) payload.skip_audit = options.skip_audit;
+    if (options.skip_fidelity_audit !== undefined) payload.skip_fidelity_audit = options.skip_fidelity_audit;
+    if (options.skip_sources_audit !== undefined) payload.skip_sources_audit = options.skip_sources_audit;
+    if (options.speaker_roles?.length) payload.speaker_roles = JSON.stringify(options.speaker_roles);
+    if (options.speakers_expected) payload.speakers_expected = options.speakers_expected;
+    if (options.subtitle_format) payload.subtitle_format = options.subtitle_format;
+    if (options.area) payload.area = options.area;
+    if (options.custom_keyterms) payload.custom_keyterms = options.custom_keyterms;
+
+    const response = await this.axios.post('/transcription/vomo/jobs/urls', payload);
     return response.data;
   }
 
@@ -1890,10 +2109,17 @@ class ApiClient {
       document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
       format_enabled?: boolean;
       include_timestamps?: boolean;
       allow_indirect?: boolean;
       allow_summary?: boolean;
+      output_style?: 'default' | 'ata_literal' | 'ata_resumida' | 'relatorio';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1937,12 +2163,21 @@ class ApiClient {
     if (payload.document_font_size !== undefined) {
       formData.append('document_font_size', String(payload.document_font_size));
     }
+    if (payload.document_table_font_size !== undefined) {
+      formData.append('document_table_font_size', String(payload.document_table_font_size));
+    }
     if (payload.document_line_height !== undefined) {
       formData.append('document_line_height', String(payload.document_line_height));
     }
     if (payload.document_paragraph_spacing !== undefined) {
       formData.append('document_paragraph_spacing', String(payload.document_paragraph_spacing));
     }
+    if (payload.document_table_header_bg) formData.append('document_table_header_bg', payload.document_table_header_bg);
+    if (payload.document_table_header_text) formData.append('document_table_header_text', payload.document_table_header_text);
+    if (payload.document_table_row_even_bg) formData.append('document_table_row_even_bg', payload.document_table_row_even_bg);
+    if (payload.document_table_row_odd_bg) formData.append('document_table_row_odd_bg', payload.document_table_row_odd_bg);
+    if (payload.document_table_cell_text) formData.append('document_table_cell_text', payload.document_table_cell_text);
+    if (payload.document_table_border_color) formData.append('document_table_border_color', payload.document_table_border_color);
     if (payload.format_enabled !== undefined) {
       formData.append('format_enabled', payload.format_enabled ? 'true' : 'false');
     }
@@ -1951,6 +2186,7 @@ class ApiClient {
     }
     if (payload.allow_indirect) formData.append('allow_indirect', 'true');
     if (payload.allow_summary) formData.append('allow_summary', 'true');
+    if (payload.output_style) formData.append('output_style', payload.output_style);
     if (payload.use_cache !== undefined) formData.append('use_cache', payload.use_cache ? 'true' : 'false');
     if (payload.auto_apply_fixes !== undefined) {
       formData.append('auto_apply_fixes', payload.auto_apply_fixes ? 'true' : 'false');
@@ -2029,10 +2265,17 @@ class ApiClient {
       document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
       format_enabled?: boolean;
       include_timestamps?: boolean;
       allow_indirect?: boolean;
       allow_summary?: boolean;
+      output_style?: 'default' | 'ata_literal' | 'ata_resumida' | 'relatorio';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -2062,6 +2305,7 @@ class ApiClient {
       include_timestamps: payload.include_timestamps !== undefined ? payload.include_timestamps : true,
       allow_indirect: !!payload.allow_indirect,
       allow_summary: !!payload.allow_summary,
+      output_style: payload.output_style || 'default',
       language: payload.language || 'pt',
       output_language: payload.output_language || '',
       transcription_engine: payload.transcription_engine || 'whisper',
@@ -2075,8 +2319,15 @@ class ApiClient {
     if (payload.document_show_header_footer !== undefined) body.document_show_header_footer = payload.document_show_header_footer;
     if (payload.document_font_family) body.document_font_family = payload.document_font_family;
     if (payload.document_font_size !== undefined) body.document_font_size = payload.document_font_size;
+    if (payload.document_table_font_size !== undefined) body.document_table_font_size = payload.document_table_font_size;
     if (payload.document_line_height !== undefined) body.document_line_height = payload.document_line_height;
     if (payload.document_paragraph_spacing !== undefined) body.document_paragraph_spacing = payload.document_paragraph_spacing;
+    if (payload.document_table_header_bg) body.document_table_header_bg = payload.document_table_header_bg;
+    if (payload.document_table_header_text) body.document_table_header_text = payload.document_table_header_text;
+    if (payload.document_table_row_even_bg) body.document_table_row_even_bg = payload.document_table_row_even_bg;
+    if (payload.document_table_row_odd_bg) body.document_table_row_odd_bg = payload.document_table_row_odd_bg;
+    if (payload.document_table_cell_text) body.document_table_cell_text = payload.document_table_cell_text;
+    if (payload.document_table_border_color) body.document_table_border_color = payload.document_table_border_color;
     if (payload.use_cache !== undefined) body.use_cache = payload.use_cache;
     if (payload.auto_apply_fixes !== undefined) body.auto_apply_fixes = payload.auto_apply_fixes;
     if (payload.auto_apply_content_fixes !== undefined) body.auto_apply_content_fixes = payload.auto_apply_content_fixes;
@@ -2110,7 +2361,9 @@ class ApiClient {
   }
 
   async retryTranscriptionJob(jobId: string): Promise<any> {
-    const response = await this.axios.post(`/transcription/vomo/jobs/${jobId}/retry`);
+    const token = this.getAccessToken();
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    const response = await this.axios.post(`/transcription/vomo/jobs/${jobId}/retry${tokenParam}`);
     return response.data;
   }
 
@@ -2125,6 +2378,8 @@ class ApiClient {
       fixed_content?: string;
       needs_revalidate?: boolean;
       applied_issue_ids?: string[];
+      rejected_preventive_issue_ids?: string[];
+      rejected_preventive_reasons?: Record<string, string>;
     }
   ): Promise<{ success: boolean; quality?: any }> {
     const response = await this.axios.post(`/transcription/jobs/${jobId}/quality`, data);
@@ -2341,6 +2596,61 @@ class ApiClient {
 
   async recomputeTranscriptionPreventiveAudit(jobId: string): Promise<{ success: boolean; reports?: any; audit_summary?: any }> {
     const response = await this.axios.post(`/transcription/jobs/${jobId}/preventive-audit/recompute`);
+    return response.data;
+  }
+
+  async listPendingTranscriptions(
+    provider?: 'assemblyai' | 'whisper' | 'elevenlabs',
+    syncStatus: boolean = true,
+  ): Promise<Array<{
+    transcript_id: string;
+    file_name: string;
+    file_hash: string;
+    status: string;
+    provider: string;
+    submitted_at: string;
+    completed_at?: string;
+    audio_duration?: number;
+    config_hash?: string;
+    error?: string;
+  }>> {
+    const response = await this.axios.get('/transcription/pending', {
+      params: {
+        ...(provider ? { provider } : {}),
+        sync_status: syncStatus ? 'true' : 'false',
+      },
+    });
+    return response.data;
+  }
+
+  async resumePendingTranscription(payload: {
+    transcript_id: string;
+    provider?: 'assemblyai' | 'whisper' | 'elevenlabs';
+    file_hash?: string;
+    speaker_roles?: string[];
+    mode?: string;
+  }): Promise<{
+    status: string;
+    transcript_id: string;
+    text?: string;
+    segments?: any[];
+    audio_duration?: number;
+    error?: string;
+    message?: string;
+  }> {
+    const token = this.getAccessToken();
+    const tokenParam = token ? `?token=${encodeURIComponent(token)}` : '';
+    const response = await this.axios.post(`/transcription/resume${tokenParam}`, payload);
+    return response.data;
+  }
+
+  async deletePendingTranscriptionCache(
+    fileHash: string,
+    provider: 'assemblyai' | 'whisper' | 'elevenlabs' = 'assemblyai',
+  ): Promise<{ status: string; file_hash: string; provider: string }> {
+    const response = await this.axios.delete(`/transcription/cache/${encodeURIComponent(fileHash)}`, {
+      params: { provider },
+    });
     return response.data;
   }
 
@@ -2617,11 +2927,19 @@ class ApiClient {
       document_header?: string;
       document_footer?: string;
       document_margins?: string;
+      document_page_frame?: boolean;
+      document_show_header_footer?: boolean;
       document_font_family?: string;
       document_font_size?: number;
       document_table_font_size?: number;
       document_line_height?: number;
       document_paragraph_spacing?: number;
+      document_table_header_bg?: string;
+      document_table_header_text?: string;
+      document_table_row_even_bg?: string;
+      document_table_row_odd_bg?: string;
+      document_table_cell_text?: string;
+      document_table_border_color?: string;
     }
   ): Promise<Blob> {
     const response = await this.axios.post('/transcription/export/docx',
@@ -2632,11 +2950,19 @@ class ApiClient {
         document_header: options?.document_header,
         document_footer: options?.document_footer,
         document_margins: options?.document_margins,
+        document_page_frame: options?.document_page_frame,
+        document_show_header_footer: options?.document_show_header_footer,
         document_font_family: options?.document_font_family,
         document_font_size: options?.document_font_size,
         document_table_font_size: options?.document_table_font_size,
         document_line_height: options?.document_line_height,
         document_paragraph_spacing: options?.document_paragraph_spacing,
+        document_table_header_bg: options?.document_table_header_bg,
+        document_table_header_text: options?.document_table_header_text,
+        document_table_row_even_bg: options?.document_table_row_even_bg,
+        document_table_row_odd_bg: options?.document_table_row_odd_bg,
+        document_table_cell_text: options?.document_table_cell_text,
+        document_table_border_color: options?.document_table_border_color,
       },
       { responseType: 'blob' }
     );
@@ -2661,6 +2987,7 @@ class ApiClient {
       format_enabled?: boolean;
       allow_indirect?: boolean;
       allow_summary?: boolean;
+      output_style?: 'default' | 'ata_literal' | 'ata_resumida' | 'relatorio';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -2687,6 +3014,7 @@ class ApiClient {
       if (options.format_enabled === false) formData.append('format_enabled', 'false');
       if (options.allow_indirect) formData.append('allow_indirect', 'true');
       if (options.allow_summary) formData.append('allow_summary', 'true');
+      if (options.output_style) formData.append('output_style', options.output_style);
       if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
       if (options.auto_apply_fixes !== undefined) {
         formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -2904,17 +3232,44 @@ class ApiClient {
     content: string;
     document_name: string;
     raw_content?: string;
+    mode?: string;
   }): Promise<{
     document_name: string;
     analyzed_at: string;
     total_issues: number;
+    mode?: string;
     pending_fixes: Array<{
       id: string;
       type: string;
+      fix_type?: string;
       description: string;
       action: string;
       severity: string;
+      table_heading?: string;
+      strategy?: string;
+      section_title?: string;
+      subtopic_title?: string;
+      subtopic_level?: number;
+      before_section?: string;
+      current_section?: string;
+      target_section?: string;
+      after_section?: string;
       fingerprint?: string;
+      line_index?: number;
+      duplicate_kind?: string;
+      duplicate_of_index?: number;
+      similarity_score?: number;
+      jaccard_score?: number;
+      heading_line?: number;
+      heading_level?: number;
+      old_title?: string;
+      new_title?: string;
+      old_raw?: string;
+      new_raw?: string;
+      rename_source?: string;
+      diff_preview?: string;
+      confidence?: number;
+      reason?: string;
     }>;
     requires_approval: boolean;
     // v4.0 Content Validation Fields
@@ -2936,14 +3291,40 @@ class ApiClient {
   async applyApprovedFixes(data: {
     content: string;
     approved_fix_ids: string[];
+    mode?: string;
     approved_fixes?: Array<{
       id: string;
       type: string;
+      fix_type?: string;
       description: string;
       action: string;
       severity: string;
       fingerprint?: string;
       title?: string;
+      heading_line?: number;
+      heading_level?: number;
+      old_title?: string;
+      new_title?: string;
+      old_raw?: string;
+      new_raw?: string;
+      rename_source?: string;
+      diff_preview?: string;
+      table_heading?: string;
+      strategy?: string;
+      section_title?: string;
+      subtopic_title?: string;
+      subtopic_level?: number;
+      before_section?: string;
+      current_section?: string;
+      target_section?: string;
+      after_section?: string;
+      line_index?: number;
+      duplicate_kind?: string;
+      duplicate_of_index?: number;
+      similarity_score?: number;
+      jaccard_score?: number;
+      confidence?: number;
+      reason?: string;
     }>;
   }): Promise<{
     success: boolean;
@@ -2952,6 +3333,27 @@ class ApiClient {
     size_reduction?: string;
     error?: string;
   }> {
+    const structuralTypes = new Set([
+      "duplicate_paragraph",
+      "duplicate_section",
+      "heading_numbering",
+      "table_misplacement",
+      "heading_semantic_mismatch",
+      "parent_child_topic_drift",
+      "near_duplicate_heading",
+    ]);
+    const nonStructural = (data.approved_fixes || []).filter((fix) => {
+      const explicitFixType = String(fix?.fix_type || "").trim().toLowerCase();
+      if (explicitFixType) return explicitFixType !== "structural";
+      const issueType = String(fix?.type || "").trim().toLowerCase();
+      if (!issueType) return false;
+      return !structuralTypes.has(issueType);
+    });
+    if (nonStructural.length > 0) {
+      throw new Error(
+        "applyApprovedFixes aceita apenas correções estruturais. Use applyTranscriptionRevisions ou applyUnifiedHilFixes para conteúdo/semântica."
+      );
+    }
     const response = await this.axios.post('/quality/apply-approved', data);
     return response.data;
   }
@@ -3074,6 +3476,14 @@ class ApiClient {
       source?: string;
       fingerprint?: string;
       title?: string;
+      old_title?: string;
+      new_title?: string;
+      old_raw?: string;
+      new_raw?: string;
+      rename_source?: string;
+      diff_preview?: string;
+      heading_line?: number;
+      heading_level?: number;
       patch?: {
         anchor_text?: string;
         old_text?: string;
@@ -3306,6 +3716,23 @@ class ApiClient {
       severity: string;
       fingerprint?: string;
       title?: string;
+      heading_line?: number;
+      heading_level?: number;
+      old_title?: string;
+      new_title?: string;
+      old_raw?: string;
+      new_raw?: string;
+      rename_source?: string;
+      diff_preview?: string;
+      table_heading?: string;
+      strategy?: string;
+      section_title?: string;
+      subtopic_title?: string;
+      subtopic_level?: number;
+      before_section?: string;
+      current_section?: string;
+      target_section?: string;
+      after_section?: string;
       patch?: {
         anchor_text?: string;
         old_text?: string;
@@ -3313,6 +3740,7 @@ class ApiClient {
       };
     }>;
     model_selection?: string;
+    mode?: string;
   }): Promise<{
     success: boolean;
     fixed_content?: string;
@@ -4005,6 +4433,72 @@ class ApiClient {
   }): Promise<any> {
     const response = await this.axios.get('/corpus/documents', { params });
     return response.data;
+  }
+
+  async getCorpusDocumentSource(documentId: string): Promise<{
+    document_id: string;
+    name: string;
+    original_name: string;
+    file_type: string | null;
+    size_bytes: number | null;
+    available: boolean;
+    source_url: string | null;
+    viewer_url: string | null;
+    download_url: string | null;
+    viewer_kind: 'pdf_native' | 'office_html' | 'external' | 'unavailable' | null;
+    preview_status: 'ready' | 'processing' | 'failed' | 'not_supported' | null;
+    page_count: number | null;
+    metadata: Record<string, any> | null;
+  }> {
+    const response = await this.axios.get(`/corpus/documents/${documentId}/source`);
+    return response.data;
+  }
+
+  async getCorpusDocumentViewerManifest(documentId: string): Promise<{
+    document_id: string;
+    viewer_kind: 'pdf_native' | 'office_html' | 'external' | 'unavailable';
+    viewer_url: string | null;
+    download_url: string | null;
+    source_url: string | null;
+    page_count: number | null;
+    supports_highlight: boolean;
+    supports_page_jump: boolean;
+    preview_status: 'ready' | 'processing' | 'failed' | 'not_supported';
+    metadata: Record<string, any> | null;
+  }> {
+    const response = await this.axios.get(`/corpus/documents/${documentId}/viewer-manifest`);
+    return response.data;
+  }
+
+  getCorpusDocumentContentUrl(documentId: string, options?: { download?: boolean }): string {
+    const search = options?.download ? '?download=true' : '';
+    return `/api/corpus/documents/${encodeURIComponent(documentId)}/content${search}`;
+  }
+
+  getCorpusDocumentPreviewUrl(
+    documentId: string,
+    options?: { page?: number; q?: string; chunk?: string }
+  ): string {
+    const params = new URLSearchParams();
+    if (options?.page && Number.isFinite(options.page)) params.set('page', String(options.page));
+    if (options?.q) params.set('q', options.q);
+    if (options?.chunk) params.set('chunk', options.chunk);
+    const query = params.toString();
+    return `/api/corpus/documents/${encodeURIComponent(documentId)}/preview${query ? `?${query}` : ''}`;
+  }
+
+  getCorpusViewerRouteUrl(
+    documentId: string,
+    options?: { page?: number; q?: string; chunk?: string; openExternally?: boolean }
+  ): string {
+    const params = new URLSearchParams();
+    params.set('documentId', documentId);
+    if (options?.page && Number.isFinite(options.page)) params.set('page', String(options.page));
+    if (options?.q) params.set('q', options.q);
+    if (options?.chunk) params.set('chunk', options.chunk);
+    if (options?.openExternally) params.set('external', '1');
+    const query = params.toString();
+    return `/corpus/viewer${query ? `?${query}` : ''}`;
   }
 
   async ingestCorpusDocuments(data: {
