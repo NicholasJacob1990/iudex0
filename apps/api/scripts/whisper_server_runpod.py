@@ -29,7 +29,13 @@ GET /status/{job_id}
   - Returns: {"status": "queued|processing|completed|error", "progress": 0-100}
 
 GET /result/{job_id}
-  - Returns: {"text": "...", "segments": [...], "words": [...]}
+  - Returns: {"text": "...", "text_length": N, "text_sha256": "...",
+              "segments": [...], "segments_count": N, "words": [...]}
+
+GET /stream/{job_id}
+  - SSE stream: segments emitted in real-time as they are transcribed
+  - Events: segment (per segment), done (with integrity fields), error
+  - Client can verify integrity via text_length / text_sha256 in "done" event
 
 DELETE /job/{job_id}
   - Cancela e limpa job
@@ -48,6 +54,8 @@ Variáveis de ambiente:
 - JOB_RETENTION_HOURS: Tempo para manter jobs completos (default: 24)
 """
 
+import hashlib
+import json as _json
 import os
 import uuid
 import asyncio
@@ -56,12 +64,13 @@ import tempfile
 import shutil
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from enum import Enum
 from dataclasses import dataclass, field
 import threading
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends, BackgroundTasks, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -109,6 +118,8 @@ class TranscriptionJob:
     result: Optional[Dict[str, Any]] = None
     audio_path: Optional[str] = None
     config: Dict[str, Any] = field(default_factory=dict)
+    # SSE streaming: subscribers receive segments in real-time
+    _sse_queues: List[asyncio.Queue] = field(default_factory=list)
 
 
 # Armazenamento em memória dos jobs
@@ -311,6 +322,86 @@ async def cancel_job(job_id: str, _: str = Depends(verify_token)):
     return {"status": "cancelled", "job_id": job_id}
 
 
+@app.get("/stream/{job_id}")
+async def stream_transcription(job_id: str, request: Request, _: str = Depends(verify_token)):
+    """
+    SSE endpoint — streams segments in real-time as they are transcribed.
+
+    Events:
+      - event: segment  → {"index": N, "progress": 0-95, "data": {start, end, text, speaker}}
+      - event: done      → {"text_length": N, "text_sha256": "...", "segments_count": N}
+      - event: error     → {"detail": "..."}
+
+    The client can accumulate segments locally, then verify integrity via
+    text_length / text_sha256 in the "done" event (or cross-check with GET /result).
+    """
+    with jobs_lock:
+        job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # If job already completed, return result summary as a single SSE event and close.
+    if job.status == JobStatus.COMPLETED and job.result:
+        async def _already_done():
+            payload = {
+                "event": "done",
+                "text_length": job.result.get("text_length", len(job.result.get("text", ""))),
+                "text_sha256": job.result.get("text_sha256", ""),
+                "segments_count": job.result.get("segments_count", len(job.result.get("segments", []))),
+            }
+            yield f"event: done\ndata: {_json.dumps(payload)}\n\n"
+        return StreamingResponse(_already_done(), media_type="text/event-stream")
+
+    if job.status == JobStatus.ERROR:
+        async def _already_error():
+            yield f"event: error\ndata: {_json.dumps({'detail': job.error or 'unknown'})}\n\n"
+        return StreamingResponse(_already_error(), media_type="text/event-stream")
+
+    # Subscribe to live segment events
+    queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]._sse_queues.append(queue)
+
+    async def _event_generator():
+        try:
+            while True:
+                # Check if client disconnected
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    # Send keep-alive comment to prevent proxy timeouts
+                    yield ": keepalive\n\n"
+                    continue
+
+                event_type = event.get("event", "segment")
+                yield f"event: {event_type}\ndata: {_json.dumps(event)}\n\n"
+
+                # Terminal events — close the stream
+                if event_type in ("done", "error"):
+                    break
+        finally:
+            # Unsubscribe
+            with jobs_lock:
+                if job_id in jobs:
+                    try:
+                        jobs[job_id]._sse_queues.remove(queue)
+                    except ValueError:
+                        pass
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
 # =============================================================================
 # PROCESSAMENTO
 # =============================================================================
@@ -355,6 +446,11 @@ async def process_transcription(job_id: str):
             # Processar segmentos
             total_duration = info.duration if hasattr(info, "duration") else 0
 
+            # Collect SSE queues snapshot (avoid holding lock during iteration)
+            with jobs_lock:
+                sse_queues = list(jobs[job_id]._sse_queues) if job_id in jobs else []
+
+            progress = 0
             for segment in segments:
                 # Atualizar progresso
                 if total_duration > 0:
@@ -380,14 +476,47 @@ async def process_transcription(job_id: str):
                             "probability": word.probability,
                         })
 
+                # Emit segment to SSE subscribers
+                sse_event = {
+                    "event": "segment",
+                    "index": len(segments_list) - 1,
+                    "progress": progress,
+                    "data": seg_data,
+                }
+                for q in sse_queues:
+                    try:
+                        q.put_nowait(sse_event)
+                    except asyncio.QueueFull:
+                        pass  # Slow consumer — drop oldest not critical for segments
+
+            # Build final text and integrity fields
+            final_text = " ".join(full_text)
+            text_sha256 = hashlib.sha256(final_text.encode("utf-8")).hexdigest()
+
             # Resultado final
             result = {
-                "text": " ".join(full_text),
+                "text": final_text,
+                "text_length": len(final_text),
+                "text_sha256": text_sha256,
                 "segments": segments_list,
+                "segments_count": len(segments_list),
                 "words": words_list,
                 "language": info.language if hasattr(info, "language") else config.get("language"),
                 "duration": total_duration,
             }
+
+            # Notify SSE subscribers that transcription is complete
+            done_event = {
+                "event": "done",
+                "text_length": len(final_text),
+                "text_sha256": text_sha256,
+                "segments_count": len(segments_list),
+            }
+            for q in sse_queues:
+                try:
+                    q.put_nowait(done_event)
+                except asyncio.QueueFull:
+                    pass
 
             # Atualizar job
             with jobs_lock:
@@ -406,6 +535,16 @@ async def process_transcription(job_id: str):
                     jobs[job_id].status = JobStatus.ERROR
                     jobs[job_id].error = str(e)
                     jobs[job_id].completed_at = datetime.utcnow()
+                    sse_queues = list(jobs[job_id]._sse_queues)
+                else:
+                    sse_queues = []
+            # Notify SSE subscribers of the error
+            err_event = {"event": "error", "detail": str(e)}
+            for q in sse_queues:
+                try:
+                    q.put_nowait(err_event)
+                except asyncio.QueueFull:
+                    pass
 
         finally:
             # Limpar arquivo temporário após processamento

@@ -1,0 +1,97 @@
+name: Deploy RunPod Worker
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/runpod-worker/**"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag (default: latest commit SHA short)"
+        required: false
+        default: ""
+
+env:
+  DOCKER_IMAGE: nicholasjacob1990/faster-whisper-diarize
+  RUNPOD_ENDPOINT_ID: e7apudo9b603of
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            TAG="v2-$(echo ${{ github.sha }} | cut -c1-7)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Image tag: $TAG"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: apps/runpod-worker
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.tag }}
+            ${{ env.DOCKER_IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Update RunPod endpoint template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          IMAGE="${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.tag }}"
+          echo "Updating RunPod endpoint ${{ env.RUNPOD_ENDPOINT_ID }} to image: $IMAGE"
+
+          # 1. Create/update template with new image
+          TEMPLATE_RESPONSE=$(curl -s -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { saveTemplate(input: { name: \\\"faster-whisper-iudex-${{ steps.tag.outputs.tag }}\\\", imageName: \\\"${IMAGE}\\\", isServerless: true, containerDiskInGb: 20, env: [ { key: \\\"WHISPER_MODEL\\\", value: \\\"large-v3\\\" }, { key: \\\"WHISPER_DEVICE\\\", value: \\\"cuda\\\" }, { key: \\\"WHISPER_COMPUTE_TYPE\\\", value: \\\"float16\\\" } ] }) { id name imageName } }\"
+            }")
+
+          echo "Template response: $TEMPLATE_RESPONSE"
+          TEMPLATE_ID=$(echo "$TEMPLATE_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['saveTemplate']['id'])" 2>/dev/null)
+
+          if [ -z "$TEMPLATE_ID" ]; then
+            echo "::error::Failed to create/update template"
+            echo "$TEMPLATE_RESPONSE"
+            exit 1
+          fi
+          echo "Template ID: $TEMPLATE_ID"
+
+          # 2. Update endpoint to use new template
+          ENDPOINT_RESPONSE=$(curl -s -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"query\": \"mutation { updateEndpointTemplate(input: { endpointId: \\\"${{ env.RUNPOD_ENDPOINT_ID }}\\\", templateId: \\\"${TEMPLATE_ID}\\\" }) { id templateId } }\"
+            }")
+
+          echo "Endpoint update response: $ENDPOINT_RESPONSE"
+
+          # Verify success
+          SUCCESS=$(echo "$ENDPOINT_RESPONSE" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('data',{}).get('updateEndpointTemplate',{}).get('id',''))" 2>/dev/null)
+          if [ -z "$SUCCESS" ]; then
+            echo "::error::Failed to update endpoint template"
+            exit 1
+          fi
+
+          echo "Successfully updated endpoint ${{ env.RUNPOD_ENDPOINT_ID }} with template $TEMPLATE_ID (image: $IMAGE)"
