@@ -25,10 +25,12 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-# Pre-download Whisper model at build time (avoids cold-start download)
+# Pre-download Whisper model at build time (avoids cold-start download).
+# Use huggingface-cli to cache the CTranslate2 model files without loading the model
+# (which would require CUDA and compatible filelock).
 ARG WHISPER_MODEL=large-v3
 ENV WHISPER_MODEL=${WHISPER_MODEL}
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${WHISPER_MODEL}', device='cpu', compute_type='int8')" && \
+RUN huggingface-cli download "Systran/faster-whisper-${WHISPER_MODEL}" --local-dir-use-symlinks False && \
     echo "Model ${WHISPER_MODEL} cached successfully"
 
 # Copy handler
