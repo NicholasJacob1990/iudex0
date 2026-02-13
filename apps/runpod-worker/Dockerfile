@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # (which would require CUDA and compatible filelock).
 ARG WHISPER_MODEL=large-v3
 ENV WHISPER_MODEL=${WHISPER_MODEL}
-RUN huggingface-cli download "Systran/faster-whisper-${WHISPER_MODEL}" --local-dir-use-symlinks False && \
+RUN python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-${WHISPER_MODEL}')" && \
     echo "Model ${WHISPER_MODEL} cached successfully"
 
 # Copy handler
