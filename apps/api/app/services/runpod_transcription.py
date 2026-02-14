@@ -289,6 +289,8 @@ class RunPodClient:
         preprocess_audio: bool = False,
         output_formats: Optional[list] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        stream_segments: bool = False,
+        stream_segment_interval: Optional[int] = None,
     ) -> RunPodResult:
         """Submit job to custom v3 worker (unified transcription + diarization).
 
@@ -315,6 +317,10 @@ class RunPodClient:
             input_data["output_formats"] = output_formats
         if metadata:
             input_data["metadata"] = metadata
+        if stream_segments:
+            input_data["stream_segments"] = True
+            if stream_segment_interval is not None and stream_segment_interval > 0:
+                input_data["stream_segment_interval"] = int(stream_segment_interval)
 
         payload: Dict[str, Any] = {"input": input_data}
 
@@ -417,11 +423,38 @@ class RunPodClient:
                             error=chunk_output["error"],
                         )
 
-                if stream_status == "COMPLETED" and final_result:
+                if stream_status == "COMPLETED":
+                    if final_result:
+                        return RunPodResult(
+                            run_id=run_id,
+                            status="COMPLETED",
+                            output=final_result,
+                        )
+
+                    # Alguns workers encerram com COMPLETED e stream vazio.
+                    # Tenta resgatar output pelo status endpoint; se vier vazio, falha rápido
+                    # para permitir fallback ao endpoint oficial.
+                    try:
+                        status_result = await self.get_status(run_id, endpoint_id)
+                        if status_result.output is not None:
+                            return RunPodResult(
+                                run_id=run_id,
+                                status="COMPLETED",
+                                output=status_result.output,
+                                execution_time_ms=status_result.execution_time_ms,
+                            )
+                    except Exception as status_exc:
+                        logger.warning("Failed to fetch status output for completed stream %s: %s", run_id, status_exc)
+
+                    logger.error(
+                        "RunPod stream completed sem output/stream para %s (endpoint=%s).",
+                        run_id,
+                        endpoint_id,
+                    )
                     return RunPodResult(
                         run_id=run_id,
-                        status="COMPLETED",
-                        output=final_result,
+                        status="FAILED",
+                        error="Custom worker completou sem output (stream vazio).",
                     )
 
                 if stream_status in ("FAILED", "CANCELLED"):
@@ -603,6 +636,7 @@ class RunPodClient:
                     preprocess_audio=preprocess_audio,
                     output_formats=output_formats,
                     metadata=metadata,
+                    stream_segments=bool(on_segment),
                 )
 
                 # Try streaming first, fall back to polling
@@ -646,6 +680,7 @@ class RunPodClient:
                         num_speakers=max_speakers or min_speakers,
                         hotwords=hotwords,
                         initial_prompt=initial_prompt,
+                        stream_segments=False,
                     )
                     dia_final = await self.stream_results(
                         run_id=dia_result.run_id,
@@ -769,6 +804,17 @@ def _unwrap_output_payload(output: Any) -> Any:
     - lista com um único dict
     - string JSON
     """
+    def _looks_like_transcription_payload(value: Any) -> bool:
+        return isinstance(value, dict) and any(
+            key in value for key in ("transcription", "text", "transcript", "segments", "chunks", "utterances", "full_text")
+        )
+
+    def _unwrap_chunk_output(item: Any) -> Any:
+        if isinstance(item, dict):
+            nested = item.get("output", item)
+            return _parse_json_if_possible(nested)
+        return _parse_json_if_possible(item)
+
     current: Any = output
     for _ in range(6):
         current = _parse_json_if_possible(current)
@@ -776,17 +822,38 @@ def _unwrap_output_payload(output: Any) -> Any:
         if isinstance(current, list):
             if not current:
                 return current
+
+            # Stream agregado do RunPod costuma vir como lista de chunks
+            # [{"output": {...progress...}}, ..., {"output": {...done/text...}}].
+            # Preferimos o último chunk que pareça payload de transcrição.
             picked = None
-            for item in current:
-                if isinstance(item, dict) and any(
-                    key in item
-                    for key in ("transcription", "text", "transcript", "segments", "chunks", "output", "result", "data")
-                ):
-                    picked = item
+            for item in reversed(current):
+                candidate = _unwrap_chunk_output(item)
+                if _looks_like_transcription_payload(candidate):
+                    picked = candidate
                     break
-                if isinstance(item, str) and item.strip():
-                    picked = item
-                    break
+
+            # Fallback: último chunk marcado como done (mesmo sem texto explícito).
+            if picked is None:
+                for item in reversed(current):
+                    candidate = _unwrap_chunk_output(item)
+                    if isinstance(candidate, dict) and candidate.get("done") is True:
+                        picked = candidate
+                        break
+
+            # Fallback legado: primeiro item minimamente útil.
+            if picked is None:
+                for item in current:
+                    candidate = _unwrap_chunk_output(item)
+                    if isinstance(candidate, dict) and any(
+                        key in candidate
+                        for key in ("transcription", "text", "transcript", "segments", "chunks", "output", "result", "data")
+                    ):
+                        picked = candidate
+                        break
+                    if isinstance(candidate, str) and candidate.strip():
+                        picked = candidate
+                        break
             if picked is None:
                 return current
             current = picked
@@ -1068,6 +1135,8 @@ def extract_transcription(result: RunPodResult) -> Optional[Dict[str, Any]]:
             result_dict["transcription_time"] = output["transcription_time"]
         if output.get("duration"):
             result_dict["duration"] = output["duration"]
+        if "words_truncated" in output:
+            result_dict["words_truncated"] = bool(output.get("words_truncated"))
 
     return result_dict
 

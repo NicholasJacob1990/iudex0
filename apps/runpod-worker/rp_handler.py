@@ -55,6 +55,8 @@ DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
 COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
 DEFAULT_BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
 DIARIZATION_MODEL = os.environ.get("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
+DEFAULT_STREAM_SEGMENT_INTERVAL = max(1, int(os.environ.get("WHISPER_STREAM_SEGMENT_INTERVAL", "20")))
+MAX_WORDS_OUTPUT = max(0, int(os.environ.get("WHISPER_MAX_WORDS_OUTPUT", "50000")))
 
 # Legal vocabulary hotwords (improves recognition of domain-specific terms)
 DEFAULT_HOTWORDS = (
@@ -394,6 +396,10 @@ def handler(event: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
     align_words_flag = bool(job_input.get("align_words", False))
     output_formats = job_input.get("output_formats", ["json"])
     metadata = job_input.get("metadata", {})
+    stream_segments = bool(job_input.get("stream_segments", False))
+    stream_segment_interval = max(
+        1, int(job_input.get("stream_segment_interval", DEFAULT_STREAM_SEGMENT_INTERVAL))
+    )
 
     # Official worker params
     initial_prompt = job_input.get("initial_prompt")
@@ -476,6 +482,7 @@ def handler(event: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
         full_text = []
         total_duration = info.duration if hasattr(info, "duration") else 0
         hallucinated_count = 0
+        words_truncated = False
 
         for seg in segments_gen:
             text = seg.text.strip()
@@ -495,6 +502,9 @@ def handler(event: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
 
             if word_timestamps and seg.words:
                 for w in seg.words:
+                    if MAX_WORDS_OUTPUT and len(words_list) >= MAX_WORDS_OUTPUT:
+                        words_truncated = True
+                        break
                     words_list.append({
                         "start": round(w.start, 3),
                         "end": round(w.end, 3),
@@ -502,18 +512,23 @@ def handler(event: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
                         "probability": round(w.probability, 4),
                     })
 
-            # Yield segment progressively (streaming)
+            # Emit progresso incremental. Segmentos completos só quando solicitado.
             if total_duration > 0:
                 pct = min(85, 15 + int((seg.end / total_duration) * 70))
             else:
                 pct = min(85, 15 + len(segments_list))
 
-            yield {
-                "stage": "transcribing",
-                "progress": pct,
-                "segment": seg_data,
-                "segment_index": len(segments_list) - 1,
-            }
+            should_emit = (len(segments_list) % stream_segment_interval == 0)
+            if should_emit:
+                chunk = {
+                    "stage": "transcribing",
+                    "progress": pct,
+                    "message": "Transcrevendo...",
+                }
+                if stream_segments:
+                    chunk["segment"] = seg_data
+                    chunk["segment_index"] = len(segments_list) - 1
+                yield chunk
 
         transcription_time = time.time() - t0
         logger.info(
@@ -578,6 +593,7 @@ def handler(event: Dict[str, Any]) -> Generator[Dict[str, Any], None, None]:
             "compute_type": COMPUTE_TYPE,
             "batch_size": batch_size if batched else 1,
             "hallucinations_filtered": hallucinated_count,
+            "words_truncated": words_truncated,
         }
 
         # Diarization data

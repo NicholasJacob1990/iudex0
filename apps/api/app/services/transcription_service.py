@@ -189,6 +189,7 @@ class TranscriptionService:
         output_folder: str,
         mode: str,
         custom_prompt: Optional[str],
+        custom_prompt_scope: str = "tables_only",
         disable_tables: bool,
         progress_callback: Optional[Callable[[str, int, str], Awaitable[None]]],
         skip_audit: bool,
@@ -207,6 +208,7 @@ class TranscriptionService:
             "output_folder": output_folder,
             "mode": mode,
             "custom_prompt": custom_prompt,
+            "custom_prompt_scope": custom_prompt_scope,
             "disable_tables": bool(disable_tables),
             "progress_callback": progress_callback,
             "skip_audit": skip_audit,
@@ -1144,12 +1146,15 @@ class TranscriptionService:
         emit: Optional[Callable] = None,
         start_progress: int = 25,
         end_progress: int = 60,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
+        speaker_names: Optional[list] = None,
     ) -> Optional[dict]:
         """
         Transcreve via RunPod Serverless.
 
         1. Gera URL temporária para o áudio
-        2. Submete job ao RunPod
+        2. Submete job ao RunPod (com hints de área/keyterms via initial_prompt)
         3. Poll com progresso até completar
         """
         from app.services.runpod_transcription import get_runpod_client, extract_transcription
@@ -1169,18 +1174,19 @@ class TranscriptionService:
         logger.info("RunPod audio URL: %s", audio_url.split("?")[0])
         await asyncio.to_thread(self._preflight_runpod_audio_url, audio_url)
 
+        # Normalizar hints de área/keyterms para initial_prompt do RunPod
+        hints = self._normalize_hints(
+            area=area,
+            custom_keyterms=custom_keyterms,
+            speaker_names=speaker_names,
+            provider="runpod",
+        )
+        runpod_initial_prompt = hints["initial_prompt"] or None
+        if runpod_initial_prompt:
+            logger.info("RunPod hints: fingerprint=%s, keyterms=%d", hints["fingerprint"], len(hints["keyterms"]))
+
         if emit:
             await emit("transcription", start_progress, "Submetendo job ao RunPod...")
-
-        # Submeter transcrição ao worker oficial faster-whisper (modelo turbo)
-        result = await client.submit_job(
-            audio_url=audio_url,
-            language=language,
-            diarization=diarization,
-        )
-
-        if emit:
-            await emit("transcription", start_progress + 5, f"Job RunPod: {result.run_id}")
 
         # Poll com progresso
         async def _on_runpod_progress(stage: str, pct: int, msg: str):
@@ -1189,10 +1195,58 @@ class TranscriptionService:
                 mapped = start_progress + int((end_progress - start_progress) * pct / 100)
                 await emit(stage, mapped, msg)
 
-        final = await client.poll_until_complete(
-            run_id=result.run_id,
-            on_progress=_on_runpod_progress,
-        )
+        async def _run_official_endpoint():
+            # Worker oficial faster-whisper
+            result = await client.submit_job(
+                audio_url=audio_url,
+                language=language,
+                diarization=diarization,
+                initial_prompt=runpod_initial_prompt,
+            )
+            if emit:
+                await emit("transcription", start_progress + 5, f"Job RunPod (oficial): {result.run_id}")
+            return await client.poll_until_complete(
+                run_id=result.run_id,
+                on_progress=_on_runpod_progress,
+            )
+
+        async def _run_custom_endpoint():
+            # Worker custom v3 unificado (transcrição + diarização opcional)
+            if emit:
+                await emit("transcription", start_progress + 1, "Submetendo job ao RunPod (custom v3)...")
+            result = await client.submit_unified_job(
+                audio_url=audio_url,
+                endpoint_id=client.fallback_endpoint_id,
+                language=language,
+                diarize=bool(diarization),
+                hotwords=hints["hotwords"] or None,
+                initial_prompt=runpod_initial_prompt,
+            )
+            if emit:
+                await emit("transcription", start_progress + 5, f"Job RunPod (custom): {result.run_id}")
+            return await client.stream_results(
+                run_id=result.run_id,
+                endpoint_id=client.fallback_endpoint_id,
+                on_progress=_on_runpod_progress,
+            )
+
+        # Prioridade: custom v3 como primário (quando configurado), com fallback para oficial.
+        if client.fallback_configured:
+            logger.info("RunPod: usando endpoint custom v3 como primário (%s)", client.fallback_endpoint_id)
+            final = await _run_custom_endpoint()
+            if final.status != "COMPLETED":
+                logger.warning(
+                    "RunPod custom v3 falhou (%s: %s). Tentando endpoint oficial (%s).",
+                    final.status,
+                    final.error,
+                    client.endpoint_id,
+                )
+                if emit:
+                    await emit("transcription", start_progress + 2, "Custom v3 falhou, tentando endpoint oficial...")
+                final = await _run_official_endpoint()
+        else:
+            logger.info("RunPod: custom v3 não configurado, usando endpoint oficial (%s)", client.endpoint_id)
+            final = await _run_official_endpoint()
 
         if final.status == "COMPLETED":
             parsed = extract_transcription(final)
@@ -2009,7 +2063,7 @@ class TranscriptionService:
         await emit("transcription", upload_end, f"✅ Upload completo ({upload_time:.0f}s)")
 
         # 2. Submeter transcrição
-        aai_prompt, keyterms = self._get_assemblyai_prompt_for_mode(
+        aai_prompt, keyterms, prompt_mode = self._get_assemblyai_prompt_for_mode(
             mode=mode,
             language=language,
             area=area,
@@ -2021,11 +2075,13 @@ class TranscriptionService:
         data = {
             "audio_url": audio_url,
             "speech_models": ["universal-3-pro"],
-            "prompt": aai_prompt,
             "speaker_labels": True,
             "language_code": language,
         }
-        if keyterms:
+        # Modo exclusivo: evitar enviar prompt + keyterms_prompt simultaneamente
+        if prompt_mode in ("prompt_only", "both"):
+            data["prompt"] = aai_prompt
+        if prompt_mode in ("keyterms_only", "both") and keyterms:
             data["keyterms_prompt"] = keyterms
         if speakers_expected and speakers_expected > 0:
             data["speakers_expected"] = speakers_expected
@@ -2272,6 +2328,11 @@ class TranscriptionService:
         Usado tanto para resultados frescos quanto para cache.
         """
         elapsed = time.time() - start_time
+
+        # Telemetria: logar speech_model_used para observabilidade
+        speech_model_used = poll_resp.get("speech_model", "unknown")
+        logger.info(f"AssemblyAI speech_model_used={speech_model_used} transcript_id={transcript_id}")
+
         utterances = poll_resp.get("utterances", [])
         words = poll_resp.get("words", [])
         segments = []
@@ -2486,6 +2547,99 @@ class TranscriptionService:
             "balanço", "DRE", "ROI", "EBITDA",
         ],
     }
+
+    # ── Hint normalizer (Fase 1) ──────────────────────────────────────────
+    # Limites de keyterms por provider (documentação oficial de cada API)
+    _PROVIDER_KEYTERM_LIMITS = {
+        "assemblyai": 1000,   # Universal-3 Pro
+        "elevenlabs": 100,    # scribe_v2
+        "runpod": 200,        # faster-whisper hotwords
+        "whisper": 50,        # initial_prompt (curto)
+    }
+
+    @staticmethod
+    def _hash_list(items: Optional[list]) -> str:
+        """Hash estável para listas (speaker_id_values, etc.)."""
+        if not items:
+            return ""
+        return hashlib.sha256(
+            json.dumps(sorted(str(i) for i in items)).encode()
+        ).hexdigest()[:8]
+
+    @staticmethod
+    def _hash_spelling(pairs: Optional[list[dict]]) -> str:
+        """Hash estável para pares de custom_spelling."""
+        if not pairs:
+            return ""
+        return hashlib.sha256(
+            json.dumps(pairs, sort_keys=True).encode()
+        ).hexdigest()[:8]
+
+    def _normalize_hints(
+        self,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
+        speaker_names: Optional[list] = None,
+        provider: str = "assemblyai",
+    ) -> dict:
+        """
+        Centraliza merge de AREA_KEYTERMS + custom_keyterms + speaker_names.
+        Dedup, aplica limites por provider, gera fingerprint para cache.
+
+        Returns:
+            {
+                "keyterms": list[str],       # lista merged+dedup
+                "initial_prompt": str,        # texto para Whisper-based providers
+                "hotwords": str,              # comma-separated para RunPod v3
+                "fingerprint": str,           # sha256[:8] para cache keying
+            }
+        """
+        merged: list[str] = []
+
+        # 1. Area keyterms
+        if area and area.lower() in self.AREA_KEYTERMS:
+            merged.extend(self.AREA_KEYTERMS[area.lower()])
+
+        # 2. Custom keyterms do usuário
+        if custom_keyterms:
+            merged.extend(str(k).strip() for k in custom_keyterms if k and str(k).strip())
+
+        # 3. Speaker names/roles (úteis como hints para ASR)
+        if speaker_names:
+            merged.extend(str(s).strip() for s in speaker_names if s and str(s).strip())
+
+        # Dedup preservando ordem
+        merged = list(dict.fromkeys(merged))
+
+        # Aplicar limite do provider
+        limit = self._PROVIDER_KEYTERM_LIMITS.get(provider, 200)
+        keyterms = merged[:limit]
+
+        # Gerar initial_prompt (para Whisper-based)
+        initial_prompt = ""
+        if keyterms:
+            terms_str = ", ".join(keyterms[:limit])
+            initial_prompt = f"Termos técnicos: {terms_str}"
+            # Truncar em ~500 chars para Whisper (evitar overflow)
+            if provider == "whisper" and len(initial_prompt) > 500:
+                initial_prompt = initial_prompt[:497] + "..."
+
+        # Gerar hotwords (comma-separated para RunPod v3)
+        hotwords = ", ".join(keyterms) if keyterms else ""
+
+        # Fingerprint estável para cache
+        fingerprint = ""
+        if keyterms:
+            fingerprint = hashlib.sha256(
+                json.dumps(sorted(keyterms)).encode()
+            ).hexdigest()[:8]
+
+        return {
+            "keyterms": keyterms,
+            "initial_prompt": initial_prompt,
+            "hotwords": hotwords,
+            "fingerprint": fingerprint,
+        }
 
     def _run_assemblyai_transcription(
         self,
@@ -2907,31 +3061,29 @@ class TranscriptionService:
         area: Optional[str] = None,
         speaker_roles: Optional[list] = None,
         custom_keyterms: Optional[list] = None,
-    ) -> tuple[str, list[str]]:
+    ) -> tuple[str, list[str], str]:
         """
-        Retorna (prompt, keyterms_list) para AssemblyAI.
+        Retorna (prompt, keyterms_list, prompt_mode) para AssemblyAI.
         Foco: transcrição bruta fiel, sem formatação.
 
-        Args:
-            mode: Modo de transcrição (APOSTILA, AUDIENCIA, REUNIAO, LEGENDA, etc.)
-            language: Código do idioma (pt, en, es, auto, etc.)
-            area: Área de conhecimento (juridico, medicina, ti, engenharia, financeiro)
-            speaker_roles: Lista de roles/participantes esperados
-            custom_keyterms: Termos específicos do usuário para melhorar reconhecimento
+        prompt_mode decide envio exclusivo:
+        - "keyterms_only": >50 keyterms → priorizar keyterms_prompt
+        - "both": ≤50 keyterms + prompt → seguro enviar ambos
+        - "prompt_only": sem keyterms → enviar apenas prompt
 
         Returns:
-            Tupla (prompt: str, keyterms: list[str])
+            Tupla (prompt: str, keyterms: list[str], prompt_mode: str)
         """
         mode_upper = (mode or "APOSTILA").upper()
 
-        # Montar keyterms: área + custom do usuário
-        keyterms = []
-        if area and area.lower() in self.AREA_KEYTERMS:
-            keyterms.extend(self.AREA_KEYTERMS[area.lower()])
-        if custom_keyterms:
-            keyterms.extend(custom_keyterms[:100])  # Limite de 100 custom
-        # Limitar a 200 (limite do Universal-3)
-        keyterms = list(set(keyterms))[:200]
+        # Montar keyterms via _normalize_hints (centralizado)
+        hints = self._normalize_hints(
+            area=area,
+            custom_keyterms=custom_keyterms,
+            speaker_names=[str(r) for r in (speaker_roles or []) if r],
+            provider="assemblyai",
+        )
+        keyterms = hints["keyterms"]
 
         # Prompts focados em TRANSCRIÇÃO BRUTA FIEL (sem formatação)
         # A formatação vem depois (Gemini/GPT no mlx_vomo.py)
@@ -2986,7 +3138,15 @@ class TranscriptionService:
             roles_str = ", ".join(str(r) for r in speaker_roles[:10])
             base_prompt += f" Speakers: {roles_str}."
 
-        return base_prompt, keyterms
+        # Modo exclusivo: evitar enviar prompt + keyterms_prompt simultaneamente
+        if len(keyterms) > 50:
+            prompt_mode = "keyterms_only"
+        elif keyterms:
+            prompt_mode = "both"
+        else:
+            prompt_mode = "prompt_only"
+
+        return base_prompt, keyterms, prompt_mode
 
     def _transcribe_assemblyai_with_roles(
         self,
@@ -3104,7 +3264,7 @@ class TranscriptionService:
         logger.info(f"✅ AssemblyAI upload completo em {time.time() - start_time:.1f}s")
 
         # 2. Obter prompt e keyterms para o modo/área
-        aai_prompt, keyterms = self._get_assemblyai_prompt_for_mode(
+        aai_prompt, keyterms, prompt_mode = self._get_assemblyai_prompt_for_mode(
             mode=mode,
             language=language,
             area=area,
@@ -3117,13 +3277,14 @@ class TranscriptionService:
         # IMPORTANTE: usar "speech_models" (array), não "speech_model" (deprecated)
         data = {
             "audio_url": audio_url,
-            "speech_models": ["universal-3-pro"],  # Modelo com suporte a prompting
-            "prompt": aai_prompt,  # Instrução em linguagem natural
+            "speech_models": ["universal-3-pro"],
             "speaker_labels": True,
             "language_code": language,
         }
-
-        if keyterms:
+        # Modo exclusivo: evitar enviar prompt + keyterms_prompt simultaneamente
+        if prompt_mode in ("prompt_only", "both"):
+            data["prompt"] = aai_prompt
+        if prompt_mode in ("keyterms_only", "both") and keyterms:
             data["keyterms_prompt"] = keyterms
         if speakers_expected and speakers_expected > 0:
             data["speakers_expected"] = speakers_expected
@@ -3537,9 +3698,12 @@ class TranscriptionService:
         language: str = "pt",
         diarize: bool = True,
         tag_audio_events: bool = True,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
+        speaker_names: Optional[list] = None,
     ) -> Optional[dict]:
         """
-        Transcreve via ElevenLabs Scribe v2 com timestamps precisos por palavra.
+        Transcreve via ElevenLabs Scribe com timestamps precisos por palavra.
         Ideal para geração de legendas (SRT/VTT).
 
         Features:
@@ -3548,6 +3712,7 @@ class TranscriptionService:
         - Detecção de eventos de áudio (risos, música, aplausos)
         - Suporta arquivos de até 3GB / 10h
         - Cache de resultados para evitar reprocessamento
+        - scribe_v2 com keyterms (feature-flagged via ELEVENLABS_USE_SCRIBE_V2)
 
         Returns dict com: text, segments, words, speakers, elapsed_seconds, audio_duration, backend
         """
@@ -3558,11 +3723,25 @@ class TranscriptionService:
             logger.warning("ElevenLabs API key não configurada")
             return None
 
+        # Feature flag: scribe_v2 com suporte a keyterms
+        use_v2 = os.getenv("ELEVENLABS_USE_SCRIBE_V2", "").lower() in ("true", "1", "yes")
+        model_id = "scribe_v2" if use_v2 else "scribe_v1"
+
+        # Normalizar hints para keyterms (apenas scribe_v2)
+        hints = self._normalize_hints(
+            area=area,
+            custom_keyterms=custom_keyterms,
+            speaker_names=speaker_names,
+            provider="elevenlabs",
+        )
+
         # === Cache ElevenLabs: Calcular config hash e verificar cache ===
         config_hash = self._get_elevenlabs_config_hash(
             language=language,
             diarize=diarize,
             tag_audio_events=tag_audio_events,
+            model_id=model_id,
+            hints_fingerprint=hints["fingerprint"],
         )
 
         cached = self._check_elevenlabs_cache(audio_path, config_hash)
@@ -3574,17 +3753,22 @@ class TranscriptionService:
         headers = {"xi-api-key": api_key}
 
         start_time = time.time()
-        logger.info(f"🎬 ElevenLabs Scribe: transcrevendo {Path(audio_path).name}...")
+        logger.info(f"🎬 ElevenLabs {model_id}: transcrevendo {Path(audio_path).name}...")
 
         try:
             with open(audio_path, "rb") as f:
                 files = {"file": (Path(audio_path).name, f)}
                 data = {
-                    "model_id": "scribe_v1",  # scribe_v1 é o modelo atual
+                    "model_id": model_id,
                     "language_code": language if language != "auto" else None,
                     "diarize": str(diarize).lower(),
                     "tag_audio_events": str(tag_audio_events).lower(),
                 }
+                # scribe_v2: adicionar keyterms se disponíveis
+                if use_v2 and hints["keyterms"]:
+                    # ElevenLabs aceita keyterms como JSON array string
+                    data["keyterms"] = json.dumps(hints["keyterms"][:100])
+                    logger.info(f"ElevenLabs keyterms: {len(hints['keyterms'][:100])} termos, fingerprint={hints['fingerprint']}")
                 # Remove None values
                 data = {k: v for k, v in data.items() if v is not None}
 
@@ -4387,10 +4571,21 @@ class TranscriptionService:
         speaker_id_type: Optional[str] = None,
         speaker_id_values: Optional[list] = None,
         emit: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
     ) -> dict:
         """
         Executa Whisper (full result) e, quando necessário, aplica diarização externa.
         """
+        # Normalizar hints para Whisper initial_prompt
+        _whisper_hints = self._normalize_hints(
+            area=area,
+            custom_keyterms=custom_keyterms,
+            speaker_names=[str(r) for r in (speaker_roles or []) if r],
+            provider="whisper",
+        )
+        _extra_terms = _whisper_hints["initial_prompt"] or None
+
         result = await asyncio.to_thread(
             vomo.transcribe_file_full,
             audio_path,
@@ -4399,6 +4594,7 @@ class TranscriptionService:
             diarization=diarization,
             diarization_strict=diarization_strict,
             language=language,
+            extra_terms=_extra_terms,
         )
         if not isinstance(result, dict):
             result = {"text": str(result or ""), "words": [], "segments": []}
@@ -4432,6 +4628,7 @@ class TranscriptionService:
         mode: str = "APOSTILA",
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
+        custom_prompt_scope: str = "tables_only",
         high_accuracy: bool = False,
         transcription_engine: str = "whisper",
         diarization: Optional[bool] = None,
@@ -4582,6 +4779,9 @@ class TranscriptionService:
                                 language=language or "pt",
                                 diarize=True,
                                 tag_audio_events=True,
+                                area=area,
+                                custom_keyterms=custom_keyterms,
+                                speaker_names=[str(r) for r in (speaker_roles or []) if r],
                             )
                         except Exception as el_exc:
                             logger.warning("ElevenLabs falhou: %s", el_exc)
@@ -4656,6 +4856,8 @@ class TranscriptionService:
                                     diarization_provider=diarization_provider,
                                     speakers_expected=speakers_expected,
                                     speaker_roles=speaker_roles,
+                                    area=area,
+                                    custom_keyterms=custom_keyterms,
                                 )
                                 transcription_text = whisper_result.get("text", "")
                                 transcription_words = whisper_result.get("words", [])
@@ -4694,6 +4896,8 @@ class TranscriptionService:
                                 diarization_provider=diarization_provider,
                                 speakers_expected=speakers_expected,
                                 speaker_roles=speaker_roles,
+                                area=area,
+                                custom_keyterms=custom_keyterms,
                             )
                             transcription_text = whisper_result.get("text", "")
                             transcription_words = whisper_result.get("words", [])
@@ -4764,6 +4968,8 @@ class TranscriptionService:
                                 diarization_provider=diarization_provider,
                                 speakers_expected=speakers_expected,
                                 speaker_roles=speaker_roles,
+                                area=area,
+                                custom_keyterms=custom_keyterms,
                             )
                             transcription_text = whisper_result.get("text", "")
                             transcription_words = whisper_result.get("words", [])
@@ -4801,6 +5007,8 @@ class TranscriptionService:
                             diarization_provider=diarization_provider,
                             speakers_expected=speakers_expected,
                             speaker_roles=speaker_roles,
+                            area=area,
+                            custom_keyterms=custom_keyterms,
                         )
                         transcription_text = whisper_result.get("text", "")
                         transcription_words = whisper_result.get("words", [])
@@ -4872,6 +5080,7 @@ class TranscriptionService:
                         output_folder=temp_dir,
                         mode=mode,
                         custom_prompt=system_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         disable_tables=False,
                         progress_callback=None,
                         skip_audit=skip_legal_audit,
@@ -5200,6 +5409,7 @@ class TranscriptionService:
         mode: str = "APOSTILA",
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
+        custom_prompt_scope: str = "tables_only",
         disable_tables: bool = False,
         high_accuracy: bool = False,
         transcription_engine: str = "whisper",
@@ -5475,6 +5685,7 @@ class TranscriptionService:
             transcription_text = None
             transcription_words: list = []  # Word-level timestamps para player interativo
             transcription_segments: list = []  # Segmentos temporais para fallback de visualização
+            transcription_words_truncated = False
 
             _skip_raw_cache_sse = (
                 (mode or "").upper() == "RAW"
@@ -5646,11 +5857,15 @@ class TranscriptionService:
                         el_result_sse = None
                         try:
                             el_result_sse = await asyncio.to_thread(
-                                self._transcribe_elevenlabs_scribe,
-                                cloud_audio_path,  # Usar áudio otimizado para cloud
-                                language or "pt",
-                                True,  # diarize
-                                True,  # tag_audio_events
+                                lambda: self._transcribe_elevenlabs_scribe(
+                                    audio_path=cloud_audio_path,
+                                    language=language or "pt",
+                                    diarize=True,
+                                    tag_audio_events=True,
+                                    area=area,
+                                    custom_keyterms=custom_keyterms,
+                                    speaker_names=[str(r) for r in (speaker_roles or []) if r],
+                                ),
                             )
                         except Exception as el_exc:
                             logger.warning("ElevenLabs falhou (SSE legendas): %s", el_exc)
@@ -5846,11 +6061,18 @@ class TranscriptionService:
                                 emit=emit,
                                 start_progress=25,
                                 end_progress=60,
+                                area=area,
+                                custom_keyterms=custom_keyterms,
+                                speaker_names=[str(r) for r in (speaker_roles or []) if r],
                             )
                             if runpod_result and str(runpod_result.get("text", "")).strip():
                                 transcription_text = runpod_result["text"]
                                 transcription_words = runpod_result.get("words", []) or []
                                 transcription_segments = runpod_result.get("segments", []) or []
+                                transcription_words_truncated = (
+                                    transcription_words_truncated
+                                    or bool(runpod_result.get("words_truncated"))
+                                )
                                 await emit("transcription", 60, "Transcrição RunPod concluída ✓")
                             else:
                                 raise RuntimeError("RunPod retornou resultado vazio")
@@ -5976,6 +6198,7 @@ class TranscriptionService:
                     "content": transcription_text,
                     "raw_content": transcription_text,
                     "words": transcription_words,
+                    "words_truncated": bool(transcription_words_truncated),
                     "reports": {},
                 }
                 if transcription_segments:
@@ -6017,6 +6240,7 @@ class TranscriptionService:
                         output_folder=temp_dir,
                         mode=mode,
                         custom_prompt=system_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         disable_tables=bool(disable_tables),
                         progress_callback=emit,
                         skip_audit=skip_legal_audit,
@@ -6394,10 +6618,15 @@ class TranscriptionService:
                 "suggestions": None,
                 "warnings": [llm_warning] if llm_warning else [],
             }
+            if transcription_words_truncated:
+                quality_payload["warnings"].append(
+                    "Word-level timestamps foram truncados no provider para evitar payload excessivo."
+                )
             return {
                 "content": final_text,
                 "raw_content": transcription_text,
                 "words": transcription_words,  # Word-level timestamps para player interativo
+                "words_truncated": bool(transcription_words_truncated),
                 "reports": report_paths,
                 "audit_issues": issues,
                 "audit_summary": audit_summary,
@@ -6422,6 +6651,7 @@ class TranscriptionService:
         mode: str = "APOSTILA",
         thinking_level: str = "medium",
         custom_prompt: Optional[str] = None,
+        custom_prompt_scope: str = "tables_only",
         disable_tables: bool = False,
         high_accuracy: bool = False,
         transcription_engine: str = "whisper",
@@ -6439,6 +6669,8 @@ class TranscriptionService:
         skip_sources_audit: bool = False,
         language: Optional[str] = None,
         output_language: Optional[str] = None,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
         allow_provider_fallback: Optional[bool] = None,
     ) -> dict:
         """
@@ -6476,10 +6708,11 @@ class TranscriptionService:
 
             # Emit progress BEFORE initializing vomo (can be slow due to Vertex AI/Gemini connection)
             await emit("initializing", 0, "🚀 Inicializando motor de transcrição...")
-            if _requested_engine_batch in {"assemblyai", "elevenlabs"}:
+            if _requested_engine_batch in {"assemblyai", "elevenlabs", "runpod"}:
                 _provider_available = (
                     (_requested_engine_batch == "assemblyai" and self._get_assemblyai_key() is not None)
                     or (_requested_engine_batch == "elevenlabs" and self._get_elevenlabs_key() is not None)
+                    or (_requested_engine_batch == "runpod" and self._is_runpod_configured())
                 )
                 if not _provider_available:
                     _can_switch_missing_provider = self._is_provider_fallback_allowed(
@@ -6513,6 +6746,7 @@ class TranscriptionService:
             vomo._current_mode = (mode or "APOSTILA").strip().upper()
             total_files = len(file_paths)
             all_raw_transcriptions = []
+            batch_words_truncated = False
             diarization_enabled, diarization_required = (False, False)
             try:
                 diarization_enabled, diarization_required = vomo.resolve_diarization_policy(
@@ -6594,12 +6828,77 @@ class TranscriptionService:
                         # Verificar se AAI deve ser primário (para áudios longos)
                         _force_aai_batch = self._is_assemblyai_primary_forced()
                         _aai_key = self._get_assemblyai_key()
-                        _engine_aai_batch = transcription_engine == "assemblyai"
-                        _engine_whisper_batch = transcription_engine == "whisper"
+                        _engine_aai_batch = _requested_engine_batch == "assemblyai"
+                        _engine_runpod_batch = _requested_engine_batch == "runpod"
+                        _engine_whisper_batch = _requested_engine_batch == "whisper"
                         _force_aai_effective_batch = _force_aai_batch and not _engine_whisper_batch
                         audio_duration = self._get_wav_duration_seconds(audio_path)
 
-                        if (_engine_aai_batch or _force_aai_effective_batch) and _aai_key:
+                        if _engine_runpod_batch and self._is_runpod_configured():
+                            logger.info("🚀 RunPod primário (batch) para %s (%.0fs)", file_name, audio_duration)
+
+                            async def _runpod_batch_emit(stage: str, progress: int, message: str):
+                                pct = (progress - 25) / 35  # 0.0 a 1.0
+                                actual_progress = transcribe_progress + int(pct * (file_progress_increment - 5))
+                                await emit("batch", actual_progress, f"[{file_num}/{total_files}] {message}")
+
+                            try:
+                                runpod_result = await self._transcribe_runpod(
+                                    file_path=file_path,
+                                    audio_path=audio_path,
+                                    language=language or "pt",
+                                    diarization=diarization_enabled,
+                                    emit=_runpod_batch_emit,
+                                    start_progress=25,
+                                    end_progress=60,
+                                    area=area,
+                                    custom_keyterms=custom_keyterms,
+                                )
+                                if runpod_result and str(runpod_result.get("text", "")).strip():
+                                    transcription_text = runpod_result["text"]
+                                    batch_words_truncated = (
+                                        batch_words_truncated
+                                        or bool(runpod_result.get("words_truncated"))
+                                    )
+                                else:
+                                    raise RuntimeError("RunPod retornou resultado vazio")
+                            except Exception as runpod_exc:
+                                logger.warning("⚠️ RunPod falhou para %s, usando Whisper: %s", file_name, runpod_exc)
+                                _can_runpod_to_whisper_batch = self._is_provider_fallback_allowed(
+                                    requested_engine=transcription_engine,
+                                    from_provider="runpod",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                )
+                                if not _can_runpod_to_whisper_batch:
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] ❌ RunPod indisponível e fallback para Whisper desabilitado",
+                                    )
+                                    transcription_text = f"[ERRO: RunPod indisponível e fallback para Whisper desabilitado - {runpod_exc}]"
+                                else:
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] {self._provider_switch_message(from_provider='runpod', to_provider='whisper', allow_provider_fallback=allow_provider_fallback)}",
+                                    )
+                                    whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                        vomo=vomo,
+                                        audio_path=audio_path,
+                                        mode=mode,
+                                        high_accuracy=high_accuracy,
+                                        diarization=diarization,
+                                        diarization_strict=diarization_strict,
+                                        language=language,
+                                        diarization_enabled=diarization_enabled,
+                                        diarization_required=diarization_required,
+                                        diarization_provider=diarization_provider,
+                                        area=area,
+                                        custom_keyterms=custom_keyterms,
+                                    )
+                                    transcription_text = whisper_result.get("text", "")
+                        elif (_engine_aai_batch or _force_aai_effective_batch) and _aai_key:
                             # AssemblyAI como primário (melhor para áudios longos) - com progresso real
                             logger.info(f"🗣️ AAI primário (batch) para {file_name} ({audio_duration:.0f}s)")
 
@@ -6681,6 +6980,8 @@ class TranscriptionService:
                                         diarization_enabled=diarization_enabled,
                                         diarization_required=diarization_required,
                                         diarization_provider=diarization_provider,
+                                        area=area,
+                                        custom_keyterms=custom_keyterms,
                                     )
                                     transcription_text = whisper_result.get("text", "")
                         else:
@@ -6725,6 +7026,8 @@ class TranscriptionService:
                                     diarization_enabled=diarization_enabled,
                                     diarization_required=diarization_required,
                                     diarization_provider=diarization_provider,
+                                    area=area,
+                                    custom_keyterms=custom_keyterms,
                                 )
                                 transcription_text = whisper_result.get("text", "")
                             except Exception as whisper_exc:
@@ -6810,7 +7113,12 @@ class TranscriptionService:
             
             if mode == "RAW":
                 await emit("batch", 100, "Transcrição bruta unificada ✓")
-                return {"content": unified_raw, "raw_content": unified_raw, "reports": {}}
+                return {
+                    "content": unified_raw,
+                    "raw_content": unified_raw,
+                    "words_truncated": bool(batch_words_truncated),
+                    "reports": {},
+                }
             
             # Stage 3: Format unified document (60-100%)
             await emit("formatting", 65, "Preparando formatação unificada...")
@@ -6848,6 +7156,7 @@ class TranscriptionService:
                         output_folder=temp_dir,
                         mode=mode,
                         custom_prompt=system_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         disable_tables=bool(disable_tables),
                         progress_callback=emit,
                         skip_audit=skip_legal_audit,
@@ -7149,9 +7458,14 @@ class TranscriptionService:
                 "suggestions": None,
                 "warnings": [llm_warning] if llm_warning else [],
             }
+            if batch_words_truncated:
+                quality_payload["warnings"].append(
+                    "Word-level timestamps foram truncados em pelo menos um arquivo do lote."
+                )
             return {
                 "content": final_text,
                 "raw_content": unified_raw,
+                "words_truncated": bool(batch_words_truncated),
                 "reports": report_paths,
                 "audit_issues": issues,
                 "audit_summary": audit_summary,
@@ -7212,11 +7526,43 @@ class TranscriptionService:
         suffix = "beam" if high_accuracy else "base"
         return self._get_transcription_cache_dir() / file_hash / f"raw_{suffix}.txt"
 
+    def _is_invalid_raw_cache_payload(self, raw_text: Optional[str]) -> bool:
+        """
+        Detecta payloads de erro para não reutilizar como transcrição válida.
+        """
+        text = (raw_text or "").strip()
+        if not text:
+            return True
+
+        normalized = text.lower()
+        if normalized.startswith("[erro:") or normalized.startswith("erro:"):
+            return True
+
+        error_markers = (
+            "runpod indisponível e fallback para whisper foi desabilitado",
+            "assemblyai indisponível e fallback para whisper foi desabilitado",
+            "transcrição whisper falhou -",
+            "transcrição falhou -",
+            "url pública do áudio inacessível",
+            "url pública do áudio rejeitada",
+            "name 'area' is not defined",
+            "token inválido ou expirado",
+            "verifique se o tunnel está ativo",
+            "verifique tunnel/base url e assinatura do token",
+        )
+        return any(marker in normalized for marker in error_markers)
+
     def _load_cached_raw(self, file_hash: str, high_accuracy: bool, diarization_enabled: bool) -> Optional[str]:
         cache_path = self._get_raw_cache_path(file_hash, high_accuracy, diarization_enabled)
         if cache_path.exists():
             try:
-                return cache_path.read_text(encoding="utf-8")
+                cached = cache_path.read_text(encoding="utf-8")
+                if self._is_invalid_raw_cache_payload(cached):
+                    logger.warning("Ignorando cache RAW inválido: %s", cache_path)
+                    with contextlib.suppress(Exception):
+                        cache_path.unlink()
+                    return None
+                return cached
             except Exception:
                 return None
         # Compat: só faz fallback para cache legado quando diarização está OFF
@@ -7224,7 +7570,13 @@ class TranscriptionService:
             legacy_path = self._get_raw_cache_path_legacy(file_hash, high_accuracy)
             if legacy_path.exists():
                 try:
-                    return legacy_path.read_text(encoding="utf-8")
+                    cached = legacy_path.read_text(encoding="utf-8")
+                    if self._is_invalid_raw_cache_payload(cached):
+                        logger.warning("Ignorando cache RAW legado inválido: %s", legacy_path)
+                        with contextlib.suppress(Exception):
+                            legacy_path.unlink()
+                        return None
+                    return cached
                 except Exception:
                     return None
         return None
@@ -7237,6 +7589,9 @@ class TranscriptionService:
         raw_text: str,
         source_name: str = "",
     ) -> None:
+        if self._is_invalid_raw_cache_payload(raw_text):
+            logger.warning("Pulando persistência de cache RAW inválido para %s", source_name or file_hash)
+            return
         cache_path = self._get_raw_cache_path(file_hash, high_accuracy, diarization_enabled)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         cache_path.write_text(raw_text or "", encoding="utf-8")
@@ -7277,13 +7632,27 @@ class TranscriptionService:
         speaker_labels: bool = True,
         speakers_expected: Optional[int] = None,
         mode: Optional[str] = None,
+        hints_fingerprint: str = "",
+        speaker_id_type: Optional[str] = None,
+        speaker_id_values_hash: str = "",
+        custom_spelling_hash: str = "",
+        prompt_mode: str = "prompt_only",
     ) -> str:
-        """Calcula hash da configuração para invalidação de cache."""
+        """Calcula hash da configuração para invalidação de cache.
+
+        Inclui hints, speaker_id e custom_spelling para evitar cache stale
+        quando o usuário muda vocabulário/speakers sem mudar o áudio.
+        """
         config = {
             "language": language,
             "speaker_labels": speaker_labels,
             "speakers_expected": speakers_expected,
             "mode": mode or "default",
+            "hints": hints_fingerprint,
+            "sid_type": speaker_id_type or "",
+            "sid_vals": speaker_id_values_hash,
+            "spelling": custom_spelling_hash,
+            "pmode": prompt_mode,
         }
         return hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest()[:8]
 
@@ -7473,12 +7842,20 @@ class TranscriptionService:
         language: str = "pt",
         diarize: bool = True,
         tag_audio_events: bool = True,
+        model_id: str = "scribe_v1",
+        hints_fingerprint: str = "",
+        speaker_id_type: Optional[str] = None,
+        speaker_id_values_hash: str = "",
     ) -> str:
         """Calcula hash da configuração ElevenLabs para invalidação de cache."""
         config = {
             "language": language,
             "diarize": diarize,
             "tag_audio_events": tag_audio_events,
+            "model": model_id,
+            "hints": hints_fingerprint,
+            "sid_type": speaker_id_type or "",
+            "sid_vals": speaker_id_values_hash,
         }
         return hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest()[:8]
 
@@ -7573,6 +7950,7 @@ class TranscriptionService:
         model: str = "large-v3",
         beam_size: int = 5,
         word_timestamps: bool = True,
+        hints_fingerprint: str = "",
     ) -> str:
         """Calcula hash da configuração Whisper Server para invalidação de cache."""
         config = {
@@ -7580,6 +7958,7 @@ class TranscriptionService:
             "model": model,
             "beam_size": beam_size,
             "word_timestamps": word_timestamps,
+            "hints": hints_fingerprint,
         }
         return hashlib.md5(json.dumps(config, sort_keys=True).encode()).hexdigest()[:8]
 
@@ -9216,6 +9595,7 @@ Responda APENAS com JSON válido:
         high_accuracy: bool = False,
         format_mode: str = "AUDIENCIA",
         custom_prompt: Optional[str] = None,
+        custom_prompt_scope: str = "tables_only",
         format_enabled: bool = True,
         include_timestamps: bool = True,
         allow_indirect: bool = False,
@@ -9233,6 +9613,8 @@ Responda APENAS com JSON válido:
         speakers_expected: Optional[int] = None,
         transcription_engine: str = "whisper",
         allow_provider_fallback: Optional[bool] = None,
+        area: Optional[str] = None,
+        custom_keyterms: Optional[list] = None,
     ) -> dict:
         async def emit(stage: str, progress: int, message: str):
             if on_progress:
@@ -9348,11 +9730,15 @@ Responda APENAS com JSON válido:
                 await emit("transcription", 30, "Transcrevendo com ElevenLabs Scribe...")
                 try:
                     _hearing_elevenlabs_result = await asyncio.to_thread(
-                        self._transcribe_elevenlabs_scribe,
-                        audio_path,
-                        language or "pt",
-                        True,  # diarize
-                        True,  # tag_audio_events
+                        lambda: self._transcribe_elevenlabs_scribe(
+                            audio_path=audio_path,
+                            language=language or "pt",
+                            diarize=True,
+                            tag_audio_events=True,
+                            area=area,
+                            custom_keyterms=custom_keyterms,
+                            speaker_names=[str(r) for r in (speaker_roles or []) if r],
+                        ),
                     )
                 except Exception as el_exc:
                     logger.warning(f"ElevenLabs falhou: {el_exc}")
@@ -9442,11 +9828,19 @@ Responda APENAS com JSON válido:
                 # Whisper local (fluxo principal ou fallback)
                 engine_msg = "Whisper MLX" if _use_whisper_hearing else "Whisper MLX (fallback)"
                 await emit("transcription", 30, f"Transcrevendo com {engine_msg}...")
+                # Normalizar hints de área/keyterms para Whisper initial_prompt
+                _whisper_hints = self._normalize_hints(
+                    area=area,
+                    custom_keyterms=custom_keyterms,
+                    speaker_names=[str(r) for r in (speaker_roles or []) if r],
+                    provider="whisper",
+                )
+                _whisper_extra_terms = _whisper_hints["initial_prompt"] or None
                 structured = None
                 if high_accuracy and hasattr(vomo, "transcribe_beam_with_segments"):
-                    structured = await asyncio.to_thread(vomo.transcribe_beam_with_segments, audio_path)
+                    structured = await asyncio.to_thread(vomo.transcribe_beam_with_segments, audio_path, extra_terms=_whisper_extra_terms)
                 elif hasattr(vomo, "transcribe_with_segments"):
-                    structured = await asyncio.to_thread(vomo.transcribe_with_segments, audio_path)
+                    structured = await asyncio.to_thread(vomo.transcribe_with_segments, audio_path, extra_terms=_whisper_extra_terms)
 
                 if structured:
                     transcription_text = structured.get("text") or ""
@@ -9660,6 +10054,7 @@ Responda APENAS com JSON válido:
                     output_folder=str(run_dir),
                     mode=format_mode_normalized,
                     custom_prompt=custom_prompt,
+                    custom_prompt_scope=custom_prompt_scope,
                     disable_tables=False,
                     progress_callback=emit,
                     skip_audit=skip_legal_audit,

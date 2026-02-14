@@ -1186,6 +1186,7 @@ def _write_vomo_job_result(
         quality = result.get("quality")
         words = result.get("words") if isinstance(result.get("words"), list) else None
         segments = result.get("segments") if isinstance(result.get("segments"), list) else None
+        words_truncated = bool(result.get("words_truncated"))
         # Novos campos para rastreabilidade de transcrições AAI
         transcript_id = result.get("transcript_id")
         transcription_backend = result.get("backend")
@@ -1197,6 +1198,7 @@ def _write_vomo_job_result(
         quality = None
         words = None
         segments = None
+        words_truncated = False
         transcript_id = None
         transcription_backend = None
 
@@ -1235,6 +1237,7 @@ def _write_vomo_job_result(
         "audit_path": str(audit_path) if audit_path else None,
         "words_path": str(words_path) if words_path else None,
         "segments_path": str(segments_path) if segments_path else None,
+        "words_truncated": words_truncated,
         "audit_issues": audit_issues,
         "quality": quality,
         "rich_text_html_path": None,
@@ -1335,6 +1338,7 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     raw_content = ""
     words: List[Any] = []
     segments: List[Any] = []
+    words_truncated = bool(result_data.get("words_truncated"))
     reports = None
     audit_issues = result_data.get("audit_issues") or []
     quality = result_data.get("quality")
@@ -1442,6 +1446,7 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "raw_content": raw_content,
         "words": words,
         "segments": segments,
+        "words_truncated": words_truncated,
         "reports": reports,
         "audit_issues": audit_issues,
         "quality": quality,
@@ -1701,6 +1706,7 @@ async def create_vomo_job(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     disable_tables: bool = Form(False),
     document_theme: str = Form("classic"),
     document_header: Optional[str] = Form(None),
@@ -1735,7 +1741,21 @@ async def create_vomo_job(
     custom_keyterms: Optional[str] = Form(None, description="Termos separados por vírgula"),
     current_user: User = Depends(get_current_user),
 ):
-    logger.info(f"[VOMO/JOBS] Received: mode={mode}, thinking_level={thinking_level}, language={language}, diarization={diarization}, diarization_provider={diarization_provider}, subtitle_format={subtitle_format}, area={area}, files={len(files) if files else 0}")
+    logger.info(
+        "[VOMO/JOBS] Received: mode=%s, thinking_level=%s, language=%s, "
+        "transcription_engine=%s, allow_provider_fallback=%s, diarization=%s, "
+        "diarization_provider=%s, subtitle_format=%s, area=%s, files=%s",
+        mode,
+        thinking_level,
+        language,
+        transcription_engine,
+        allow_provider_fallback,
+        diarization,
+        diarization_provider,
+        subtitle_format,
+        area,
+        len(files) if files else 0,
+    )
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -1870,6 +1890,7 @@ async def create_vomo_job(
                             mode=mode,
                             thinking_level=thinking_level,
                             custom_prompt=custom_prompt,
+                            custom_prompt_scope=custom_prompt_scope,
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=high_accuracy,
                             transcription_engine=config.get("transcription_engine", "whisper"),
@@ -1902,6 +1923,7 @@ async def create_vomo_job(
                             mode=mode,
                             thinking_level=thinking_level,
                             custom_prompt=custom_prompt,
+                            custom_prompt_scope=custom_prompt_scope,
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=high_accuracy,
                             transcription_engine=config.get("transcription_engine", "whisper"),
@@ -1920,6 +1942,8 @@ async def create_vomo_job(
                             skip_sources_audit=skip_sources_audit,
                             language=language,
                             output_language=output_language,
+                            area=area,
+                            custom_keyterms=parsed_keyterms,
                         )
 
                 ensure_not_cancelled()
@@ -2134,6 +2158,8 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                             skip_sources_audit=config.get("skip_sources_audit", False),
                             language=config.get("language", "pt"),
                             output_language=config.get("output_language", ""),
+                            area=config.get("area"),
+                            custom_keyterms=parsed_keyterms,
                         )
 
                 ensure_not_cancelled()
@@ -2436,6 +2462,7 @@ async def create_hearing_job(
     high_accuracy: bool = Form(False),
     format_mode: str = Form("AUDIENCIA"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     format_enabled: bool = Form(True),
     include_timestamps: bool = Form(True),
     document_theme: str = Form("classic"),
@@ -2462,10 +2489,21 @@ async def create_hearing_job(
     speakers_expected: Optional[int] = Form(None),
     transcription_engine: str = Form("whisper"),
     allow_provider_fallback: Optional[bool] = Form(None),
+    area: Optional[str] = Form(None, description="Área: juridico, medicina, ti, engenharia, financeiro"),
+    custom_keyterms: Optional[str] = Form(None, description="JSON array de termos técnicos"),
     current_user: User = Depends(get_current_user),
 ):
     job_id = str(uuid.uuid4())
     job_dir = _get_job_dir(job_id)
+    # Parse custom_keyterms de JSON string
+    _parsed_keyterms = None
+    if custom_keyterms:
+        try:
+            _parsed_keyterms = json.loads(custom_keyterms)
+            if not isinstance(_parsed_keyterms, list):
+                _parsed_keyterms = None
+        except (json.JSONDecodeError, TypeError):
+            _parsed_keyterms = None
     if custom_prompt is not None:
         custom_prompt = custom_prompt.strip() or None
     if document_header is not None:
@@ -2588,6 +2626,7 @@ async def create_hearing_job(
                         high_accuracy=high_accuracy,
                         format_mode=format_mode,
                         custom_prompt=custom_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         format_enabled=format_enabled,
                         include_timestamps=include_timestamps,
                         allow_indirect=allow_indirect,
@@ -2605,6 +2644,8 @@ async def create_hearing_job(
                         speakers_expected=speakers_expected,
                         transcription_engine=transcription_engine,
                         allow_provider_fallback=allow_provider_fallback,
+                        area=area,
+                        custom_keyterms=_parsed_keyterms,
                     )
                 ensure_not_cancelled()
                 result_path = _write_hearing_job_result(job_dir, result)
@@ -2775,6 +2816,8 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
                         speakers_expected=getattr(request, "speakers_expected", None),
                         transcription_engine=request.transcription_engine,
                         allow_provider_fallback=request.allow_provider_fallback,
+                        area=getattr(request, "area", None),
+                        custom_keyterms=getattr(request, "custom_keyterms", None),
                     )
 
                 ensure_not_cancelled()
@@ -3868,6 +3911,7 @@ async def transcribe_vomo(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
     transcription_engine: str = Form("whisper"),
@@ -3935,6 +3979,7 @@ async def transcribe_vomo(
                 mode=mode,
                 thinking_level=thinking_level,
                 custom_prompt=custom_prompt,
+                custom_prompt_scope=custom_prompt_scope,
                 high_accuracy=high_accuracy,
                 transcription_engine=transcription_engine,
                 allow_provider_fallback=allow_provider_fallback,
@@ -3978,6 +4023,7 @@ async def transcribe_vomo_stream(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     disable_tables: bool = Form(False),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
@@ -4061,7 +4107,15 @@ async def transcribe_vomo_stream(
     
     async def event_generator():
         progress_queue = asyncio.Queue()
-        final_result = {"content": None, "raw_content": None, "words": [], "segments": [], "reports": None, "error": None}
+        final_result = {
+            "content": None,
+            "raw_content": None,
+            "words": [],
+            "segments": [],
+            "words_truncated": False,
+            "reports": None,
+            "error": None,
+        }
         
         async def on_progress(stage: str, progress: int, message: str):
             """Callback chamado pelo service para reportar progresso."""
@@ -4079,6 +4133,7 @@ async def transcribe_vomo_stream(
                         mode=mode,
                         thinking_level=thinking_level,
                         custom_prompt=custom_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
                         transcription_engine=transcription_engine,
@@ -4111,6 +4166,7 @@ async def transcribe_vomo_stream(
                     final_result["raw_content"] = result.get("raw_content")
                     final_result["words"] = result.get("words") if isinstance(result.get("words"), list) else []
                     final_result["segments"] = result.get("segments") if isinstance(result.get("segments"), list) else []
+                    final_result["words_truncated"] = bool(result.get("words_truncated"))
                     final_result["reports"] = result.get("reports")
                 else:
                     final_result["content"] = result
@@ -4154,6 +4210,7 @@ async def transcribe_vomo_stream(
                         "raw_content": final_result.get("raw_content"),
                         "words": final_result.get("words") or [],
                         "segments": final_result.get("segments") or [],
+                        "words_truncated": bool(final_result.get("words_truncated")),
                         "reports": final_result.get("reports")
                     })
                 }
@@ -4179,6 +4236,7 @@ async def transcribe_batch_stream(
     mode: str = Form("APOSTILA"),
     thinking_level: str = Form("medium"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     disable_tables: bool = Form(False),
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
@@ -4237,7 +4295,15 @@ async def transcribe_batch_stream(
     
     async def event_generator():
         progress_queue = asyncio.Queue()
-        final_result = {"content": None, "raw_content": None, "words": [], "segments": [], "reports": None, "error": None}
+        final_result = {
+            "content": None,
+            "raw_content": None,
+            "words": [],
+            "segments": [],
+            "words_truncated": False,
+            "reports": None,
+            "error": None,
+        }
         
         async def on_progress(stage: str, progress: int, message: str):
             await progress_queue.put({
@@ -4254,6 +4320,7 @@ async def transcribe_batch_stream(
                         mode=mode,
                         thinking_level=thinking_level,
                         custom_prompt=custom_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
                         transcription_engine=transcription_engine,
@@ -4278,6 +4345,7 @@ async def transcribe_batch_stream(
                     final_result["raw_content"] = result.get("raw_content")
                     final_result["words"] = result.get("words") if isinstance(result.get("words"), list) else []
                     final_result["segments"] = result.get("segments") if isinstance(result.get("segments"), list) else []
+                    final_result["words_truncated"] = bool(result.get("words_truncated"))
                     final_result["reports"] = result.get("reports")
                 else:
                     final_result["content"] = result
@@ -4317,6 +4385,7 @@ async def transcribe_batch_stream(
                         "raw_content": final_result.get("raw_content"),
                         "words": final_result.get("words") or [],
                         "segments": final_result.get("segments") or [],
+                        "words_truncated": bool(final_result.get("words_truncated")),
                         "reports": final_result.get("reports")
                     })
                 }
@@ -4734,6 +4803,7 @@ async def transcribe_hearing_stream(
     high_accuracy: bool = Form(False),
     format_mode: str = Form("AUDIENCIA"),
     custom_prompt: Optional[str] = Form(None),
+    custom_prompt_scope: str = Form("tables_only"),
     format_enabled: bool = Form(True),
     include_timestamps: bool = Form(True),
     allow_indirect: bool = Form(False),
@@ -4750,6 +4820,8 @@ async def transcribe_hearing_stream(
     speakers_expected: Optional[int] = Form(None),
     transcription_engine: str = Form("whisper"),
     allow_provider_fallback: Optional[bool] = Form(None),
+    area: Optional[str] = Form(None, description="Área: juridico, medicina, ti, engenharia, financeiro"),
+    custom_keyterms: Optional[str] = Form(None, description="JSON array de termos técnicos"),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -4757,6 +4829,16 @@ async def transcribe_hearing_stream(
     """
     import json
     import asyncio
+
+    # Parse custom_keyterms de JSON string
+    _parsed_keyterms_sse = None
+    if custom_keyterms:
+        try:
+            _parsed_keyterms_sse = json.loads(custom_keyterms)
+            if not isinstance(_parsed_keyterms_sse, list):
+                _parsed_keyterms_sse = None
+        except (json.JSONDecodeError, TypeError):
+            _parsed_keyterms_sse = None
 
     EventSourceResponse = _get_event_source_response()
 
@@ -4805,6 +4887,7 @@ async def transcribe_hearing_stream(
                         high_accuracy=high_accuracy,
                         format_mode=format_mode,
                         custom_prompt=custom_prompt,
+                        custom_prompt_scope=custom_prompt_scope,
                         format_enabled=format_enabled,
                         include_timestamps=include_timestamps,
                         allow_indirect=allow_indirect,
@@ -4822,6 +4905,8 @@ async def transcribe_hearing_stream(
                         speakers_expected=speakers_expected,
                         transcription_engine=transcription_engine,
                         allow_provider_fallback=allow_provider_fallback,
+                        area=area,
+                        custom_keyterms=_parsed_keyterms_sse,
                     )
                 final_result["payload"] = result
             except Exception as e:

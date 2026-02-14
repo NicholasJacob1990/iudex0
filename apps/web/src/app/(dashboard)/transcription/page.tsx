@@ -17,8 +17,7 @@ import { useDocumentStore } from '@/stores/document-store';
 import { Switch } from '@/components/ui/switch';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { QualityPanel } from '@/components/dashboard/quality-panel';
-import { AuditIssuesPanel } from '@/components/dashboard/audit-issues-panel';
-import { PreventiveAuditPanel } from '@/components/dashboard/preventive-audit-panel';
+import { UnifiedAuditPanel } from '@/components/dashboard/unified-audit-panel';
 import { TranscriptionPromptPicker } from '@/components/dashboard/transcription-prompt-picker';
 import { SyncedTranscriptViewer } from '@/components/dashboard/synced-transcript-viewer';
 import { WordLevelTranscriptViewer } from '@/components/dashboard/word-level-transcript-viewer';
@@ -320,6 +319,7 @@ const DOCUMENT_THEMES: DocumentTheme[] = [
 ];
 
 export default function TranscriptionPage() {
+    const runpodEnabled = process.env.NEXT_PUBLIC_RUNPOD_ENABLED === 'true';
     const [files, setFiles] = useState<File[]>([]);
     const [publicUrl, setPublicUrl] = useState('');
     const [transcriptionLanguage, setTranscriptionLanguage] = useState('pt');
@@ -353,7 +353,16 @@ export default function TranscriptionPage() {
         },
     });
     const [highAccuracy, setHighAccuracy] = useState(false);
-    const [transcriptionEngine, setTranscriptionEngine] = useState<'whisper' | 'assemblyai' | 'elevenlabs'>('whisper');
+    const [transcriptionEngine, setTranscriptionEngine] = useState<'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod'>(() => {
+        const defaultEngine: 'whisper' | 'runpod' = runpodEnabled ? 'runpod' : 'whisper';
+        if (typeof window === 'undefined') return defaultEngine;
+        const saved = window.localStorage.getItem('iudex_transcription_engine');
+        if (saved === 'whisper' || saved === 'assemblyai' || saved === 'elevenlabs' || saved === 'runpod') {
+            if (saved === 'runpod' && !runpodEnabled) return 'whisper';
+            return saved;
+        }
+        return defaultEngine;
+    });
     const [transcriptionArea, setTranscriptionArea] = useState<string>('geral');
     const [customKeyterms, setCustomKeyterms] = useState<string>('');
     const [enableDiarization, setEnableDiarization] = useState(false);
@@ -363,6 +372,8 @@ export default function TranscriptionPage() {
     const [result, setResult] = useState<string | null>(null);
     const [rawResult, setRawResult] = useState<string | null>(null);
     const [transcriptionWords, setTranscriptionWords] = useState<Array<{word: string; start: number; end: number; speaker?: string}>>([]);
+    const [transcriptionSegments, setTranscriptionSegments] = useState<Array<{ start?: number; end?: number; text?: string; speaker?: string; speaker_label?: string }>>([]);
+    const [wordTimestampsTruncated, setWordTimestampsTruncated] = useState(false);
     const [richTextHtml, setRichTextHtml] = useState<string | null>(null);
     const [richTextJson, setRichTextJson] = useState<any | null>(null);
     const [richTextMeta, setRichTextMeta] = useState<any | null>(null);
@@ -445,6 +456,7 @@ export default function TranscriptionPage() {
     const preventiveAuditKeyRef = useRef<string | null>(null);
     const [jobHistory, setJobHistory] = useState<any[]>([]);
     const [jobsLoading, setJobsLoading] = useState(false);
+    const [jobsRefreshing, setJobsRefreshing] = useState(false);
     const [savedDocuments, setSavedDocuments] = useState<any[]>([]);
     const [savedDocsLoading, setSavedDocsLoading] = useState(false);
     const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -473,7 +485,9 @@ export default function TranscriptionPage() {
     const [progressDockMinimized, setProgressDockMinimized] = useState(false);
     const [processStartTime, setProcessStartTime] = useState<number | null>(null);
     const [elapsedSeconds, setElapsedSeconds] = useState<number>(0);
-    const logsEndRef = useRef<HTMLDivElement>(null);
+    const logsContainerRef = useRef<HTMLDivElement>(null);
+    const providerSwitchToastShownRef = useRef(false);
+    const activeStreamAbortRef = useRef<AbortController | null>(null);
 
     // HIL Audit State
     const [auditIssues, setAuditIssues] = useState<any[]>([]);
@@ -483,6 +497,7 @@ export default function TranscriptionPage() {
     const [showDiffConfirm, setShowDiffConfirm] = useState(false);
     const [pendingRevision, setPendingRevision] = useState<{ content: string; data: any; evidenceUsed?: any } | null>(null);
     const [isAuditOutdated, setIsAuditOutdated] = useState(false);
+    const [isRegeneratingAudit, setIsRegeneratingAudit] = useState(false);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [followJobLive, setFollowJobLive] = useState(true);
     const [mainTab, setMainTab] = useState<'jobs' | 'preview'>('jobs');
@@ -532,6 +547,12 @@ export default function TranscriptionPage() {
             setHighAccuracy(false);
         }
     }, [transcriptionEngine, highAccuracy]);
+
+    useEffect(() => {
+        if (typeof window !== 'undefined') {
+            window.localStorage.setItem('iudex_transcription_engine', transcriptionEngine);
+        }
+    }, [transcriptionEngine]);
     const documentTypographyStyle = useMemo(() => {
         const style: CSSProperties & Record<string, string> = {
             '--doc-font-size': `${activeDocumentLayout.fontSize}px`,
@@ -672,13 +693,28 @@ export default function TranscriptionPage() {
 
     const getIssueRawSnippet = (issue: any) => {
         const evidence = Array.isArray(issue?.raw_evidence) ? issue.raw_evidence : [];
-        if (!evidence.length) return '';
-        const first = evidence[0];
-        const snippet =
-            typeof first === 'string'
-                ? first
-                : (first?.snippet ?? first?.text ?? '');
-        return String(snippet || '').trim();
+        if (evidence.length) {
+            const first = evidence[0];
+            const snippet =
+                typeof first === 'string'
+                    ? first
+                    : (first?.snippet ?? first?.text ?? '');
+            return String(snippet || '').trim();
+        }
+        const directRaw = typeof issue?.evidence_raw === 'string' ? issue.evidence_raw.trim() : '';
+        if (directRaw) return directRaw;
+        return serializeRawItem(issue?.raw_item);
+    };
+
+    const serializeRawItem = (rawItem: unknown) => {
+        if (!rawItem || typeof rawItem !== 'object') return '';
+        try {
+            const text = JSON.stringify(rawItem, null, 2);
+            if (!text) return '';
+            return text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+        } catch {
+            return '';
+        }
     };
 
     const extractSectionFromMarkdown = (markdown: string, suggestedSection: string, reference: string) => {
@@ -915,6 +951,66 @@ export default function TranscriptionPage() {
         });
     }, [savedDocuments, savedDocsSearch, resolveSavedDocumentId]);
 
+    const areJobsEquivalent = useCallback((prevJob: any, nextJob: any) => {
+        if (prevJob === nextJob) return true;
+        if (!prevJob || !nextJob) return false;
+        const keys = new Set([...Object.keys(prevJob), ...Object.keys(nextJob)]);
+        for (const key of keys) {
+            const prevValue = prevJob[key];
+            const nextValue = nextJob[key];
+            if (prevValue === nextValue) continue;
+
+            const prevIsObject = prevValue !== null && typeof prevValue === 'object';
+            const nextIsObject = nextValue !== null && typeof nextValue === 'object';
+            if (prevIsObject || nextIsObject) {
+                if (JSON.stringify(prevValue) !== JSON.stringify(nextValue)) return false;
+                continue;
+            }
+            return false;
+        }
+        return true;
+    }, []);
+
+    const mergeJobHistory = useCallback((prevJobs: any[], nextJobs: any[]) => {
+        if (!Array.isArray(nextJobs) || nextJobs.length === 0) {
+            return nextJobs;
+        }
+        if (!Array.isArray(prevJobs) || prevJobs.length === 0) {
+            return nextJobs;
+        }
+
+        const prevById = new Map(prevJobs.map((job) => [job?.job_id, job]));
+        let hasChanges = prevJobs.length !== nextJobs.length;
+        const merged = nextJobs.map((job) => {
+            const jobId = job?.job_id;
+            if (!jobId) {
+                hasChanges = true;
+                return job;
+            }
+            const prev = prevById.get(jobId);
+            if (!prev) {
+                hasChanges = true;
+                return job;
+            }
+            if (areJobsEquivalent(prev, job)) {
+                return prev;
+            }
+            hasChanges = true;
+            return job;
+        });
+
+        if (!hasChanges && merged.length === prevJobs.length) {
+            for (let index = 0; index < merged.length; index += 1) {
+                if (merged[index] !== prevJobs[index]) {
+                    hasChanges = true;
+                    break;
+                }
+            }
+        }
+
+        return hasChanges ? merged : prevJobs;
+    }, [areJobsEquivalent]);
+
     const upsertSavedDocuments = (docs: any[]) => {
         if (!docs.length) return;
         setSavedDocuments((prev) => {
@@ -1074,17 +1170,27 @@ export default function TranscriptionPage() {
         }
     }, [playbackRate]);
 
-    const loadJobHistory = useCallback(async () => {
+    const loadJobHistory = useCallback(async (options?: { silent?: boolean }) => {
+        const silent = Boolean(options?.silent);
         try {
-            setJobsLoading(true);
+            if (silent) {
+                setJobsRefreshing(true);
+            } else {
+                setJobsLoading(true);
+            }
             const data = await apiClient.listTranscriptionJobs(20);
-            setJobHistory(Array.isArray(data?.jobs) ? data.jobs : []);
+            const incoming = Array.isArray(data?.jobs) ? data.jobs : [];
+            setJobHistory((prev) => mergeJobHistory(prev, incoming));
         } catch (error) {
             console.error(error);
         } finally {
-            setJobsLoading(false);
+            if (silent) {
+                setJobsRefreshing(false);
+            } else {
+                setJobsLoading(false);
+            }
         }
-    }, []);
+    }, [mergeJobHistory]);
 
     const loadSavedDocuments = useCallback(async () => {
         try {
@@ -1178,6 +1284,16 @@ export default function TranscriptionPage() {
         loadJobHistory();
     }, [loadJobHistory]);
 
+    // Polling periódico do histórico quando há jobs ativos (running/queued)
+    useEffect(() => {
+        const hasActiveJobs = jobHistory.some(j => j.status === 'running' || j.status === 'queued');
+        if (!hasActiveJobs) return;
+        const interval = setInterval(() => {
+            loadJobHistory({ silent: true }).catch(() => undefined);
+        }, 5000);
+        return () => clearInterval(interval);
+    }, [jobHistory, loadJobHistory]);
+
     useEffect(() => {
         loadSavedDocuments();
     }, [loadSavedDocuments]);
@@ -1229,10 +1345,10 @@ export default function TranscriptionPage() {
         }
     }, [isProcessing, processStartTime]);
 
-    // Auto-scroll para o final dos logs
+    // Auto-scroll apenas dentro do painel de logs (sem rolar a página inteira)
     useEffect(() => {
-        if (logsEndRef.current && logs.length > 0) {
-            logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        if (logsContainerRef.current && logs.length > 0) {
+            logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
         }
     }, [logs]);
 
@@ -1593,15 +1709,101 @@ export default function TranscriptionPage() {
         const type = typeof issue?.type === 'string' ? issue.type : 'issue';
         const safeRef = reference ? ` (${reference})` : '';
         const safeSection = suggestedSection ? ` Seção: ${suggestedSection}.` : '';
-        const instruction = `Objetivo: corrigir ${type}${safeRef}.${safeSection} ` +
-            'Insira a referência no texto preservando o estilo e a estrutura. ' +
-            'Use apenas informações presentes no RAW (sem inventar). ' +
-            'Se a referência já estiver no texto, evite duplicar.';
+        const customInstruction = typeof issue?.user_instruction === 'string' ? issue.user_instruction.trim() : '';
+        const fixType = String(issue?.fix_type || '').toLowerCase();
+        const instruction = customInstruction || (
+            fixType === 'structural'
+                ? `Objetivo: corrigir ${type}${safeRef}.${safeSection} Ajuste a estrutura/tópicos/tabelas mantendo conteúdo e estilo. Não invente informações.`
+                : `Objetivo: corrigir ${type}${safeRef}.${safeSection} Corrija o texto com base nas evidências, preservando estilo e estrutura. Use apenas informações presentes no RAW (sem inventar).`
+        );
         setIssueAssistantIssue(issue);
         setIssueAssistantInstruction(instruction);
         setIssueAssistantForce(false);
         setIssueAssistantOpen(true);
     }, []);
+
+    const diagnosticToActionable = useCallback((issue: any, moduleId: string) => {
+        const desc = String(issue?.description || '');
+        const src = String(issue?.source || moduleId);
+        const cat = String(issue?.category || 'diagnostic');
+        const seed = `${moduleId}_${src}_${cat}_${desc}`;
+        let hash = 0;
+        for (let i = 0; i < seed.length; i++) {
+            hash = (hash << 5) - hash + seed.charCodeAt(i);
+            hash |= 0;
+        }
+        const id = `diag_${moduleId}_${Math.abs(hash)}`;
+
+        // All diagnostic issues must go through LLM content path.
+        // The structural fix engine only handles duplicate_paragraph/duplicate_section/heading_numbering
+        // and ignores any other category → zero changes if we set fix_type='structural'.
+        const fixType = 'content';
+
+        const evidenceRaw = typeof issue?.evidence_raw === 'string' ? issue.evidence_raw.trim() : '';
+        const rawItemSerialized = serializeRawItem(issue?.raw_item);
+        const evidenceSnippet = evidenceRaw || rawItemSerialized;
+        const rawEvidence = evidenceSnippet ? [{ snippet: evidenceSnippet }] : undefined;
+
+        // Extract suggested_section from raw_item fields (varies by audit plugin)
+        const ri = issue?.raw_item;
+        let suggestedSection = '';
+        if (ri) {
+            // preventive_fidelity: localizacao_formatado / localizacao
+            const loc = ri.localizacao_formatado || ri.localizacao || '';
+            if (typeof loc === 'string' && loc.trim()) {
+                suggestedSection = loc.trim();
+            }
+            // structural_analysis: heading_line (e.g. "## 1. Introduction")
+            if (!suggestedSection && typeof ri.heading_line === 'string' && ri.heading_line.trim()) {
+                suggestedSection = ri.heading_line.replace(/^#{1,6}\s*/, '').trim();
+            }
+        }
+        // Fallback: extract heading from evidence_formatted if it starts with ##
+        if (!suggestedSection && typeof issue?.evidence_formatted === 'string') {
+            const headingMatch = issue.evidence_formatted.match(/^##\s+(.+)$/m);
+            if (headingMatch) {
+                suggestedSection = headingMatch[1].trim();
+            }
+        }
+
+        // Extract reference from raw_item
+        let reference = '';
+        if (ri) {
+            const refCandidate = ri.trecho_formatado || ri.correcao_sugerida || ri.correcao || '';
+            if (typeof refCandidate === 'string' && refCandidate.trim().length >= 10) {
+                reference = refCandidate.trim().slice(0, 200);
+            }
+        }
+
+        let userInstruction = `Corrigir o seguinte problema de diagnóstico: ${desc}\n`;
+        userInstruction += '\nAjuste o conteúdo usando somente o que estiver suportado pela evidência (sem inventar).';
+        if (evidenceSnippet) {
+            userInstruction += `\n\nEvidência do RAW:\n${evidenceSnippet}`;
+        }
+
+        return {
+            id,
+            type: cat,
+            fix_type: fixType,
+            severity: issue?.severity || 'info',
+            description: desc,
+            suggestion: 'Corrigir conforme a evidência disponível.',
+            source: src,
+            origin: moduleId,
+            reference: reference || undefined,
+            suggested_section: suggestedSection || undefined,
+            raw_evidence: rawEvidence,
+            evidence_formatted: issue?.evidence_formatted || undefined,
+            user_instruction: userInstruction,
+            raw_item: issue?.raw_item,
+            formatted_context: undefined as string | undefined,
+        };
+    }, []);
+
+    const handleFixDiagnosticIssue = useCallback((issue: any, moduleId: string) => {
+        const actionable = diagnosticToActionable(issue, moduleId);
+        openIssueAssistant(actionable);
+    }, [diagnosticToActionable, openIssueAssistant]);
 
     const buildReportEntries = (reports: Record<string, string> | null) => {
         if (!reports) return [];
@@ -1922,13 +2124,37 @@ export default function TranscriptionPage() {
     };
 
     const runJobStream = async (jobId: string, onComplete: (payload: any) => Promise<void> | void) => {
+        // Abortar stream anterior se existir
+        if (activeStreamAbortRef.current) {
+            activeStreamAbortRef.current.abort();
+        }
+        const abortController = new AbortController();
+        activeStreamAbortRef.current = abortController;
+        const streamJobId = jobId; // captura o jobId deste stream
+        const startedAt = new Date();
+        const startedTs = `${startedAt.getHours().toString().padStart(2, '0')}:${startedAt.getMinutes().toString().padStart(2, '0')}:${startedAt.getSeconds().toString().padStart(2, '0')}`;
+        setLogs((prev) => {
+            if (prev.length > 0) return prev;
+            return [{ timestamp: startedTs, message: `Conectando ao stream do job ${streamJobId.slice(0, 8)}...` }];
+        });
+
         const startTime = Date.now();
 
         const onProgress = (stage: string, progress: number, message: string) => {
-            console.log('[SSE Progress]', { stage, progress, message });
+            // Ignorar updates de streams stale (job mudou)
+            if (abortController.signal.aborted) return;
+            console.log('[SSE Progress]', { jobId: streamJobId, stage, progress, message });
             setProgressStage(stage);
             setProgressPercent(progress);
             setProgressMessage(message);
+            if (
+                !providerSwitchToastShownRef.current
+                && typeof message === 'string'
+                && message.includes('trocando para')
+            ) {
+                providerSwitchToastShownRef.current = true;
+                toast.warning(message, { duration: 6500 });
+            }
 
             if (progress > 0 && progress < 100) {
                 const elapsed = (Date.now() - startTime) / 1000;
@@ -1948,6 +2174,7 @@ export default function TranscriptionPage() {
                     const issues = Array.isArray(auditData.issues) ? auditData.issues : [];
                     setAuditIssues(issues);
                     setSelectedIssues(new Set(issues.map((i: any) => i.id)));
+                    setAuditSummary(auditData?.audit_summary || null);
                     if (auditData.reports || auditData.audit_summary) {
                         const mergedReports = mergeReportKeys(auditData.reports, auditData.audit_summary);
                         if (mergedReports) {
@@ -2011,6 +2238,9 @@ export default function TranscriptionPage() {
     const handleJobCompletion = async (payload: any, shouldAutoSave: boolean) => {
         if (payload?.job_type === 'hearing' || payload?.payload) {
             setTranscriptionType('hearing');
+            setTranscriptionWords([]);
+            setTranscriptionSegments([]);
+            setWordTimestampsTruncated(false);
             applyHearingPayload(payload?.payload || payload);
             setJobQuality(payload?.quality ?? null);
             setIsAuditOutdated(Boolean(payload?.quality?.needs_revalidate));
@@ -2069,7 +2299,14 @@ export default function TranscriptionPage() {
         } else {
             setTranscriptionWords([]);
         }
+        if (Array.isArray(payload?.segments)) {
+            setTranscriptionSegments(payload.segments);
+        } else {
+            setTranscriptionSegments([]);
+        }
+        setWordTimestampsTruncated(Boolean(payload?.words_truncated));
         setReportPaths(normalizeReportPaths(mergeReportKeys(payload?.reports ?? null, payload?.audit_summary)));
+        setAuditSummary(payload?.audit_summary ?? null);
         setJobQuality(payload?.quality ?? null);
         setIsAuditOutdated(Boolean(payload?.quality?.needs_revalidate));
         setIsProcessing(false);
@@ -2149,6 +2386,9 @@ export default function TranscriptionPage() {
 
             if (data?.job_type === 'hearing' || data?.payload) {
                 setTranscriptionType('hearing');
+                setTranscriptionWords([]);
+                setTranscriptionSegments([]);
+                setWordTimestampsTruncated(false);
                 applyHearingPayload(data);
                 setJobQuality(data?.quality ?? null);
                 setIsAuditOutdated(Boolean(data?.quality?.needs_revalidate));
@@ -2214,7 +2454,14 @@ export default function TranscriptionPage() {
                 } else {
                     setTranscriptionWords([]);
                 }
+                if (Array.isArray(data?.segments)) {
+                    setTranscriptionSegments(data.segments);
+                } else {
+                    setTranscriptionSegments([]);
+                }
+                setWordTimestampsTruncated(Boolean(data?.words_truncated));
                 setReportPaths(normalizeReportPaths(mergeReportKeys(data?.reports ?? null, data?.audit_summary)));
+                setAuditSummary(data?.audit_summary ?? null);
                 setJobQuality(data?.quality ?? null);
                 setIsAuditOutdated(Boolean(data?.quality?.needs_revalidate));
                 setActiveTab('preview');
@@ -2254,25 +2501,61 @@ export default function TranscriptionPage() {
 
     const handleResumeJob = async (jobId: string) => {
         setActiveJobId(jobId);
-        setIsProcessing(true);
+        const historySnapshot = jobHistory.find((job: any) => job.job_id === jobId);
+        let snapshot: any = historySnapshot;
+
+        try {
+            const latest = await apiClient.getTranscriptionJob(jobId);
+            if (latest && typeof latest === 'object') {
+                snapshot = { ...(historySnapshot || {}), ...latest };
+            }
+        } catch {
+            // fallback para snapshot do histórico
+        }
+
+        const normalizedStatus = String(snapshot?.status || '').toLowerCase();
+        const isTerminal = ['completed', 'complete', 'error', 'failed', 'canceled', 'cancelled'].includes(normalizedStatus);
+        const seededProgress = typeof snapshot?.progress === 'number'
+            ? snapshot.progress
+            : (normalizedStatus === 'completed' || normalizedStatus === 'complete' ? 100 : 0);
+        const seededStage = String(snapshot?.stage || (isTerminal ? normalizedStatus || 'complete' : 'starting'));
+        const seededMessage = String(snapshot?.message || (isTerminal ? 'Job finalizado.' : 'Retomando...'));
+
+        setIsProcessing(!isTerminal);
         setProcessStartTime(Date.now());
         setElapsedSeconds(0);
-            setResult(null);
-            clearRichContent();
+        setResult(null);
+        clearRichContent();
         setRawResult(null);
+        setTranscriptionWords([]);
+        setTranscriptionSegments([]);
+        setWordTimestampsTruncated(false);
         setReport(null);
         setReportPaths(null);
+        setAuditSummary(null);
         setHearingPayload(null);
         setHearingTranscript(null);
         setHearingFormatted(null);
         setJobMediaFiles([]);
-        setProgressStage('starting');
-        setProgressPercent(0);
-        setProgressMessage('Retomando...');
-        setLogs([]);
+        setProgressStage(seededStage);
+        setProgressPercent(seededProgress);
+        setProgressMessage(seededMessage);
+        const resumeAt = new Date();
+        const resumeTs = `${resumeAt.getHours().toString().padStart(2, '0')}:${resumeAt.getMinutes().toString().padStart(2, '0')}:${resumeAt.getSeconds().toString().padStart(2, '0')}`;
+        const seedMessage = snapshot
+            ? `Retomado do histórico: [${snapshot.stage || 'running'} ${snapshot.progress ?? '?'}%] ${snapshot.message || 'sem mensagem'}`
+            : 'Retomando acompanhamento...';
+        setLogs([{ timestamp: resumeTs, message: seedMessage }]);
         setActiveSegmentId(null);
         setCurrentTime(0);
         setEtaSeconds(null);
+
+        if (isTerminal) {
+            if (normalizedStatus === 'completed' || normalizedStatus === 'complete') {
+                await handleLoadJobResult(jobId);
+            }
+            return;
+        }
 
         await runJobStream(jobId, async (payload) => {
             await handleJobCompletion(payload, false);
@@ -2309,6 +2592,9 @@ export default function TranscriptionPage() {
             setElapsedSeconds(0);
             setResult(null);
             clearRichContent();
+            setTranscriptionWords([]);
+            setTranscriptionSegments([]);
+            setWordTimestampsTruncated(false);
             setLogs([]);
             setActiveSegmentId(null);
             setCurrentTime(0);
@@ -2493,10 +2779,20 @@ export default function TranscriptionPage() {
             toast.error('Escolha apenas uma fonte: arquivos OU URL (não ambos).');
             return;
         }
+        const onlyTextFiles = files.length > 0 && files.every(isTextFile);
+        // Respeitar engine escolhida pelo usuário: fallback automático só no Whisper.
+        const allowProviderFallback: boolean | undefined = onlyTextFiles
+            ? undefined
+            : (transcriptionEngine === 'whisper' ? true : false);
+        providerSwitchToastShownRef.current = false;
 
         setJobQuality(null);
         setJobMediaFiles([]);
-        const onlyTextFiles = files.length > 0 && files.every(isTextFile);
+        const diarizationEnabledForPayload = enableDiarization || isHearing || isLegenda;
+        const diarizationProviderForPayload: 'auto' | 'local' | 'runpod' | 'assemblyai' | undefined =
+            transcriptionEngine === 'whisper'
+                ? 'auto'
+                : undefined;
         const options = {
             mode,
             thinking_level: thinkingLevel,
@@ -2516,8 +2812,8 @@ export default function TranscriptionPage() {
             model_selection: selectedModel,
             high_accuracy: effectiveHighAccuracy,
             transcription_engine: transcriptionEngine,
-            diarization: enableDiarization ? true : undefined,
-            diarization_strict: enableDiarization ? true : undefined,
+            diarization: diarizationEnabledForPayload ? true : undefined,
+            diarization_provider: diarizationEnabledForPayload ? diarizationProviderForPayload : undefined,
             use_cache: useRawCache,
             auto_apply_fixes: autoApplyFixes,
             auto_apply_content_fixes: autoApplyContentFixes,
@@ -2526,13 +2822,14 @@ export default function TranscriptionPage() {
             skip_sources_audit: skipFidelityAudit,
             language: transcriptionLanguage,
             output_language: outputLanguage || undefined,
-            speaker_roles: enableDiarization && hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
-            speakers_expected: enableDiarization && hearingSpeakerRoles.length ? hearingSpeakerRoles.length : undefined,
-            speaker_id_type: enableDiarization && hearingSpeakerRoles.length ? speakerIdType : undefined,
-            speaker_id_values: enableDiarization && hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
+            speaker_roles: diarizationEnabledForPayload && hearingSpeakerRoles.length ? hearingSpeakerRoles : undefined,
+            speakers_expected: diarizationEnabledForPayload && hearingSpeakerRoles.length ? hearingSpeakerRoles.length : undefined,
+            speaker_id_type: diarizationEnabledForPayload && hearingSpeakerRoles.length ? speakerIdType : undefined,
+            speaker_id_values: diarizationEnabledForPayload && hearingSpeakerRoles.length ? JSON.stringify(hearingSpeakerRoles) : undefined,
             subtitle_format: isLegenda ? subtitleFormat : undefined,
             area: transcriptionArea !== 'geral' ? transcriptionArea : undefined,
             custom_keyterms: customKeyterms.trim() || undefined,
+            allow_provider_fallback: allowProviderFallback,
         };
 
         if (isHearing) {
@@ -2608,6 +2905,7 @@ export default function TranscriptionPage() {
                                 ...hearingSpeakerRoles,
                             ].filter(Boolean).join(', ') || undefined,
                             transcription_engine: transcriptionEngine,
+                            allow_provider_fallback: allowProviderFallback,
                         })
                         : await apiClient.startHearingJob(files[0], {
                             case_id: hearingCaseId.trim(),
@@ -2651,18 +2949,30 @@ export default function TranscriptionPage() {
                                 ...hearingSpeakerRoles,
                             ].filter(Boolean).join(', ') || undefined,
                             transcription_engine: transcriptionEngine,
+                            allow_provider_fallback: allowProviderFallback,
                         });
                     if (job?.job_id) setActiveJobId(job.job_id);
                 } else {
                     console.log('[handleSubmit] Apostila/Legenda mode, hasUrl:', hasUrl, 'files.length:', files.length);
                     console.log('[handleSubmit] Files:', files.map(f => ({ name: f.name, size: f.size })));
                     setActiveDocumentName(hasUrl ? 'URL pública' : (files.length === 1 ? files[0]?.name || 'Documento' : `${files.length} arquivos`));
-                    const job = hasUrl
-                        ? await apiClient.startTranscriptionJobFromUrl(urlValue, options)
-                        : await apiClient.startTranscriptionJob(files, options);
-                    if (job?.job_id) setActiveJobId(job.job_id);
+                    if (hasUrl) {
+                        const job = await apiClient.startTranscriptionJobFromUrl(urlValue, options);
+                        if (job?.job_id) setActiveJobId(job.job_id);
+                    } else if (files.length > 1) {
+                        // Multi-upload: 1 job por arquivo (paralelo)
+                        const results = await Promise.all(
+                            files.map(f => apiClient.startTranscriptionJob([f], options))
+                        );
+                        const ids = results.map(r => r?.job_id).filter(Boolean);
+                        if (ids.length > 0) setActiveJobId(ids[0]);
+                    } else {
+                        const job = await apiClient.startTranscriptionJob(files, options);
+                        if (job?.job_id) setActiveJobId(job.job_id);
+                    }
                 }
-                toast.success('Job iniciado. Acompanhe no dashboard.');
+                const jobCount = hasUrl ? 1 : files.length;
+                toast.success(jobCount > 1 ? `${jobCount} jobs iniciados. Acompanhe no dashboard.` : 'Job iniciado. Acompanhe no dashboard.');
                 setFiles([]);
                 setPublicUrl('');
                 setSettingsOpen(false);
@@ -2685,8 +2995,12 @@ export default function TranscriptionPage() {
         setResult(null);
         clearRichContent();
         setRawResult(null);
+        setTranscriptionWords([]);
+        setTranscriptionSegments([]);
+        setWordTimestampsTruncated(false);
         setReport(null);
         setReportPaths(null);
+        setAuditSummary(null);
         setHearingPayload(null);
         setHearingTranscript(null);
         setHearingFormatted(null);
@@ -2761,6 +3075,7 @@ export default function TranscriptionPage() {
                             ...hearingSpeakerRoles,
                         ].filter(Boolean).join(', ') || undefined,
                         transcription_engine: transcriptionEngine,
+                        allow_provider_fallback: allowProviderFallback,
                     })
                     : await apiClient.startHearingJob(files[0], {
                         case_id: hearingCaseId.trim(),
@@ -2804,6 +3119,7 @@ export default function TranscriptionPage() {
                             ...hearingSpeakerRoles,
                         ].filter(Boolean).join(', ') || undefined,
                         transcription_engine: transcriptionEngine,
+                        allow_provider_fallback: allowProviderFallback,
                     });
                 setActiveJobId(job.job_id);
                 setMainTab('preview');
@@ -2989,7 +3305,7 @@ export default function TranscriptionPage() {
         });
         if (newIssues.length === 0) {
             toast.info('Alertas ja estao em Correcoes (HIL).');
-            setActiveTab('hil');
+            setActiveTab('audit');
             return;
         }
         const mergeLocal = () => {
@@ -3001,7 +3317,7 @@ export default function TranscriptionPage() {
                 });
                 return next;
             });
-            setActiveTab('hil');
+            setActiveTab('audit');
             toast.success(`${newIssues.length} alerta(s) enviado(s) para Correcoes (HIL).`);
         };
 
@@ -3021,7 +3337,7 @@ export default function TranscriptionPage() {
                         });
                         return next;
                     });
-                    setActiveTab('hil');
+                    setActiveTab('audit');
                     toast.success(`${newIssues.length} alerta(s) enviado(s) para Correcoes (HIL).`, { id: toastId });
                 })
                 .catch((error: any) => {
@@ -3041,7 +3357,7 @@ export default function TranscriptionPage() {
             toast.info('Nenhum resultado disponivel para revisao HIL.');
             return;
         }
-        setActiveTab('hil');
+        setActiveTab('audit');
     };
 
     const handleSaveToLibrary = async (andChat = false) => {
@@ -3105,6 +3421,18 @@ export default function TranscriptionPage() {
                 })
                 .then((resp) => {
                     if (resp?.quality) setJobQuality(resp.quality);
+                    if (resp?.audit_summary) {
+                        setAuditSummary(resp.audit_summary);
+                        setIsAuditOutdated(false);
+                    }
+                    if (resp?.audit_issues) setAuditIssues(resp.audit_issues);
+                    if (resp?.reports || resp?.audit_summary) {
+                        setReportPaths(
+                            normalizeReportPaths(
+                                mergeReportKeys(resp?.reports ?? null, resp?.audit_summary ?? null)
+                            )
+                        );
+                    }
                 })
                 .catch(() => toast.warning('Correções aplicadas localmente, mas não foi possível salvar no histórico.'));
         }
@@ -3206,6 +3534,30 @@ export default function TranscriptionPage() {
             }
         }
     };
+
+    const handleRegenerateAudit = useCallback(async () => {
+        if (!activeJobId) return;
+        setIsRegeneratingAudit(true);
+        try {
+            const resp = await apiClient.regenerateTranscriptionAudit(activeJobId);
+            if (resp.audit_summary) setAuditSummary(resp.audit_summary);
+            if (resp.audit_issues) setAuditIssues(resp.audit_issues);
+            if (resp.quality) setJobQuality(resp.quality);
+            if (resp.reports || resp.audit_summary) {
+                setReportPaths(
+                    normalizeReportPaths(
+                        mergeReportKeys(resp.reports ?? null, resp.audit_summary ?? null)
+                    )
+                );
+            }
+            setIsAuditOutdated(false);
+            toast.success('Auditoria regenerada.');
+        } catch (err: any) {
+            toast.error(`Erro ao regenerar auditoria: ${err?.message || err}`);
+        } finally {
+            setIsRegeneratingAudit(false);
+        }
+    }, [activeJobId]);
 
     const applyHilIssues = async (issuesToApply: any[], actionLabel: string) => {
         if (!result || issuesToApply.length === 0) {
@@ -3317,6 +3669,29 @@ export default function TranscriptionPage() {
             if (slowTimer) clearTimeout(slowTimer);
             setIsApplyingFixes(false);
         }
+    };
+
+    const handleFixDiagnosticModule = async (issues: any[], moduleId: string) => {
+        if (!Array.isArray(issues) || issues.length === 0) {
+            toast.info('Nenhum diagnóstico encontrado neste módulo.');
+            return;
+        }
+        // Enrich each issue with formatted_context so the backend can locate the right section
+        const actionable = issues.map((issue) => {
+            const base = diagnosticToActionable(issue, moduleId);
+            if (result) {
+                const ctx = extractSectionFromMarkdown(
+                    result,
+                    base.suggested_section || '',
+                    base.reference || '',
+                );
+                if (ctx.section) {
+                    base.formatted_context = ctx.section;
+                }
+            }
+            return base;
+        });
+        await applyHilIssues(actionable, `Pré-visualizando correções do módulo: ${moduleId}`);
     };
 
     const handleApplyFixes = async () => {
@@ -3515,7 +3890,7 @@ export default function TranscriptionPage() {
                         onClick={() => loadJobHistory()}
                         disabled={jobsLoading}
                     >
-                        <RefreshCw className={`mr-2 h-4 w-4 ${jobsLoading ? 'animate-spin' : ''}`} />
+                        <RefreshCw className={`mr-2 h-4 w-4 ${(jobsLoading || jobsRefreshing) ? 'animate-spin' : ''}`} />
                         Atualizar
                     </Button>
                     <Button
@@ -3664,7 +4039,7 @@ export default function TranscriptionPage() {
                                         <div>Atualizado</div>
                                         <div className="text-right">Ações</div>
                                     </div>
-                                    {jobsLoading ? (
+                                    {jobsLoading && filteredJobHistory.length === 0 ? (
                                         <div className="p-4 text-sm text-muted-foreground">Carregando jobs...</div>
                                     ) : filteredJobHistory.length === 0 ? (
                                         <div className="p-6 text-sm text-muted-foreground">Nenhum job encontrado com os filtros atuais.</div>
@@ -3915,6 +4290,7 @@ export default function TranscriptionPage() {
                                     setHearingPayload(null);
                                     setHearingTranscript(null);
                                     setHearingFormatted(null);
+                                    setAuditSummary(null);
                                     setAuditIssues([]);
                                 }}
                             >
@@ -3949,6 +4325,8 @@ export default function TranscriptionPage() {
                                             ? 'Processamento local no Mac (gratuito)'
                                             : transcriptionEngine === 'elevenlabs'
                                             ? 'ElevenLabs Scribe (melhor para legendas)'
+                                            : transcriptionEngine === 'runpod'
+                                            ? 'GPU cloud (paralelo, mais rápido)'
                                             : 'Processamento na nuvem (mais rápido)'}
                                     </span>
                                 </Label>
@@ -3975,6 +4353,19 @@ export default function TranscriptionPage() {
                                     >
                                         AssemblyAI
                                     </button>
+                                    {runpodEnabled && (
+                                        <button
+                                            type="button"
+                                            className={`flex-1 px-3 py-2 text-sm font-medium transition-colors ${
+                                                transcriptionEngine === 'runpod'
+                                                    ? 'bg-primary text-primary-foreground'
+                                                    : 'bg-background hover:bg-muted'
+                                            }`}
+                                            onClick={() => setTranscriptionEngine('runpod')}
+                                        >
+                                            RunPod
+                                        </button>
+                                    )}
                                     {(isLegenda || isHearing) && (
                                         <button
                                             type="button"
@@ -5094,19 +5485,18 @@ export default function TranscriptionPage() {
                                         <TabsTrigger value="preview">{isHearing ? 'Transcrição' : 'Visualização'}</TabsTrigger>
                                         <TabsTrigger value="export">Exportar</TabsTrigger>
 												{!isHearing && result && (
-													<TabsTrigger value="hil" className={auditIssues.length > 0 ? "text-orange-600" : ""}>
-														{auditIssues.length > 0 ? `Correções (HIL) (${auditIssues.length})` : 'Correções (HIL)'}
+													<TabsTrigger
+														value="audit"
+														className={
+															isAuditOutdated ? "text-amber-600" :
+															auditIssues.length > 0 ? "text-orange-600" :
+															auditSummary?.summary?.status === 'ok' ? "text-green-600" : ""
+														}
+													>
+														{isAuditOutdated ? '⚠️ Auditoria' : `Auditoria${auditIssues.length > 0 ? ` (${auditIssues.length})` : ''}`}
 													</TabsTrigger>
 												)}
-										{!isHearing && hasPreventiveAudit && (
-											<TabsTrigger
-												value="preventive"
-												className={preventiveShouldBlockDisplay ? "text-orange-600" : (preventiveAudit || preventiveAuditMarkdown) ? "text-green-600" : ""}
-											>
-												{preventiveShouldBlockDisplay ? '⚠️ Auditoria' : 'Auditoria'}
-											</TabsTrigger>
-										)}
-										<TabsTrigger value="quality">{isHearing ? 'Qualidade' : 'Qualidade (Resumo)'}</TabsTrigger>
+										{isHearing && <TabsTrigger value="quality">Qualidade</TabsTrigger>}
 												{isHearing && hearingFormatted && <TabsTrigger value="formatted">Texto formatado</TabsTrigger>}
 												{isHearing && <TabsTrigger value="speakers">Falantes</TabsTrigger>}
 												{isHearing && <TabsTrigger value="evidence">Evidências</TabsTrigger>}
@@ -5117,23 +5507,26 @@ export default function TranscriptionPage() {
                                     </TabsList>
                                 </div>
 
-                                {/* HIL Audit Issues Tab */}
+                                {/* Unified Audit Tab (non-hearing) */}
                                 {!isHearing && (
-                                    <TabsContent value="hil" className="flex-1 overflow-y-auto p-4 m-0 space-y-4">
-                                        <AuditIssuesPanel
-                                            issues={auditIssues}
+                                    <TabsContent value="audit" className="flex-1 overflow-y-auto p-4 m-0 space-y-4">
+                                        <UnifiedAuditPanel
+                                            auditSummary={auditSummary}
+                                            auditIssues={auditIssues}
+                                            validationReport={jobQuality?.validation_report}
+                                            analysisResult={jobQuality?.analysis_result}
                                             selectedIssueIds={selectedIssues}
-                                            selectedModelLabel={selectedModel}
-                                            hasRawForHil={hasRawForHil}
                                             isApplying={isApplyingFixes}
+                                            isRegenerating={isRegeneratingAudit}
                                             isAuditOutdated={isAuditOutdated}
-                                            autoAppliedSummary={autoAppliedSummary}
-                                            hilDiagnostics={hilDiagnostics}
+                                            selectedModelLabel={selectedModel}
                                             onToggleIssue={toggleIssue}
                                             onApplySelected={handleApplyFixes}
                                             onAutoApplyStructural={handleAutoApplyStructural}
                                             onAutoApplyContent={handleAutoApplyContent}
-                                            onReviewIssue={openIssueAssistant}
+                                            onRegenerate={handleRegenerateAudit}
+                                            onFixDiagnosticIssue={handleFixDiagnosticIssue}
+                                            onFixDiagnosticModule={handleFixDiagnosticModule}
                                         />
                                     </TabsContent>
 										)}
@@ -5438,15 +5831,22 @@ export default function TranscriptionPage() {
                                                             {/* DEBUG: Verificar dados word-level */}
                                                             {process.env.NODE_ENV === 'development' && previewMode === 'raw' && (
                                                                 <div className="text-xs text-muted-foreground p-2 bg-muted/30 border-b">
-                                                                    Words: {transcriptionWords.length} | MediaURL: {mediaUrl ? 'OK' : 'null'}
+                                                                    Words: {transcriptionWords.length} | Segments: {transcriptionSegments.length} | MediaURL: {mediaUrl ? 'OK' : 'null'}
+                                                                </div>
+                                                            )}
+                                                            {previewMode === 'raw' && wordTimestampsTruncated && (
+                                                                <div className="mx-2 mt-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                                                    Timestamps por palavra foram truncados pelo provider para reduzir payload. A navegação permanece disponível, mas pode não cobrir 100% do áudio.
                                                                 </div>
                                                             )}
                                                             {previewMode === 'raw' && (isHearing ? hearingTranscript : rawResult) ? (
-                                                                // Usar WordLevelTranscriptViewer quando words disponíveis, senão SyncedTranscriptViewer
-                                                                !isHearing && transcriptionWords.length > 0 ? (
+                                                                // Usa WordLevel também quando só há segments/raw (fallback aproximado),
+                                                                // mantendo SyncedTranscriptViewer quando há múltiplos arquivos de mídia.
+                                                                !isHearing && (transcriptionWords.length > 0 || transcriptionSegments.length > 0 || Boolean(rawResult)) && (files.length <= 1 && jobMediaFiles.length <= 1) ? (
                                                                     <WordLevelTranscriptViewer
                                                                         rawContent={rawResult || ''}
                                                                         words={transcriptionWords}
+                                                                        segments={transcriptionSegments}
                                                                         mediaUrl={mediaUrl}
                                                                         timestampInterval={mode === 'AUDIENCIA' || mode === 'REUNIAO' || mode === 'LEGENDA' ? 0 : 60}
                                                                         className="h-full border rounded-md"
@@ -5579,63 +5979,30 @@ export default function TranscriptionPage() {
                                     </div>
 										</TabsContent>
 
-										{!isHearing && hasPreventiveAudit && (
-											<TabsContent value="preventive" className="flex-1 overflow-y-auto p-4 m-0 space-y-4">
-												<PreventiveAuditPanel
-													audit={preventiveAudit}
-													auditMarkdown={preventiveAuditMarkdown}
-													recommendation={preventiveRecommendation}
-													status={preventiveStatus}
-													loading={preventiveAuditLoading}
-													error={preventiveAuditError}
-													isAuditOutdated={isAuditOutdated}
-													hasRawForHil={hasRawForHil}
-													hasDocument={Boolean(result)}
-													onConvertAlerts={handleConvertPreventiveToHil}
-													onGoToHil={handleGoToHil}
-													onDownloadReport={handleDownloadReport}
-													canDownloadMd={Boolean(reportPaths?.preventive_fidelity_md_path)}
-													canDownloadJson={Boolean(reportPaths?.preventive_fidelity_json_path)}
-													onRecompute={handleRecomputePreventiveAudit}
-													canRecompute={Boolean(activeJobId) && !preventiveAuditLoading}
-													onReload={() => fetchPreventiveAudit(true)}
-													consolidatedScore={auditSummary?.summary?.score}
-													consolidatedStatus={auditSummary?.summary?.status}
-												/>
-											</TabsContent>
-										)}
-
+										{/* Quality tab — hearing only */}
+										{isHearing && (
 										<TabsContent value="quality" className="flex-1 overflow-y-auto p-4 m-0">
 												<QualityPanel
-													rawContent={isHearing ? (hearingTranscript || '') : (rawResult || '')}
-													formattedContent={isHearing ? (hearingFormatted || '') : (result || '')}
+													rawContent={hearingTranscript || ''}
+													formattedContent={hearingFormatted || ''}
 													documentName={activeDocumentName || 'Documento'}
-													documentMode={!isHearing ? mode : undefined}
 													modelSelection={selectedModel}
 													jobId={activeJobId || undefined}
 													initialQuality={jobQuality}
-													onContentUpdated={isHearing ? setHearingFormatted : (content) => {
-														setResult(content);
-														clearRichContent();
-													}}
-												variant={isHearing ? 'full' : 'dashboard'}
-												// Hearing-specific props
-												contentType={isHearing ? 'hearing' : 'apostila'}
-												segments={isHearing ? hearingSegments : undefined}
-												speakers={isHearing ? hearingSpeakers : undefined}
-												hearingMode={isHearing ? (hearingFormatMode === 'audiencia' ? 'AUDIENCIA' : hearingFormatMode === 'reuniao' ? 'REUNIAO' : 'DEPOIMENTO') : undefined}
-												onHearingUpdated={isHearing ? (payload) => applyHearingPayload(payload) : undefined}
-												// Synchronization props (unified audit state)
-												externalAuditIssues={!isHearing ? auditIssues : undefined}
+													onContentUpdated={setHearingFormatted}
+												variant="full"
+												contentType="hearing"
+												segments={hearingSegments}
+												speakers={hearingSpeakers}
+												hearingMode={hearingFormatMode === 'audiencia' ? 'AUDIENCIA' : hearingFormatMode === 'reuniao' ? 'REUNIAO' : 'DEPOIMENTO'}
+												onHearingUpdated={(payload) => applyHearingPayload(payload)}
 												isAuditOutdated={isAuditOutdated}
-												onIssuesUpdated={!isHearing ? setAuditIssues : undefined}
 												onAuditOutdatedChange={setIsAuditOutdated}
-												onConvertContentAlerts={!isHearing ? handleConvertQualityAlertsToHil : undefined}
-												// Consolidated audit score (from audit_summary.json)
 												consolidatedScore={auditSummary?.summary?.score}
 												consolidatedStatus={auditSummary?.summary?.status}
 											/>
 										</TabsContent>
+										)}
 
                                 {isHearing && (
                                     <>
@@ -5927,9 +6294,14 @@ export default function TranscriptionPage() {
                                                     Limpar
                                                 </Button>
                                             </div>
-                                            <div className="rounded-md border bg-black/95 text-green-400 font-mono text-[11px] p-3 h-[200px] overflow-y-auto">
+                                            <div
+                                                ref={logsContainerRef}
+                                                className="rounded-md border bg-black/95 text-green-400 font-mono text-[11px] p-3 h-[200px] overflow-y-auto"
+                                            >
                                                 {logs.length === 0 ? (
-                                                    <div className="text-green-600/50 animate-pulse">$ aguardando logs...</div>
+                                                    <div className="text-green-600/60 animate-pulse">
+                                                        {progressMessage ? `$ ${progressMessage}` : '$ aguardando logs...'}
+                                                    </div>
                                                 ) : (
                                                     <>
                                                         {logs.map((log, i) => (
@@ -5938,7 +6310,6 @@ export default function TranscriptionPage() {
                                                                 <span className="text-green-300">{log.message}</span>
                                                             </div>
                                                         ))}
-                                                        <div ref={logsEndRef} />
                                                     </>
                                                 )}
                                             </div>
@@ -6198,7 +6569,7 @@ export default function TranscriptionPage() {
                     </div>
                     <div className="mt-3 rounded-md border bg-black/95 text-green-200 font-mono text-xs p-3 h-[60vh] overflow-y-auto">
                         {logs.length === 0 ? (
-                            <div className="opacity-60">AGUARDANDO LOGS...</div>
+                            <div className="opacity-60">{progressMessage || 'AGUARDANDO LOGS...'}</div>
                         ) : (
                             <pre className="whitespace-pre-wrap break-words">{plainLogsText}</pre>
                         )}

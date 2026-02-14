@@ -524,3 +524,27 @@ class TestExtractTranscription:
         assert extracted["transcription_time"] == 1.5
         assert extracted["duration"] == 3.0
         assert extracted["hallucinations_filtered"] >= 2
+
+    def test_extract_from_aggregated_stream_output_list(self):
+        """Status output pode vir como lista agregada de chunks do stream."""
+        result = RunPodResult(
+            run_id="run-agg",
+            status="COMPLETED",
+            output=[
+                {"output": {"stage": "downloading", "progress": 0, "message": "Baixando"}},
+                {"output": {"stage": "transcribing", "progress": 50, "message": "Transcrevendo"}},
+                {
+                    "output": {
+                        "done": True,
+                        "text": "Texto final do worker",
+                        "segments": [{"start": 0.0, "end": 1.0, "text": "Texto final do worker"}],
+                        "language": "pt",
+                    }
+                },
+            ],
+        )
+
+        extracted = extract_transcription(result)
+        assert extracted is not None
+        assert extracted["text"] == "Texto final do worker"
+        assert len(extracted["segments"]) == 1

@@ -178,6 +178,26 @@ interface WorkflowRunResponse {
   created_at: string;
 }
 
+interface WorkflowScheduleResponse {
+  cron: string | null;
+  enabled: boolean;
+  timezone: string;
+  last_run: string | null;
+  webhook_url: string | null;
+  webhook_active: boolean;
+  webhook_secret_configured: boolean;
+}
+
+interface WorkflowWebhookSecretResponse {
+  status: string;
+  webhook_active: boolean;
+  webhook_url: string | null;
+  webhook_secret: string | null;
+  generated: boolean;
+  rotated: boolean;
+}
+
+
 interface GenerateDocumentRequest {
   prompt: string;
   context?: any;
@@ -618,6 +638,23 @@ class ApiClient {
     return null;
   }
 
+  private getDirectApiUrlCandidates(): string[] {
+    const candidates: string[] = [];
+    const preferred = this.getDirectApiUrl();
+    if (preferred) candidates.push(preferred);
+
+    if (process.env.NODE_ENV === 'development') {
+      candidates.push(
+        'http://127.0.0.1:8000/api',
+        'http://localhost:8000/api',
+        'http://127.0.0.1:8002/api',
+        'http://localhost:8002/api'
+      );
+    }
+
+    return Array.from(new Set(candidates.filter(Boolean)));
+  }
+
   private isLikelyHtmlNotFound(response: Response, detail: string): boolean {
     if (response.status !== 404) return false;
     const contentType = response.headers.get('content-type') || '';
@@ -728,12 +765,41 @@ class ApiClient {
     buildFormData: () => FormData,
     headers: HeadersInit
   ): Promise<Response> {
+    const normalizeHeaders = (input: HeadersInit): Record<string, string> => {
+      if (input instanceof Headers) {
+        return Object.fromEntries(input.entries());
+      }
+      if (Array.isArray(input)) {
+        return Object.fromEntries(input);
+      }
+      return { ...(input as Record<string, string>) };
+    };
+
+    let requestHeaders = normalizeHeaders(headers);
     const primaryUrl = `${API_URL}${path}`;
-    const primaryResponse = await fetch(primaryUrl, {
+    let primaryResponse = await fetch(primaryUrl, {
       method: 'POST',
-      headers,
+      headers: requestHeaders,
       body: buildFormData(),
     });
+
+    // Native fetch path does not have axios interceptors; retry once after refresh on 401.
+    if (primaryResponse.status === 401) {
+      try {
+        const newToken = await this.refreshAccessToken();
+        requestHeaders = {
+          ...requestHeaders,
+          Authorization: `Bearer ${newToken}`,
+        };
+        primaryResponse = await fetch(primaryUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          body: buildFormData(),
+        });
+      } catch {
+        throw new Error('HTTP 401: Token inválido ou expirado');
+      }
+    }
 
     if (primaryResponse.ok) return primaryResponse;
 
@@ -750,7 +816,7 @@ class ApiClient {
     const fallbackUrl = `${directBase}${path}`;
     const fallbackResponse = await fetch(fallbackUrl, {
       method: 'POST',
-      headers,
+      headers: requestHeaders,
       body: buildFormData(),
     });
 
@@ -853,15 +919,22 @@ class ApiClient {
       throw new Error('No refresh token available');
     }
 
-    const response = await this.axios.post<AuthResponse>(
-      '/auth/refresh',
-      {},
-      {
-        headers: { Authorization: `Bearer ${refreshToken}` },
-      }
-    );
+    // Use native fetch here to avoid interceptor recursion on failed refresh.
+    const response = await fetch(`${API_URL}/auth/refresh`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${refreshToken}`,
+      },
+      body: JSON.stringify({}),
+    });
+    if (!response.ok) {
+      const detail = await this.extractFetchErrorMessage(response);
+      throw new Error(`HTTP ${response.status}: ${detail}`);
+    }
 
-    const { access_token, refresh_token } = response.data;
+    const data = (await response.json()) as AuthResponse;
+    const { access_token, refresh_token } = data;
     this.setAccessToken(access_token);
     this.setRefreshToken(refresh_token);
 
@@ -1722,6 +1795,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1729,6 +1803,7 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      allow_provider_fallback?: boolean;
     }
   ): Promise<any> {
     const formData = new FormData();
@@ -1742,6 +1817,9 @@ class ApiClient {
     if (options.diarization_strict !== undefined) {
       formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
     }
+    if (options.diarization_provider && options.diarization_provider !== 'auto') {
+      formData.append('diarization_provider', options.diarization_provider);
+    }
     if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
     if (options.auto_apply_fixes !== undefined) {
       formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -1753,6 +1831,9 @@ class ApiClient {
     if (options.skip_audit) formData.append('skip_audit', 'true');
     if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
     if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+    if (options.allow_provider_fallback !== undefined) {
+      formData.append('allow_provider_fallback', options.allow_provider_fallback ? 'true' : 'false');
+    }
 
     const response = await this.axios.post('/transcription/vomo', formData, {
       // Aumentar timeout para transcrições longas (10 min)
@@ -1791,6 +1872,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1798,7 +1880,8 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
-      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
       speaker_roles?: string[];
@@ -1856,8 +1939,14 @@ class ApiClient {
     if (options.high_accuracy) formData.append('high_accuracy', 'true');
     if (options.diarization !== undefined) formData.append('diarization', options.diarization ? 'true' : 'false');
     if (options.diarization_strict) formData.append('diarization_strict', 'true');
+    if (options.diarization_provider && options.diarization_provider !== 'auto') {
+      formData.append('diarization_provider', options.diarization_provider);
+    }
     if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
     if (options.transcription_engine) formData.append('transcription_engine', options.transcription_engine);
+    if (options.allow_provider_fallback !== undefined) {
+      formData.append('allow_provider_fallback', options.allow_provider_fallback ? 'true' : 'false');
+    }
     if (options.auto_apply_fixes !== undefined) {
       formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
     }
@@ -1944,6 +2033,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean | null;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -1951,7 +2041,8 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
-      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
       speaker_roles?: string[];
@@ -1971,6 +2062,7 @@ class ApiClient {
       output_language: options.output_language || '',
     };
     if (options.transcription_engine) payload.transcription_engine = options.transcription_engine;
+    if (options.allow_provider_fallback !== undefined) payload.allow_provider_fallback = options.allow_provider_fallback;
     if (options.custom_prompt) payload.custom_prompt = options.custom_prompt;
     if (options.disable_tables !== undefined) payload.disable_tables = options.disable_tables;
     if (options.document_theme) payload.document_theme = options.document_theme;
@@ -1992,6 +2084,9 @@ class ApiClient {
     if (options.document_table_border_color) payload.document_table_border_color = options.document_table_border_color;
     if (options.diarization !== undefined) payload.diarization = options.diarization;
     if (options.diarization_strict !== undefined) payload.diarization_strict = options.diarization_strict;
+    if (options.diarization_provider && options.diarization_provider !== 'auto') {
+      payload.diarization_provider = options.diarization_provider;
+    }
     if (options.use_cache !== undefined) payload.use_cache = options.use_cache;
     if (options.auto_apply_fixes !== undefined) payload.auto_apply_fixes = options.auto_apply_fixes;
     if (options.auto_apply_content_fixes !== undefined) payload.auto_apply_content_fixes = options.auto_apply_content_fixes;
@@ -2037,6 +2132,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean | null;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -2044,7 +2140,8 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
-      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
       speaker_roles?: string[];
@@ -2064,6 +2161,7 @@ class ApiClient {
       output_language: options.output_language || '',
     };
     if (options.transcription_engine) payload.transcription_engine = options.transcription_engine;
+    if (options.allow_provider_fallback !== undefined) payload.allow_provider_fallback = options.allow_provider_fallback;
     if (options.custom_prompt) payload.custom_prompt = options.custom_prompt;
     if (options.disable_tables !== undefined) payload.disable_tables = options.disable_tables;
     if (options.document_theme) payload.document_theme = options.document_theme;
@@ -2085,6 +2183,9 @@ class ApiClient {
     if (options.document_table_border_color) payload.document_table_border_color = options.document_table_border_color;
     if (options.diarization !== undefined) payload.diarization = options.diarization;
     if (options.diarization_strict !== undefined) payload.diarization_strict = options.diarization_strict;
+    if (options.diarization_provider && options.diarization_provider !== 'auto') {
+      payload.diarization_provider = options.diarization_provider;
+    }
     if (options.use_cache !== undefined) payload.use_cache = options.use_cache;
     if (options.auto_apply_fixes !== undefined) payload.auto_apply_fixes = options.auto_apply_fixes;
     if (options.auto_apply_content_fixes !== undefined) payload.auto_apply_content_fixes = options.auto_apply_content_fixes;
@@ -2140,6 +2241,8 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
       speaker_roles?: string[];
@@ -2148,7 +2251,6 @@ class ApiClient {
       speaker_id_values?: string;
       area?: string;
       custom_keyterms?: string;
-      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
     }
   ): Promise<{ job_id: string; status: string }> {
     const formData = new FormData();
@@ -2156,6 +2258,9 @@ class ApiClient {
     formData.append('case_id', payload.case_id);
     if (payload.language) formData.append('language', payload.language);
     if (payload.transcription_engine) formData.append('transcription_engine', payload.transcription_engine);
+    if (payload.allow_provider_fallback !== undefined) {
+      formData.append('allow_provider_fallback', payload.allow_provider_fallback ? 'true' : 'false');
+    }
     if (payload.output_language) formData.append('output_language', payload.output_language);
     formData.append('goal', payload.goal);
     formData.append('thinking_level', payload.thinking_level);
@@ -2296,6 +2401,8 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
       speaker_roles?: string[];
@@ -2304,7 +2411,6 @@ class ApiClient {
       speaker_id_values?: string;
       area?: string;
       custom_keyterms?: string;
-      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs';
     }
   ): Promise<{ job_id: string; status: string }> {
     const body: any = {
@@ -2324,6 +2430,7 @@ class ApiClient {
       output_language: payload.output_language || '',
       transcription_engine: payload.transcription_engine || 'whisper',
     };
+    if (payload.allow_provider_fallback !== undefined) body.allow_provider_fallback = payload.allow_provider_fallback;
     if (payload.custom_prompt) body.custom_prompt = payload.custom_prompt;
     if (payload.document_theme) body.document_theme = payload.document_theme;
     if (payload.document_header) body.document_header = payload.document_header;
@@ -2370,8 +2477,69 @@ class ApiClient {
   }
 
   async cancelTranscriptionJob(jobId: string): Promise<any> {
-    const response = await this.axios.post(`/transcription/jobs/${jobId}/cancel`);
-    return response.data;
+    try {
+      const response = await this.axios.post(`/transcription/jobs/${jobId}/cancel`);
+      return response.data;
+    } catch (error: any) {
+      const status = Number(error?.response?.status || 0);
+      const detail = String(
+        error?.response?.data?.detail
+        || error?.response?.data?.error
+        || error?.response?.data?.message
+        || error?.message
+        || ''
+      ).toLowerCase();
+
+      const looksLikeProxyFailure = (
+        status >= 500
+        || detail.includes('api proxy error')
+        || detail.includes('fetch failed')
+        || detail.includes('failed to fetch')
+        || detail.includes('network error')
+        || detail.includes('ecconnrefused')
+      );
+
+      if (!looksLikeProxyFailure) {
+        throw error;
+      }
+
+      const token = this.getAccessToken();
+      const attempts: string[] = [];
+      const directBases = this.getDirectApiUrlCandidates().filter((base) => base && base !== API_URL);
+
+      for (const directBase of directBases) {
+        const directUrl = `${directBase}/transcription/jobs/${jobId}/cancel`;
+        try {
+          const directResponse = await fetch(directUrl, {
+            method: 'POST',
+            headers: {
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+              Accept: 'application/json',
+            },
+          });
+
+          if (!directResponse.ok) {
+            const directDetail = await this.extractFetchErrorMessage(directResponse);
+            attempts.push(`${directUrl} -> HTTP ${directResponse.status}: ${directDetail}`);
+            continue;
+          }
+
+          try {
+            return await directResponse.json();
+          } catch {
+            return { success: true, status: 'canceled' };
+          }
+        } catch (directErr: any) {
+          attempts.push(`${directUrl} -> ${String(directErr?.message || directErr || 'fetch failed')}`);
+        }
+      }
+
+      if (attempts.length > 0) {
+        throw new Error(`Não foi possível alcançar a API para interromper o job. ${attempts.join(' | ')}`);
+      }
+
+      throw error;
+    }
   }
 
   async retryTranscriptionJob(jobId: string): Promise<any> {
@@ -2395,8 +2563,25 @@ class ApiClient {
       rejected_preventive_issue_ids?: string[];
       rejected_preventive_reasons?: Record<string, string>;
     }
-  ): Promise<{ success: boolean; quality?: any }> {
+  ): Promise<{
+    success: boolean;
+    quality?: any;
+    audit_summary?: any;
+    audit_issues?: any[];
+    reports?: any;
+  }> {
     const response = await this.axios.post(`/transcription/jobs/${jobId}/quality`, data);
+    return response.data;
+  }
+
+  async regenerateTranscriptionAudit(jobId: string): Promise<{
+    success: boolean;
+    audit_summary?: any;
+    audit_issues?: any[];
+    quality?: any;
+    reports?: any;
+  }> {
+    const response = await this.axios.post(`/transcription/jobs/${jobId}/regenerate-audit`);
     return response.data;
   }
 
@@ -2425,6 +2610,11 @@ class ApiClient {
     let retryCount = 0;
     let lastProgress = 0;
     let completed = false;
+    const normalizeProgress = (value: unknown, fallback: number): number => {
+      const parsed = Number(value);
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.max(0, Math.min(100, parsed));
+    };
 
     const attemptStream = async (): Promise<boolean> => {
       try {
@@ -2458,8 +2648,8 @@ class ApiClient {
             try {
               const data = JSON.parse(line.slice(5).trim());
               if (data.stage !== undefined) {
-                lastProgress = data.progress || lastProgress;
-                onProgress(data.stage, data.progress, data.message);
+                lastProgress = normalizeProgress(data.progress, lastProgress);
+                onProgress(data.stage, lastProgress, data.message);
               } else if (data.job_type || data.payload || data.content !== undefined) {
                 completed = true;
                 onComplete(data);
@@ -2535,8 +2725,8 @@ class ApiClient {
             }
             // Update progress from job status if available
             if (jobStatus?.progress !== undefined) {
-              lastProgress = jobStatus.progress;
-              onProgress('processing', jobStatus.progress, jobStatus.message || 'Processando...');
+              lastProgress = normalizeProgress(jobStatus.progress, lastProgress);
+              onProgress('processing', lastProgress, jobStatus.message || 'Processando...');
             }
           } catch (pollError: any) {
             if (process.env.NODE_ENV === 'development') console.warn('[Polling] Error:', pollError.message);
@@ -2681,6 +2871,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -2688,11 +2879,20 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
-    onComplete: (payload: { content: string; raw_content?: string | null; reports?: any }) => void,
+    onComplete: (payload: {
+      content: string;
+      raw_content?: string | null;
+      words?: any[];
+      segments?: any[];
+      words_truncated?: boolean;
+      reports?: any;
+    }) => void,
     onError: (error: string) => void
   ): Promise<void> {
     const buildFormData = () => {
@@ -2707,6 +2907,9 @@ class ApiClient {
       if (options.diarization_strict !== undefined) {
         formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
       }
+      if (options.diarization_provider && options.diarization_provider !== 'auto') {
+        formData.append('diarization_provider', options.diarization_provider);
+      }
       if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
       if (options.auto_apply_fixes !== undefined) {
         formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -2718,6 +2921,10 @@ class ApiClient {
       if (options.skip_audit) formData.append('skip_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.transcription_engine) formData.append('transcription_engine', options.transcription_engine);
+      if (options.allow_provider_fallback !== undefined) {
+        formData.append('allow_provider_fallback', options.allow_provider_fallback ? 'true' : 'false');
+      }
       if (options.language) formData.append('language', options.language);
       if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
@@ -2765,6 +2972,9 @@ class ApiClient {
                 onComplete({
                   content: data.content,
                   raw_content: data.raw_content,
+                  words: Array.isArray(data.words) ? data.words : [],
+                  segments: Array.isArray(data.segments) ? data.segments : [],
+                  words_truncated: Boolean(data.words_truncated),
                   reports: data.reports,
                 });
               } else if (data.error !== undefined) {
@@ -2786,6 +2996,9 @@ class ApiClient {
             onComplete({
               content: data.content,
               raw_content: data.raw_content,
+              words: Array.isArray(data.words) ? data.words : [],
+              segments: Array.isArray(data.segments) ? data.segments : [],
+              words_truncated: Boolean(data.words_truncated),
               reports: data.reports,
             });
           } else if (data.error !== undefined) {
@@ -2813,6 +3026,7 @@ class ApiClient {
       high_accuracy?: boolean;
       diarization?: boolean;
       diarization_strict?: boolean;
+      diarization_provider?: 'auto' | 'local' | 'runpod' | 'assemblyai';
       use_cache?: boolean;
       auto_apply_fixes?: boolean;
       auto_apply_content_fixes?: boolean;
@@ -2820,11 +3034,22 @@ class ApiClient {
       skip_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
     },
     onProgress: (stage: string, progress: number, message: string) => void,
-    onComplete: (payload: { content: string; raw_content?: string | null; filenames: string[]; total_files: number; reports?: any }) => void,
+    onComplete: (payload: {
+      content: string;
+      raw_content?: string | null;
+      filenames: string[];
+      total_files: number;
+      words?: any[];
+      segments?: any[];
+      words_truncated?: boolean;
+      reports?: any;
+    }) => void,
     onError: (error: string) => void
   ): Promise<void> {
     const buildFormData = () => {
@@ -2839,6 +3064,9 @@ class ApiClient {
       if (options.diarization_strict !== undefined) {
         formData.append('diarization_strict', options.diarization_strict ? 'true' : 'false');
       }
+      if (options.diarization_provider && options.diarization_provider !== 'auto') {
+        formData.append('diarization_provider', options.diarization_provider);
+      }
       if (options.use_cache !== undefined) formData.append('use_cache', options.use_cache ? 'true' : 'false');
       if (options.auto_apply_fixes !== undefined) {
         formData.append('auto_apply_fixes', options.auto_apply_fixes ? 'true' : 'false');
@@ -2850,6 +3078,10 @@ class ApiClient {
       if (options.skip_audit) formData.append('skip_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.transcription_engine) formData.append('transcription_engine', options.transcription_engine);
+      if (options.allow_provider_fallback !== undefined) {
+        formData.append('allow_provider_fallback', options.allow_provider_fallback ? 'true' : 'false');
+      }
       if (options.language) formData.append('language', options.language);
       if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
@@ -2897,6 +3129,9 @@ class ApiClient {
                   raw_content: data.raw_content,
                   filenames: data.filenames || [],
                   total_files: data.total_files || 1,
+                  words: Array.isArray(data.words) ? data.words : [],
+                  segments: Array.isArray(data.segments) ? data.segments : [],
+                  words_truncated: Boolean(data.words_truncated),
                   reports: data.reports,
                 });
               } else if (data.error !== undefined) {
@@ -2919,6 +3154,9 @@ class ApiClient {
               raw_content: data.raw_content,
               filenames: data.filenames || [],
               total_files: data.total_files || 1,
+              words: Array.isArray(data.words) ? data.words : [],
+              segments: Array.isArray(data.segments) ? data.segments : [],
+              words_truncated: Boolean(data.words_truncated),
               reports: data.reports,
             });
           } else if (data.error !== undefined) {
@@ -2937,6 +3175,7 @@ class ApiClient {
     content: string,
     filename: string,
     options?: {
+      mode?: string;
       document_theme?: string;
       document_header?: string;
       document_footer?: string;
@@ -2960,6 +3199,7 @@ class ApiClient {
       {
         content,
         filename,
+        mode: options?.mode,
         document_theme: options?.document_theme,
         document_header: options?.document_header,
         document_footer: options?.document_footer,
@@ -3008,6 +3248,8 @@ class ApiClient {
       skip_legal_audit?: boolean;
       skip_fidelity_audit?: boolean;
       skip_sources_audit?: boolean;
+      transcription_engine?: 'whisper' | 'assemblyai' | 'elevenlabs' | 'runpod';
+      allow_provider_fallback?: boolean;
       language?: string;
       output_language?: string;
     },
@@ -3039,6 +3281,10 @@ class ApiClient {
       if (options.skip_legal_audit) formData.append('skip_legal_audit', 'true');
       if (options.skip_fidelity_audit) formData.append('skip_fidelity_audit', 'true');
       if (options.skip_sources_audit) formData.append('skip_sources_audit', 'true');
+      if (options.transcription_engine) formData.append('transcription_engine', options.transcription_engine);
+      if (options.allow_provider_fallback !== undefined) {
+        formData.append('allow_provider_fallback', options.allow_provider_fallback ? 'true' : 'false');
+      }
       if (options.language) formData.append('language', options.language);
       if (options.output_language) formData.append('output_language', options.output_language);
       return formData;
@@ -3407,6 +3653,130 @@ class ApiClient {
   }
 
   /**
+   * SSE streaming version of applyTranscriptionRevisions.
+   * Emits progress events while patching, then calls onComplete with the final result.
+   * Falls back to the non-streaming endpoint if SSE fails.
+   */
+  async applyRevisionsStream(
+    data: {
+      job_id?: string;
+      content?: string;
+      raw_content?: string;
+      approved_issues: any[];
+      model_selection?: string;
+      mode?: string;
+    },
+    onProgress: (stage: string, progress: number, message: string) => void,
+    onComplete: (result: any) => void,
+    onError: (error: string) => void,
+  ): Promise<void> {
+    const token = this.getAccessToken();
+    const url = `${API_URL}/transcription/apply-revisions-stream`;
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(data),
+      });
+
+      if (!response.ok) {
+        const detail = await this.extractFetchErrorMessage(response);
+        throw new Error(`HTTP ${response.status}: ${detail}`);
+      }
+
+      // If server returns JSON (e.g. no issues), just parse it and exit.
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.includes('text/event-stream')) {
+        const parsed = await response.json();
+        onComplete(parsed);
+        return;
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('Response body is not readable');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let currentEvent = '';
+      let currentDataLines: string[] = [];
+
+      const dispatch = () => {
+        if (currentDataLines.length === 0 && !currentEvent) return;
+        const dataStr = currentDataLines.join('\n').trim();
+        currentDataLines = [];
+        const evt = currentEvent;
+        currentEvent = '';
+        if (!dataStr) return;
+        try {
+          const parsed = JSON.parse(dataStr);
+          if (evt === 'progress' || (!evt && parsed.stage)) {
+            onProgress(parsed.stage || '', parsed.progress ?? 0, parsed.message || '');
+          } else if (evt === 'complete') {
+            onComplete(parsed);
+          } else if (evt === 'error') {
+            onError(parsed.error || 'Erro desconhecido');
+          }
+        } catch {
+          // ignore parse errors for malformed events
+        }
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.replace(/\r$/, '');
+          if (line === '') {
+            const before = currentEvent;
+            dispatch();
+            // Stop reading as soon as we see terminal events.
+            if (before === 'complete' || before === 'error') return;
+            continue;
+          }
+          if (line.startsWith(':')) continue;
+          if (line.startsWith('event:')) {
+            currentEvent = line.slice(6).trim();
+            continue;
+          }
+          if (line.startsWith('data:')) {
+            currentDataLines.push(line.slice(5).trimStart());
+            continue;
+          }
+        }
+      }
+
+      // Flush any partially buffered event at EOF.
+      if (buffer.trim()) {
+        const line = buffer.replace(/\r$/, '');
+        if (line.startsWith('event:')) currentEvent = line.slice(6).trim();
+        else if (line.startsWith('data:')) currentDataLines.push(line.slice(5).trimStart());
+      }
+      dispatch();
+
+      onError('Stream encerrado sem resultado final');
+    } catch (error: any) {
+      // Fallback: try non-streaming endpoint
+      try {
+        const result = await this.applyTranscriptionRevisions(data);
+        onComplete(result);
+      } catch (fallbackError: any) {
+        onError(fallbackError?.message || 'Falha ao aplicar revisões');
+      }
+    }
+  }
+
+  /**
    * Persist conversion of preventive audit alerts into HIL issues for a job.
    * This updates the job snapshot (audit_issues.json + result.json) on the backend.
    */
@@ -3475,6 +3845,8 @@ class ApiClient {
     document_name?: string;
     omissions?: string[];
     distortions?: string[];
+    hallucinations?: any[];
+    context_issues?: any[];
     include_structural?: boolean;
     model_selection?: string;
   }): Promise<{
@@ -3770,6 +4142,63 @@ class ApiClient {
     return response.data;
   }
 
+  // ============= UNIFIED AUDIT =============
+
+  /**
+   * Fetch unified audit combining preventive + quality + structural analysis
+   */
+  async fetchUnifiedAudit(params: {
+    job_id?: string;
+    raw_content?: string;
+    formatted_content?: string;
+    document_name?: string;
+    mode?: string;
+    preventive_audit?: any;
+    preventive_audit_markdown?: string;
+    audit_summary?: any;
+  }): Promise<{
+    score: number | null;
+    status: string;
+    total_issues: number;
+    issues: any[];
+    by_severity: Record<string, number>;
+    by_type: Record<string, number>;
+    modules: Array<{ name: string; status: string; score?: number; issue_count: number }>;
+    generated_at: string;
+    preventive_markdown?: string;
+  }> {
+    const response = await this.axios.post('/quality/unified-audit', params, {
+      timeout: 5 * 60 * 1000,
+    });
+    return response.data;
+  }
+
+  /**
+   * Apply unified fixes (structural + content) in one call
+   */
+  async applyUnifiedAuditFixes(params: {
+    job_id?: string;
+    content: string;
+    raw_content?: string;
+    approved_issues: any[];
+    model_selection?: string;
+    mode?: string;
+  }): Promise<{
+    success: boolean;
+    content: string;
+    applied: number;
+    structural_applied: number;
+    content_applied: number;
+    structural_error?: string;
+    content_error?: string;
+    diagnostics: any;
+  }> {
+    const response = await this.axios.post('/quality/unified-apply', params, {
+      timeout: 10 * 60 * 1000,
+    });
+    return response.data;
+  }
+
   // =========================================================================
   // GRAPH VISUALIZATION METHODS
   // =========================================================================
@@ -3860,15 +4289,29 @@ class ApiClient {
       id: string;
       name: string;
       type: string;
+      normalized?: string;
       co_occurrences: number;
       sample_text?: string;
+      // Transparency-first hybrid (optional)
+      verified?: boolean;
+      relationship_type?: string;
+      layer?: string;
+      dimension?: string;
+      evidence?: string;
     }>;
     jurisprudencia: Array<{
       id: string;
       name: string;
       type: string;
+      normalized?: string;
       co_occurrences: number;
       sample_text?: string;
+      // Transparency-first hybrid (optional)
+      verified?: boolean;
+      relationship_type?: string;
+      layer?: string;
+      dimension?: string;
+      evidence?: string;
     }>;
   }> {
     const response = await this.axios.get(`/graph/remissoes/${entityId}`, { params });
@@ -4320,6 +4763,31 @@ class ApiClient {
     return response.data;
   }
 
+  async getWorkflowSchedule(workflowId: string): Promise<WorkflowScheduleResponse> {
+    const response = await this.axios.get<WorkflowScheduleResponse>('/workflows/' + workflowId + '/schedule');
+    return response.data;
+  }
+
+  async updateWorkflowSchedule(workflowId: string, data: {
+    cron?: string | null;
+    enabled: boolean;
+    timezone?: string;
+  }): Promise<{ status: string; schedule: { cron: string | null; enabled: boolean; timezone: string } }> {
+    const response = await this.axios.put('/workflows/' + workflowId + '/schedule', data);
+    return response.data;
+  }
+
+  async ensureWorkflowWebhookSecret(workflowId: string, rotate: boolean = false): Promise<WorkflowWebhookSecretResponse> {
+    const query = rotate ? '?rotate=true' : '';
+    const response = await this.axios.post<WorkflowWebhookSecretResponse>('/workflows/' + workflowId + '/webhook-secret' + query);
+    return response.data;
+  }
+
+  async disableWorkflowWebhook(workflowId: string): Promise<{ status: string; webhook_active: boolean; webhook_url: null }> {
+    const response = await this.axios.delete('/workflows/' + workflowId + '/webhook-secret');
+    return response.data;
+  }
+
   // ── Admin Monitoring Dashboard ────────────────────────────
 
   async getAdminDashboard(): Promise<{
@@ -4403,9 +4871,10 @@ class ApiClient {
     return response.data;
   }
 
-  async getWorkflowCatalog(params?: { category?: string; output_type?: string; search?: string }): Promise<any[]> {
+  async getWorkflowCatalog(params?: { category?: string; practice_area?: string; output_type?: string; search?: string }): Promise<any[]> {
     const searchParams = new URLSearchParams();
     if (params?.category) searchParams.set('category', params.category);
+    if (params?.practice_area) searchParams.set('practice_area', params.practice_area);
     if (params?.output_type) searchParams.set('output_type', params.output_type);
     if (params?.search) searchParams.set('search', params.search);
     const response = await this.axios.get(`/workflows/catalog?${searchParams.toString()}`);
@@ -4414,6 +4883,11 @@ class ApiClient {
 
   async cloneWorkflowTemplate(templateId: string): Promise<WorkflowResponse> {
     const response = await this.axios.post(`/workflows/${templateId}/clone`);
+    return response.data;
+  }
+
+  async seedWorkflowTemplates(): Promise<{ success: boolean; inserted: number; skipped: number; total: number }> {
+    const response = await this.axios.post(`/workflows/templates/seed`);
     return response.data;
   }
 
@@ -4835,6 +5309,58 @@ class ApiClient {
     const response = await this.axios.get('/audit-logs/stats', {
       params: { days: days || 30 },
     });
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Agentic Feature Flags (Admin)
+  // ---------------------------------------------------------------------------
+
+  async getAgenticFeatureFlags(): Promise<{
+    snapshot: {
+      global_enabled: boolean;
+      auto_detect_sdk: boolean;
+      sdk_available: boolean;
+      canary_percent: number;
+      analytics_sample_rate: number;
+      executor_enabled: Record<string, boolean>;
+      limits: {
+        max_tool_calls_per_request: number;
+        max_delegated_tokens_per_request: number;
+      };
+    };
+    runtime_overrides: Record<string, string>;
+  }> {
+    const response = await this.axios.get('/models/agentic-flags');
+    return response.data;
+  }
+
+  async updateAgenticFeatureFlags(overrides: Record<string, string | number | boolean>): Promise<{
+    changed: Record<string, { old?: string | null; new?: string | null }>;
+    runtime_overrides: Record<string, string>;
+    snapshot: {
+      global_enabled: boolean;
+      auto_detect_sdk: boolean;
+      sdk_available: boolean;
+      canary_percent: number;
+      analytics_sample_rate: number;
+      executor_enabled: Record<string, boolean>;
+      limits: {
+        max_tool_calls_per_request: number;
+        max_delegated_tokens_per_request: number;
+      };
+    };
+  }> {
+    const response = await this.axios.put('/models/agentic-flags', { overrides });
+    return response.data;
+  }
+
+  async removeAgenticFeatureFlagOverride(flagKey: string): Promise<{
+    flag_key: string;
+    removed: boolean;
+    runtime_overrides: Record<string, string>;
+  }> {
+    const response = await this.axios.delete(`/models/agentic-flags/${encodeURIComponent(flagKey)}`);
     return response.data;
   }
 
