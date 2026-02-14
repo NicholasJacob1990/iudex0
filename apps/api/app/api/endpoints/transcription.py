@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException, BackgroundTasks, Body, Request
 from fastapi.responses import StreamingResponse, FileResponse
 from typing import Optional, Any, Dict, List
-from datetime import datetime
+from datetime import datetime, timezone
 import asyncio
 import shutil
 import os
@@ -17,6 +17,7 @@ from app.schemas.transcription import TranscriptionRequest, HearingSpeakersUpdat
 from app.services.transcription_service import TranscriptionService
 from app.services.job_manager import job_manager
 from app.services.api_call_tracker import job_context, usage_context
+from app.services.mlx_loader import load_vomo_class
 from app.core.config import settings
 from app.core.security import get_current_user, decode_token, get_current_user_optional
 from app.models.user import User
@@ -24,6 +25,7 @@ from docx import Document
 from pydantic import BaseModel
 import re
 from app.services.preventive_hil import build_preventive_hil_issues
+from app.services.audit_pipeline import run_audit_pipeline
 from urllib.parse import urlparse
 import ipaddress
 
@@ -32,10 +34,30 @@ _USE_CELERY_TRANSCRIPTION = os.getenv("IUDEX_USE_CELERY_TRANSCRIPTION", "false")
 _CELERY_TRANSCRIPTION_QUEUE = os.getenv("IUDEX_CELERY_TRANSCRIPTION_QUEUE", "transcription")
 if _USE_CELERY_TRANSCRIPTION:
     try:
+        from app.workers.celery_app import celery_app
         from app.workers.tasks import transcription_job_task
     except ImportError:
         _USE_CELERY_TRANSCRIPTION = False
+        celery_app = None
         transcription_job_task = None
+
+
+def _celery_workers_available() -> bool:
+    """
+    Verifica rapidamente se há worker Celery online para consumir a fila.
+    Evita jobs ficarem presos em queued/0% quando nenhum worker está ativo.
+    """
+    if not _USE_CELERY_TRANSCRIPTION or transcription_job_task is None or celery_app is None:
+        return False
+    try:
+        inspect = celery_app.control.inspect(timeout=1.0)
+        ping_data = inspect.ping() if inspect else None
+        if not ping_data:
+            return False
+        return bool(ping_data)
+    except Exception as exc:
+        logger.warning(f"[VOMO/JOBS] Celery indisponível para transcrição; fallback local. Detalhe: {exc}")
+        return False
 
 class ExportRequest(BaseModel):
     content: str
@@ -111,6 +133,7 @@ class UrlVomoJobRequest(BaseModel):
     transcription_engine: str = "whisper"  # "whisper" ou "assemblyai"
     diarization: Optional[bool] = None
     diarization_strict: bool = False
+    diarization_provider: Optional[str] = "auto"  # auto | local | runpod | assemblyai
     use_cache: bool = True
     auto_apply_fixes: bool = True
     auto_apply_content_fixes: bool = False
@@ -126,6 +149,7 @@ class UrlVomoJobRequest(BaseModel):
     # Speaker Identification (AssemblyAI)
     speaker_id_type: Optional[str] = None  # "name" ou "role"
     speaker_id_values: Optional[list] = None  # Lista de nomes ou papéis
+    allow_provider_fallback: Optional[bool] = None
 
 
 class UrlHearingJobRequest(BaseModel):
@@ -165,6 +189,7 @@ class UrlHearingJobRequest(BaseModel):
     speaker_id_type: Optional[str] = None  # "name" ou "role"
     speaker_id_values: Optional[list] = None  # Lista de nomes ou papéis
     transcription_engine: str = "whisper"  # "whisper" ou "assemblyai"
+    allow_provider_fallback: Optional[bool] = None
 
 
 def _url_is_public_and_allowed(url: str) -> tuple[bool, str]:
@@ -301,16 +326,36 @@ logger = logging.getLogger(__name__)
 # Instância global do serviço (carrega modelos na init se necessário, aqui é leve)
 service = TranscriptionService()
 
-# Semáforo global para processar transcrições sequencialmente (1 por vez)
-# Evita competição pela GPU e deadlocks
-_transcription_semaphore: asyncio.Semaphore = None
+# ---------- Semáforos por provider (fila inteligente) ----------
+# Whisper local: sequencial (MLX crash com concorrência)
+# AssemblyAI/ElevenLabs: concorrência configurável por env
+# RunPod: configurável via RUNPOD_MAX_CONCURRENCY
+from app.services.transcription_providers import get_provider_config
 
-def _get_transcription_semaphore() -> asyncio.Semaphore:
-    """Retorna semáforo global, criando se necessário (lazy init para event loop)."""
-    global _transcription_semaphore
-    if _transcription_semaphore is None:
-        _transcription_semaphore = asyncio.Semaphore(1)
-    return _transcription_semaphore
+_provider_semaphores: Dict[str, asyncio.Semaphore] = {}
+
+def _get_provider_semaphore(engine: str) -> Optional[asyncio.Semaphore]:
+    """Retorna semáforo por provider (lazy init). None = sem limite."""
+    cfg = get_provider_config(engine)
+    if cfg.max_concurrency <= 0:
+        return None  # sem limite (assemblyai, elevenlabs)
+    if engine not in _provider_semaphores:
+        _provider_semaphores[engine] = asyncio.Semaphore(cfg.max_concurrency)
+    return _provider_semaphores[engine]
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def _acquire_provider_slot(engine: str):
+    """Async context manager: adquire slot do provider ou passa direto se sem limite."""
+    sem = _get_provider_semaphore(engine)
+    if sem is not None:
+        async with sem:
+            yield
+    else:
+        yield
+
+# Compat: manter referência antiga para código legado
 
 # Registro local de execução (permite cancelamento best-effort)
 _transcription_tasks: Dict[str, asyncio.Task] = {}
@@ -332,6 +377,102 @@ def _register_task(job_id: str, task: asyncio.Task) -> None:
 def _cleanup_task(job_id: str) -> None:
     _transcription_tasks.pop(job_id, None)
     _transcription_cancel_events.pop(job_id, None)
+
+
+_ACTIVE_CELERY_STATES = {"PENDING", "RECEIVED", "STARTED", "RETRY"}
+
+
+def _parse_iso_utc(value: Any) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _read_stale_minutes(status: str) -> int:
+    key = (
+        "IUDEX_TRANSCRIPTION_STALE_QUEUED_MINUTES"
+        if status == "queued"
+        else "IUDEX_TRANSCRIPTION_STALE_RUNNING_MINUTES"
+    )
+    default = "20" if status == "queued" else "45"
+    try:
+        value = int(os.getenv(key, default))
+    except Exception:
+        value = int(default)
+    return max(1, value)
+
+
+def _is_local_job_active(job_id: str) -> bool:
+    task = _transcription_tasks.get(job_id)
+    return bool(task and not task.done())
+
+
+def _is_celery_job_active(celery_task_id: Optional[str]) -> bool:
+    if not celery_task_id or not _USE_CELERY_TRANSCRIPTION or celery_app is None:
+        return False
+    try:
+        state = str(celery_app.AsyncResult(celery_task_id).state or "").upper()
+    except Exception as exc:
+        logger.warning(f"[VOMO/JOBS] Falha ao consultar estado Celery {celery_task_id}: {exc}")
+        return False
+    return state in _ACTIVE_CELERY_STATES
+
+
+def _reconcile_stale_transcription_job(job: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(job, dict):
+        return job
+
+    status = str(job.get("status") or "").strip().lower()
+    if status not in {"queued", "running"}:
+        return job
+
+    job_id = str(job.get("job_id") or "").strip()
+    if not job_id:
+        return job
+
+    if _is_local_job_active(job_id):
+        return job
+
+    celery_task_id = str(job.get("celery_task_id") or "").strip() or None
+    if _is_celery_job_active(celery_task_id):
+        return job
+
+    reference_ts = _parse_iso_utc(job.get("updated_at")) or _parse_iso_utc(job.get("created_at"))
+    if reference_ts is None:
+        return job
+
+    age_minutes = (datetime.now(timezone.utc) - reference_ts).total_seconds() / 60.0
+    stale_after = _read_stale_minutes(status)
+    if age_minutes < stale_after:
+        return job
+
+    stale_msg = (
+        f"Job marcado como travado (status={status}, sem atividade há {int(age_minutes)} min). "
+        "Reenvie o job."
+    )
+    logger.warning(f"[VOMO/JOBS] {job_id}: {stale_msg}")
+    try:
+        job_manager.update_transcription_job(
+            job_id,
+            status="error",
+            stage="error",
+            message=stale_msg,
+            error=stale_msg,
+        )
+        refreshed = job_manager.get_transcription_job(job_id)
+        return refreshed or job
+    except Exception as exc:
+        logger.warning(f"[VOMO/JOBS] Falha ao reconciliar job travado {job_id}: {exc}")
+        return job
 
 
 def _get_event_source_response():
@@ -459,6 +600,379 @@ def _join_report_path(output_dir_value: str, filename: str) -> str:
     # Keep the same “style” as the base path: absolute stays absolute, relative stays relative.
     return str(joined)
 
+
+def _issue_signature(issue: Dict[str, Any]) -> str:
+    return (
+        f"{issue.get('type', '')}:"
+        f"{issue.get('reference', '')}:"
+        f"{issue.get('description', '')}"
+    )
+
+
+def _merge_unique_audit_issues(
+    existing: List[Dict[str, Any]],
+    extra: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    seen_signatures: set[str] = set()
+
+    for issue in (existing or []) + (extra or []):
+        if not isinstance(issue, dict):
+            continue
+        issue_id = str(issue.get("id") or "")
+        signature = _issue_signature(issue)
+
+        if issue_id and issue_id in seen_ids:
+            continue
+        if signature in seen_signatures:
+            continue
+
+        if issue_id:
+            seen_ids.add(issue_id)
+        seen_signatures.add(signature)
+        merged.append(issue)
+
+    return merged
+
+
+def _has_strict_reference_in_raw(reference: str, raw_content: str) -> bool:
+    ref = (reference or "").strip()
+    raw = raw_content or ""
+    if not ref or not raw:
+        return False
+    escaped = re.escape(ref)
+    escaped = re.sub(r"\\\s+", r"\\s+", escaped)
+    pattern = rf"(?<![0-9A-Za-z]){escaped}(?![0-9A-Za-z])"
+    try:
+        return bool(re.search(pattern, raw, flags=re.IGNORECASE))
+    except re.error:
+        return False
+
+
+def _should_drop_non_actionable_issue(
+    issue: Dict[str, Any],
+    *,
+    raw_content: str,
+    formatted_content: str,
+) -> bool:
+    issue_type = str(issue.get("type") or "").strip().lower()
+    description = str(issue.get("description") or "").strip().lower()
+    suggestion = str(issue.get("suggestion") or "").strip().lower()
+    reference = str(issue.get("reference") or "").strip()
+    formatted_lower = (formatted_content or "").lower()
+
+    # Tooling/meta noise from partial source-audit failures should not block HIL.
+    if "resposta inválida da auditoria de fontes" in description:
+        return True
+    if "reexecutar auditoria de fontes para obter nota consolidada" in suggestion:
+        return True
+
+    # Known false-positive pattern for truncation in this pipeline snapshot.
+    if "reais i" in description and "reais interesses" in formatted_lower:
+        return True
+
+    # Missing-julgado must be corroborated by RAW with strict token boundaries.
+    if issue_type == "missing_julgado" and reference and raw_content:
+        if not _has_strict_reference_in_raw(reference, raw_content):
+            return True
+
+    return False
+
+
+def _build_validation_hil_issues(
+    quality: Optional[Dict[str, Any]],
+    *,
+    raw_content: str,
+    formatted_content: str,
+) -> List[Dict[str, Any]]:
+    if not isinstance(quality, dict):
+        return []
+    validation = quality.get("validation_report")
+    if not isinstance(validation, dict):
+        return []
+
+    issues: List[Dict[str, Any]] = []
+    raw_lower = (raw_content or "").lower()
+    formatted_lower = (formatted_content or "").lower()
+
+    def _build_id(prefix: str, text: str, idx: int) -> str:
+        digest = hashlib.md5(f"{text}:{idx}".encode("utf-8", errors="ignore")).hexdigest()[:10]
+        return f"{prefix}_{digest}"
+
+    for idx, omission in enumerate(validation.get("omissions") or []):
+        text = str(omission or "").strip()
+        if not text:
+            continue
+
+        lower = text.lower()
+        if "reais i" in lower and "reais interesses" in formatted_lower:
+            continue
+
+        issue: Dict[str, Any] = {
+            "id": _build_id("validation_omissao", text, idx),
+            "type": "validation_omissao",
+            "fix_type": "content",
+            "severity": "warning",
+            "source": "validation_fidelity",
+            "origin": "validation_fidelity",
+            "description": f"Omissão detectada na validação: {text}",
+            "suggestion": "Revisar o trecho no texto formatado com base no RAW.",
+        }
+
+        # Add lightweight evidence hints when possible.
+        if "art. 17" in lower or "artigo 17" in lower:
+            if "artigo 17" in raw_lower or "art. 17" in raw_lower:
+                issue["reference"] = "Art. 17, IX - Lei 3.350/99"
+
+        issues.append(issue)
+
+    for idx, distortion in enumerate(validation.get("distortions") or []):
+        text = str(distortion or "").strip()
+        if not text:
+            continue
+        issues.append({
+            "id": _build_id("validation_distorcao", text, idx),
+            "type": "validation_distorcao",
+            "fix_type": "content",
+            "severity": "warning",
+            "source": "validation_fidelity",
+            "origin": "validation_fidelity",
+            "description": f"Distorção detectada na validação: {text}",
+            "suggestion": "Corrigir o trecho para manter fidelidade ao RAW.",
+        })
+
+    return issues
+
+
+def _build_audit_context_from_job(
+    job_id: str,
+    *,
+    require_non_hearing: bool = False,
+) -> Dict[str, Any]:
+    """Resolve all paths and data needed to run the audit pipeline for an existing job."""
+    job = job_manager.get_transcription_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="Job not completed")
+
+    result_path = _find_job_result_path(job)
+    with open(result_path, "r", encoding="utf-8") as f:
+        result_data = json.load(f)
+
+    reports_path_value = result_data.get("reports_path")
+    reports_path: Optional[Path] = None
+    if reports_path_value:
+        reports_path = _resolve_job_path(str(reports_path_value))
+
+    reports = result_data.get("reports") or {}
+    if not isinstance(reports, dict) or not reports:
+        if reports_path and reports_path.exists():
+            try:
+                loaded_reports = json.loads(reports_path.read_text(encoding="utf-8", errors="ignore"))
+                reports = loaded_reports if isinstance(loaded_reports, dict) else {}
+            except Exception:
+                reports = {}
+        else:
+            reports = {}
+
+    job_type = str(result_data.get("job_type") or "vomo").lower()
+    if require_non_hearing and job_type == "hearing":
+        raise HTTPException(status_code=409, detail="Hearing jobs are not supported for unified audit regeneration")
+    quality = result_data.get("quality") or {}
+
+    # Read raw and formatted content
+    raw_content = ""
+    raw_path = result_data.get("raw_path")
+    if raw_path:
+        candidate = _resolve_job_path(str(raw_path))
+        if candidate.exists():
+            raw_content = candidate.read_text(encoding="utf-8", errors="ignore")
+
+    formatted_content = ""
+    content_path = result_data.get("content_path")
+    if content_path:
+        candidate = _resolve_job_path(str(content_path))
+        if candidate.exists():
+            formatted_content = candidate.read_text(encoding="utf-8", errors="ignore")
+
+    output_dir = reports.get("output_dir")
+    if not output_dir:
+        if reports_path:
+            output_dir = str(reports_path.parent.resolve())
+        else:
+            output_dir = str((_get_transcription_jobs_dir() / job_id).resolve())
+
+    return {
+        "job": job,
+        "job_type": job_type,
+        "result_path": result_path,
+        "result_data": result_data,
+        "reports": reports,
+        "reports_path": reports_path,
+        "quality": quality,
+        "raw_content": raw_content,
+        "formatted_content": formatted_content,
+        "output_dir": output_dir,
+    }
+
+
+def _regenerate_audit_for_job(job_id: str, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Re-run the full audit pipeline for a job and persist updated audit_summary + audit_issues.
+    Returns the updated {audit_summary, audit_issues, quality, reports}.
+    """
+    if ctx is None:
+        ctx = _build_audit_context_from_job(job_id)
+
+    result_data = ctx["result_data"]
+    reports = ctx["reports"]
+    reports_path = ctx.get("reports_path")
+    quality = ctx["quality"]
+    raw_content = ctx["raw_content"]
+    formatted_content = ctx["formatted_content"]
+    output_dir = Path(ctx["output_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Refresh preventive fidelity report by chunked RAW-vs-formatted comparison
+    # before consolidating audit_summary, so all tabs/panels converge to latest evidence.
+    if str(ctx.get("job_type") or "").lower() != "hearing":
+        try:
+            preventive_result = _recompute_preventive_audit_for_context(job_id, ctx=ctx)
+            if isinstance(preventive_result.get("reports"), dict):
+                reports = preventive_result["reports"]
+        except Exception as preventive_exc:
+            logger.warning(f"Failed to refresh preventive audit for job {job_id}: {preventive_exc}")
+
+    # Build report_paths dict expected by audit_pipeline
+    report_paths = dict(reports)
+
+    # Run the full audit pipeline
+    audit_result = run_audit_pipeline(
+        output_dir=output_dir,
+        report_paths=report_paths,
+        raw_text=raw_content,
+        formatted_text=formatted_content,
+        analysis_report=quality.get("analysis_result"),
+        validation_report=quality.get("validation_report"),
+    )
+
+    audit_summary = {
+        "summary": audit_result["summary"],
+        "modules": audit_result["modules"],
+        "report_keys": audit_result["report_keys"],
+    }
+
+    # Persist audit_summary.json
+    summary_path = output_dir / "audit_summary.json"
+    summary_path.write_text(
+        json.dumps(audit_summary, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    reports["audit_summary_path"] = str(summary_path)
+
+    # Rebuild audit_issues: apply normalization and deduplication
+    job = ctx["job"]
+    document_name = ((job.get("file_names") or [job_id])[0]) if isinstance(job, dict) else job_id
+
+    # Start from existing preventive/manual issues (sources != derived structural types)
+    existing_issues = result_data.get("audit_issues")
+    if not isinstance(existing_issues, list):
+        existing_issues = []
+    if not existing_issues:
+        audit_path_value = result_data.get("audit_path")
+        if audit_path_value:
+            audit_candidate = _resolve_job_path(str(audit_path_value))
+            if audit_candidate.exists():
+                try:
+                    loaded_issues = json.loads(audit_candidate.read_text(encoding="utf-8", errors="ignore"))
+                    if isinstance(loaded_issues, list):
+                        existing_issues = [i for i in loaded_issues if isinstance(i, dict)]
+                except Exception:
+                    existing_issues = []
+
+    # Build structural issues from analysis_result
+    try:
+        from app.services.quality_service import quality_service as qs
+        derived = qs._build_audit_issues(
+            quality.get("analysis_result"),
+            document_name,
+            raw_content=raw_content,
+            formatted_content=formatted_content,
+        )
+    except Exception:
+        derived = []
+
+    # Build validation HIL issues
+    validation_hil = _build_validation_hil_issues(
+        quality,
+        raw_content=raw_content,
+        formatted_content=formatted_content,
+    )
+
+    # Filter out non-actionable noise
+    all_extra = (derived or []) + (validation_hil or [])
+    filtered_extra = [
+        i for i in all_extra
+        if isinstance(i, dict) and not _should_drop_non_actionable_issue(
+            i, raw_content=raw_content, formatted_content=formatted_content
+        )
+    ]
+
+    # Preserve manual/preventive issues, replace derived types
+    derived_types = {
+        "duplicate_section", "duplicate_paragraph", "heading_numbering",
+        "missing_law", "missing_sumula", "missing_decreto", "missing_julgado",
+        "compression_warning", "legal_audit",
+        "validation_omissao", "validation_distorcao",
+    }
+    preserved = [
+        i for i in existing_issues
+        if isinstance(i, dict) and str(i.get("type") or "") not in derived_types
+    ]
+
+    audit_issues = _merge_unique_audit_issues(preserved, filtered_extra)
+
+    # Persist audit_issues.json
+    job_dir = (_get_transcription_jobs_dir() / job_id).resolve()
+    audit_issues_path = job_dir / "audit_issues.json"
+    audit_issues_path.write_text(
+        json.dumps(audit_issues, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Persist reports.json in sync with result.json.
+    reports_file: Path
+    if isinstance(reports_path, Path):
+        reports_file = reports_path.resolve()
+    else:
+        reports_file = (job_dir / "reports.json").resolve()
+    reports_file.parent.mkdir(parents=True, exist_ok=True)
+    reports_file.write_text(
+        json.dumps(reports, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # Update result_data
+    result_data["audit_issues"] = audit_issues
+    result_data["audit_path"] = str(audit_issues_path)
+    result_data["reports"] = reports
+    result_data["reports_path"] = str(reports_file)
+
+    # Persist result.json
+    result_path = ctx["result_path"]
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(result_data, f, ensure_ascii=False, indent=2)
+
+    return {
+        "audit_summary": audit_summary,
+        "audit_issues": audit_issues,
+        "quality": quality,
+        "reports": reports,
+    }
+
+
 def _build_genai_client():
     from google import genai
 
@@ -475,6 +989,153 @@ def _build_genai_client():
     if api_key:
         return genai.Client(api_key=api_key)
     raise RuntimeError("Google GenAI não configurado (defina GOOGLE_CLOUD_PROJECT ou GOOGLE_API_KEY/GEMINI_API_KEY).")
+
+
+def _recompute_preventive_audit_for_context(
+    job_id: str,
+    *,
+    ctx: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Recompute preventive fidelity audit from RAW vs formatted content for the given job context.
+    Uses chunked Gemini comparison and persists JSON/MD report paths back to reports/result.json.
+    """
+    if ctx is None:
+        ctx = _build_audit_context_from_job(job_id)
+
+    result_data = ctx.get("result_data") or {}
+    reports = ctx.get("reports") or {}
+    if not isinstance(reports, dict):
+        reports = {}
+
+    raw_content = (ctx.get("raw_content") or "").strip()
+    formatted_content = (ctx.get("formatted_content") or "").strip()
+    if not raw_content or not formatted_content:
+        raise HTTPException(status_code=409, detail="Job sem RAW ou conteúdo formatado para auditoria preventiva.")
+
+    job_dir = (_get_transcription_jobs_dir() / job_id).resolve()
+    metadata_path = job_dir / "metadata.json"
+    metadata: Dict[str, Any] = {}
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except Exception:
+            metadata = {}
+
+    fallback_mode = str(metadata.get("mode") or result_data.get("mode") or "APOSTILA")
+    video_name, mode_suffix = _infer_video_name_and_mode_suffix(reports, fallback_mode=fallback_mode)
+
+    output_dir_value = reports.get("output_dir") or ctx.get("output_dir")
+    if output_dir_value:
+        output_dir_path = _resolve_job_path(str(output_dir_value)).resolve()
+    else:
+        output_dir_path = job_dir
+        output_dir_value = str(output_dir_path)
+        reports["output_dir"] = output_dir_value
+
+    output_dir_path.mkdir(parents=True, exist_ok=True)
+
+    preventive_json_key = "preventive_fidelity_json_path"
+    preventive_md_key = "preventive_fidelity_md_path"
+    json_filename = f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json"
+    md_filename = f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md"
+
+    json_path_value = _join_report_path(str(output_dir_value), json_filename)
+    md_path_value = _join_report_path(str(output_dir_value), md_filename)
+    json_path = _resolve_job_path(json_path_value).resolve()
+    md_path = _resolve_job_path(md_path_value).resolve()
+
+    include_sources = not bool(metadata.get("skip_sources_audit"))
+    modo = str(metadata.get("mode") or mode_suffix or "APOSTILA").upper()
+
+    project_root = str(Path(__file__).resolve().parents[5])
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+
+    from audit_fidelity_preventive import auditar_fidelidade_preventiva, gerar_relatorio_markdown_completo
+
+    try:
+        client = _build_genai_client()
+        result = auditar_fidelidade_preventiva(
+            client,
+            raw_content,
+            formatted_content,
+            video_name,
+            output_path=str(json_path),
+            modo=modo,
+            include_sources=include_sources,
+        )
+    except Exception as exc:
+        palavras_raw = len(raw_content.split()) if raw_content else 0
+        palavras_fmt = len(formatted_content.split()) if formatted_content else 0
+        taxa_retencao = (palavras_fmt / palavras_raw) if palavras_raw > 0 else 0
+        result = {
+            "aprovado": True,
+            "nota_fidelidade": 0,
+            "gravidade_geral": "INFO",
+            "erro": str(exc),
+            "omissoes_criticas": [],
+            "distorcoes": [],
+            "problemas_estruturais": [],
+            "problemas_contexto": [],
+            "alucinacoes": [],
+            "metricas": {
+                "palavras_raw": palavras_raw,
+                "palavras_formatado": palavras_fmt,
+                "taxa_retencao": round(taxa_retencao, 4),
+                "dispositivos_legais_raw": 0,
+                "dispositivos_legais_formatado": 0,
+                "taxa_preservacao_dispositivos": 0,
+            },
+            "observacoes_gerais": f"Auditoria preventiva não pôde ser recalculada: {exc}",
+            "recomendacao_hil": {"pausar_para_revisao": False, "motivo": "", "areas_criticas": []},
+            "source": "preventive_audit_recompute_fallback",
+        }
+        try:
+            json_path.parent.mkdir(parents=True, exist_ok=True)
+            json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    try:
+        if not json_path.exists() or json_path.stat().st_size == 0:
+            json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        gerar_relatorio_markdown_completo(result, str(md_path), video_name)
+    except Exception as exc:
+        try:
+            md_path.write_text(
+                f"# Auditoria Preventiva de Fidelidade\n\nFalha ao gerar relatório markdown: {exc}\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    reports[preventive_json_key] = json_path_value
+    reports[preventive_md_key] = md_path_value
+
+    reports_path = ctx.get("reports_path")
+    if isinstance(reports_path, Path):
+        reports_file = reports_path.resolve()
+    else:
+        reports_file = (job_dir / "reports.json").resolve()
+
+    reports_file.parent.mkdir(parents=True, exist_ok=True)
+    reports_file.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    result_data["reports"] = reports
+    result_data["reports_path"] = str(reports_file)
+    result_path = ctx.get("result_path")
+    if isinstance(result_path, Path):
+        result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    ctx["reports"] = reports
+    ctx["reports_path"] = reports_file
+    ctx["result_data"] = result_data
+    return {"reports": reports, "result": result}
 
 def _find_job_result_path(job: Dict[str, Any]) -> Path:
     result_path = job.get("result_path")
@@ -523,6 +1184,8 @@ def _write_vomo_job_result(
         reports = result.get("reports") or {}
         audit_issues = result.get("audit_issues") or []
         quality = result.get("quality")
+        words = result.get("words") if isinstance(result.get("words"), list) else None
+        segments = result.get("segments") if isinstance(result.get("segments"), list) else None
         # Novos campos para rastreabilidade de transcrições AAI
         transcript_id = result.get("transcript_id")
         transcription_backend = result.get("backend")
@@ -532,6 +1195,8 @@ def _write_vomo_job_result(
         reports = {}
         audit_issues = []
         quality = None
+        words = None
+        segments = None
         transcript_id = None
         transcription_backend = None
 
@@ -550,6 +1215,16 @@ def _write_vomo_job_result(
         audit_path = job_dir / "audit_issues.json"
         audit_path.write_text(json.dumps(audit_issues, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    words_path = None
+    if words:
+        words_path = job_dir / "words.json"
+        words_path.write_text(json.dumps(words, ensure_ascii=False), encoding="utf-8")
+
+    segments_path = None
+    if segments:
+        segments_path = job_dir / "segments.json"
+        segments_path.write_text(json.dumps(segments, ensure_ascii=False), encoding="utf-8")
+
     result_data = {
         "job_type": "vomo",
         "mode": mode,
@@ -558,6 +1233,8 @@ def _write_vomo_job_result(
         "raw_path": str(raw_path),
         "reports_path": str(reports_path) if reports_path else None,
         "audit_path": str(audit_path) if audit_path else None,
+        "words_path": str(words_path) if words_path else None,
+        "segments_path": str(segments_path) if segments_path else None,
         "audit_issues": audit_issues,
         "quality": quality,
         "rich_text_html_path": None,
@@ -656,6 +1333,8 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
 
     content = ""
     raw_content = ""
+    words: List[Any] = []
+    segments: List[Any] = []
     reports = None
     audit_issues = result_data.get("audit_issues") or []
     quality = result_data.get("quality")
@@ -664,6 +1343,8 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
     raw_path = result_data.get("raw_path")
     reports_path = result_data.get("reports_path")
     audit_path = result_data.get("audit_path")
+    words_path = result_data.get("words_path")
+    segments_path = result_data.get("segments_path")
     if content_path:
         content_candidate = _resolve_job_path(content_path)
         if content_candidate.exists():
@@ -682,6 +1363,41 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         if audit_candidate.exists():
             with open(audit_candidate, "r", encoding="utf-8") as af:
                 audit_issues = json.load(af)
+    if words_path:
+        words_candidate = _resolve_job_path(words_path)
+        if words_candidate.exists():
+            with open(words_candidate, "r", encoding="utf-8") as wf:
+                loaded_words = json.load(wf)
+                if isinstance(loaded_words, list):
+                    words = loaded_words
+    if segments_path:
+        segments_candidate = _resolve_job_path(segments_path)
+        if segments_candidate.exists():
+            with open(segments_candidate, "r", encoding="utf-8") as sf:
+                loaded_segments = json.load(sf)
+                if isinstance(loaded_segments, list):
+                    segments = loaded_segments
+
+    # Converge HIL issues with validation output and remove known non-actionable noise.
+    filtered_audit_issues: List[Dict[str, Any]] = []
+    for issue in audit_issues if isinstance(audit_issues, list) else []:
+        if not isinstance(issue, dict):
+            continue
+        if _should_drop_non_actionable_issue(
+            issue,
+            raw_content=raw_content or "",
+            formatted_content=content or "",
+        ):
+            continue
+        filtered_audit_issues.append(issue)
+    audit_issues = filtered_audit_issues
+
+    validation_hil_issues = _build_validation_hil_issues(
+        quality if isinstance(quality, dict) else {},
+        raw_content=raw_content or "",
+        formatted_content=content or "",
+    )
+    audit_issues = _merge_unique_audit_issues(audit_issues, validation_hil_issues)
 
     # Load consolidated audit_summary if exists
     audit_summary = None
@@ -724,6 +1440,8 @@ def _load_job_result_payload(job: Dict[str, Any]) -> Dict[str, Any]:
         "mode": mode,
         "content": content,
         "raw_content": raw_content,
+        "words": words,
+        "segments": segments,
         "reports": reports,
         "audit_issues": audit_issues,
         "quality": quality,
@@ -912,16 +1630,9 @@ async def export_docx(request: ExportRequest, current_user: User = Depends(get_c
     Usa a mesma lógica de formatação premium do mlx_vomo.py.
     """
     import tempfile
-    import sys
-    import os
-    
-    # Add project root to path
-    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../../"))
-    if PROJECT_ROOT not in sys.path:
-        sys.path.append(PROJECT_ROOT)
     
     try:
-        from mlx_vomo import VomoMLX
+        VomoMLX = load_vomo_class(caller_file=__file__)
         
         # Create temp directory for output
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1004,8 +1715,10 @@ async def create_vomo_job(
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
     transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
+    diarization_provider: str = Form("auto", description="Provider: auto, local, runpod, assemblyai"),
     use_cache: bool = Form(True),
     auto_apply_fixes: bool = Form(True),
     auto_apply_content_fixes: bool = Form(False),
@@ -1022,7 +1735,7 @@ async def create_vomo_job(
     custom_keyterms: Optional[str] = Form(None, description="Termos separados por vírgula"),
     current_user: User = Depends(get_current_user),
 ):
-    logger.info(f"[VOMO/JOBS] Received: mode={mode}, thinking_level={thinking_level}, language={language}, diarization={diarization}, subtitle_format={subtitle_format}, area={area}, files={len(files) if files else 0}")
+    logger.info(f"[VOMO/JOBS] Received: mode={mode}, thinking_level={thinking_level}, language={language}, diarization={diarization}, diarization_provider={diarization_provider}, subtitle_format={subtitle_format}, area={area}, files={len(files) if files else 0}")
     if not files or len(files) == 0:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -1081,8 +1794,10 @@ async def create_vomo_job(
         "model_selection": model_selection,
         "high_accuracy": high_accuracy,
         "transcription_engine": transcription_engine,
+        "allow_provider_fallback": allow_provider_fallback,
         "diarization": diarization,
         "diarization_strict": diarization_strict,
+        "diarization_provider": diarization_provider if diarization_provider != "auto" else None,
         "use_cache": use_cache,
         "auto_apply_fixes": auto_apply_fixes,
         "auto_apply_content_fixes": auto_apply_content_fixes,
@@ -1116,6 +1831,8 @@ async def create_vomo_job(
     cancel_event = _get_cancel_event(job_id)
 
     async def run_job():
+        job_service = TranscriptionService()
+
         def ensure_not_cancelled():
             if cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1133,9 +1850,10 @@ async def create_vomo_job(
                 message=message,
             )
 
-        # Aguardar semáforo para processar sequencialmente (1 job por vez)
-        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
-        async with _get_transcription_semaphore():
+        # Semáforo por provider: whisper=sequencial, assemblyai/runpod=paralelo
+        _engine = config.get("transcription_engine", "whisper")
+        job_manager.update_transcription_job(job_id, message=f"Aguardando fila ({_engine})...")
+        async with _acquire_provider_slot(_engine):
             try:
                 ensure_not_cancelled()
                 job_manager.update_transcription_job(
@@ -1147,7 +1865,7 @@ async def create_vomo_job(
                 )
                 with job_context(job_id):
                     if len(file_paths) == 1:
-                        result = await service.process_file_with_progress(
+                        result = await job_service.process_file_with_progress(
                             file_path=file_paths[0],
                             mode=mode,
                             thinking_level=thinking_level,
@@ -1155,8 +1873,10 @@ async def create_vomo_job(
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=high_accuracy,
                             transcription_engine=config.get("transcription_engine", "whisper"),
+                            allow_provider_fallback=config.get("allow_provider_fallback"),
                             diarization=diarization,
                             diarization_strict=diarization_strict,
+                            diarization_provider=config.get("diarization_provider"),
                             on_progress=on_progress,
                             model_selection=model_selection,
                             use_cache=use_cache,
@@ -1173,9 +1893,10 @@ async def create_vomo_job(
                             subtitle_format=config.get("subtitle_format"),
                             area=area,
                             custom_keyterms=parsed_keyterms,
+                            job_id=job_id,
                         )
                     else:
-                        result = await service.process_batch_with_progress(
+                        result = await job_service.process_batch_with_progress(
                             file_paths=file_paths,
                             file_names=file_names,
                             mode=mode,
@@ -1184,8 +1905,10 @@ async def create_vomo_job(
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=high_accuracy,
                             transcription_engine=config.get("transcription_engine", "whisper"),
+                            allow_provider_fallback=config.get("allow_provider_fallback"),
                             diarization=diarization,
                             diarization_strict=diarization_strict,
+                            diarization_provider=config.get("diarization_provider"),
                             model_selection=model_selection,
                             on_progress=on_progress,
                             use_cache=use_cache,
@@ -1232,7 +1955,7 @@ async def create_vomo_job(
                 _cleanup_task(job_id)
 
     # Usar Celery se habilitado, caso contrário asyncio
-    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+    if _celery_workers_available():
         # Dispara task Celery (roda em worker separado)
         celery_result = transcription_job_task.apply_async(
             kwargs={
@@ -1253,6 +1976,15 @@ async def create_vomo_job(
             pass
         logger.info(f"[VOMO/JOBS] Job {job_id} enviado para Celery worker")
     else:
+        if _USE_CELERY_TRANSCRIPTION:
+            logger.warning(f"[VOMO/JOBS] Job {job_id} sem worker Celery ativo; executando localmente")
+            try:
+                job_manager.update_transcription_job(
+                    job_id,
+                    message="Celery indisponível; executando localmente",
+                )
+            except Exception:
+                pass
         # Fallback: asyncio (comportamento original)
         task = asyncio.create_task(run_job())
         _register_task(job_id, task)
@@ -1313,6 +2045,8 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
     cancel_event = _get_cancel_event(job_id)
 
     async def run_job():
+        job_service = TranscriptionService()
+
         def ensure_not_cancelled():
             if cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1330,7 +2064,10 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                 message=message,
             )
 
-        async with _get_transcription_semaphore():
+        # Semáforo por provider: whisper=sequencial, assemblyai/runpod=paralelo
+        _engine = config.get("transcription_engine", "whisper")
+        job_manager.update_transcription_job(job_id, message=f"Aguardando fila ({_engine})...")
+        async with _acquire_provider_slot(_engine):
             try:
                 ensure_not_cancelled()
                 job_manager.update_transcription_job(
@@ -1342,7 +2079,7 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                 )
                 with job_context(job_id):
                     if len(file_paths) == 1:
-                        result = await service.process_file_with_progress(
+                        result = await job_service.process_file_with_progress(
                             file_path=file_paths[0],
                             mode=mode,
                             thinking_level=config.get("thinking_level", "medium"),
@@ -1350,8 +2087,10 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=config.get("high_accuracy", False),
                             transcription_engine=config.get("transcription_engine", "whisper"),
+                            allow_provider_fallback=config.get("allow_provider_fallback"),
                             diarization=config.get("diarization"),
                             diarization_strict=config.get("diarization_strict", False),
+                            diarization_provider=config.get("diarization_provider"),
                             on_progress=on_progress,
                             model_selection=config.get("model_selection"),
                             use_cache=config.get("use_cache", True),
@@ -1368,9 +2107,10 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                             subtitle_format=config.get("subtitle_format"),
                             area=config.get("area"),
                             custom_keyterms=parsed_keyterms,
+                            job_id=job_id,
                         )
                     else:
-                        result = await service.process_batch_with_progress(
+                        result = await job_service.process_batch_with_progress(
                             file_paths=file_paths,
                             file_names=file_names,
                             mode=mode,
@@ -1379,8 +2119,10 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                             disable_tables=config.get("disable_tables", False),
                             high_accuracy=config.get("high_accuracy", False),
                             transcription_engine=config.get("transcription_engine", "whisper"),
+                            allow_provider_fallback=config.get("allow_provider_fallback"),
                             diarization=config.get("diarization"),
                             diarization_strict=config.get("diarization_strict", False),
+                            diarization_provider=config.get("diarization_provider"),
                             model_selection=config.get("model_selection"),
                             on_progress=on_progress,
                             use_cache=config.get("use_cache", True),
@@ -1427,7 +2169,7 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
                 _cleanup_task(job_id)
 
     # Usar Celery se habilitado, caso contrário asyncio
-    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+    if _celery_workers_available():
         celery_result = transcription_job_task.apply_async(
             kwargs={
                 "job_id": job_id,
@@ -1447,6 +2189,15 @@ async def retry_vomo_job(job_id: str, current_user: User = Depends(get_current_u
             pass
         logger.info(f"[VOMO/JOBS] Job {job_id} (retry) enviado para Celery worker")
     else:
+        if _USE_CELERY_TRANSCRIPTION:
+            logger.warning(f"[VOMO/JOBS] Job {job_id} (retry) sem worker Celery ativo; executando localmente")
+            try:
+                job_manager.update_transcription_job(
+                    job_id,
+                    message="Celery indisponível no retry; executando localmente",
+                )
+            except Exception:
+                pass
         task = asyncio.create_task(run_job())
         _register_task(job_id, task)
 
@@ -1507,8 +2258,14 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
         "model_selection": request.model_selection,
         "high_accuracy": bool(request.high_accuracy),
         "transcription_engine": request.transcription_engine,
+        "allow_provider_fallback": request.allow_provider_fallback,
         "diarization": request.diarization,
         "diarization_strict": bool(request.diarization_strict),
+        "diarization_provider": (
+            request.diarization_provider
+            if (request.diarization_provider or "auto") != "auto"
+            else None
+        ),
         "use_cache": bool(request.use_cache),
         "auto_apply_fixes": bool(request.auto_apply_fixes),
         "auto_apply_content_fixes": bool(request.auto_apply_content_fixes),
@@ -1541,6 +2298,8 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
     cancel_event = _get_cancel_event(job_id)
 
     async def run_job():
+        job_service = TranscriptionService()
+
         def ensure_not_cancelled():
             if cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1558,9 +2317,10 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
                 message=message,
             )
 
-        # Aguardar semáforo para processar sequencialmente (1 job por vez)
-        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
-        async with _get_transcription_semaphore():
+        # Semáforo por provider: whisper=sequencial, assemblyai/runpod=paralelo
+        _engine = config.get("transcription_engine", "whisper")
+        job_manager.update_transcription_job(job_id, message=f"Aguardando fila ({_engine})...")
+        async with _acquire_provider_slot(_engine):
             try:
                 ensure_not_cancelled()
                 job_manager.update_transcription_job(
@@ -1571,7 +2331,7 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
                     message="Iniciando processamento",
                 )
                 with job_context(job_id):
-                    result = await service.process_file_with_progress(
+                    result = await job_service.process_file_with_progress(
                         file_path=file_paths[0],
                         mode=mode,
                         thinking_level=request.thinking_level,
@@ -1579,8 +2339,10 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
                         disable_tables=config.get("disable_tables", False),
                         high_accuracy=bool(request.high_accuracy),
                         transcription_engine=request.transcription_engine,
+                        allow_provider_fallback=request.allow_provider_fallback,
                         diarization=request.diarization,
                         diarization_strict=bool(request.diarization_strict),
+                        diarization_provider=config.get("diarization_provider"),
                         on_progress=on_progress,
                         model_selection=request.model_selection,
                         use_cache=bool(request.use_cache),
@@ -1595,6 +2357,7 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
                         speaker_roles=parsed_speaker_roles_url,
                         speakers_expected=request.speakers_expected,
                         subtitle_format=config.get("subtitle_format"),
+                        job_id=job_id,
                     )
 
                 ensure_not_cancelled()
@@ -1630,7 +2393,7 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
                 _cleanup_task(job_id)
 
     # Usar Celery se habilitado, caso contrário asyncio
-    if _USE_CELERY_TRANSCRIPTION and transcription_job_task is not None:
+    if _celery_workers_available():
         celery_result = transcription_job_task.apply_async(
             kwargs={
                 "job_id": job_id,
@@ -1650,6 +2413,15 @@ async def create_vomo_job_from_url(request: UrlVomoJobRequest = Body(...), curre
             pass
         logger.info(f"[VOMO/JOBS] Job {job_id} (URL) enviado para Celery worker")
     else:
+        if _USE_CELERY_TRANSCRIPTION:
+            logger.warning(f"[VOMO/JOBS] Job {job_id} (URL) sem worker Celery ativo; executando localmente")
+            try:
+                job_manager.update_transcription_job(
+                    job_id,
+                    message="Celery indisponível para URL; executando localmente",
+                )
+            except Exception:
+                pass
         task = asyncio.create_task(run_job())
         _register_task(job_id, task)
     return {"job_id": job_id, "status": "queued"}
@@ -1689,6 +2461,7 @@ async def create_hearing_job(
     speaker_roles: Optional[str] = Form(None),
     speakers_expected: Optional[int] = Form(None),
     transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
     job_id = str(uuid.uuid4())
@@ -1751,6 +2524,7 @@ async def create_hearing_job(
         "skip_sources_audit": skip_sources_audit,
         "language": language,
         "transcription_engine": transcription_engine,
+        "allow_provider_fallback": allow_provider_fallback,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -1772,6 +2546,8 @@ async def create_hearing_job(
     cancel_event = _get_cancel_event(job_id)
 
     async def run_job():
+        job_service = TranscriptionService()
+
         def ensure_not_cancelled():
             if cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1789,9 +2565,10 @@ async def create_hearing_job(
                 message=message,
             )
 
-        # Aguardar semáforo para processar sequencialmente (1 job por vez)
-        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
-        async with _get_transcription_semaphore():
+        # Semáforo por provider: whisper=sequencial, assemblyai/runpod=paralelo
+        _engine = config.get("transcription_engine", "whisper")
+        job_manager.update_transcription_job(job_id, message=f"Aguardando fila ({_engine})...")
+        async with _acquire_provider_slot(_engine):
             try:
                 ensure_not_cancelled()
                 job_manager.update_transcription_job(
@@ -1802,7 +2579,7 @@ async def create_hearing_job(
                     message="Iniciando processamento",
                 )
                 with job_context(job_id):
-                    result = await service.process_hearing_with_progress(
+                    result = await job_service.process_hearing_with_progress(
                         file_path=file_paths[0],
                         case_id=case_id,
                         goal=goal,
@@ -1827,6 +2604,7 @@ async def create_hearing_job(
                         speaker_roles=_speaker_roles_list,
                         speakers_expected=speakers_expected,
                         transcription_engine=transcription_engine,
+                        allow_provider_fallback=allow_provider_fallback,
                     )
                 ensure_not_cancelled()
                 result_path = _write_hearing_job_result(job_dir, result)
@@ -1916,6 +2694,7 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
         "language": request.language,
         "source_url": url,
         "transcription_engine": request.transcription_engine,
+        "allow_provider_fallback": request.allow_provider_fallback,
     }
 
     metadata_path = job_dir / "metadata.json"
@@ -1937,6 +2716,8 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
     cancel_event = _get_cancel_event(job_id)
 
     async def run_job():
+        job_service = TranscriptionService()
+
         def ensure_not_cancelled():
             if cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1954,9 +2735,10 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
                 message=message,
             )
 
-        # Aguardar semáforo para processar sequencialmente (1 job por vez)
-        job_manager.update_transcription_job(job_id, message="Aguardando fila...")
-        async with _get_transcription_semaphore():
+        # Semáforo por provider: whisper=sequencial, assemblyai/runpod=paralelo
+        _engine = config.get("transcription_engine", "whisper")
+        job_manager.update_transcription_job(job_id, message=f"Aguardando fila ({_engine})...")
+        async with _acquire_provider_slot(_engine):
             try:
                 ensure_not_cancelled()
                 job_manager.update_transcription_job(
@@ -1967,7 +2749,7 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
                     message="Iniciando processamento",
                 )
                 with job_context(job_id):
-                    result = await service.process_hearing_with_progress(
+                    result = await job_service.process_hearing_with_progress(
                         file_path=file_paths[0],
                         case_id=request.case_id,
                         goal=request.goal,
@@ -1992,6 +2774,7 @@ async def create_hearing_job_from_url(request: UrlHearingJobRequest = Body(...),
                         speaker_roles=getattr(request, "speaker_roles", None),
                         speakers_expected=getattr(request, "speakers_expected", None),
                         transcription_engine=request.transcription_engine,
+                        allow_provider_fallback=request.allow_provider_fallback,
                     )
 
                 ensure_not_cancelled()
@@ -2038,6 +2821,7 @@ async def list_transcription_jobs(
     current_user: User = Depends(get_current_user),
 ):
     jobs = job_manager.list_transcription_jobs(limit=limit, status=status, job_type=job_type)
+    jobs = [_reconcile_stale_transcription_job(job) or job for job in jobs]
     return {"jobs": jobs}
 
 @router.get("/jobs/{job_id}")
@@ -2045,6 +2829,7 @@ async def get_transcription_job(job_id: str, current_user: User = Depends(get_cu
     job = job_manager.get_transcription_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+    job = _reconcile_stale_transcription_job(job) or job
     return job
 
 
@@ -2054,7 +2839,7 @@ async def cancel_transcription_job(job_id: str, current_user: User = Depends(get
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     status = job.get("status")
-    if status in {"completed", "error", "canceled"}:
+    if status in {"completed", "error", "canceled", "cancelled"}:
         raise HTTPException(status_code=409, detail=f"Job already {status}")
 
     cancel_event = _get_cancel_event(job_id)
@@ -2435,6 +3220,213 @@ async def get_job_media(
         headers={"Accept-Ranges": "bytes"}  # Enable seeking in audio/video
     )
 
+
+# ---------- Audio serve para RunPod (token HMAC temporário) ----------
+import hashlib
+import hmac
+import time as _time
+
+_AUDIO_TOKEN_TTL = 3600  # 1h
+
+def _audio_token_secret() -> str:
+    """
+    Use the same SECRET_KEY resolved by app settings to avoid drift between
+    token generation/validation and runtime configuration.
+    """
+    secret = str(getattr(settings, "SECRET_KEY", "") or "").strip()
+    if not secret:
+        raise RuntimeError("SECRET_KEY não configurada para assinatura de áudio RunPod")
+    return secret
+
+def _sign_audio_token(job_id: str) -> str:
+    """Gera token HMAC para acesso temporário ao áudio (sem auth header)."""
+    secret = _audio_token_secret()
+    ts = str(int(_time.time()))
+    sig = hmac.new(secret.encode(), f"{job_id}:{ts}".encode(), hashlib.sha256).hexdigest()[:32]
+    return f"{ts}.{sig}"
+
+def _verify_audio_token(job_id: str, token: str) -> bool:
+    """Verifica token HMAC para audio serve."""
+    secret = _audio_token_secret()
+    parts = token.split(".", 1)
+    if len(parts) != 2:
+        return False
+    ts_str, sig = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return False
+    if _time.time() - ts > _AUDIO_TOKEN_TTL:
+        return False
+    expected = hmac.new(secret.encode(), f"{job_id}:{ts_str}".encode(), hashlib.sha256).hexdigest()[:32]
+    return hmac.compare_digest(sig, expected)
+
+def generate_runpod_audio_url(job_id: str, base_url: str) -> str:
+    """Gera URL pública temporária para o RunPod acessar o áudio."""
+    token = _sign_audio_token(job_id)
+    base = (base_url or "").rstrip("/")
+    parsed = urlparse(base)
+    if parsed.path.endswith("/api"):
+        path_prefix = base
+    else:
+        path_prefix = f"{base}/api"
+    return f"{path_prefix}/transcription/audio/{job_id}?token={token}"
+
+
+@router.get("/audio/{job_id}")
+async def serve_audio_for_runpod(job_id: str, token: str):
+    """
+    Serve o arquivo de áudio do job para consumo pelo RunPod worker.
+    Autenticado via token HMAC temporário (1h).
+    """
+    if not _verify_audio_token(job_id, token):
+        raise HTTPException(status_code=403, detail="Token inválido ou expirado")
+
+    job = job_manager.get_transcription_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    job_dir = _get_transcription_jobs_dir() / job_id
+    input_dir = job_dir / "input"
+    if not input_dir.exists():
+        raise HTTPException(status_code=404, detail="Input directory not found")
+
+    input_files = sorted(input_dir.iterdir())
+    if not input_files:
+        raise HTTPException(status_code=404, detail="No input files found")
+
+    file_path = input_files[0]
+    suffix = file_path.suffix.lower()
+    media_types = {
+        ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+        ".aac": "audio/aac", ".ogg": "audio/ogg", ".mp4": "video/mp4",
+    }
+    return FileResponse(
+        file_path,
+        media_type=media_types.get(suffix, "application/octet-stream"),
+        filename=file_path.name,
+    )
+
+
+# ---------- RunPod Webhook Callback ----------
+
+@router.post("/webhook")
+async def runpod_webhook_callback(request: Request):
+    """
+    Receive webhook callbacks from RunPod when a job completes.
+
+    RunPod sends POST with body:
+    {
+      "id": "run-abc123",
+      "status": "COMPLETED" | "FAILED",
+      "output": { ... transcription result ... },
+      "error": "...",
+      "executionTime": 5000
+    }
+
+    This endpoint:
+    1. Validates the payload
+    2. Matches the RunPod run_id to an internal transcription job
+    3. Processes the result (extract_transcription + post-processing)
+    4. Updates the job manager with the result
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    run_id = body.get("id")
+    status = body.get("status")
+    output = body.get("output")
+    error = body.get("error")
+    execution_time = body.get("executionTime")
+
+    if not run_id or not status:
+        raise HTTPException(status_code=400, detail="Missing 'id' or 'status' in webhook payload")
+
+    logger.info("RunPod webhook received: run_id=%s status=%s", run_id, status)
+
+    # Find the internal job that corresponds to this RunPod run_id
+    # Jobs store runpod_run_id in their metadata
+    job = _find_job_by_runpod_run_id(run_id)
+    if not job:
+        logger.warning("RunPod webhook: no matching job for run_id=%s", run_id)
+        # Return 200 to avoid RunPod retrying
+        return {"status": "ignored", "reason": "no matching job"}
+
+    job_id = job.get("jobid", "")
+
+    if status == "COMPLETED" and output:
+        from app.services.runpod_transcription import RunPodResult, extract_transcription
+
+        result = RunPodResult(
+            run_id=run_id,
+            status="COMPLETED",
+            output=output,
+            execution_time_ms=execution_time,
+        )
+        parsed = extract_transcription(result)
+
+        if parsed and parsed.get("text"):
+            # Apply post-processing (legal dictionary, punctuation)
+            from app.services.transcription_postprocessing import postprocess_transcription
+            parsed = postprocess_transcription(parsed)
+
+            # Save result
+            result_path = _save_webhook_result(job_id, parsed)
+            job_manager.update_transcription_job(
+                job_id,
+                status="completed",
+                progress=100,
+                stage="completed",
+                message="Transcrição concluída (webhook)",
+                result_path=result_path,
+            )
+            logger.info("RunPod webhook: job %s completed successfully via webhook", job_id)
+        else:
+            job_manager.update_transcription_job(
+                job_id,
+                status="error",
+                error="RunPod completed but output was empty",
+            )
+    elif status == "FAILED":
+        job_manager.update_transcription_job(
+            job_id,
+            status="error",
+            error=error or "RunPod job failed",
+        )
+    else:
+        logger.info("RunPod webhook: ignoring status=%s for run_id=%s", status, run_id)
+
+    return {"status": "ok", "job_id": job_id}
+
+
+def _find_job_by_runpod_run_id(run_id: str) -> Optional[Dict[str, Any]]:
+    """Find an internal transcription job by its RunPod run_id."""
+    # Search recent jobs (last 100) for matching runpod_run_id
+    jobs = job_manager.list_transcription_jobs(limit=100)
+    for job in jobs:
+        meta = job.get("metadata") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:
+                meta = {}
+        if meta.get("runpod_run_id") == run_id:
+            return job
+    return None
+
+
+def _save_webhook_result(job_id: str, parsed: Dict[str, Any]) -> str:
+    """Save webhook transcription result to disk and return the path."""
+    job_dir = _get_transcription_jobs_dir() / job_id / "output"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    result_path = str(job_dir / "result.json")
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(parsed, f, ensure_ascii=False, indent=2)
+    return result_path
+
+
 @router.get("/jobs/{job_id}/media/list")
 async def list_job_media(
     job_id: str,
@@ -2488,141 +3480,9 @@ async def recompute_preventive_audit(job_id: str, current_user: User = Depends(g
         raise HTTPException(status_code=409, detail="Job not completed")
 
     try:
-        payload = _load_job_result_payload(job)
-        reports = payload.get("reports") or {}
-        if not isinstance(reports, dict):
-            reports = {}
-
-        raw_content = (payload.get("raw_content") or "").strip()
-        formatted_content = (payload.get("content") or "").strip()
-        if not raw_content or not formatted_content:
-            raise HTTPException(status_code=409, detail="Job sem RAW ou conteúdo formatado para auditoria preventiva.")
-
-        job_dir = (_get_transcription_jobs_dir() / job_id).resolve()
-        metadata_path = job_dir / "metadata.json"
-        metadata: Dict[str, Any] = {}
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            except Exception:
-                metadata = {}
-
-        fallback_mode = str(metadata.get("mode") or payload.get("mode") or "APOSTILA")
-        video_name, mode_suffix = _infer_video_name_and_mode_suffix(reports, fallback_mode=fallback_mode)
-
-        output_dir_value = reports.get("output_dir")
-        if output_dir_value:
-            output_dir_path = _resolve_job_path(str(output_dir_value)).resolve()
-        else:
-            # Fallback: persist under job dir to keep it downloadable.
-            output_dir_path = job_dir
-            output_dir_value = str(output_dir_path)
-            reports["output_dir"] = output_dir_value
-
-        output_dir_path.mkdir(parents=True, exist_ok=True)
-
-        preventive_json_key = "preventive_fidelity_json_path"
-        preventive_md_key = "preventive_fidelity_md_path"
-
-        json_filename = f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json"
-        md_filename = f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md"
-
-        json_path_value = _join_report_path(str(output_dir_value), json_filename)
-        md_path_value = _join_report_path(str(output_dir_value), md_filename)
-        json_path = _resolve_job_path(json_path_value).resolve()
-        md_path = _resolve_job_path(md_path_value).resolve()
-
-        include_sources = not bool(metadata.get("skip_sources_audit"))
-        modo = str(metadata.get("mode") or mode_suffix or "APOSTILA").upper()
-
-        project_root = str(Path(__file__).resolve().parents[5])
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-
-        from audit_fidelity_preventive import auditar_fidelidade_preventiva, gerar_relatorio_markdown_completo
-
-        try:
-            client = _build_genai_client()
-            result = auditar_fidelidade_preventiva(
-                client,
-                raw_content,
-                formatted_content,
-                video_name,
-                output_path=str(json_path),
-                modo=modo,
-                include_sources=include_sources,
-            )
-        except Exception as exc:
-            palavras_raw = len(raw_content.split()) if raw_content else 0
-            palavras_fmt = len(formatted_content.split()) if formatted_content else 0
-            taxa_retencao = (palavras_fmt / palavras_raw) if palavras_raw > 0 else 0
-            result = {
-                "aprovado": True,
-                "nota_fidelidade": 0,
-                "gravidade_geral": "INFO",
-                "erro": str(exc),
-                "omissoes_criticas": [],
-                "distorcoes": [],
-                "problemas_estruturais": [],
-                "problemas_contexto": [],
-                "alucinacoes": [],
-                "metricas": {
-                    "palavras_raw": palavras_raw,
-                    "palavras_formatado": palavras_fmt,
-                    "taxa_retencao": round(taxa_retencao, 4),
-                    "dispositivos_legais_raw": 0,
-                    "dispositivos_legais_formatado": 0,
-                    "taxa_preservacao_dispositivos": 0,
-                },
-                "observacoes_gerais": f"Auditoria preventiva não pôde ser recalculada: {exc}",
-                "recomendacao_hil": {"pausar_para_revisao": False, "motivo": "", "areas_criticas": []},
-                "source": "preventive_audit_recompute_fallback",
-            }
-            try:
-                json_path.parent.mkdir(parents=True, exist_ok=True)
-                json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-        # Garantir persistência do JSON mesmo quando a função retornou sem escrever (defensivo).
-        try:
-            if not json_path.exists() or json_path.stat().st_size == 0:
-                json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-        except Exception:
-            pass
-
-        try:
-            gerar_relatorio_markdown_completo(result, str(md_path), video_name)
-        except Exception as exc:
-            # Ainda assim, tente deixar um MD mínimo para o usuário.
-            try:
-                md_path.write_text(
-                    f"# Auditoria Preventiva de Fidelidade\n\nFalha ao gerar relatório markdown: {exc}\n",
-                    encoding="utf-8",
-                )
-            except Exception:
-                pass
-
-        reports[preventive_json_key] = json_path_value
-        reports[preventive_md_key] = md_path_value
-
-        reports_path_value = payload.get("reports_path")
-        if reports_path_value:
-            reports_path = _resolve_job_path(str(reports_path_value))
-        else:
-            reports_path = job_dir / "reports.json"
-            # Best effort: update result.json pointer if missing
-            try:
-                result_path = _find_job_result_path(job)
-                result_data = json.loads(result_path.read_text(encoding="utf-8"))
-                if not result_data.get("reports_path"):
-                    result_data["reports_path"] = str(reports_path)
-                    result_path.write_text(json.dumps(result_data, ensure_ascii=False, indent=2), encoding="utf-8")
-            except Exception:
-                pass
-
-        reports_path.write_text(json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"success": True, "reports": reports}
+        ctx = _build_audit_context_from_job(job_id)
+        data = _recompute_preventive_audit_for_context(job_id, ctx=ctx)
+        return {"success": True, "reports": data.get("reports")}
     except HTTPException:
         raise
     except Exception as exc:
@@ -2749,51 +3609,30 @@ async def update_transcription_job_quality(job_id: str, request: JobQualityUpdat
                         quality["needs_revalidate"] = False
                         result_data["quality"] = quality
 
-                        # Sync audit files with revalidated data
+                        # Sync _FIDELIDADE.json (compat format) for legacy consumers
                         try:
                             reports = result_data.get("reports") or {}
-                            output_dir_path = reports.get("output_dir")
-                            if output_dir_path:
-                                output_dir = Path(output_dir_path)
-                                # Update _FIDELIDADE.json (compat format)
-                                fidelity_path = reports.get("fidelity_path") or reports.get("validation_path")
-                                if fidelity_path:
-                                    compat_data = {
-                                        "aprovado": validation_report.get("approved", False),
-                                        "nota": validation_report.get("score", 0),
-                                        "nota_fidelidade": validation_report.get("score", 0),
-                                        "omissoes": validation_report.get("omissions", []),
-                                        "omissoes_graves": validation_report.get("omissions", []),
-                                        "distorcoes": validation_report.get("distortions", []),
-                                        "problemas_estrutura": validation_report.get("structural_issues", []),
-                                        "observacoes": validation_report.get("observations", ""),
-                                        "source": "revalidation",
-                                        "revalidated_at": validation_report.get("validated_at"),
-                                    }
-                                    Path(fidelity_path).write_text(
-                                        json.dumps(compat_data, ensure_ascii=False, indent=2),
-                                        encoding="utf-8"
-                                    )
-                                    logger.info(f"✅ Synced fidelity JSON: {fidelity_path}")
-
-                                # Update audit_summary.json with new score
-                                summary_path = reports.get("audit_summary_path")
-                                if summary_path and Path(summary_path).exists():
-                                    try:
-                                        summary_data = json.loads(Path(summary_path).read_text(encoding="utf-8"))
-                                        if "summary" in summary_data:
-                                            summary_data["summary"]["score"] = validation_report.get("score", 0)
-                                            summary_data["summary"]["scores"]["validation_fidelity"] = validation_report.get("score", 0)
-                                            summary_data["summary"]["revalidated_at"] = validation_report.get("validated_at")
-                                            Path(summary_path).write_text(
-                                                json.dumps(summary_data, ensure_ascii=False, indent=2),
-                                                encoding="utf-8"
-                                            )
-                                            logger.info(f"✅ Synced audit_summary.json with new score: {validation_report.get('score')}")
-                                    except Exception as sync_err:
-                                        logger.warning(f"Failed to sync audit_summary.json: {sync_err}")
+                            fidelity_path = reports.get("fidelity_path") or reports.get("validation_path")
+                            if fidelity_path:
+                                compat_data = {
+                                    "aprovado": validation_report.get("approved", False),
+                                    "nota": validation_report.get("score", 0),
+                                    "nota_fidelidade": validation_report.get("score", 0),
+                                    "omissoes": validation_report.get("omissions", []),
+                                    "omissoes_graves": validation_report.get("omissions", []),
+                                    "distorcoes": validation_report.get("distortions", []),
+                                    "problemas_estrutura": validation_report.get("structural_issues", []),
+                                    "observacoes": validation_report.get("observations", ""),
+                                    "source": "revalidation",
+                                    "revalidated_at": validation_report.get("validated_at"),
+                                }
+                                Path(fidelity_path).write_text(
+                                    json.dumps(compat_data, ensure_ascii=False, indent=2),
+                                    encoding="utf-8"
+                                )
+                                logger.info(f"✅ Synced fidelity JSON: {fidelity_path}")
                         except Exception as sync_err:
-                            logger.warning(f"Failed to sync audit files after revalidation: {sync_err}")
+                            logger.warning(f"Failed to sync fidelity file after revalidation: {sync_err}")
 
                     except asyncio.TimeoutError:
                         logger.warning("Timeout ao revalidar documento após correções")
@@ -2804,68 +3643,85 @@ async def update_transcription_job_quality(job_id: str, request: JobQualityUpdat
                         quality["needs_revalidate"] = True
                         result_data["quality"] = quality
 
-                # Replace auto-derived audit issues with freshly computed ones, keeping manual/preventive issues.
-                derived = service._build_audit_issues(
-                    analysis_report,
-                    document_name,
-                    raw_content=raw_content or "",
-                    formatted_content=fixed_content or "",
-                )
-                derived_types = {
-                    "duplicate_section",
-                    "duplicate_paragraph",
-                    "heading_numbering",
-                    "missing_law",
-                    "missing_sumula",
-                    "missing_decreto",
-                    "missing_julgado",
-                    "compression_warning",
-                    "legal_audit",
-                }
+                # Persist result_data with updated quality before full audit regeneration
+                with open(result_path, "w", encoding="utf-8") as f:
+                    json.dump(result_data, f, ensure_ascii=False, indent=2)
 
-                existing_list = result_data.get("audit_issues")
-                if isinstance(existing_list, list):
-                    existing_issues = [i for i in existing_list if isinstance(i, dict)]
-                else:
-                    existing_issues = []
-                preserved = [i for i in existing_issues if str(i.get("type") or "") not in derived_types]
-
-                merged: List[Dict[str, Any]] = []
-                seen_ids = set()
-                seen_keys = set()
-                for issue in preserved + (derived or []):
-                    if not isinstance(issue, dict):
-                        continue
-                    issue_id = str(issue.get("id") or "")
-                    if issue_id and issue_id in seen_ids:
-                        continue
-                    key = f"{issue.get('type','')}:{issue.get('reference','')}:{issue.get('description','')}"
-                    if key in seen_keys:
-                        continue
-                    if issue_id:
-                        seen_ids.add(issue_id)
-                    seen_keys.add(key)
-                    merged.append(issue)
-                result_data["audit_issues"] = merged
-
-                job_dir = (_get_transcription_jobs_dir() / job_id).resolve()
-                audit_file = job_dir / "audit_issues.json"
+                # Full audit regeneration — _regenerate_audit_for_job re-reads result.json
+                # (which we just persisted above) and persists updated result.json + audit files.
                 try:
-                    audit_file.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
-                    result_data["audit_path"] = str(audit_file.resolve())
-                except Exception:
-                    pass
+                    if str(result_data.get("job_type") or "vomo").lower() != "hearing":
+                        regen_ctx = _build_audit_context_from_job(job_id, require_non_hearing=True)
+                        regen_result = _regenerate_audit_for_job(job_id, ctx=regen_ctx)
+                        logger.info(f"✅ Full audit regenerated after quality update for job {job_id}")
+                        return {
+                            "success": True,
+                            "quality": regen_result.get("quality", {}),
+                            "audit_summary": regen_result.get("audit_summary"),
+                            "audit_issues": regen_result.get("audit_issues", []),
+                            "reports": regen_result.get("reports", {}),
+                        }
+                except Exception as regen_err:
+                    logger.warning(f"Failed to regenerate audit after quality update: {regen_err}")
             except Exception as e:
                 logger.warning(f"Falha ao recomputar analysis/audit_issues após correção: {e}")
 
+        # Fallback: persist and return without full regeneration
         with open(result_path, "w", encoding="utf-8") as f:
             json.dump(result_data, f, ensure_ascii=False, indent=2)
 
-        return {"success": True, "quality": result_data.get("quality") or {}}
+        # Try to load audit_summary from file for the response
+        audit_summary = None
+        try:
+            reports = result_data.get("reports") or {}
+            if not reports and result_data.get("reports_path"):
+                reports_candidate = _resolve_job_path(str(result_data.get("reports_path")))
+                if reports_candidate.exists():
+                    loaded_reports = json.loads(reports_candidate.read_text(encoding="utf-8", errors="ignore"))
+                    if isinstance(loaded_reports, dict):
+                        reports = loaded_reports
+            summary_path = reports.get("audit_summary_path") if isinstance(reports, dict) else None
+            if summary_path:
+                summary_candidate = _resolve_job_path(str(summary_path))
+                if summary_candidate.exists():
+                    audit_summary = json.loads(summary_candidate.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "quality": result_data.get("quality") or {},
+            "audit_summary": audit_summary,
+            "audit_issues": result_data.get("audit_issues", []),
+            "reports": result_data.get("reports", {}),
+        }
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to update quality: {exc}")
+
+
+@router.post("/jobs/{job_id}/regenerate-audit")
+async def regenerate_audit(job_id: str, current_user: User = Depends(get_current_user)):
+    """Re-run the full audit pipeline for a completed job and return unified audit data."""
+    try:
+        ctx = _build_audit_context_from_job(job_id, require_non_hearing=True)
+        result = _regenerate_audit_for_job(job_id, ctx=ctx)
+        return {
+            "success": True,
+            "audit_summary": result["audit_summary"],
+            "audit_issues": result["audit_issues"],
+            "quality": result["quality"],
+            "reports": result["reports"],
+        }
+    except HTTPException:
+        raise
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:
+        logger.error(f"Failed to regenerate audit for job {job_id}: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to regenerate audit: {exc}")
+
 
 @router.post("/jobs/{job_id}/content")
 async def update_transcription_job_content(job_id: str, request: JobContentUpdateRequest, current_user: User = Depends(get_current_user)):
@@ -2962,6 +3818,7 @@ async def stream_transcription_job(job_id: str, current_user: User = Depends(get
         last_snapshot = None
         while True:
             job = job_manager.get_transcription_job(job_id)
+            job = _reconcile_stale_transcription_job(job) or job
             if not job:
                 yield {"event": "error", "data": json.dumps({"error": "Job not found"})}
                 break
@@ -2970,7 +3827,7 @@ async def stream_transcription_job(job_id: str, current_user: User = Depends(get
             if status == "error":
                 yield {"event": "error", "data": json.dumps({"error": job.get("error") or "Job failed"})}
                 break
-            if status == "canceled":
+            if status in {"canceled", "cancelled"}:
                 yield {"event": "error", "data": json.dumps({"error": job.get("message") or "Job canceled"})}
                 break
             if status == "completed":
@@ -3014,8 +3871,10 @@ async def transcribe_vomo(
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
     transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
+    diarization_provider: str = Form("auto", description="Provider: auto, local, runpod, assemblyai"),
     use_cache: bool = Form(True),
     auto_apply_fixes: bool = Form(True),
     auto_apply_content_fixes: bool = Form(False),
@@ -3078,8 +3937,10 @@ async def transcribe_vomo(
                 custom_prompt=custom_prompt,
                 high_accuracy=high_accuracy,
                 transcription_engine=transcription_engine,
+                allow_provider_fallback=allow_provider_fallback,
                 diarization=diarization,
                 diarization_strict=diarization_strict,
+                diarization_provider=diarization_provider,
                 model_selection=model_selection,
                 use_cache=use_cache,
                 auto_apply_fixes=auto_apply_fixes,
@@ -3121,8 +3982,10 @@ async def transcribe_vomo_stream(
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
     transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
+    diarization_provider: str = Form("auto", description="Provider: auto, local, runpod, assemblyai"),
     use_cache: bool = Form(True),
     auto_apply_fixes: bool = Form(True),
     auto_apply_content_fixes: bool = Form(False),
@@ -3198,7 +4061,7 @@ async def transcribe_vomo_stream(
     
     async def event_generator():
         progress_queue = asyncio.Queue()
-        final_result = {"content": None, "raw_content": None, "reports": None, "error": None}
+        final_result = {"content": None, "raw_content": None, "words": [], "segments": [], "reports": None, "error": None}
         
         async def on_progress(stage: str, progress: int, message: str):
             """Callback chamado pelo service para reportar progresso."""
@@ -3219,8 +4082,10 @@ async def transcribe_vomo_stream(
                         disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
                         transcription_engine=transcription_engine,
+                        allow_provider_fallback=allow_provider_fallback,
                         diarization=diarization,
                         diarization_strict=diarization_strict,
+                        diarization_provider=diarization_provider,
                         model_selection=model_selection,
                         on_progress=on_progress,
                         use_cache=use_cache,
@@ -3239,10 +4104,13 @@ async def transcribe_vomo_stream(
                         custom_keyterms=parsed_keyterms_stream,
                         speaker_id_type=speaker_id_type,
                         speaker_id_values=parsed_speaker_id_values,
+                        job_id=run_id,
                     )
                 if isinstance(result, dict):
                     final_result["content"] = result.get("content")
                     final_result["raw_content"] = result.get("raw_content")
+                    final_result["words"] = result.get("words") if isinstance(result.get("words"), list) else []
+                    final_result["segments"] = result.get("segments") if isinstance(result.get("segments"), list) else []
                     final_result["reports"] = result.get("reports")
                 else:
                     final_result["content"] = result
@@ -3284,6 +4152,8 @@ async def transcribe_vomo_stream(
                         "filename": file.filename,
                         "content": final_result["content"],
                         "raw_content": final_result.get("raw_content"),
+                        "words": final_result.get("words") or [],
+                        "segments": final_result.get("segments") or [],
                         "reports": final_result.get("reports")
                     })
                 }
@@ -3313,8 +4183,10 @@ async def transcribe_batch_stream(
     model_selection: str = Form("gemini-3-flash-preview"),
     high_accuracy: bool = Form(False),
     transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     diarization: Optional[bool] = Form(None),
     diarization_strict: bool = Form(False),
+    diarization_provider: str = Form("auto", description="Provider: auto, local, runpod, assemblyai"),
     use_cache: bool = Form(True),
     auto_apply_fixes: bool = Form(True),
     auto_apply_content_fixes: bool = Form(False),
@@ -3365,7 +4237,7 @@ async def transcribe_batch_stream(
     
     async def event_generator():
         progress_queue = asyncio.Queue()
-        final_result = {"content": None, "raw_content": None, "reports": None, "error": None}
+        final_result = {"content": None, "raw_content": None, "words": [], "segments": [], "reports": None, "error": None}
         
         async def on_progress(stage: str, progress: int, message: str):
             await progress_queue.put({
@@ -3385,8 +4257,10 @@ async def transcribe_batch_stream(
                         disable_tables=bool(disable_tables),
                         high_accuracy=high_accuracy,
                         transcription_engine=transcription_engine,
+                        allow_provider_fallback=allow_provider_fallback,
                         diarization=diarization,
                         diarization_strict=diarization_strict,
+                        diarization_provider=diarization_provider,
                         model_selection=model_selection,
                         on_progress=on_progress,
                         use_cache=use_cache,
@@ -3402,6 +4276,8 @@ async def transcribe_batch_stream(
                 if isinstance(result, dict):
                     final_result["content"] = result.get("content")
                     final_result["raw_content"] = result.get("raw_content")
+                    final_result["words"] = result.get("words") if isinstance(result.get("words"), list) else []
+                    final_result["segments"] = result.get("segments") if isinstance(result.get("segments"), list) else []
                     final_result["reports"] = result.get("reports")
                 else:
                     final_result["content"] = result
@@ -3439,6 +4315,8 @@ async def transcribe_batch_stream(
                         "total_files": len(file_names),
                         "content": final_result["content"],
                         "raw_content": final_result.get("raw_content"),
+                        "words": final_result.get("words") or [],
+                        "segments": final_result.get("segments") or [],
                         "reports": final_result.get("reports")
                     })
                 }
@@ -3870,6 +4748,8 @@ async def transcribe_hearing_stream(
     output_language: str = Form(""),
     speaker_roles: Optional[str] = Form(None),
     speakers_expected: Optional[int] = Form(None),
+    transcription_engine: str = Form("whisper"),
+    allow_provider_fallback: Optional[bool] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -3940,6 +4820,8 @@ async def transcribe_hearing_stream(
                         output_language=output_language,
                         speaker_roles=parsed_speaker_roles,
                         speakers_expected=speakers_expected,
+                        transcription_engine=transcription_engine,
+                        allow_provider_fallback=allow_provider_fallback,
                     )
                 final_result["payload"] = result
             except Exception as e:

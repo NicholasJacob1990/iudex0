@@ -5,6 +5,2440 @@
 
 ---
 
+## 2026-02-13 — Embedding Provider Standardization: voyage-4-large 1024d
+
+### Resumo
+Padronização dos providers de embedding no Iudex para usar voyage-4-large (1024d) como modelo padrão para direito BR, substituindo JurisBERT (768d). Implementação de 8 melhorias ordenadas por impacto/esforço.
+
+### Arquivos Alterados
+- `apps/api/app/services/rag/embedding_router.py` — Adicionado VOYAGE_V4 ao enum, nova collection legal_br_v4 (1024d), BR roteia para voyage-4-large, usage tracking, deprecation warning para legacy collections
+- `apps/api/app/services/rag/voyage_embeddings.py` — Default model mudado para voyage-4-large, OpenAI fallback hardcodado em 3072d
+- `apps/api/app/services/rag/kanon_embeddings.py` — OpenAI fallback hardcodado em 3072d
+- `apps/api/app/services/rag/jurisbert_embeddings.py` — OpenAI fallback hardcodado em 3072d
+- `apps/api/app/services/rag/core/neo4j_mvp.py` — vector_dimensions default 768→1024, NEO4J_VECTOR_DIM separado de NEO4J_EMBEDDING_DIM
+- `apps/api/app/services/rag/core/graph_neo4j.py` — Env var separada NEO4J_KG_EMBEDDING_DIM para KG embeddings (128d)
+- `apps/api/app/services/rag/core/embeddings.py` — VOYAGE_DEFAULT_MODEL default atualizado
+- `apps/api/app/services/rag/legal_embeddings.py` — VOYAGE_DEFAULT_MODEL default atualizado
+- `apps/api/app/services/rag/config.py` — Comentários clarificando dimensões por provider
+- `apps/api/app/services/rag/.env.example` — Documentação de routing overrides e voyage-context-3
+
+### Arquivos Criados
+- `apps/api/scripts/bench_embedding_providers.py` — Script de benchmark JurisBERT vs voyage-4-large
+
+### Decisões Tomadas
+- voyage-4-large (1024d, $0.12/1M tok) como padrão BR em vez de JurisBERT (768d)
+- Dimensões hardcodadas por provider nos fallback paths (elimina ambiguidade EMBEDDING_DIMENSIONS)
+- NEO4J_VECTOR_DIM separado de NEO4J_EMBEDDING_DIM para evitar conflito chunk vs KG embeddings
+- Legacy collections (lei, juris, etc.) mantidas com warning de deprecação
+
+---
+
+## 2026-02-13 — RunPod Worker v3: Worker Unificado + Client Completo
+
+### Resumo
+Implementação completa do plano de evolução do RunPod Custom Worker v3, abrangendo todas as fases (0-3) aprovadas.
+
+### Fases Implementadas
+
+**Fase 0 — Quick Wins:**
+- Idle timeout atualizado para 300s via RunPod GraphQL API
+- FlashBoot: requer ativação manual via console RunPod
+
+**Fase 1 — Handler v3 (rp_handler.py reescrito):**
+- BatchedInferencePipeline (2-4x speedup)
+- Multi-model (large-v3 + large-v3-turbo) com hot-swap e GC
+- Hotwords jurídicos (STJ, STF, agravo, mandado, etc.)
+- Anti-hallucination (repetition_penalty=1.1, no_repeat_ngram_size=3)
+- Todos os params do worker oficial suportados
+- Generator handler (streaming via /stream/{job_id})
+- int8_float16 compute type (35% menos VRAM)
+- FFmpeg audio preprocessing (opcional)
+- SRT/VTT output formats
+- Metadata passthrough
+
+**Fase 2 — Worker Unificado:**
+- Diarização pyannote 3.1 integrada no mesmo container
+- WhisperX word alignment (opcional)
+- Speaker assignment por overlap (segmento + palavra)
+- Elimina necessidade do endpoint separado de diarização
+
+**Fase 3 — Client (runpod_transcription.py):**
+- `submit_unified_job()` para worker v3 (transcrição + diarização unificada)
+- `stream_results()` para consumir generator handler via /stream/{job_id}
+- Webhook URL no payload (env RUNPOD_WEBHOOK_URL)
+- Hallucination filter (BoH) em `extract_transcription()`
+- Suporte ao novo output format v3 (speakers, SRT/VTT, metadata, model info)
+- Fallback strategy: primary → v3 unified → legacy diarization endpoint
+
+### Arquivos Alterados
+- `apps/runpod-worker/rp_handler.py` — reescrito completo (v3)
+- `apps/runpod-worker/Dockerfile` — base atualizada, multi-model, pyannote, int8_float16
+- `apps/runpod-worker/requirements.txt` — faster-whisper 1.2+, pyannote, whisperx
+- `apps/api/app/services/runpod_transcription.py` — stream, webhook, hallucination filter, v3 output
+- `apps/api/tests/test_runpod_client.py` — 24 testes (novos: hallucination, v3 output, unified diarization)
+- `.github/workflows/deploy-runpod-worker.yml` — v3 tags, HF_TOKEN build arg, int8_float16 env
+
+### Testes
+- 24/24 testes RunPod client passando
+- 7/7 testes base URL resolution passando
+- 12/12 testes transcription queue passando
+
+### Próximos Passos
+- Ativar FlashBoot via console RunPod
+- Build e push Docker image v3 (trigger GitHub Actions)
+- Adicionar `HF_TOKEN` secret ao GitHub repo (para build Docker com pyannote)
+
+---
+
+## 2026-02-13 — Fase 4: Pós-processamento de Transcrição + Webhook
+
+### Resumo
+Implementação completa da Fase 4 do plano RunPod v3: pós-processamento de qualidade para transcrições jurídicas e endpoint webhook para callbacks do RunPod.
+
+### Funcionalidades Implementadas
+
+**Endpoint Webhook (`POST /transcription/webhook`):**
+- Recebe callbacks do RunPod ao completar job
+- Busca job correspondente pelo `runpod_run_id`
+- Aplica pipeline de pós-processamento automaticamente
+- Salva resultado processado no disco
+
+**Dicionário Jurídico (`apply_legal_dictionary`):**
+- 30+ padrões regex para correções de termos legais comuns do Whisper
+- Palavras partidas: "a gravo" → "agravo", "em bargos" → "embargos", "man dado" → "mandado"
+- Confusões fonéticas: "havias corpus" → "habeas corpus", "est é efe" → "STF"
+- Abreviações de tribunais: "tê jota esse" → "TJS"
+
+**Restauração de Pontuação (`restore_punctuation`):**
+- Ponto antes de "Artigo", "Parágrafo", "Inciso", etc.
+- Vírgula antes de conjunções adversativas (porém, contudo, todavia)
+- Dois-pontos após verbos decisórios (decide, determina, resolve)
+- Normalização de espaços múltiplos
+
+**Normalização de Siglas (`normalize_acronyms`):**
+- ~30 siglas jurídicas (STF, STJ, CPC, OAB, TJSP, etc.)
+- Uppercasing word-boundary-safe
+
+**Detecção de Alucinação via LLM (`detect_hallucinations_llm`):**
+- Score 0-1 por segmento usando Gemini 2.0 Flash
+- Detecção heurística de segmentos suspeitos (curtos, repetidos, final de áudio)
+- Async para não bloquear pipeline
+
+**Integração no Pipeline:**
+- `postprocess_transcription()` chamado em `_transcribe_via_runpod()` após `extract_transcription()`
+- Non-fatal: falha no postprocessing não bloqueia transcrição
+
+### Arquivos Criados
+- `apps/api/app/services/transcription_postprocessing.py` — módulo completo de pós-processamento
+- `apps/api/tests/test_transcription_postprocessing.py` — 28 testes
+
+### Arquivos Alterados
+- `apps/api/app/api/endpoints/transcription.py` — endpoint webhook
+- `apps/api/app/services/transcription_service.py` — integração do postprocessing
+
+### Testes
+- 71/71 testes passando (24 RunPod + 7 base URL + 12 queue + 28 postprocessing)
+
+---
+
+## 2026-02-12 — Fix: Diffs não apareciam para correção de itens diagnósticos
+
+### Resumo
+Corrigido bug onde clicar "Corrigir com IA" em itens de diagnóstico (Auditoria preventiva, Validação, Análise estrutural, etc.) não gerava diffs visíveis no DiffConfirmDialog.
+
+### Causa Raiz
+3 problemas combinados:
+1. **`fix_type` errado**: Issues classificados como `structural` iam para `apply_structural_fixes_from_issues`, que só trata `duplicate_paragraph/duplicate_section/heading_numbering` e ignora qualquer outra categoria → zero mudanças.
+2. **Sem `suggested_section`**: Backend não conseguia inferir em qual seção H2 aplicar a correção (4 estratégias de fallback todas falhavam).
+3. **Batch sem `formatted_context`**: `handleFixDiagnosticModule` enviava issues sem contexto da seção → backend caía no fallback de documento inteiro → LLM retornava conteúdo inalterado.
+
+### Correções Aplicadas
+- `diagnosticToActionable`: Forçar `fix_type: 'content'` para TODOS os issues diagnósticos (structural fix engine não os suporta)
+- Extrair `suggested_section` do `raw_item` (`localizacao_formatado`, `localizacao`, `heading_line`) e de `evidence_formatted`
+- Extrair `reference` do `raw_item` (`trecho_formatado`, `correcao_sugerida`)
+- `handleFixDiagnosticModule`: Enriquecer cada issue com `formatted_context` via `extractSectionFromMarkdown` antes de enviar ao backend
+
+### Arquivos Alterados
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — `diagnosticToActionable`, `handleFixDiagnosticModule`
+
+### Verificação
+- `npx tsc --noEmit` — OK
+- `npx eslint` — OK
+
+---
+
+## 2026-02-12 — APOSTILA: Passada Final com Contexto Total
+
+### Resumo
+Aplicada a mesma estratégia de contexto total da revisão leve de FIDELIDADE na passada final do modo APOSTILA (`ai_structure_review`), reduzindo truncamento em documentos longos durante a revisão semântica.
+
+### Arquivos Modificados
+- `mlx_vomo.py` — `ai_structure_review` agora usa contexto completo por padrão (`use_full_context=True` via `IUDEX_APOSTILA_FULL_CONTEXT`), com fallback legado opcional para truncamento.
+
+### Decisões
+- Padrão: **janela total** para APOSTILA na passada final.
+- Compatibilidade: env `IUDEX_APOSTILA_FULL_CONTEXT` pode desligar e voltar ao comportamento antigo (truncar para 800k chars e estrutura para 50k).
+- Revisão de FIDELIDADE já permanecia em contexto total.
+
+### Verificação
+- `python3 -m py_compile mlx_vomo.py` sem erros.
+
+---
+
+## 2026-02-12 — Paralelizar HIL Fix Pipeline (asyncio.gather)
+
+### Resumo
+Otimizado `fix_content_issues_with_llm` em `quality_service.py` para processar seções em paralelo
+ao invés de sequencialmente. Chamadas LLM por seção são independentes — a dependência de ordem
+(bottom-up) existe apenas na aplicação dos patches ao documento.
+
+### Arquivos Modificados
+- `apps/api/app/services/quality_service.py` — Substituído loop sequencial (linhas 1456-1492) por `asyncio.gather()` + `Semaphore(5)`. Issues legal + other são mescladas numa única passada por seção. Patches aplicados bottom-up após todas as chamadas LLM completarem.
+
+### Decisões
+- `asyncio.Semaphore(max_concurrent=5)` via `IUDEX_HIL_MAX_CONCURRENT_SECTIONS` — limita pressão na API
+- `original_content_snapshot` capturado uma vez — todos os prompts leem do mesmo snapshot
+- Retry logic permanece dentro de `_patch_section` (sob o semáforo, não bloqueia outras seções)
+- Fallback para documento inteiro continua sequencial (1 única chamada LLM)
+
+### Performance Esperada
+- 5 seções: ~50s → ~10s (5x)
+- 10 seções: ~100s → ~20s (5x)
+
+---
+
+## 2026-02-12 — UnifiedAuditPanel: MetricsGrid, StatusBar, ModuleBreakdown
+
+### Resumo
+Reescrito `UnifiedAuditPanel` para restaurar funcionalidades que existiam no antigo `QualityPanel`:
+grid de métricas (Fidelidade/Alertas/Correções HIL), barra de status (aprovação, timestamp, HIL, taxa compressão),
+badges de omissões/distorções no módulo de validação, e renderização de coverage como prosa (não issues individuais).
+
+### Arquivos Modificados
+- `apps/web/src/components/dashboard/unified-audit-panel.tsx` — Reescrito com novos sub-componentes: `MetricsGrid`, `StatusBar`, `formatTimestamp`; props `validationReport` e `analysisResult` adicionadas; `ModuleBreakdown` enriquecido (badges omissões/distorções, coverage como prosa)
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Passado `validationReport={jobQuality?.validation_report}` e `analysisResult={jobQuality?.analysis_result}` ao `<UnifiedAuditPanel>`
+
+### Decisões
+- Dados já vinham do backend (`quality.validation_report`, `quality.analysis_result`) — mudança puramente de frontend
+- Coverage check renderiza como bloco monospace (prosa) ao invés de lista de issues, evitando bug visual
+- Score de fidelidade (validação) exibido separadamente do score consolidado (min(preventive, validation))
+- StatusBar mostra taxa de compressão com alerta visual quando < 70%
+
+---
+
+## 2026-02-12 — Melhorias UI Transcrição + Desabilitar Fallback + Registry Updates
+
+### Resumo
+Desabilitado fallback automático de engine (AAI→Whisper), melhorado polling de progresso na UI, corrigido SSE streams cruzando entre jobs, e adicionado atualização do registry no emit para progresso em tempo real.
+
+### Arquivos Modificados
+- `apps/api/app/services/transcription_service.py` — `_is_provider_fallback_allowed()` retorna `False` quando usuário escolheu engine específica; `emit()` atualiza registry a cada 3s via `job_id`
+- `apps/api/app/api/endpoints/transcription.py` — Adicionado `job_id=` em 4 call sites de `process_file_with_progress`
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Polling 5s para jobs ativos; AbortController para cancelar SSE streams stale
+- `apps/web/scripts/check-node-version.cjs` — Relaxado check de versão Node (permite v25+)
+
+### Decisões
+- Fallback off por padrão quando engine é escolhida pelo usuário (respeitar escolha)
+- Registry update a cada 3s (não a cada emit) para evitar overhead de I/O
+- AbortController ref para evitar state corruption quando usuário troca de job
+
+---
+
+## 2026-02-12 — RunPod Custom Endpoint + Fix output=None + Importação AssemblyAI
+
+### Resumo
+Recriação de endpoint RunPod com imagem Docker custom (`nicholasjacob1990/faster-whisper-diarize:v1`), correção do bug crítico `output=None` no RunPod, e importação de 2 jobs AssemblyAI para o sistema de cache do Iudex.
+
+### Problemas Resolvidos
+1. **RunPod `output=None`**: Worker recebia payload com 7 aliases de URL + campo `"transcription": "plain_text"` que confundiam o handler. Simplificado para `{"audio": url}` apenas.
+2. **GraphQL API mudou**: RunPod migrou de `api.runpod.ai/graphql` → `api.runpod.io/graphql`.
+3. **Endpoint throttled**: Primeiro endpoint criado com GPUs limitadas (AMPERE_24,16). Recriado com seleção ampla.
+4. **HMAC token mismatch**: Testes manuais usavam `hashlib.sha256()` mas código usa `hmac.new()` com `settings.SECRET_KEY`.
+5. **Cache AAI miss para PGM_RJ**: SHA-256 dos arquivos PGM_RJ difere dos temp_cloud. Criados cache entries para hashes reais.
+
+### Arquivos Modificados
+- `apps/api/app/services/runpod_transcription.py` — Simplificação do `submit_job()`: removido `_with_audio_aliases()` e `"transcription": "plain_text"`
+- `apps/api/.env` — `RUNPOD_ENDPOINT_ID=e7apudo9b603of` (custom, 2x mais rápido que official)
+
+### Arquivos Criados
+- `apps/api/storage/aai_transcripts/9df6d990*.json` — Cache AAI para `15_Administrativo_Tributario.mp3`
+- `apps/api/storage/aai_transcripts/7e42a07a*.json` — Cache AAI para `17_Tributario_Eduardo_Sobral.mp3`
+- `apps/api/storage/aai_transcripts/d0032d38*.json` — Cache AAI para `15_Administrativo_Tributario.mp4`
+- `apps/api/storage/aai_transcripts/f029905f*.json` — Cache AAI para `17_Tributario_Eduardo_Sobral.mp4`
+- `storage/assemblyai_cache/*.json` — Respostas completas AAI (raw + iudex format)
+
+### RunPod Endpoints (estado atual)
+| Endpoint | ID | Imagem | Uso |
+|---|---|---|---|
+| Custom (ativo) | `e7apudo9b603of` | `nicholasjacob1990/faster-whisper-diarize:v1` | Transcrição principal |
+| Official (backup) | `ey0lpri25p5y7g` | `runpod/ai-api-faster-whisper:1.0.10` | Backup |
+| Diarização | `m4rtd819crtvmw` | Custom pyannote | Diarização separada |
+
+### Testes Manuais
+- Custom endpoint: 13.6s, 50 segments, 5582 chars, 1007 word timestamps
+- Official endpoint: 26.1s, mesma output
+- **Custom 2x mais rápido**
+
+### Jobs AssemblyAI Importados
+- `3061c7ac` → `15_Administrativo_Tributario` (235min, 187772 chars)
+- `d50683b9` → `17_Tributario_Eduardo_Sobral` (266min, 201898 chars, 4 speakers)
+
+### Pendências
+- Re-testar transcrição RunPod via UI após fix do payload
+- Testar cache AAI para arquivos PGM_RJ via UI (modo APOSTILA)
+
+---
+
+## 2026-02-11 — Unificação do Sistema de Auditoria (3 abas → 1)
+
+### Resumo
+Unificação completa do sistema de auditoria na página de transcrição. Antes: 3 abas divergentes (Qualidade, Auditoria Preventiva, Correções HIL) lendo de fontes diferentes para o mesmo job. Agora: 1 aba "Auditoria" com fonte canônica única (`audit_summary.json` para visão, `audit_issues` para ações HIL).
+
+### Arquivos Criados
+- `apps/web/src/lib/audit-types.ts` — Tipos TS: AuditSummary, AuditModule, AuditActionableIssue
+- `apps/web/src/components/dashboard/unified-audit-panel.tsx` — Painel unificado: ScoreCard, ModuleBreakdown (Accordion), ActionableIssuesList
+
+### Arquivos Modificados
+- `apps/api/app/api/endpoints/transcription.py` — Helpers `_build_audit_context_from_job()` e `_regenerate_audit_for_job()`, endpoint `POST /jobs/{id}/regenerate-audit`, regeneração automática no `POST /jobs/{id}/quality`
+- `apps/web/src/lib/api-client.ts` — `regenerateTranscriptionAudit()`, payload expandido em `updateTranscriptionJobQuality`
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Substituição de 3 tabs por 1 "Auditoria" (non-hearing), hearing mode inalterado
+
+### Arquivos Deprecados (mantidos por 1 ciclo)
+- `apps/web/src/components/dashboard/quality-panel.tsx`
+- `apps/web/src/components/dashboard/audit-issues-panel.tsx`
+- `apps/web/src/components/dashboard/preventive-audit-panel.tsx`
+
+### Decisões Tomadas
+- Regeneração full pipeline (5 plugins) no `POST /quality`, não no `/apply-revisions`
+- Score policy: `min(preventive_score, validation_score)` quando ambos existem
+- `audit_issues` (IDs estáveis MD5) como fonte canônica de ações HIL
+- Hearing mode completamente inalterado (mantém aba qualidade separada)
+- Troca imediata de UI (sem feature flag)
+
+### Testes
+- 18 testes de auditoria: PASSED
+- 56 testes transcription/quality/hearing: PASSED
+- TypeScript: compila sem erros
+- Next.js: compila sem erros (9606 módulos)
+
+### Nota
+- Teste pré-existente `test_unified_audit_endpoint.py` já estava quebrado (importa `app.schemas.audit_unified` que nunca existiu) — não é das nossas mudanças
+
+---
+
+## 2026-02-11 — Transcrição Paralela: RunPod WhisperX + Fila Inteligente + Diarização
+
+### Resumo
+Implementação completa de transcrição paralela com RunPod Serverless (WhisperX worker) incluindo:
+- Provider registry com semáforo per-provider (Whisper sequencial, AssemblyAI/RunPod paralelo)
+- RunPod async HTTP client adaptado para WhisperX (diarização com pyannote)
+- Audio serve endpoint com HMAC tokens para RunPod workers
+- Multi-upload frontend com jobs independentes e seletor de engine
+- Configuração da conta RunPod via Playwright ($10 créditos, WhisperX endpoint)
+
+### Arquivos Criados
+- `apps/api/app/services/transcription_providers.py` — Provider registry (Whisper, AssemblyAI, ElevenLabs, RunPod)
+- `apps/api/app/services/runpod_transcription.py` — RunPod async client (WhisperX format, diarização)
+- `apps/api/tests/test_runpod_client.py` — 14 testes (submit, poll, cancel, extract com/sem diarização)
+- `apps/api/tests/test_transcription_queue.py` — 12 testes (semáforos per-provider, concurrency)
+
+### Arquivos Modificados
+- `apps/api/app/api/endpoints/transcription.py` — Semáforos per-provider + audio serve endpoint
+- `apps/api/app/services/transcription_service.py` — Integração RunPod no fluxo SSE
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Multi-upload + engine selector
+- `apps/web/src/lib/api-client.ts` — Tipo `runpod` no union de engines
+- `apps/api/.env` — RUNPOD_API_KEY, RUNPOD_ENDPOINT_ID, HUGGINGFACE_ACCESS_TOKEN
+- `apps/web/.env.local` — NEXT_PUBLIC_RUNPOD_ENABLED=true
+
+### Decisões Tomadas
+- **WhisperX** em vez de Faster Whisper: inclui diarização (pyannote) e word alignment
+- Input field `audio_file` (WhisperX) vs `audio` (Faster Whisper)
+- Endpoint WhisperX (`x9kudgpn8mjsva`): GPU 80GB/48GB Pro, max 2 workers, US-TX-3
+- Diarização ativada por padrão quando `HUGGINGFACE_ACCESS_TOKEN` disponível
+- `extract_transcription()` retorna `speakers` e `has_diarization` fields
+
+### RunPod Config
+- API Key: `rpa_44P...` (em .env)
+- WhisperX Endpoint: `x9kudgpn8mjsva`
+- Faster Whisper Endpoint: `yt0im4t61ncmbr` (pode ser deletado — não tem diarização)
+
+### Testes
+- 26 testes passando (pytest) — `test_runpod_client.py` + `test_transcription_queue.py`
+
+---
+
+## 2026-02-11 — Pesquisa e Plano: Iudex como Claude Cowork
+
+### Resumo
+Pesquisa extensiva com 6+ subagentes em paralelo para mapear toda a arquitetura do Claude Cowork, plugin system, MCP servers, e SDKs de agentes (Claude, OpenAI, Gemini). Plano documentado para transformar o Iudex numa plataforma Cowork-like multi-provider.
+
+### Arquivos Criados
+- `docs/PLANO_IUDEX_COWORK.md` — Plano completo de 16 seções com arquitetura, fases, arquivos, riscos
+
+### Pesquisa Realizada (6 agentes paralelos)
+1. **Iudex Backend** — 43 models, 30+ routers, skills/workflows/MCP/RAG/playbooks
+2. **Iudex Frontend** — React Flow workflow builder, 17 node types, Zustand stores, SSE streaming
+3. **Claude Cowork** — 11 plugins oficiais, sistema de conectores `~~category`, hooks, .plugin format
+4. **OpenAI Agents SDK** — Agent, Runner, Handoffs, Guardrails, MCP, Sessions, Tracing
+5. **Gemini ADK** — Sequential/Parallel/LoopAgent, MCPToolset, A2A Protocol, Callbacks
+6. **MCP Ecosystem** — 25+ servers catalogados (PJe, BRLaw, DataJud, Office, Notion, Slack, etc.)
+
+### Decisões Tomadas
+- Abordagem híbrida multi-provider: Claude para raciocínio jurídico, OpenAI para orquestração, Gemini para pesquisa paralela
+- Plugin system inspirado no Cowork mas integrado ao backend existente do Iudex
+- v1: 6 fases (~10-14 sem) — revisado após descoberta que SDKs já estavam integrados
+- v2: 3 fases (~4-6 sem) — Commands + Hooks -> MCP + Connectors -> Plugin System + UI
+- Connector abstraction (`~~category`) simplificado (config por tenant, não registry completo)
+
+### Auto-Crítica do Plano v1
+- Fase 2 (Multi-Provider) era 100% redundante — executors e adapters já existiam
+- Skills UI já existe com wizard, editor, validation — não precisa criar
+- Plano reduziu de ~25 para ~12 novos arquivos
+
+### Cotejo com 10 Subagentes (v2 → v2.1)
+- Descoberto que `slash-command-menu.tsx` já tem 15 SystemCommands (v2 dizia "não existe")
+- Descoberto que `marketplace/page.tsx` já tem search/filter/install (v2 dizia "UI não existe")
+- Observabilidade in-memory identificada como gap real → adicionada persistence em DB
+- SubAgent definitions (agents/*.md do Cowork) adicionadas ao plugin manifest
+- Fases reordenadas: Plugin Foundation primeiro (pré-requisito para commands/hooks)
+
+### Incorporação INVENTARIO + BACKEND_DOMAIN_MAP (v2.1 → v2.2)
+Leitura dos inventários revelou 7+ redundâncias adicionais no plano:
+- `command_service.py` JÁ EXISTE (234 linhas, 9 commands hardcoded) — plano propunha criar
+- DataJud COMPLETO: `djen_service.py` (734 linhas) + SDK tools + watchlist + sync — plano propunha criar MCP wrapper
+- `mcp-legal-server/main.py` já existe com RPC, ACL, rate limiting
+- `AgentPool` (spawn/cancel/list) + `ParallelAgentsNode` (LangGraph) já existem — SubAgentDefinition redundante
+- Knowledge API (5 endpoints: legislação, jurisprudência, web, citations, shepardize) já existe
+- Tribunais API (13 endpoints: credenciais, processos, peticionamento) já existe
+- Marketplace API (6 endpoints: categories, install, review) já existe
+
+**Resultado**: Plano v2.2 reduzido a ~8 novos arquivos, 2 fases, 3-4 semanas. Fase MCP Legal ELIMINADA.
+
+### Arquivos Criados/Atualizados
+- `docs/PLANO_IUDEX_COWORK.md` — Plano v1 (6 fases, referência)
+- `docs/PLANO_IUDEX_COWORK_v2.md` — **Atualizado para v2.2** (2 fases, inventário completo)
+
+### Próximos Passos
+- Início da Fase 1 (Plugin Foundation + Commands extend + Hooks, ~2 semanas)
+
+---
+
+## 2026-02-11 — Correção de 15+ falhas de testes + Infraestrutura Docker RAG
+
+### Resumo
+Identificadas e corrigidas 15+ falhas de teste na suite completa (1909 testes). Infraestrutura Docker (Qdrant, OpenSearch, Neo4j) instalada e configurada.
+
+### Resultados
+| Métrica | Antes | Depois |
+|---------|-------|--------|
+| Passed | 1822 | **1858** |
+| Failed | 13 | **0** (1 intermitente) |
+| Skipped | 74 | **50** |
+
+### Arquivos Alterados
+- `app/api/endpoints/chats.py` — Fix `show_thinking_step` → `thinking_enabled` (NameError)
+- `app/services/ai/skills/skill_builder.py` — `validate_skill_markdown` não retorna cedo quando frontmatter tem keys válidas; permite detecção de conflitos
+- `app/services/quality_service.py` — Removido `import os` duplicado no finally; adicionado processamento de `heading_semantic_issues` com refinamento AI
+- `tests/test_chat_skill_resolution.py` — Atualizado para desempacotar 3 valores de `_resolve_matched_skill_prompt`
+- `tests/test_skill_builder.py` — Adicionados 3 triggers ao markdown de teste
+- `tests/test_kg_builder.py` — `hasattr()` em vez de `in` para `GraphSchema` do neo4j-graphrag
+- `tests/test_quality_structural_fixes.py` — Removido kwarg `mode` obsoleto
+- `tests/test_hearing_format_source.py` — Lambda `*args, **kwargs` + monkeypatch `_infer_speaker_roles_with_llm`
+- `tests/rag/test_qdrant_service.py` — Bridge `query_points` → `search` para mocks
+- `tests/rag/test_qdrant_integration.py` — Helper `_search()` compatível com query_points API
+- `docker-compose.rag.yml` — Qdrant v1.7.4 → v1.12.6
+
+### Infraestrutura Docker
+- **Qdrant** v1.12.6 em localhost:6333
+- **OpenSearch** 2.11.0 em localhost:9200 (security disabled para testes)
+- **Neo4j** 5.21.0-enterprise em localhost:8687 (Bolt)
+- Pacotes instalados: `neo4j-graphrag`, `opensearch-py`, `qdrant-client`, `msal`, `botbuilder-core`
+
+---
+
+## 2026-02-11 — Hierarquia: 5 melhorias anti-fragmentação (v2.41)
+
+### Problema
+`mlx_vomo.py` gerava muitos tópicos ## planos (flat) sem hierarquia. Aspectos de um mesmo tema viravam H2 separados ao invés de subtópicos (###).
+
+### 5 Melhorias Implementadas
+
+**1. Pré-filtro da estrutura antes dos chunks**
+- Portadas `filtrar_niveis_excessivos()` e `simplificar_estrutura_se_necessario()` de `format_transcription_gemini.py`
+- Remove itens com nível > 3, simplifica para níveis 1-2 se estrutura > 60 linhas
+
+**2. Separação estrutura de corte vs hierarquia**
+- `global_structure` (com ABRE/FECHA) → usado em `dividir_sequencial` para cortes
+- `hierarchy_structure` (limpa via `limpar_estrutura_para_review`) → usada para guiar H2/H3 nos chunks
+- Evita que âncoras verbatim poluam o guia hierárquico
+
+**3. Merge semântico de títulos repetidos**
+- `renumber_headings` agora usa `SequenceMatcher` (ratio > 0.85) para fundir títulos quase-duplicados entre fronteiras de chunks
+- Impede inflação de tópicos por repetição
+
+**4. Auditoria final lê formato numerado**
+- `final_structure_audit` agora reconhece tanto `##`/`###` quanto `1.`/`1.1.` no mapeamento
+- Remove ABRE/FECHA das comparações
+- Antes, a auditoria ignorava o mapeamento inteiro porque só procurava markdown headers
+
+**5. Regra de granularidade H2 no PROMPT_MAPEAMENTO**
+- Regra 6: "Abra novo tópico nível 1 SOMENTE quando macroassunto mudar"
+- Regra 7: Anti-fragmentação explícita com exemplos correto/errado
+
+### Prompts Também Editados (sessão anterior)
+- `PROMPT_STRUCTURE_APOSTILA`: Tabela de 3 níveis, exemplos, anti-fragmentação
+- `PROMPT_STRUCTURE_REVIEW`: Anti-fragmentação + marcos legais como ###
+- `PROMPT_STRUCTURE_REVIEW_LITE`: Mesmas regras
+
+### Arquivos Alterados
+- `mlx_vomo.py` — 7 edições (2 funções novas, pipeline, renumber_headings, audit, mapeamento, 3 prompts)
+
+---
+
+## 2026-02-11 — Fix: Tabelas ausentes em transcrições + Melhorias de granularidade
+
+### Problema
+Tabelas não apareciam nas transcrições pela UI/API, embora no CLI saíssem corretamente.
+
+### Causa Raiz
+1. `max_output_tokens=16384` no `mlx_vomo.py` era insuficiente — tabelas são geradas no final de cada chunk e eram truncadas
+2. Detecção de tabela ausente (`_has_incomplete_table`) só detectava tabelas parciais, não completamente ausentes
+3. Post-processing não reposicionava tabelas para fim de seção
+4. `_auto_apply_structural_fixes` e `_auto_apply_content_fixes` no pipeline da API podiam remover tabelas sem proteção
+
+### Alterações em `mlx_vomo.py`
+- `max_output_tokens`: 16384 → 32000 (alinhado com `format_transcription_gemini.py`)
+- Threshold de parágrafos APOSTILA: 900 → 500 chars (mais granular)
+- Adicionada instrução de isolar Questões/Exercícios em blockquotes no `PROMPT_STYLE_APOSTILA`
+- `mover_tabelas_para_fim_de_secao` adicionado ao pipeline pós-processamento (passada 2.8)
+- Nova função `_has_missing_table()`: detecta títulos 📋 sem tabela correspondente
+- `_retry_incomplete_table` agora detecta tabelas incompletas E ausentes
+
+### Alterações em `transcription_service.py`
+- Guarda em `_auto_apply_structural_fixes`: se auto-fix remove todas as tabelas, reverte para original
+- Guarda em `_auto_apply_content_fixes`: mesma proteção contra perda de tabelas pelo LLM
+
+### Arquivos Alterados
+- `mlx_vomo.py` — 5 edições (tokens, threshold, prompt, pipeline, retry)
+- `apps/api/app/services/transcription_service.py` — 2 guardas de proteção de tabelas
+
+---
+
+## 2026-02-11 — Verificação: Marked com `breaks: true` e GFM Pipe Tables
+
+### Pergunta Original
+Investigar se `parseMarkdownToHtmlSync()` em `markdown-parser.ts` tem problemas com `breaks: true` e tabelas GFM pipe:
+1. O `breaks: true` interfere com a detecção de blocos de tabela?
+2. Se o LLM gerar `<table>` HTML bruto, será escapado pelo renderer?
+
+### Testes Realizados
+Usando `marked@17.0.1` (versão atual no projeto):
+
+**Teste 1: Impacto de `breaks: true` nas tabelas**
+- COM `breaks: true`: Tabelas pipe markdown parseiam corretamente ✓
+- SEM `breaks: true` (controle): Mesmo resultado ✓
+- Conclusão: **`breaks: true` NÃO interfere com tabelas GFM** — o parser trata tabelas como blocos antes de aplicar `breaks`
+
+**Teste 2: Tabelas com newlines singulares**
+- Input: `| Col1 | Col2 |\n|------|------|\n| A | B |\nParagraph here`
+- Resultado: Primeira tabela parseada corretamente, depois a linha "Paragraph here" foi colocada em uma nova linha de tabela (não é exatamente markdown-correto, mas marked faz assim)
+- COM double newline: Funciona corretamente (tabela separada do parágrafo)
+
+**Teste 3: HTML Tables (raw HTML gerado por LLM)**
+- Input: `<table><tr><td>A</td><td>B</td></tr></table>`
+- Output COM renderer `html()` que escapa: `&lt;table&gt;...&lt;/table&gt;` ✓
+- Conclusão: **HTML tables geradas pelo LLM SERÃO escapadas** e renderizadas como texto, não como tabelas visuais
+
+**Teste 4: CRLF line endings**
+- Windows-style CRLF: Sem problemas, marked normaliza internamente ✓
+
+### Conclusão Final
+1. **`breaks: true` é seguro para tabelas** — não há interferência
+2. **Pipe markdown tables funcionam normalmente** ✓
+3. **Potencial problema real: Se LLM gerar HTML `<table>`**
+   - Será escapado para `&lt;table&gt;` (segurança boa)
+   - Mas usuário vê texto bruto, não tabela visual
+   - Solução: Antecipar e treinar LLM para gerar pipe tables, não HTML tables
+
+### Arquivos Criados/Verificados
+- `/apps/web/src/lib/markdown-parser.ts` (v17.0.1) — verificado ✓
+- `/apps/web/package.json` (marked@17.0.1)
+- `/apps/web/src/lib/__tests__/markdown-parser-tables.test.ts` — suite de testes (Jest)
+- `/scripts/test-markdown-tables.js` — script de verificação manual (5/5 testes passam ✓)
+- `/docs/MARKDOWN_PARSER_ANALYSIS.md` — análise completa
+- `/docs/MARKDOWN_PARSER_ENHANCEMENTS.md` — opções de melhoria (opcional)
+
+### Status Final
+✓ `breaks: true` NÃO interfere com tabelas GFM
+✓ Pipe markdown tables parseiam corretamente
+✓ HTML tables são escapadas (segurança)
+✓ Código está funcional e seguro — MANTER ATUAL
+⚠ Se LLM usar HTML tables, aparecem como texto (por design)
+→ Solução: Treinar LLM para usar pipe tables
+
+---
+
+## 2026-02-10 — Fix HIL/Audit Tab Navigation + Diff Formatado
+
+### Contexto
+Após a unificação do sistema de auditoria, os diffs e aprovações no painel HIL pararam de funcionar. Além disso, os diffs eram exibidos em texto bruto (tags HTML/markdown visíveis).
+
+### Bugs Corrigidos
+1. **Tab navigation quebrada**: `setActiveTab('hil')` apontava para tab inexistente — a tab 'hil' foi substituída por 'audit' mas 4 referências não foram atualizadas
+2. **Diff confirmation ausente**: AuditDashboard aplicava correções diretamente sem mostrar DiffConfirmDialog — alterado para passar pelo fluxo de `pendingRevision` + `showDiffConfirm`
+
+### Feature: Diff Formatado no DiffConfirmDialog
+- Nova tab "Diff Formatado" como default (3 tabs: Formatado, Bruto, Final)
+- Diff inline por palavra usando `diffWords()` em texto limpo (plain text extraído de HTML/markdown)
+- Destaque visual: verde para adições, vermelho+strikethrough para remoções
+- Comparação lado a lado "Original/Corrigido" com conteúdo renderizado (DOMPurify para HTML, react-markdown para markdown)
+- Detecção automática de tipo de conteúdo (HTML vs markdown)
+- Tab Preview também melhorada para renderizar HTML com DOMPurify
+
+### Arquivos Modificados
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — 4x `setActiveTab('hil')` → `setActiveTab('audit')` + wiring do DiffConfirmDialog via `setPendingRevision`
+- `apps/web/src/components/dashboard/diff-confirm-dialog.tsx` — Rewrite completo com tab formatada, utilities de plain text, detecção HTML/markdown
+
+### Verificação
+- `npx tsc --noEmit` — OK (zero erros)
+
+---
+
+## 2026-02-10 — Unificação do Sistema de Auditoria
+
+### Contexto
+Sistema de auditoria fragmentado em 3 painéis (Quality, Preventive, HIL) com terminologia inconsistente, detecção duplicada e fluxo manual. Unificado em uma aba "Auditoria" única para documentos.
+
+### Arquivos Criados
+- `apps/api/app/schemas/audit_unified.py` — Schemas Pydantic unificados (tipos, severidades, dedup, mapeamento)
+- `apps/api/app/api/endpoints/audit_unified.py` — Endpoints `/quality/unified-audit` e `/quality/unified-apply`
+- `apps/web/src/lib/unified-audit.ts` — Tipos TS, parseUnifiedResponse, mergeFromLegacy, computeHealth
+- `apps/web/src/components/dashboard/audit-dashboard.tsx` — Componente principal com sub-tabs (Issues, Resumo, Detalhes)
+- `apps/web/src/components/dashboard/audit-health-bar.tsx` — Barra compacta visível em todas as tabs
+
+### Arquivos Modificados
+- `apps/api/app/api/routes.py` — Registro do router audit_unified
+- `apps/web/src/lib/api-client.ts` — fetchUnifiedAudit + applyUnifiedAuditFixes
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Substituição de 3 tabs por 1 aba "Auditoria" unificada + health bar
+
+### Decisões
+- Preservado o QualityPanel (variant='dashboard') na sub-tab "Resumo"
+- Diffs mostrados em formato rich (antes/depois estilizado), não git-style
+- Hearing mantém QualityPanel full separado sem alterações
+- Auto-conversão de issues preventivas (sem botão manual)
+- Backend reutiliza quality_service existente (não duplica)
+- Endpoints registrados em `/quality/unified-*` (prefix `/audit` já ocupado por auditoria jurídica)
+
+### Verificação
+- `npx tsc --noEmit` — OK (zero erros)
+- Python syntax check — OK
+
+### Revisão 1 — Correções de Código
+1. **CRÍTICO**: `quality_service.analyze_document()` não existia → `analyze_structural_issues()`
+2. **Dedup**: `parseUnifiedResponse()` sem dedup → adicionado `deduplicateByFingerprint()`
+3. **Confiança preventiva**: Hardcoded 0.6 → extrai do campo `confianca`
+4. **Severidade**: Falhava com `confianca` float → caminhos separados
+5. **Contagem módulos**: Antes do dedup → movida para depois
+6. **computeHealth**: Warning para qualquer issue → só `high+`
+7. **contentType hardcoded**: `"apostila"` → dinâmico baseado em documentMode
+8. **setTimeout**: Em `handleAutoApply` → aplica direto
+9. **Imports órfãos**: Removidos do page.tsx
+10. **Toast fallback**: Adicionado ao usar legacy merge
+
+### Revisão 2 — Correções de Lógica
+11. **Imports não usados**: `Copy`, `Eye`, `Card*`, `buildQualityHilIssues`, `AlertTriangle` → removidos
+12. **Health stale após apply**: Não recomputava → agora recomputa inline
+13. **Apply duplicado**: `handleAutoApply` copy-paste → extraído `applyIssues()` compartilhado
+14. **`normalizeType()` no-op**: Função morta → removida
+15. **Backend status inconsistente**: `warning if all_issues` → alinhado: `warning if high+`
+
+### Revisão 3 — Bug Crítico: Correções Silenciosamente Ignoradas
+**Causa raiz**: `apply_unified_hil_fixes` filtra por `type in structural_types` e `type in semantic_types`, mas a normalização convertia tipos específicos (`"duplicate_paragraph"`) para genéricos (`"structural"`), que NÃO estão nos sets. Resultado: 100% das issues eram ignoradas.
+
+**Correções aplicadas:**
+16. **`original_type` adicionado ao schema**: Preserva tipo raw para o backend apply
+17. **Endpoint restaura `original_type`**: No `/unified-apply`, `fix["type"] = fix["original_type"]`
+18. **`semantic_types` expandido**: Incluídos `hallucination`, `context`, `source_error`, `missing_reference` + aliases preventivos
+19. **Fallback por `fix_type`**: Se `type` não está em nenhum set, usa `fix_type == "content"` como critério
+20. **Feedback de zero mudanças**: Toast warning quando `applied === 0` ou conteúdo não mudou
+21. **`original_type` no frontend**: Preservado em `hilToUnified()` e `qualityFixToUnified()`
+
+### Revisão 4 — Fixes Não Aplicam: Campos Estruturais Perdidos
+**Causa raiz**: `UnifiedAuditIssue` (Pydantic) **não tinha `extra="allow"`**, então campos estruturais essenciais (`heading_line`, `old_title`, `new_title`, `title`, `line_index`, `table_heading`, `strategy`, etc.) eram silenciosamente descartados na serialização. Quando o frontend reenvia os issues para o apply, esses campos não existiam mais.
+
+**Correções aplicadas:**
+22. **`model_config = ConfigDict(extra="allow")`** em `UnifiedAuditIssue` — preserva campos extras na serialização
+23. **`normalize_quality_issues()` repassa campos originais**: `**extra_fields` spread no construtor para manter `heading_line`, `title`, `line_index`, etc.
+24. **`action` corrigido no `/unified-apply`**: Determina `INSERT/REPLACE` a partir do patch ao invés de copiar `action_summary` (texto descritivo), que não matchava no legacy fallback
+25. **Error reporting**: `skipped_fixes` agora incluídos no response como `content_error` + diagnostics
+26. **Toast order fix**: Warnings de `structural_error`/`content_error` movidos para ANTES do `return` no apply (eram unreachable quando applied===0)
+
+### Arquivos Adicionalmente Modificados (revisões)
+- `apps/api/app/services/quality_service.py` — Expandido `semantic_types` + fallback por `fix_type`
+- `apps/api/app/schemas/audit_unified.py` — `ConfigDict(extra="allow")` em `UnifiedAuditIssue`
+- `apps/api/app/api/endpoints/audit_unified.py` — Extra fields passthrough, action verb fix, logging, skipped_fixes relay
+- `apps/web/src/components/dashboard/audit-dashboard.tsx` — Toast order fix
+
+---
+
+## 2026-02-10 — Sincronização de PROMPT_FIDELIDADE entre CLI e UI
+
+### Contexto
+A transcrição gerada pela UI (web) no modo FIDELIDADE apresentava qualidade inferior à gerada pela CLI (mlx_vomo.py): 13% menos conteúdo, tabelas mais simples (4 colunas vs 5), sem tabela de pegadinhas, menos listas e negritos.
+
+### Causas Raiz Identificadas
+1. **3 cópias desincronizadas do prompt FIDELIDADE**: `mlx_vomo.py` (atualizado), `legal_prompts.py` (desatualizado), `lib/prompts.ts` (desatualizado)
+2. **legal_prompts.py** proibia bullet points (`NÃO USE BULLET POINTS`) enquanto mlx_vomo.py permitia com moderação
+3. **Tabela genérica 4 colunas** nas cópias da UI vs 5 colunas + tabela de pegadinhas no CLI
+4. **Sem instrução de speakers, encerramento, quebra semântica** nas cópias da UI
+5. O preset `data/prompts.ts` (TRANSCRIPTION_PRESETS) já estava atualizado com tabelas ricas
+
+### Arquivos Alterados
+- `apps/api/app/services/legal_prompts.py` — PROMPT_FIDELIDADE alinhado com mlx_vomo.py
+- `apps/web/src/lib/prompts.ts` — PROMPT_FIDELIDADE alinhado com mlx_vomo.py
+
+### Melhorias Implementadas
+- Bullet points permitidos com moderação (era PROIBIDO)
+- Tabela 5 colunas com "Dica de prova" + segunda tabela "Pegadinhas"
+- Instrução de completude (7 tipos de conteúdo obrigatório)
+- Regras de legibilidade detalhadas (quebra semântica, pontos de quebra, anti-telegráfico)
+- Identificação de speakers (`## [Disciplina] — Prof. [Nome]`)
+- Preservação de encerramentos de aula
+- Tratamento nuançado de gírias (parentesco factual vs gíria)
+- Regra anti-duplicação com tratamento de repetição de contexto
+
+---
+
+## 2026-02-10 — Validadores de Alucinação e Contexto no false_positive_prevention.py
+
+### Contexto
+Os validadores de `false_positive_prevention.py` não tinham tratamento específico para alucinações e problemas de contexto — ambos recebiam confidence 0.70 automática sem verificação contra RAW.
+
+### Arquivos Alterados
+- `apps/api/app/services/false_positive_prevention.py` — Adicionados 2 validadores + 1 helper:
+  - `_validate_hallucination()`: Extrai fragmentos factuais (nomes, leis, datas, números) e verifica se existem no RAW. Se existem → falso positivo. Se não → alucinação confirmada. Também faz fuzzy search do trecho completo e verifica presença no formatado.
+  - `_validate_context_issue()`: Verifica se a ambiguidade existe também no RAW (então não é erro de formatação), detecta marcadores de ambiguidade (pronomes, demonstrativos, "referido", "citado"), e valida correção sugerida contra RAW.
+  - `_extract_factual_fragments()`: Extrai nomes próprios, referências legais, datas, números e frases citadas para verificação determinística.
+- `apps/api/app/api/endpoints/quality_control.py` — `ConvertToHilRequest` com `hallucinations` e `context_issues`
+- `apps/api/app/services/quality_service.py` — `convert_to_hil_issues` processa alucinações e contexto
+
+### Resultados dos Testes
+- Alucinação real (conteúdo fabricado) → 1.00 very_high
+- Alucinação falso positivo (conteúdo no RAW) → 0.20 very_low (filtrada)
+- Contexto real (ambiguidade da formatação) → 1.00 very_high
+- Contexto falso positivo (mesmo texto no RAW) → 0.40 very_low (filtrada)
+
+---
+
+## 2026-02-10 — Fix: Conversão completa Quality → HIL + Race condition + UI didática
+
+### Contexto
+Usuário não conseguia converter problemas da aba Qualidade em issues para correção, nem regenerar a auditoria preventiva. Também pediu melhor nomenclatura de botões e que TODOS os tipos de problemas (alucinações, contexto, omissões, distorções, estruturais) fossem convertidos em issues HIL.
+
+### Arquivos Alterados
+- `apps/web/src/components/dashboard/quality-panel.tsx` — Botão "Detectar Problemas" (`handleConvertToUnifiedHil`) na toolbar do dashboard; renomeação de botões ("Recalcular Nota", "Checklist Legal"); em dashboard mode envia issues para aba HIL via `onConvertContentAlerts`; passa `hallucinations` e `context_issues` para API
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Reescrito `handleRecomputePreventiveAudit`: fetch direto via `downloadTranscriptionReport` + `finally`
+- `apps/web/src/lib/api-client.ts` — `convertToHilIssues` aceita `hallucinations` e `context_issues`
+- `apps/api/app/api/endpoints/quality_control.py` — `ConvertToHilRequest` com `hallucinations` e `context_issues`
+- `apps/api/app/services/quality_service.py` — `convert_to_hil_issues` processa alucinações (type="alucinacao", action=REPLACE) e problemas de contexto (type=ctx_type, action=REPLACE)
+
+### Bugs Corrigidos
+1. **Botão oculto**: "Validação Completa" estava escondido em modo dashboard → agora visível como "Detectar Problemas"
+2. **Conversão incompleta**: Só omissões/distorções/estruturais eram convertidas → agora alucinações e contexto também
+3. **Fluxo HIL**: Em dashboard mode, issues vão direto para aba Correções via `onConvertContentAlerts`
+4. **Race condition**: stale closure em `fetchPreventiveAudit` → bypass com download direto
+5. **Loading congelado**: faltava `finally { setPreventiveAuditLoading(false) }`
+
+---
+
+## 2026-02-10 — HIL Audit: Clareza de UI, Performance e Bug de Score
+
+### Contexto
+O sistema HIL de transcrições tinha problemas de clareza (issues descritivos demais, sem ação concreta) e performance (LLM calls sequenciais). Além disso, após aplicar correções num job, a nota de fidelidade caiu sem explicação visível.
+
+### Arquivos Alterados
+
+**Fase 1 — UI Clareza**
+- `apps/web/src/lib/preventive-hil.ts` — TYPE_LABELS cobrindo todas origens, `getTypeLabel()`, `action_summary` em `buildPreventiveHilIssues` e `buildQualityHilIssues`
+- `apps/web/src/components/dashboard/audit-issues-panel.tsx` — Agrupamento por prioridade (críticos/sugestões), evidence inline, banner de revalidação
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Wired `onRevalidate` prop
+
+**Fase 2 — Performance + SSE**
+- `apps/api/app/services/quality_service.py` — Paralelização de LLM calls com `asyncio.gather` + `Semaphore(3)`, guardrails de headings, `on_progress` callback
+- `apps/api/app/api/endpoints/transcription.py` — Novo endpoint `POST /apply-revisions-stream` com SSE
+- `apps/web/src/lib/api-client.ts` — `applyRevisionsStream()` com fallback
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — Consumo de SSE com progresso real no toast
+
+**Fase 3 — Evidence Backend**
+- `apps/api/app/services/preventive_hil.py` — `evidence_formatted` para omissões e contexto
+- `audit_fidelity_preventive.py` — `trecho_formatado` obrigatório no prompt JSON
+
+**Bug: Score caindo sem explicação**
+- `audit_fidelity_preventive.py` — `_build_compat_report` agora inclui `alucinacoes`, `problemas_contexto`, `pausar_para_revisao`
+- `apps/api/app/services/quality_service.py` — `validate_document` retorna `hallucinations`, `context_issues`, `pause_reason`
+- `apps/api/app/api/endpoints/quality_control.py` — `ValidateResponse` com novos campos
+- `apps/web/src/components/dashboard/quality-panel.tsx` — Interface, normalizeReport e UI para alucinações, problemas de contexto e motivo de pausa
+
+### Decisões Tomadas
+- Paralelização com semáforo de 3 (configurável via `IUDEX_HIL_CONCURRENCY`)
+- Patches aplicados bottom-to-top para estabilidade de índices
+- Guardrail: rejeita patches que alteram headings markdown
+- SSE mantém fallback para endpoint síncrono
+
+---
+
+## 2026-02-10 — Backend: Outlook Add-in Workflows + Email Trigger Autônomo
+
+### Contexto
+O Outlook Add-in tinha frontend completo com 3 abas (Resumo, Pesquisa, Workflows), mas a aba de Workflows não funcionava porque os endpoints de backend nunca foram implementados. Além disso, o sistema de email trigger precisava de renovação de subscriptions e configuração por usuário.
+
+### Arquivos Alterados
+
+**Feature 1: Backend dos Workflows do Add-in**
+- `apps/api/app/schemas/outlook_addin_schemas.py` — Adicionados `OutlookWorkflowTriggerRequest` e `OutlookWorkflowRunResponse`
+- `apps/api/app/models/workflow.py` — Removida FK de `workflow_runs.workflow_id`, ajustados relationships para `viewonly=True`
+- `apps/api/app/services/builtin_workflows.py` — **NOVO** — Registry com 4 workflows builtin (extract-deadlines, draft-reply, create-calendar-events, classify-archive)
+- `apps/api/app/workers/tasks/workflow_tasks.py` — Adicionadas tasks `run_builtin_workflow` e `renew_graph_subscriptions`
+- `apps/api/app/api/endpoints/outlook_addin.py` — Adicionados `POST /workflow/trigger` e `GET /workflow/status/{run_id}`
+- `alembic/versions/a1b2c3d4e5f6_drop_workflow_runs_fk.py` — **NOVO** — Migration para drop FK
+
+**Correções adicionais (runtime/integração)**
+- `apps/api/app/workers/tasks/workflow_tasks.py` — `run_triggered_workflow` agora aceita `run_id` opcional e atualiza o `WorkflowRun` existente (evita “runs zumbis” no status polling)
+- `apps/api/app/api/endpoints/outlook_addin.py` — Disparo de workflow UUID via Celery usando `send_task(...)` + validação de membership em org
+- `apps/api/app/services/workflow_triggers.py` — Dispatch de eventos via `send_task(...)` para evitar dependência de registro local de tasks no processo da API
+- `apps/api/app/workers/celery_app.py` e `apps/api/app/workers/tasks/__init__.py` — Ajuste de autodiscovery/imports para garantir que tasks de workflow sejam registradas no worker
+- `apps/api/app/api/endpoints/graph_webhooks.py` e `apps/api/app/api/endpoints/email_triggers.py` — `expirationDateTime` em RFC3339 UTC (`Z`) + require `GRAPH_WEBHOOK_SECRET`
+- `alembic/versions/a1b2c3d4e5f6_drop_workflow_runs_fk.py` — Drop FK agora inspeciona o nome real da constraint (robusto entre ambientes)
+- `apps/api/app/core/database.py` — `EmailTriggerConfig` importado no `init_db()` (suporta `create_all` sem Alembic)
+
+**Feature 2: Email Command Trigger**
+- `apps/api/app/models/email_trigger_config.py` — **NOVO** — Modelo de configuração de triggers por usuário
+- `apps/api/app/api/endpoints/email_triggers.py` — **NOVO** — CRUD completo + POST /subscribe
+- `apps/api/app/api/endpoints/graph_webhooks.py` — Completados lifecycle handlers + validação de sender
+- `apps/api/app/workers/celery_app.py` — Adicionado `graph-subscription-renewal` ao beat schedule
+- `apps/api/app/api/routes.py` — Registrada rota `/email-triggers`
+- `apps/api/app/models/__init__.py` — Adicionado import de `EmailTriggerConfig`
+- `alembic/versions/b2c3d4e5f6a7_create_email_trigger_configs.py` — **NOVO** — Migration para tabela
+
+### Decisões Tomadas
+- Removida FK em `workflow_runs.workflow_id` para permitir slugs builtin (ex: "extract-deadlines") sem violar constraints
+- Builtin workflows executam via chamadas diretas de IA (sem LangGraph) para simplicidade
+- Validação de sender: se o usuário tem configs com `authorized_senders`, apenas esses remetentes disparam workflows
+
+---
+
+## 2026-02-10 — Workflows: Hard Deep Research (Paridade com Ask) + UI
+
+### Contexto
+O modo “Hard Deep Research” (multi-provedor + loop agentico) existia no Ask chat, mas não estava disponível como nó no builder de Workflows nem como template com streaming de tokens/citações.
+
+### Arquivos Alterados
+- `apps/api/app/services/ai/deep_research_hard_service.py` — `study_done` agora inclui `sources` (deduplicadas) + `provider_summaries`
+- `apps/api/app/services/ai/workflow_compiler.py` — Novo node type `deep_research` (mode `hard|normal`), inclui `citations` em `step_outputs`
+- `apps/api/app/services/ai/workflow_runner.py` — Poller de `JobManager` para “token streaming” de nodes (ex: hard deep research) no SSE do run
+- `apps/api/app/scripts/seed_workflow_templates.py` — Template “Pesquisa Aprofundada” migrou para o node `deep_research` em hard mode
+- `apps/api/tests/test_workflow_deep_research_hard_streaming.py` — Teste garantindo streaming de tokens via workflow SSE
+- `apps/web/src/components/workflows/node-types/deep-research-node.tsx` — **NOVO** — Node UI
+- `apps/web/src/components/workflows/node-types/index.ts` — Registro do node `deep_research`
+- `apps/web/src/components/workflows/workflow-builder.tsx` — Node palette + defaults para `deep_research`
+- `apps/web/src/components/workflows/properties-panel.tsx` — UI de configuração do node (mode/effort/providers/timeouts/query/include_sources)
+
+### Verificação
+- `apps/api`: `pytest` para templates + streaming (`tests/test_workflow_templates_seed.py`, `tests/test_workflow_deep_research_hard_streaming.py`)
+- `apps/web`: `npm run type-check` e `npm run lint` (sem erros)
+
+### Verificação
+- Verificação de sintaxe em todos os 11 arquivos — OK
+- Migrations precisam ser executadas: `alembic upgrade head`
+
+---
+
+## 2026-02-10 — Workflows: Templates (Catalogo) + Seed via UI
+
+### Contexto
+Templates de workflow foram adicionados no seed (`seed_workflow_templates.py`), mas a UI podia não exibir nada quando o seed não foi executado no banco.
+
+### Mudanças
+- `apps/api/app/scripts/seed_workflow_templates.py`
+  - Docstring não fixa mais contagem (usa `len(TEMPLATES)`).
+  - Exposto `seed(seed_user_id=...) -> {inserted, skipped, total}` para reuso por endpoint/admin UI.
+- `apps/api/app/api/endpoints/workflows.py`
+  - `GET /workflows/catalog` agora filtra `is_template=True` (catálogo de templates).
+  - `POST /workflows/templates/seed` (ADMIN) para executar o seed via API.
+- `apps/web/src/lib/api-client.ts`
+  - `seedWorkflowTemplates()` para chamar o endpoint acima.
+- `apps/web/src/app/(dashboard)/workflows/catalog/page.tsx`
+  - Botão "Carregar templates" (e fallback no estado vazio) para executar seed e recarregar o catálogo.
+
+### Verificação
+- `npx tsc --noEmit` — OK
+- `python3 -c "ast.parse(...)"` — OK
+
+
+## 2026-02-10 — Sessão 164: Melhorar Clareza e Performance do HIL de Transcrições
+
+### Objetivo
+Melhorar a clareza da UI de auditoria HIL na página de transcrições e a performance na aplicação de correções.
+
+### Arquivos Editados
+
+**Frontend**
+- `apps/web/src/lib/preventive-hil.ts` — TYPE_LABELS (todas origens), getTypeLabel(), action_summary em buildPreventiveHilIssues e buildQualityHilIssues, remoção do fallback "Em análise" no verdict
+- `apps/web/src/components/dashboard/audit-issues-panel.tsx` — Reescrito: agrupamento por prioridade (críticos vs sugestões), labels legíveis via getTypeLabel(), evidence inline nos cards colapsados, action_summary, botão Revalidar Qualidade, severity warning com bg-red
+- `apps/web/src/app/(dashboard)/transcription/page.tsx` — onRevalidate wired (muda para aba quality), applyHilIssues migrado para SSE streaming com progress em tempo real (removido slowTimer)
+- `apps/web/src/lib/api-client.ts` — Novo método applyRevisionsStream() com SSE parsing + fallback automático para endpoint não-streaming
+
+**Backend**
+- `apps/api/app/services/quality_service.py` — fix_content_issues_with_llm paralelizado com asyncio.gather + Semaphore(3), heading guardrail (_validate_headings_preserved), on_progress callback, prompt instrução "NAO modifique headings"
+- `apps/api/app/api/endpoints/transcription.py` — Novo endpoint POST /apply-revisions-stream (SSE com progress events)
+- `apps/api/app/services/preventive_hil.py` — evidence_formatted preenchido para omissões e contexto (LLM snippet + section anchor fallback)
+- `audit_fidelity_preventive.py` — trecho_formatado adicionado ao schema JSON de omissoes_criticas e problemas_contexto
+
+### Decisões Tomadas
+- Paralelização usa Semaphore(3) configurável via IUDEX_HIL_CONCURRENCY; patches aplicados bottom-to-top após gather
+- Heading guardrail rejeita patches que alteram headings markdown (segurança para patches paralelos)
+- onRevalidate no HIL panel navega para aba "quality" em vez de duplicar lógica de revalidação
+- SSE fallback: se streaming falhar, applyRevisionsStream chama automaticamente o endpoint sync
+
+### Verificações
+- TypeScript tsc --noEmit: OK
+- Python ast.parse: OK (quality_service.py, transcription.py, preventive_hil.py, audit_fidelity_preventive.py)
+
+---
+
+## 2026-02-10 — Sessão 163: Template #27 (Minuta por Email) + Suporte a Anexos no Pipeline
+
+### Objetivo
+Criar Template #27 para geração automática de minuta via email do Outlook (sem HIL) e implementar suporte completo a encaminhamento de anexos em todo o pipeline de workflows assíncronos.
+
+### Arquivos Editados
+- `apps/api/app/services/graph_email.py` — Adicionado `get_attachments()`, parâmetro `attachments` em `send_email()` e `reply_email()` com pattern createReply→patch→add attachments→send
+- `apps/api/app/services/workflow_delivery.py` — Adicionado `_resolve_attachments()`, `_build_output_attachment()`, `_escape_html()`, embedding de citação original no path createReply
+- `apps/api/app/api/endpoints/graph_webhooks.py` — `_handle_mail_notification()` agora busca anexos via `get_attachments()` e inclui no event_data
+- `apps/api/app/scripts/seed_workflow_templates.py` — Template #27: Minuta Automática por Email (Outlook), docstring atualizada para 27 templates
+- `apps/web/src/components/workflows/properties-panel.tsx` — Checkbox "Encaminhar anexos do email original" nos panels email e outlook_reply
+
+### Decisões Tomadas
+- Graph API `/reply` não suporta anexos → usa createReply → draft → add attachments → send
+- Quando createReply é usado, citação original é perdida → delivery service embeda HTML original manualmente
+- `forward_attachments` (bool) e `attachment_filter` (lista de extensões) como config keys
+- `include_output_attachment` (bool) gera arquivo HTML do output como anexo Graph-compatible
+- `RAG_PRELOAD_EMBEDDINGS=false` necessário para startup quando quota OpenAI esgotada
+
+### Verificações
+- Python py_compile: OK em todos os arquivos modificados
+- TypeScript tsc --noEmit: OK
+- Servidor rodando em localhost:8000, health check OK
+
+---
+
+## 2026-02-10 — Sessão 162: Agendamento Configurável DJEN/DataJud + Verificações
+
+### Objetivo
+Permitir que o usuário configure frequência e horário do rastreamento de movimentações DJEN/DataJud na UI. Verificar e corrigir implementações anteriores (proactive.py faltante, typo Calendario).
+
+### Arquivos Criados
+- `apps/api/app/services/djen_scheduler.py` — Helper `compute_next_sync()` para daily, twice_daily, weekly, custom (croniter)
+- `apps/api/app/services/teams_bot/proactive.py` — Módulo de mensagens proativas Teams (faltava na implementação anterior)
+- `apps/api/alembic/versions/a866b468b088_add_sync_schedule_columns_to_watchlists.py` — Migração: 5 colunas em process_watchlist + djen_oab_watchlist
+
+### Arquivos Editados
+- `apps/api/app/models/djen.py` — +5 colunas em ProcessWatchlist e DjenOabWatchlist (sync_frequency, sync_time, sync_cron, sync_timezone, next_sync_at)
+- `apps/api/app/schemas/djen.py` — Campos de agendamento em Create/Response schemas, novo ProcessWatchlistUpdate
+- `apps/api/app/api/endpoints/djen.py` — POST salva schedule + compute next_sync, +2 PATCH endpoints para atualizar agendamento
+- `apps/api/app/workers/tasks/djen_tasks.py` — Nova task `djen_scheduled_sync` (5min via Beat), verifica next_sync_at por watchlist
+- `apps/api/app/workers/celery_app.py` — Adicionado `djen-scheduled-sync` ao beat_schedule
+- `apps/web/src/app/(dashboard)/cnj/page.tsx` — Formulários com select de frequência + input de horário, cards exibem frequência/horário/próximo sync
+- `apps/web/src/components/workflows/node-types/delivery-node.tsx` — Fix typo "Calendario" → "Calendário"
+- `apps/api/app/core/microsoft_auth.py` — Rejeita usuários Microsoft sem conta Iudex (ValueError → 403)
+- `apps/api/app/api/endpoints/microsoft_sso.py` — Catch ValueError, retorna HTTP 403
+
+### Decisões Tomadas
+- Celery Beat a cada 5 min verifica `next_sync_at <= now` por watchlist individual (mais eficiente que APScheduler)
+- `compute_next_sync()` retorna datetime UTC; suporta croniter como dependência opcional
+- Legacy `djen_daily_sync` mantida como fallback para watchlists sem next_sync_at
+
+### Verificações
+- Python py_compile: OK em 6 arquivos
+- TypeScript tsc --noEmit: OK
+- Alembic upgrade head: OK (migração aplicada)
+
+---
+
+## 2026-02-10 — Sessão 161: Microsoft SSO no Word Add-in
+
+### Objetivo
+Adicionar autenticação Microsoft SSO (NAA + fallback popup) ao Word Add-in existente, mantendo email/senha como fallback.
+
+### Arquivos Criados
+- `apps/office-addin/src/auth/msal-config.ts` — Configuração MSAL com NAA + fallback PCA (mesmo padrão do Outlook add-in, porta 3100)
+- `apps/office-addin/.env` — Variáveis VITE_AZURE_CLIENT_ID e VITE_API_URL
+
+### Arquivos Editados
+- `apps/office-addin/package.json` — Adicionado `@azure/msal-browser: ^3.27.0`
+- `apps/office-addin/src/api/client.ts` — Nova função `microsoftSSOLogin()` que envia token Microsoft ao backend via `POST /auth/microsoft-sso`
+- `apps/office-addin/src/stores/auth-store.ts` — Novo método `loginWithMicrosoft()` usando acquireToken + microsoftSSOLogin, logout agora também faz msalLogout
+- `apps/office-addin/src/components/auth/LoginForm.tsx` — Botão "Entrar com Microsoft" como primário, email/senha colapsado como fallback
+- `apps/office-addin/manifest.xml` — Adicionado `<WebApplicationInfo>` com client ID e scope User.Read
+
+### Configuração Azure AD
+- Adicionados SPA redirect URIs: `https://localhost:3100`, `http://localhost:3100` ao App Registration existente
+- Reusado mesmo App Registration `c256c4ab-8325-442b-bd9c-36c112e14eb7`
+
+### Verificações
+- `tsc --noEmit` — OK (sem erros)
+- `npm install` — OK (@azure/msal-browser 3.30.0 instalado)
+
+---
+
+## 2026-02-10 — Sessão 160: Workflows Assíncronos Event-Driven com Triggers e Entregas
+
+### Objetivo
+Criar workflows que executam independente do app estar aberto, disparados por eventos externos (Teams, Outlook, DJEN, agendamentos) com entrega automática de resultados (email, Teams, calendário, webhook).
+
+### Arquivos Criados
+- `apps/api/app/services/graph_email.py` — Email via Microsoft Graph (send, reply, get details)
+- `apps/api/app/services/graph_calendar.py` — Calendar via Microsoft Graph (create, list events)
+- `apps/api/app/services/workflow_delivery.py` — DeliveryService: despacha resultados para 5 destinos (email, teams_message, calendar_event, webhook_out, outlook_reply)
+- `apps/api/app/services/workflow_triggers.py` — TriggerRegistry: encontra workflows matching por tipo de trigger e despacha via Celery
+- `apps/web/src/components/workflows/node-types/trigger-node.tsx` — Nó visual trigger (amber/Zap)
+- `apps/web/src/components/workflows/node-types/delivery-node.tsx` — Nó visual delivery (green/Send)
+
+### Arquivos Editados
+- `apps/api/app/workers/tasks/workflow_tasks.py` — Nova task `run_triggered_workflow` + `_run_triggered()` com dispatch de deliveries
+- `apps/api/app/services/ai/workflow_compiler.py` — 2 novos node factories (`trigger`, `delivery`), campos `trigger_event` e `delivery_results` no WorkflowState
+- `apps/api/app/services/teams_bot/handlers.py` — `handle_workflow_command()` agora despacha via TriggerRegistry
+- `apps/api/app/api/endpoints/graph_webhooks.py` — `_handle_mail_notification()` fetch email + dispatch trigger
+- `apps/api/app/services/djen_sync.py` — Dispatch trigger após novas intimações DJEN
+- `apps/web/src/components/workflows/node-types/index.ts` — Registro de TriggerNode e DeliveryNode
+- `apps/web/src/components/workflows/workflow-builder.tsx` — NODE_PALETTE com trigger e delivery, defaults no addNode
+- `apps/web/src/components/workflows/properties-panel.tsx` — Painéis completos para trigger (5 tipos) e delivery (5 tipos)
+- `apps/api/app/scripts/seed_workflow_templates.py` — 5 templates assíncronos (#22-26): Auto-Análise Email, Monitor DJEN, Minuta Teams, Relatório Matinal, Webhook API
+
+### Decisões Tomadas
+- Email/Calendar via Microsoft Graph API (tokens OBO já existentes no Redis)
+- 5 tipos de trigger: teams_command, outlook_email, djen_movement, schedule, webhook
+- 5 tipos de delivery: email, teams_message, calendar_event, webhook_out, outlook_reply
+- Delivery dispatch acontece após workflow completar no Celery (não dentro do StateGraph)
+- TriggerRegistry busca workflows ativos com nós trigger matching o evento
+
+### Verificações
+- Python ast.parse: OK em todos os 9 arquivos backend
+- TypeScript tsc --noEmit: exit code 0
+
+---
+
+## 2026-02-10 — Sessão 159: Workflows — Tools/Modelos/Templates Completos
+
+### Objetivo
+Expor todas as tools, modelos e instrumentos nos campos de configuração dos workflows via dropdowns/multi-selects. Adicionar templates especializados inspirados no Harvey AI e funcionalidades de risco/fraude, transcrição e deep research.
+
+### Arquivos Criados
+- `apps/web/src/hooks/use-workflow-options.ts` — Hook para buscar tools (API + 17 builtins) e modelos
+- `apps/web/src/components/workflows/node-types/claude-agent-node.tsx` — Nó visual para agente IA
+- `apps/web/src/components/workflows/node-types/parallel-agents-node.tsx` — Nó visual para agentes paralelos
+
+### Arquivos Editados
+- `apps/web/src/components/workflows/node-types/index.ts` — Registro de claude_agent e parallel_agents
+- `apps/web/src/components/workflows/workflow-builder.tsx` — NODE_PALETTE + defaults para novos nós
+- `apps/web/src/components/workflows/properties-panel.tsx` — Painéis completos para claude_agent (seletor de agente, modelo, tools multi-select, toggles de capacidades) e parallel_agents; melhorias em tool_call (dropdown) e legal_workflow (multi-select de modelos)
+- `apps/api/app/scripts/seed_workflow_templates.py` — 8 novos templates (5 Harvey AI + 3 especializados: Risco/Fraude, Transcrição, Deep Research). Total: 20 templates.
+
+### Decisões Tomadas
+- Hook `useWorkflowOptions` faz merge de tools da API com builtins SDK para garantir disponibilidade offline
+- Seletor de agente usa AGENT_REGISTRY (Claude/OpenAI/Google) com capabilities distintas
+- Toggles de Web Search, Deep Research e Code Execution mapeiam para configurações dos executors
+- Templates de risco usam parallel_agents com 3 dimensões (fidelidade, financeiro, compliance)
+- Template de deep research usa claude_agent com web_search e deep_research habilitados
+
+### Verificação
+- `tsc --noEmit` — OK
+- `python ast.parse()` — OK
+
+---
+
+## 2026-02-10 — Sessao 158: Implementacao Phase 1 MVP Office Add-ins
+
+### Objetivo
+Implementar todas as funcionalidades Phase 1 do PRD/Design Doc Office Add-ins usando 6 subagentes em paralelo.
+
+### Agentes Executados (6 em paralelo)
+
+| # | Agente | Status | Arquivos |
+|---|--------|--------|----------|
+| 7 | Outlook Add-in Frontend | COMPLETADO | 36 arquivos em `apps/outlook-addin/` |
+| 8 | Teams App Frontend | COMPLETADO | 20 arquivos em `apps/teams-app/` |
+| 9 | Backend Auth + Models + Config | COMPLETADO | 6 novos + 4 editados |
+| 10 | Backend Outlook Endpoints | COMPLETADO | 3 arquivos |
+| 11 | Backend Teams Bot | COMPLETADO | 7 arquivos |
+| 12 | Backend Graph + Webhooks | COMPLETADO | 3 arquivos |
+
+### Arquivos Criados — Frontend
+
+**Outlook Add-in (`apps/outlook-addin/`)** — 36 arquivos:
+- Scaffold completo: package.json, vite.config.ts, tsconfig.json, tailwind.config.ts
+- `manifest.json` — JSON Unified Manifest (ADR-001) com Mailbox 1.5
+- Auth MSAL: `msal-config.ts` (NAA com fallback), `auth-provider.tsx`
+- Office bridge: `mail-bridge.ts` (getCurrentEmailData, onItemChanged)
+- API: `client.ts` (JWT refresh queue), `sse-client.ts`, `outlook-api.ts`
+- Stores Zustand: `auth-store.ts`, `email-store.ts`, `summary-store.ts`
+- Componentes: SummaryPanel, SummaryCard, DeadlineList, ActionBar, CorpusSearch, ResultCard, WorkflowTrigger, WorkflowStatus
+- Layout: TaskPane, Header, TabNavigation, ErrorBoundary
+- Auth UI: LoginForm, AuthGuard
+- Hooks: `useSSEStream.ts`
+- Testes: `office-mock.ts` (mock completo do Office.js)
+
+**Teams App (`apps/teams-app/`)** — 20 arquivos:
+- `manifest.json` — Teams v1.19 com bot + static tabs + RSC
+- Tab frontend: Vite + React + Fluent UI + Zustand (porta 3300)
+- Auth: `teams-auth.ts` (Teams SDK v2 SSO)
+- Componentes: Dashboard, WorkflowList, CorpusSearch
+
+### Arquivos Criados — Backend
+
+**Auth + Models (Agente 9):**
+- `app/models/microsoft_user.py` — MicrosoftUser (oid, tid, email, UniqueConstraint)
+- `app/models/graph_subscription.py` — GraphSubscription (subscription_id, resource, expiration)
+- `app/models/email_analysis_cache.py` — EmailAnalysisCache (internet_message_id, result JSON)
+- `app/schemas/microsoft_auth.py` — MicrosoftSSORequest/Response, TeamsSSORequest
+- `app/core/microsoft_auth.py` — validate_microsoft_token (PyJWKClient RS256), OBO flow
+- `app/api/endpoints/microsoft_sso.py` — POST /auth/microsoft-sso, /auth/teams-sso
+
+**Outlook Endpoints (Agente 10):**
+- `app/schemas/outlook_addin_schemas.py` — SummarizeEmailRequest, ClassifyRequest/Response
+- `app/api/endpoints/outlook_addin.py` — POST /summarize (SSE), /classify, /extract-deadlines
+- `app/services/outlook_addin_service.py` — OutlookAddinService com streaming via agent_clients
+
+**Teams Bot (Agente 11):**
+- `app/api/endpoints/teams_bot.py` — POST /webhook, /notify/{user_id}
+- `app/services/teams_bot/bot.py` — IudexBot(ActivityHandler) com command routing
+- `app/services/teams_bot/handlers.py` — 7 handlers (search, analyze, workflow, etc.)
+- `app/services/teams_bot/cards.py` — 7 Adaptive Card builders
+- `app/services/teams_bot/conversation_store.py` — Redis ConversationReference (30d TTL)
+- `app/workers/tasks/notification_tasks.py` — Celery tasks proactive messaging
+
+**Graph + Webhooks (Agente 12):**
+- `app/services/graph_client.py` — httpx + tenacity retry + throttling (429 + Retry-After)
+- `app/core/webhook_validation.py` — HMAC-SHA256 clientState validation
+- `app/api/endpoints/graph_webhooks.py` — Notification/lifecycle endpoints + subscription CRUD
+
+### Arquivos Editados
+- `app/core/config.py` — AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID, TEAMS_BOT_APP_ID/PASSWORD, GRAPH_WEBHOOK_SECRET, GRAPH_NOTIFICATION_URL, OUTLOOK_ADDIN_ENABLED, TEAMS_BOT_ENABLED, +4 CORS origins
+- `app/api/routes.py` — +4 routers (microsoft_sso, outlook_addin, teams_bot, graph_webhooks)
+- `app/core/database.py` — +3 model imports (MicrosoftUser, GraphSubscription, EmailAnalysisCache)
+- `requirements.txt` — +PyJWT[crypto], +msal, +botbuilder-core, +botbuilder-schema
+
+### Adaptacoes ao Codebase Real
+1. Redis: `from app.core.redis import redis_client` (nao `redis_client` module)
+2. AI: `stream_vertex_gemini_async` / `call_vertex_gemini_async` de `agent_clients` (nao `orchestrator.stream_completion`)
+3. Null guards em redis_client (Optional no projeto)
+
+### Decisoes
+- Outlook porta 3200, Teams tab porta 3300 (nao conflitam com Word add-in 3100)
+- Outlook usa JSON Unified Manifest (ADR-001)
+- Teams usa manifest v1.19 com bot + static tabs
+- OutlookAddinService segue padrao singleton do word_addin_service
+
+---
+
+## 2026-02-10 — Sessao 157b: Verificacao e Correcoes dos Docs Office Add-ins
+
+### Objetivo
+Verificar PRD e Design Doc contra pesquisa tecnica e aplicar todas as correcoes identificadas.
+
+### Pipeline Executado
+1. **3 agentes de verificacao em paralelo**:
+   - PRD verifier — confrontou RFs/RNFs com pesquisa
+   - Design Doc verifier — gap analysis de 23 itens (CRITICAL/IMPORTANT/IMPROVEMENT)
+   - File reference/diagram verifier — verificou refs a arquivos existentes e consistencia
+2. **3 agentes de correcao em paralelo** — aplicaram 19 fixes total
+
+### Correcoes Aplicadas
+
+#### PRD (`docs/PRD_OFFICE_ADDINS.md`) — 5 fixes
+- Fase 1: "Manifesto XML" → "Manifesto JSON Unificado" (consistencia com ADR-001)
+- Adicionado risco R12: Conditional Access deprecation marco 2026
+- Adicionado risco R13: Adaptive Cards v1.2 no mobile
+- Tabela de limites: +subscriptions por mailbox (1.000), +lifecycleNotificationUrl obrigatorio
+- Nota mobile apos RF-TM-07: Teams mobile suporta apenas Adaptive Cards v1.2
+
+#### Design Doc (`docs/DESIGN_DOC_OFFICE_ADDINS.md`) — 14 fixes
+- **Secao 5.1 (NAA)**: redirectUri com env-based switching (dev vs prod)
+- **Secao 5.1**: cacheLocation de sessionStorage → localStorage (docs oficiais Microsoft)
+- **Apos Secao 5.1**: Alerta critico Conditional Access deprecation marco 2026
+- **Apos alerta**: Tabela de metodos MSAL.js suportados/nao-suportados em NAA
+- **ADR-004**: Clarificacao Adaptive Cards v1.5 desktop/web, v1.2 mobile
+- **ADR-005**: Limite 1.000 subscriptions por mailbox
+- **Secao 6.2**: Nota throttling reduzido pela metade desde 30/09/2025
+- **Secao 6.3**: Requisito lifecycleNotificationUrl quando expiration > 1h
+- **Secao 7.2**: Nota que ADR-001 escolheu JSON Unificado, XML mantido como referencia
+- **Secao 7.3**: Nota convertToRestId para converter IDs EWS → Graph
+- **Secao 8.5**: Nota expiracao 30 dias para Adaptive Cards via Power Automate
+- **Secao 15.2**: Path correto Mac sideloading
+- **Fase 1**: "Manifesto XML" → "Manifesto JSON Unificado" (consistencia)
+
+### Gaps Criticos Identificados e Resolvidos
+- **Conditional Access deprecation** (marco 2026) — MSAL NAA incompativel
+- **Adaptive Cards v1.2 no mobile** — limitacao nao documentada inicialmente
+- **Inconsistencia manifesto** — ADR-001 dizia JSON mas fases diziam XML
+- **redirectUri hardcoded** — precisava ser env-based para producao
+- **cacheLocation errado** — docs Microsoft usam localStorage, nao sessionStorage
+
+### Comandos/Agentes
+- 6 agentes subprocesso executados (3 verificacao + 3 correcao)
+- Todos completados com sucesso
+
+---
+
+## 2026-02-10 — Sessao 157: PRD + Design Doc para Add-ins Outlook e Teams
+
+### Objetivo
+Criar documentacao completa (PRD e Design Doc) para construcao de add-ins Outlook e Teams integrados ao Iudex, combinando pesquisa tecnica dos agentes com estrutura do GPT.
+
+### Arquivos Criados
+
+| Arquivo | Tamanho | Descricao |
+|---------|---------|-----------|
+| `docs/PRD_OFFICE_ADDINS.md` | ~20KB | PRD com 14 secoes: visao, personas, casos de uso, RFs/RNFs, comandos, MoSCoW, metricas, riscos, fases |
+| `docs/DESIGN_DOC_OFFICE_ADDINS.md` | ~55KB | Design Doc com 16 secoes: stack, arquitetura, ADRs, auth NAA, Graph, componentes, modelo dados, seguranca, deploy, testes, fases |
+
+### Decisoes Tomadas
+- **JSON Unificado para Outlook** (ADR-001), JSON para Teams (manifesto unificado v1.19)
+- **NAA como auth primaria**: MSAL.js >= 3.27.0, com fallback SSO e popup
+- **Bot Framework em Python**: Integrado ao FastAPI existente (nao Node.js)
+- **ConversationReference em Redis**: TTL 30 dias, nao PostgreSQL
+- **Graph Webhooks + Delta Query**: Padrao recomendado para sync
+
+### Arquivos Existentes Referenciados
+- `apps/office-addin/` — Padroes reutilizados (Vite, React, Fluent UI, SSE, Zustand)
+- `apps/api/app/api/endpoints/word_addin.py` — Padrao de endpoints
+- `apps/api/app/models/workflow.py` — Modelo WorkflowRun com HIL
+- `apps/api/app/services/dms_service.py` — Graph integration existente
+
+### Proximos Passos
+- Iniciar Sprint 1-2 (Fundacao): scaffold apps, Azure AD, auth endpoints
+- Revisar documentos com equipe
+
+---
+
+## 2026-02-10 — Sessão 156: Chat /ask — Performance, UX, Acessibilidade e Arquitetura
+
+### Objetivo
+Análise completa com React Grab da página /ask (chat) e implementação de todas as melhorias identificadas em performance, UX, acessibilidade e arquitetura.
+
+### Arquivos Alterados
+
+| Arquivo | Ação | Descrição |
+|---------|------|-----------|
+| `components/chat/chat-message.tsx` | Modificado | Envolvido em React.memo para evitar re-renders |
+| `components/chat/chat-interface.tsx` | Modificado | useCallback nos handlers, RAF throttle no onScroll, ARIA attrs, lazy DiffConfirmDialog |
+| `components/ask/ask-sources-panel.tsx` | Modificado | React.memo no ContextItemCard |
+| `app/(dashboard)/ask/page.tsx` | Modificado | Agrupou Share/Export em dropdown, placeholder dinâmico por modo |
+| `hooks/use-ask-page-state.ts` | Modificado | showSourcesPanel default false; reescrito para compor 3 hooks menores |
+| `components/chat/model-params-popover.tsx` | **Novo** | Extraído do ChatInput (~780 linhas) — consome useChatStore diretamente |
+| `components/chat/template-popover.tsx` | **Novo** | Extraído do ChatInput (~230 linhas) — estado local próprio |
+| `components/chat/chat-input.tsx` | Modificado | De 2090→560 linhas (73% redução). Removeu MCP dead code, imports não usados |
+| `hooks/use-layout-resize.ts` | **Novo** | Split-panel resize, fullscreen, layout mode (~230 linhas) |
+| `hooks/use-chat-citations.ts` | **Novo** | Extração de citações/streaming status das mensagens (~140 linhas) |
+| `hooks/use-chat-actions.ts` | **Novo** | Send, share, export, generate, setChatMode (~230 linhas) |
+
+### Decisões Tomadas
+- **Componentes extraídos consomem useChatStore diretamente** em vez de receber 40+ props — interface mais limpa
+- **useAskPageState** foi decomposto em 3 hooks focados + composição, mantendo interface de retorno idêntica (zero breaking changes na página)
+- **ContextBanner não foi extraído** — apenas ~87 linhas, tightly coupled com prefill function
+- **MCP code block removido** do ChatInput — dead code nunca referenciado no JSX
+
+### Métricas
+- ChatInput: 2090 → 560 linhas (73% redução)
+- useAskPageState: 1052 → 529 linhas (50% redução) + 3 hooks focados
+- 5 novos arquivos criados, todos auto-suficientes
+
+### Testes Executados
+- `npx tsc --noEmit` — compilação limpa, zero erros
+- ESLint tem issue pré-existente (ESLint v9 breaking changes)
+
+---
+
+## 2026-02-09 — Sessão 155: SPLADE + Dense Hybrid com Pesos Dinâmicos (LLM Query Classifier)
+
+### Objetivo
+Implementar classificação dinâmica de queries jurídicas para ajustar pesos sparse/dense no hybrid search SPLADE+Dense, cobrindo todo o universo jurídico (teoria, doutrina, fatos, teses, jurisprudência, dispositivos legais, legislação, provas).
+
+### Arquivos Alterados
+
+| Arquivo | Ação | Descrição |
+|---------|------|-----------|
+| `rag/core/query_classifier.py` | **Novo** | 9 categorias MECE (IDENTIFICADOR→CONCEITUAL), LLM classifier (Gemini Flash) com cache, fast-path regex para CNJ e Art./§ |
+| `rag/storage/qdrant_service.py` | Modificado | +`search_hybrid_weighted()` com Weighted RRF, +`_search_sparse_only()`, +`_weighted_rrf_merge()`, +`search_hybrid_weighted_multi_collection_async()` |
+| `rag/pipeline/rag_pipeline.py` | Modificado | Integração do classifier no `_search_one()`, roteamento weighted/native, telemetria estruturada `hybrid_search_telemetry` |
+| `rag/config.py` | Modificado | +4 campos: `hybrid_default_sparse/dense_weight`, `hybrid_query_classifier_llm/model` |
+| `tests/test_query_classifier.py` | **Novo** | 38 testes: fast-path regex, LLM mock, pesos por categoria, fallback, cache, edge cases |
+
+### Decisões Tomadas
+- **LLM > regex** para classificação: Gemini Flash com cache LRU (1024 entries), regex apenas para CNJ (100% determinístico)
+- **9 categorias MECE** organizadas por comportamento de busca (sparse→dense), não por tipo jurídico
+- **Weighted RRF app-level**: Qdrant FusionQuery não aceita pesos → 2 queries separadas (dense + sparse) + merge client-side
+- **Otimização**: pesos iguais (±0.01) → delega para FusionQuery nativo (mais eficiente)
+- **Feature flags**: `RAG_HYBRID_QUERY_CLASSIFIER_LLM=true/false` para ligar/desligar, `RAG_QDRANT_SPARSE_ENABLED` como gate principal
+
+### Testes Executados
+- `test_query_classifier.py`: 38/38 passed
+- `test_routed_ingest.py`: 9/9 passed
+- `test_hybrid_reranker.py`: 18/18 passed
+- `test_graph_enrichment.py`: 20/20 passed
+
+### Env Vars Novos
+- `RAG_HYBRID_SPARSE_WEIGHT` (default 0.50)
+- `RAG_HYBRID_DENSE_WEIGHT` (default 0.50)
+- `RAG_HYBRID_QUERY_CLASSIFIER_LLM` (default true)
+- `RAG_HYBRID_CLASSIFIER_MODEL` (default gemini-2.0-flash)
+
+---
+
+## 2026-02-09 — Sessão 155b: Chat Fast RAG + Vetorização de Anexos Grandes
+
+### Objetivo
+Separar o pipeline RAG: pipeline completo (HyDE, Multi-Query, CRAG, Compression, Parent-Child) apenas para corpus; chat usa fast path (lexical + vector + RRF + graph/cograg apenas). Anexos grandes no chat são vetorizados via `ingest_local()` e buscados via `search_fast()`.
+
+### Arquivos Alterados
+
+| Arquivo | Ação | Descrição |
+|---------|------|-----------|
+| `rag/pipeline/rag_pipeline.py` | Modificado | +`search_fast()`: wrapper que desabilita HyDE/CRAG/Compress/Parent-Child/Corrective, mantém GraphRAG/ArgumentRAG/CogRAG |
+| `rag/pipeline_adapter.py` | Modificado | +`build_rag_context_fast()`: entry point simplificado para chat, resolve sources/filtros/query rewrite e delega para `search_fast()` |
+| `chat_service.py` | Modificado | Global RAG → `build_rag_context_fast()` (gate: `CHAT_RAG_FAST_PATH`); Local RAG → `_vectorize_and_search_local()` via ingest_local+search_fast (gate: `CHAT_LOCAL_RAG_VECTORIZED`); +`_format_local_results()` helper |
+| `tests/test_chat_fast_rag.py` | **Novo** | 12 testes: search_fast kwargs, build_rag_context_fast, format_local_results, vectorize_and_search_local |
+
+### Decisões Tomadas
+- **GraphRAG, ArgumentRAG e CogRAG ativos** no fast path (a pedido do usuário) — só stages de query enhancement desabilitados
+- **Fallback via env vars**: `CHAT_RAG_FAST_PATH=false` → pipeline completo; `CHAT_LOCAL_RAG_VECTORIZED=false` → LocalProcessIndex legado
+- **Vetorização de anexos**: usa `ingest_local()` (Qdrant local_chunks + OpenSearch rag-local) com `thread_id` como `case_id` para scoping
+
+### Testes Executados
+- `test_chat_fast_rag.py`: 12/12 passed
+- `test_query_classifier.py`: 38/38 passed (regressão)
+- `test_hybrid_reranker.py`: 18/18 passed (regressão)
+
+### Env Vars Novos
+- `CHAT_RAG_FAST_PATH` (default `true`) — Chat usa fast RAG
+- `CHAT_LOCAL_RAG_VECTORIZED` (default `true`) — Anexos do chat vetorizados via Qdrant
+
+---
+
+## 2026-02-09 — Sessão 154: EmbeddingRouter ↔ Ingest Pipeline (end-to-end) + Rerank v4
+
+### Objetivo
+Conectar o EmbeddingRouter (que roteia por jurisdição: BR→JurisBERT 768d, US/UK/INT→Kanon2 1024d, EU→VoyageLaw2 1024d, General→OpenAI 3072d) ao pipeline de ingest, que antes usava sempre OpenAI 3072d para multi-chunk. Também atualizar Cohere Rerank para v4.0-pro.
+
+### Arquivos Alterados
+
+| Arquivo | Ação | Descrição |
+|---------|------|-----------|
+| `rag/pipeline/rag_pipeline.py` | Modificado | `ingest_to_collection()`: novo param `embedding_vectors` (plural), lógica de prioridade vetores→fallback, dimensão explícita no create_collection; `ingest_local`/`ingest_global` propagam `embedding_vectors` |
+| `rag/storage/qdrant_service.py` | Modificado | `COLLECTION_TYPES` + `_collection_map` expandidos com routed collections; `create_collection()` usa `EMBEDDING_COLLECTIONS` lookup para dimensões |
+| `api/endpoints/rag.py` | Modificado | Smart ingest refatorado: chunk-first → batch embed via router → passa `embedding_vectors` ao pipeline |
+| `rag/core/cohere_reranker.py` | Modificado | Default `rerank-multilingual-v3.0` → `rerank-v4.0-pro` |
+| `rag/config.py` | Modificado | Default reranker → `rerank-v4.0-pro` |
+| `tests/test_routed_ingest.py` | **Novo** | 9 testes: vetores pré-computados, fallback, backward compat, dimensões, propagação |
+| `tests/rag/test_hybrid_reranker.py` | Modificado | Referência do modelo atualizada |
+
+### Decisões Tomadas
+- **Chunk-first embedding**: Smart ingest chunka ANTES de embedar (mesma `chunk_document()` + clamping) para garantir 1 vetor por chunk
+- **Prioridade de vetores**: `embedding_vectors` (plural) > `embedding_vector` (singular, 1 chunk) > `embed_many()` fallback
+- **Fallback com warning**: Se count de vetores ≠ count de chunks, loga warning e re-embeda com provider default
+- **Import local**: `EMBEDDING_COLLECTIONS` importado dentro de `create_collection()` para evitar circular
+- **Rerank v4.0-pro**: 1627 ELO, ~614ms; Pro recomendado sobre Fast (1506 ELO) para caso jurídico
+
+### Testes
+- `test_routed_ingest.py`: 9/9 ✅
+- `tests/rag/`: 317 passed, 8 failed (pré-existentes em test_qdrant_service.py — upsert/search, NÃO relacionados)
+- `test_graph_enrichment.py`: 20/20 ✅
+
+---
+
+## 2026-02-09 — Sessão 153: Pipeline de Enriquecimento L1→L2→L3→L3b (Transparency-First)
+
+### Objetivo
+Implementar pipeline completo de enriquecimento do grafo com abordagem "transparency-first": L2/L3/L3b criam `:RELATED_TO` com `layer='candidate'`, nunca relações tipadas diretamente. Inclui anti-alucinação, handoff L2→L3, e modo exploratório para nós isolados.
+
+### Arquivos Alterados
+
+| Arquivo | Ação | Descrição |
+|---------|------|-----------|
+| `kg_builder/link_predictor.py` | Modificado | Genérica `infer_links_by_embedding_generic()`, `EmbeddingCandidate`, RELATED_TO, Artigo×Artigo, cross-type |
+| `kg_builder/llm_link_suggester.py` | Modificado | Anti-alucinação `_validate_evidence()`, handoff L2→L3 `validate_l2_candidates_via_llm()`, RELATED_TO |
+| `kg_builder/llm_explorer.py` | **Novo** | Modo exploratório L3b: isolated nodes + shortlist + LLM exploration |
+| `kg_builder/legal_postprocessor.py` | Modificado | Fases 2/3/3b com handoff, novos campos stats, env vars |
+| `schemas/graph_enrich.py` | **Novo** | EnrichRequest/Response/Layer schemas |
+| `services/graph_enrich_service.py` | **Novo** | Orquestrador L1→L2→L3→L3b |
+| `endpoints/graph.py` | Modificado | `POST /graph/enrich` endpoint |
+| `tests/test_graph_enrichment.py` | **Novo** | 20 testes cobrindo L2/L3/L3b/schemas |
+
+### Decisões Tomadas
+- **Transparency-first**: Todas as edges L2/L3/L3b são `:RELATED_TO` com `layer='candidate'`, nunca relações tipadas
+- **candidate_type convention**: L2=`semantic:embedding_similarity:*`, L3=`rel:cita`, L3b=`exploratory:llm:*`
+- **Anti-alucinação**: Evidência do LLM validada como substring dos snippets fornecidos; falha → confiança -50%
+- **L3b min_confidence=0.80**: Mais alto que L3 (0.75) por ser modo proativo
+- **Reusa infraestrutura existente**: `include_candidates=false` já filtrava candidatos em queries
+
+### Testes
+- `test_graph_enrichment.py`: 20/20 ✅
+- `test_kg_builder.py`: 96/96 ✅ (sem regressão)
+- `test_neo4j_mvp.py`: 56/56 ✅ (sem regressão)
+- `test_orchestration_router.py`: 27/27 ✅ (sem regressão)
+
+### Env Vars Novas
+```
+KG_BUILDER_PASS_L2_TO_L3=true
+KG_BUILDER_INFER_LINKS_EXPLORATORY=false
+KG_BUILDER_INFER_LINKS_ARTIGO=true
+KG_BUILDER_INFER_LINKS_CROSS_TYPE=true
+KG_BUILDER_EXPLORATORY_MAX_DEGREE=1
+KG_BUILDER_EXPLORATORY_MAX_NODES=50
+KG_BUILDER_EXPLORATORY_MIN_CONFIDENCE=0.80
+```
+
+---
+
+## 2026-02-09 — Sessão 152: GDS Risk Detectors + Chain Audit UI + Bug Fix Fase 3
+
+### Objetivo
+Integrar 7 detectores GDS ao pipeline de scan de risco, expor auditoria de cadeia na UI `/graph/risk`, e corrigir bug pré-existente no dispatch da Fase 3 GDS.
+
+### Principais Entregas
+
+#### 1. **Chain Audit na UI** (`GraphRiskPageClient.tsx`)
+- Adicionados botões "Aresta" e "Cadeia" (split do antigo "Auditar")
+- Painel tabulado (Aresta / Cadeia) com visualização de caminhos
+- Cadeia mostra: contagem de paths, tempo de execução, nós encadeados com cores, evidências por hop
+- Chama `POST /graph/risk/audit/chain` (endpoint já existia, mas não tinha UI)
+
+#### 2. **7 Detectores GDS no Risk Scan** (`graph_risk_service.py`)
+Novos detectores baseados em algoritmos GDS (antes o scan usava só Cypher básico):
+
+| Detector | Algoritmo GDS | Cenário |
+|----------|--------------|---------|
+| `connected_risk_clusters` | WCC | Ilhas isoladas (clusters desconectados) |
+| `influence_propagation` | Eigenvector Centrality | Entidades com alta influência propagada |
+| `critical_intermediaries` | Betweenness | Intermediários críticos (bridges) |
+| `hidden_communities` | Leiden | Comunidades ocultas com alta modularidade |
+| `behavioral_similarity` | Node Similarity | Pares com Jaccard ≥ 0.5 (comportamento similar) |
+| `collusion_triangles` | Triangle Count | Entidades em muitos triângulos (colusão) |
+| `structural_vulnerabilities` | Bridges + Artic. Points | Pontos estruturais frágeis |
+
+Total de detectors agora: **12** (5 originais + 7 GDS). Todos com fallback gracioso se GDS indisponível.
+
+#### 3. **Bug Fix: Dispatch Fase 3 GDS** (`graph_ask_service.py`)
+- `gds_operations` list não incluía operações da Fase 3 (adamic_adar, node2vec, all_pairs_shortest_path, harmonic_centrality)
+- Resultado: esses handlers nunca eram chamados — fluxo pulava para templates
+- Corrigido adicionando as 4 operações à lista
+
+### Testes
+- **71 passed** (risk + GDS), incluindo o antes-falhando `test_dispatcher_calls_adamic_adar`
+- 1 falha pré-existente em `test_skill_builder` (sem relação)
+
+### Arquivos Modificados
+- `apps/web/src/app/(dashboard)/graph/risk/GraphRiskPageClient.tsx` — Chain audit UI
+- `apps/api/app/services/graph_risk_service.py` — 7 GDS detectors
+- `apps/api/app/services/graph_ask_service.py` — Bug fix gds_operations list (Fase 3)
+
+---
+
+## 2026-02-09 — Sessão 151: Implementação GDS — 8 Algoritmos Avançados para Grafo
+
+### Objetivo
+Adicionar **TODOS** os algoritmos avançados do Neo4j Graph Data Science (GDS) recomendados para análise de grafos jurídicos, expondo-os tanto para o chat (Ask/Minuta) quanto para a página Graph.
+
+### Contexto
+Usuário perguntou se o grafo suporta pesquisas genéricas (como o MCP Neo4j oficial com `get-schema`, `read-cypher`, `write-cypher`). Confirmei que já existe `text2cypher` (NL→Cypher com 3 camadas de segurança). Após explicação do GDS, usuário pediu **"sim adicione todas"** as operações avançadas.
+
+### Principais Entregas
+
+#### 1. **8 Operações GDS Implementadas**
+Todas com handlers completos em `graph_ask_service.py`:
+
+- **betweenness_centrality** — Identifica nós-ponte (conectam áreas distintas)
+  - Algoritmo: `gds.betweenness.stream`
+  - Uso: "Artigos que conectam direito civil e tributário"
+
+- **community_detection** — Detecta comunidades temáticas (Louvain)
+  - Algoritmo: `gds.louvain.stream`
+  - Uso: "Agrupar artigos por tema sem rotular manualmente"
+
+- **node_similarity** — Encontra entidades similares (vizinhos compartilhados)
+  - Algoritmo: `gds.nodeSimilarity.stream`
+  - Uso: "Decisões parecidas com X", "Artigos relacionados a Y"
+
+- **pagerank_personalized** — Ranking de importância com viés (sementes)
+  - Algoritmo: `gds.pageRank.stream` + `sourceNodes`
+  - Uso: "Artigos mais importantes conectados à CF/88 Art. 5"
+
+- **weakly_connected_components** — Componentes desconectados (ilhas)
+  - Algoritmo: `gds.wcc.stream`
+  - Uso: "Existem artigos órfãos?", "Quais ilhas no grafo?"
+
+- **shortest_path_weighted** — Caminho mais curto ponderado (Dijkstra)
+  - Algoritmo: `gds.shortestPath.dijkstra.stream` + `relationshipWeightProperty`
+  - Uso: "Caminho mais forte entre Art. X e Súmula Y"
+
+- **triangle_count** — Contagem de triângulos (clustering)
+  - Algoritmo: `gds.triangleCount.stream`
+  - Uso: "Artigos mais interligados em grupos", "Núcleos densos"
+
+- **degree_centrality** — Centralidade por grau (conexões diretas)
+  - Algoritmo: `gds.degree.stream` + `orientation`
+  - Uso: "Artigos mais citados", "Artigos que mais citam"
+
+#### 2. **Segurança e Multi-tenancy**
+- Todas as operações filtram por `tenant_id` nas projeções de grafo
+- Verificação GDS: `_check_gds_available()` verifica `gds.version()` antes de executar
+- Requer `NEO4J_GDS_ENABLED=true` + plugin GDS instalado
+- Cada operação usa projeções efêmeras com `randomUUID()` + cleanup automático via `gds.graph.drop()`
+
+#### 3. **Exposição no Chat (Ask/Minuta)**
+- Todas as 20 operações (7 existentes + 5 novas factual + 8 GDS) expostas em `unified_tools.py`
+- Documentação completa para cada algoritmo com exemplos de uso
+- Novos parâmetros: `source_ids` (array), `weight_property`, `direction` ("OUTGOING"/"INCOMING"/"BOTH"), `top_k`
+- Propagação de parâmetros em `tool_handlers.py`
+
+#### 4. **Testes**
+- **24/24 testes passando** em `test_graph_gds.py`:
+  - 8 testes de enum (verificam presença no GraphOperation)
+  - 4 testes de disponibilidade GDS (env var, instalação, cache)
+  - 10 testes de handlers (smoke tests com mocks)
+  - 2 testes de dispatcher (bloqueio quando GDS indisponível, roteamento correto)
+
+### Arquivos Modificados
+
+- **`apps/api/app/services/graph_ask_service.py`** (~350 linhas adicionadas)
+  - +8 enum values em `GraphOperation`
+  - +`_check_gds_available()` método de verificação
+  - +8 handler methods: `_handle_betweenness_centrality()` até `_handle_degree_centrality()`
+  - +Dispatcher atualizado com check GDS para as 8 operações
+
+- **`apps/api/app/services/ai/shared/unified_tools.py`** (~60 linhas adicionadas)
+  - +Enum atualizado com 8 novas operações GDS
+  - +Documentação completa (ops 13-20) com exemplos de uso
+  - +4 novos parâmetros no schema: `source_ids`, `weight_property`, `direction`, `top_k`
+  - +Footer atualizado: "Operações GDS (13-20) requerem NEO4J_GDS_ENABLED=true"
+
+- **`apps/api/app/services/ai/shared/tool_handlers.py`** (~12 linhas adicionadas)
+  - +Propagação de 4 novos parâmetros: `source_ids`, `weight_property`, `direction`, `top_k`
+
+- **`apps/api/tests/test_graph_gds.py`** (~400 linhas, arquivo novo)
+  - 24 testes de smoke (enum, disponibilidade, handlers, dispatcher)
+
+### Testes
+```bash
+pytest apps/api/tests/test_graph_gds.py -v -o "addopts="
+# ======================== 24 passed in 10.44s ========================
+```
+
+### Env Vars Necessárias
+```bash
+NEO4J_GDS_ENABLED=true  # Habilita verificação GDS
+# Plugin GDS deve estar instalado no Neo4j (detecta via gds.version())
+```
+
+### Padrão de Implementação
+Todas as operações GDS seguem padrão unificado:
+1. **Validação de parâmetros** (source_id, target_id, source_ids conforme necessário)
+2. **Projeção efêmera** de grafo com `randomUUID()` e filtro `tenant_id`
+3. **Algoritmo GDS** via `gds.<algorithm>.stream()`
+4. **Cleanup automático** via `gds.graph.drop()`
+5. **Metadata rica** retornada (algoritmo, params, tempo de execução)
+
+---
+
+## 2026-02-09 — Sessão 150: Graph Risk (Fraude/Auditoria) + Confirmação Server-Side para link_entities + Tools no Chat
+
+### Objetivo
+1. Adicionar uma camada **determinística** para descoberta de fraudes e auditorias no grafo (multi-cenário), com **página dedicada** `/graph/risk`.
+2. Tornar `link_entities` seguro por padrão com **preflight server-side** e confirmação explícita (`confirm=true`) antes de gravar.
+3. Expor scan/auditoria também para o **chat (Ask/Minuta)** via tools unificadas.
+
+### Principais Entregas
+- **link_entities 2-fases (preflight + confirm)**:
+  - `apps/api/app/services/graph_ask_service.py`: `LINK_ENTITIES_REQUIRE_CONFIRM` (default `true`).
+  - `confirm=false` retorna preview (`metadata.requires_confirmation=true`); `confirm=true` grava e retorna `metadata.write_operation=true`.
+  - `apps/api/app/services/ai/shared/tool_handlers.py`: passa `metadata` para os modelos e propaga `confirm`.
+  - `apps/api/app/services/ai/shared/unified_tools.py`: adiciona param `confirm` e regra “nunca enviar confirm=true sem confirmação explícita do usuário”.
+  - `apps/web/src/components/graph/GraphAuraAgentChat.tsx`: botão “Confirmar” envia `confirm: true`.
+
+- **Graph Risk backend**:
+  - `apps/api/app/api/endpoints/graph_risk.py`: endpoints `/graph/risk/scan`, `/graph/risk/reports`, `/graph/risk/audit/*`.
+  - `apps/api/app/services/graph_risk_service.py`: scan determinístico + auditoria de arestas/cadeias + persistência.
+  - `apps/api/app/models/graph_risk_report.py` + migration `apps/api/alembic/versions/y7z8a9b0c1d2_add_graph_risk_reports.py`.
+  - Retenção: `apps/api/app/tasks/graph_risk_cleanup.py` + Celery task `apps/api/app/workers/tasks/graph_risk_tasks.py` + schedule em `apps/api/app/workers/celery_app.py`.
+
+- **Página dedicada**:
+  - `apps/web/src/app/(dashboard)/graph/risk/page.tsx`
+  - `apps/web/src/app/(dashboard)/graph/risk/GraphRiskPageClient.tsx` (tabela de sinais + auditoria via API).
+  - `apps/web/src/components/graph/GraphAuraAgentChat.tsx`: comando `/risk` abre a página.
+
+- **Tools para chat (Ask/Minuta)**:
+  - `scan_graph_risk`, `audit_graph_edge`, `audit_graph_chain` adicionadas em:
+    - `apps/api/app/services/ai/shared/unified_tools.py`
+    - `apps/api/app/services/ai/shared/tool_handlers.py`
+
+### Testes
+- `apps/api/tests/test_graph_write.py`: atualizado para preflight/confirm.
+- `apps/api/tests/test_graph_risk_smoke.py`: smoke tests de import (schemas/service).
+
+## 2026-02-08 — Sessão 149: Otimização DoclingAdapter (3-tier Adaptativo) + Verificação group_ids
+
+### Objetivo
+1. Verificar se `group_ids` está configurado nos 3 backends (OpenSearch, Qdrant, Neo4j)
+2. Portar extração adaptativa 3-tier do `ingest_v2.py` para o `DoclingAdapter` da API
+
+### Verificação group_ids
+Confirmado em todos os 3 backends:
+- **OpenSearch**: campo `group_ids` (keyword), filtro `{"terms": {"group_ids": group_ids}}`
+- **Qdrant**: `group_ids` em PayloadSchemaType.KEYWORD, filtro `MatchAny(any=group_ids)`
+- **Neo4j**: `d.group_ids` nos nós Document, filtro Cypher `any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))`
+
+### Otimização DoclingAdapter — 3-tier Adaptativo
+**Problema**: `DoclingAdapter` usava `DocumentConverter()` com defaults (OCR+TableFormer sempre ligados), enquanto `ingest_v2.py` já tinha extração adaptativa 3-tier otimizada.
+
+**Solução inicial**: Portado o padrão 3-tier:
+1. **FAST** — sem OCR, sem TableFormer (maioria dos PDFs texto-nativos)
+2. **TABLES** — com TableFormer (quando tabelas detectadas pelo DocLayNet)
+3. **OCR** — OCR + TableFormer (quando texto esparso: <100 chars/página)
+
+### Refinamento de Critérios (iteração 2)
+**Identificado**: Critérios simplistas poderiam ativar tiers desnecessariamente:
+- Threshold de 100 chars/página muito baixo (PDFs com margens/imagens)
+- Detecção binária de tabelas (1 tabela em 50 páginas → TableFormer em tudo)
+- Sem validação de qualidade do texto FAST (encoding corrompido, OCR artifacts)
+
+**Melhorias implementadas**:
+1. **Threshold mais alto**: `_MIN_CHARS_PER_PAGE = 150` (de 100 → 150)
+2. **Densidade de tabelas**: `_has_significant_tables()` usa threshold de 5% (tabelas/páginas >= 0.05)
+   - Documentos ≤2 páginas: qualquer tabela é significativa
+   - Documentos >2 páginas: densidade precisa ser >= 5%
+3. **Validação de qualidade**: `_is_text_quality_good()` verifica:
+   - Printable ratio >= 85% (detecta encoding corrompido)
+   - Space ratio 8-35% (detecta falta de separação de palavras = OCR artifact)
+   - Avg token length 2-25 chars (detecta gibberish ou tokens concatenados)
+   - Se qualidade baixa → dispara OCR mesmo com texto não-esparso
+
+### Arquivos Modificados
+- `apps/api/app/services/docling_adapter.py`
+  - +3 converters lazy-initialized (`_converter_fast`, `_converter_tables`, `_converter_ocr`)
+  - +`_get_converter(mode)` com imports lazy dentro de null-checks
+  - +`_get_generic_converter()` para formatos não-PDF
+  - +`_is_text_sparse()` detecção de texto esparso
+  - +`_has_significant_tables()` detecção de densidade de tabelas (substitui `_has_tables`)
+  - +`_is_text_quality_good()` validação de qualidade de texto
+  - +`_extract_pdf_adaptive()` e `_docling_pdf_adaptive_sync()` lógica 3-tier refinada
+  - +5 env vars configuráveis: `DOCLING_MIN_CHARS_PER_PAGE`, `DOCLING_MIN_TABLE_DENSITY`, `DOCLING_MIN_PRINTABLE_RATIO`, `DOCLING_MIN_SPACE_RATIO`, `DOCLING_MAX_SPACE_RATIO`
+  - +`docling_tier` no metadata de ExtractionResult
+- `apps/api/tests/test_docling_adapter.py`
+  - +26 testes (7 sparse, 8 tables density, 9 quality validation, 7 tier selection, 1 routing)
+  - Removidos 3 testes legacy de `_has_tables()` (substituído por `_has_significant_tables`)
+
+### Testes
+- 35/35 testes passando
+- Cobertura: detecção de texto esparso, densidade de tabelas, validação de qualidade, tier selection completo
+
+---
+
+## 2026-02-08 — Sessão 147: Inferência Estrutural (SUBDISPOSITIVO_DE)
+
+### Objetivo
+Adicionar arestas **determinísticas** de hierarquia interna em `Artigo` (parágrafo/inciso) para o artigo-pai, sem depender de LLM e sem risco de alucinação.
+
+### O Que Foi Adicionado
+- Novo relationship type: `SUBDISPOSITIVO_DE`
+  - `Artigo(subdispositivo)` → `Artigo(artigo-pai)`
+  - Inferência baseada apenas no `entity_id` (ex.: `art_5_p2_iI` → `art_5_p2` → `art_5`)
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py`
+  - +`SUBDISPOSITIVO_DE` em `LEGAL_RELATIONSHIP_TYPES`
+  - +pattern `("Artigo","SUBDISPOSITIVO_DE","Artigo")`
+- `apps/api/app/services/rag/core/kg_builder/legal_postprocessor.py`
+  - +step `3f`: `_infer_subdispositivo_de()` (Cypher puro, sem APOC)
+  - Env gate: `KG_BUILDER_INFER_SUBDISPOSITIVO_DE` (default `true`)
+  - +stat `subdispositivo_de_inferred`
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py`
+  - +propagação `post_process_subdispositivo_de_inferred` para `result_stats`
+- `apps/api/tests/test_structural_inference.py` (novo)
+
+### Testes
+- `tests/test_structural_inference.py`: 3 testes
+- Regressão (subset): OK
+
+## 2026-02-08 — Sessão 148: Co-ocorrência Materializada (CO_MENCIONA) + Comando na Página de Grafos
+
+### Objetivo
+Materializar arestas leves de co-ocorrência **por chunk** (Artigo–Artigo) como camada **candidate**, tenant-scoped, para descoberta no grafo sem “inventar semântica”.
+
+### O Que Foi Adicionado
+- Operação GraphAsk: `recompute_co_menciona`
+  - Recalcula `(:Artigo)-[:CO_MENCIONA {layer:'candidate', tenant_id, co_occurrences, weight, samples}]->(:Artigo)`
+  - Determinística: baseada em `Chunk-[:MENTIONS]->Artigo` (co-ocorrência real)
+  - Não interfere em travessias padrão: `legal_chain`/`path` excluem candidate por default (`include_candidates=false`)
+
+### Arquivos Modificados
+- `apps/api/app/services/graph_ask_service.py`
+  - +enum `RECOMPUTE_CO_MENCIONA`
+  - +handler `_handle_recompute_co_menciona()` (chama `neo4j_mvp.recompute_candidate_comentions` via `asyncio.to_thread`)
+  - +dispatch e validação
+- `apps/api/app/api/endpoints/graph_ask.py`
+  - +`"recompute_co_menciona"` no `Literal` de `GraphAskRequest.operation`
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - +comando `/comenciona [min] [maxPairs]` (ex.: `/comenciona 2 20000`)
+  - +formatter de resposta
+- `apps/api/tests/test_recompute_comenciona.py` (novo)
+
+### Testes
+- `tests/test_recompute_comenciona.py`: 4 testes
+- Web type-check: OK
+
+## 2026-02-08 — Sessão 149: Confirmação Antes de Escrever (Graph Page)
+
+### Objetivo
+Evitar escrita acidental no grafo: resolver entidades e inferir relação primeiro, **exibir preview**, e só escrever após confirmação explícita.
+
+### O Que Foi Adicionado
+- Confirmação UI no chat do grafo para `link_entities`:
+  - Mostra `source`, `relation_type`, `target`, `dimension` (quando inferível) e `evidence` (opcional)
+  - Botões **Confirmar** / **Cancelar**
+- Suporte opcional a evidence no texto:
+  - `evidence:"..."`, `trecho:"..."`, `ev:"..."`
+  - Em `/link`, também aceita `ev "..."` no final
+
+### Arquivo Modificado
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+
+### Testes
+- Web type-check: OK
+
+## 2026-02-08 — Sessão 146: QA Factual no Grafo — Expor operações avançadas ao chat
+
+### Objetivo
+Habilitar pesquisas factuais genéricas no grafo jurídico pelos agentes de IA (Claude/GPT/Gemini). O `GraphAskService` tinha 15 operações implementadas mas o `ASK_GRAPH_TOOL` só expunha 7.
+
+### Arquivos Modificados
+- `apps/api/app/services/graph_ask_service.py`
+  - +2 enum: `RELATED_ENTITIES`, `ENTITY_STATS`
+  - +template Cypher `related_entities` (travessia direta bidirecional, exclui infra rels)
+  - +handler `_handle_entity_stats()` (4 queries: total entities, by type, total rels, rel types)
+  - +dispatch entity_stats no `ask()`
+  - +validação e defaults para ambos
+- `apps/api/app/services/ai/shared/unified_tools.py`
+  - Enum expandido: 7 → 12 operações (text2cypher, legal_chain, precedent_network, related_entities, entity_stats)
+  - +3 params: question, decision_id, relation_filter
+  - Descrições ops 8-12 com exemplos de uso
+- `apps/api/app/services/ai/shared/tool_handlers.py`
+  - +propagação question, decision_id, relation_filter
+- `apps/api/app/api/endpoints/graph_ask.py`
+  - +2 Literal values: related_entities, entity_stats
+- `apps/api/tests/test_factual_qa.py` — **Novo**: 28 testes
+
+### Testes
+- 28 novos (test_factual_qa.py): enum exposure, params, template, handler, validation, endpoint
+- 114 regressão OK (1 skipped)
+
+### Decisões
+- `related_entities` usa template Cypher (não handler) pois se encaixa no padrão existing
+- `entity_stats` usa handler especial (multi-query como discover_hubs)
+- text2cypher, legal_chain, precedent_network já existiam — só expostos na tool definition
+
+---
+
+## 2026-02-08 — Sessão 145: Normalização Agressiva + Hub Detection (Gaps neo4j-ingestor)
+
+### Objetivo
+Integrar 8 gaps identificados entre o standalone `neo4j-ingestor/` e o Iudex `legal_postprocessor.py`:
+normalização agressiva Python-side, correção de gênero, formatação de parágrafo/inciso,
+dots em Decisão, dedup de relacionamentos, garbage cleanup, Lei Complementar→LC, e hub detection.
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/kg_builder/legal_postprocessor.py`
+  - **Gap 1-3**: Funções `_normalize_artigo_name()` (accents §→par., º→o, ª→a), gender prepositions (do Lei→da Lei), paragraph/inciso formatting
+  - **Gap 4**: `_normalize_decisao_name()` (dots em números: "4.650"→"4650", 2 passes)
+  - **Gap 5**: Step 3d — dedup de relacionamentos paralelos pós-merge (itera todos rel types exceto infra)
+  - **Gap 6**: Step 3e — garbage cleanup (Artigo < 5 chars → DETACH DELETE)
+  - **Gap 7**: `_normalize_lei_name()` (Lei Complementar→LC), `_normalize_sumula_name()` (Súmula→Sumula), `_normalize_tese_name()` (trailing period)
+  - Substituição do antigo step 0a Cypher-based por `_apply_normalization()` Python-side para 5 labels
+  - Novos stats fields: `decisao_python_normalized`, `sumula_python_normalized`, `lei_python_normalized`, `tese_python_normalized`, `relationships_deduped`, `garbage_artigo_removed`
+- `apps/api/app/services/graph_ask_service.py`
+  - **Gap 8**: `DISCOVER_HUBS` enum + `_handle_discover_hubs()` handler (5 Cypher queries categorizadas: artigos referenciados, outgoing, total degree, decisões com teses, leis com artigos)
+- `apps/api/app/services/ai/shared/unified_tools.py`
+  - Operação 7 `discover_hubs` no ASK_GRAPH_TOOL + param `top_n`
+- `apps/api/app/services/ai/shared/tool_handlers.py`
+  - Propagação de `top_n` para operation_params
+- `apps/api/app/api/endpoints/graph_ask.py`
+  - `"discover_hubs"` no Literal do endpoint REST
+
+### Testes
+- `test_postprocessor_normalization.py` (NOVO): 50 testes — accents, gender, paragraph/inciso, decisao dots, sumula, lei complementar, tese, expansions, full pipeline, constants, stats fields
+- `test_discover_hubs.py` (NOVO): 8 testes — enum, validation, handler success/default/cap/categories/partial failure, tool definition
+- Regressão: 150 passed, 1 skipped, 0 failures
+
+### Referências
+- `/Users/nicholasjacob/Documents/neo4j-ingestor/fix_normalization.py` — source das funções de normalização
+- `/Users/nicholasjacob/Documents/neo4j-ingestor/fix_gender.py` — source das correções de gênero
+- `/Users/nicholasjacob/Documents/neo4j-ingestor/mcp_server.py` — source do hub detection (hubs_do_grafo)
+
+---
+
+## 2026-02-08 — Sessão 143: Guidance Para `link_entities` (Search-First + Properties)
+
+### Objetivo
+Garantir que os modelos do chat usem `ask_graph.link_entities` de forma consistente e segura: **sempre resolver `entity_id` via `ask_graph.search` antes de criar arestas**, e suportar propriedades opcionais na criação.
+
+### Arquivos Modificados
+- `apps/api/app/services/ai/shared/unified_tools.py`
+  - Melhorias na descrição do `ASK_GRAPH_TOOL` (workflow recomendado: `search` → confirmação se ambíguo → `link_entities`)
+  - Adicionado `params.properties` (object) para propriedades opcionais na relação (audit props continuam imutáveis)
+  - Ajustadas descrições de `source_id`/`target_id` para indicar uso em `path/link_entities`
+- `apps/api/app/services/ai/orchestration/router.py`
+  - System prompt jurídico agora inclui regras explícitas para uso do grafo (`search` antes de `link_entities`, sem Cypher de escrita)
+- `apps/api/app/services/ai/agent_clients.py`
+  - Instrução padrão jurídica reforça `search` antes de `link_entities` e proíbe inventar IDs
+- `apps/api/tests/test_graph_write.py`
+  - Testes atualizados para validar `params.properties` e menção do workflow “search-first” na descrição
+
+### Testes
+- `test_graph_write.py`: 11 passed
+- `test_orchestration_router.py`: 27 passed
+
+---
+
+## 2026-02-08 — Sessão 144: Graph Page `/link` (Resolve via Search + link_entities)
+
+### Objetivo
+Habilitar criação de arestas também na página de grafos (Graph UI) sem LLM, via comando explícito `/link` no widget `GraphAuraAgentChat`.
+
+### Implementação
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - Adicionado suporte à operação `link_entities` no tipo `GraphAskOperation`
+  - Novo comando `/link` com resolução `search`-first no client:
+    - Aceita `entity_id` diretamente (ex: `art_5_cf`) ou texto (ex: `"Art. 5 CF"`)
+    - Sintaxe: `/link origem -> destino via RELACAO` ou `/link origem destino via RELACAO`
+    - Se `search` retornar múltiplos candidatos, o chat pede para o usuário escolher `entity_id`
+  - Formatação de resposta para `link_entities`
+
+### Verificação
+- `apps/web`: `npm run type-check` (tsc --noEmit) OK
+
+---
+
+## 2026-02-08 — Sessão 145: Graph Page Natural Language → `link_entities`
+
+### Objetivo
+Permitir usar linguagem natural para criação de arestas na página de grafos (sem comando `/link`), ex:
+`Conecte Art. 5 CF com Súmula 473 STF via INTERPRETA`.
+
+### Implementação
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - Parser determinístico para intenção de escrita (gate por verbos imperativos + `via` ou termos como "aresta/relação")
+  - Extrai pares de entidades via aspas (`"..."`), `entre X e Y`, `X com Y` ou `X -> Y`
+  - Reusa o mesmo fluxo `search`-first do `/link` (resolve refs antes de chamar `link_entities`)
+
+### Verificação
+- `apps/web`: `npm run type-check` OK
+
+---
+
+## 2026-02-08 — Sessão 146: Graph Page LLM Mode (Consultas GraphRAG via /chats SSE)
+
+### Objetivo
+Habilitar respostas em linguagem natural na página de grafos usando LLM + GraphRAG, mantendo escrita (arestas) fora do modo LLM.
+
+### Implementação
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - Toggle `LLM: ON/OFF` no header
+  - Quando `LLM: ON` e a mensagem não for comando (`/path`, `/search`, etc.):
+    - cria (lazy) um chat backend (`POST /chats/`, modo `CHAT`) e guarda `chat_id` no `localStorage`
+    - envia mensagem via SSE (`POST /chats/{chat_id}/messages/stream`) com `graph_rag_enabled=true` e `graph_hops`
+    - renderiza tokens em streaming no widget
+  - Safety: injeta `thesis` instruindo o agente a **não** usar `link_entities` no modo LLM (writes ficam via `/link` ou parser determinístico)
+
+### Verificação
+- `apps/web`: `npm run type-check` OK
+
+---
+
+## 2026-02-08 — Sessão 147: Graph Page Natural Edges (Verb → Relation Type)
+
+### Objetivo
+Permitir que usuários criem arestas com linguagem realmente natural, sem `via` e sem `/link`, por exemplo:
+`"Sumula 473 STF interpreta Art. 5 CF"` e `"Art. 135 CTN remete a Art. 50 CC"`.
+
+### Implementação
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - Inferência determinística de `relation_type` por verbos:
+    - interpreta → `INTERPRETA`
+    - remete a → `REMETE_A`
+    - pertence a → `PERTENCE_A`
+    - fundamenta → `FUNDAMENTA`
+    - cita → `CITA`
+    - aplica (+ heurística p/ sumula) → `APLICA`/`APLICA_SUMULA`
+    - fixa tese → `FIXA_TESE`
+    - julga tema → `JULGA_TEMA`
+    - proferida por → `PROFERIDA_POR` (com flip de direção)
+    - revoga/altera/regulamenta/especializa/substitui/cancela/complementa/excepciona
+  - Gating anti-acidente: só escreve quando detecta 2 refs “com cara de entidade” (art/súmula/lei/tema + dígitos, etc.)
+  - Mantém `search-first` e exige escolha manual quando `search` retorna ambíguo
+
+### Verificação
+- `apps/web`: `npm run type-check` OK
+
+---
+
+## 2026-02-08 — Sessão 148: Graph Page `/t2c` (Text2Cypher)
+
+### Objetivo
+Expor o Text2Cypher na página de grafos via comando `/t2c`, chamando o endpoint `POST /graph/ask/text2cypher`.
+
+### Implementação
+- `apps/web/src/components/graph/GraphAuraAgentChat.tsx`
+  - Novo helper `callGraphText2Cypher()`
+  - Suporte ao comando `/t2c <pergunta>` (ou `/text2cypher <pergunta>`)
+  - Atualiza help string inicial para mencionar `/t2c`
+
+### Observações
+- O backend exige `TEXT2CYPHER_ENABLED=true`; caso contrário a resposta retorna erro informando que está desabilitado.
+
+### Verificação
+- `apps/web`: `npm run type-check` OK
+
+---
+
+## 2026-02-08 — Sessão 142: Graph Write via Chat — `link_entities` no ask_graph
+
+### Objetivo
+Permitir que os modelos de IA do chat (Claude/GPT/Gemini) criem relações (arestas) entre entidades no grafo Neo4j via linguagem natural, usando a tool `ask_graph` unificada.
+
+### Contexto
+O grafo jurídico v3.1 está populado (170 Artigos, 17 Decisões, 7 Súmulas, 260 cadeias). A tool `ask_graph` permitia consultas READ-ONLY. Primitivas de escrita segura (`link_entities_async()`, `_sanitize_relation_type()`) já existiam no `neo4j_mvp.py` mas não eram acessíveis via chat. Leitura do `ingest_v2.py` standalone confirmou paridade de relationship types.
+
+### Arquivos Criados
+- `apps/api/tests/test_graph_write.py` — **Novo**: 11 testes (enum, validação, handler success/error/fallback/audit, tool definition)
+
+### Arquivos Modificados
+- `apps/api/app/services/graph_ask_service.py`:
+  - `GraphOperation.LINK_ENTITIES` adicionado ao enum
+  - `_handle_link_entities()` — handler async com 3 camadas de segurança
+  - Dispatch routing no `ask()` (interceptado antes do template lookup)
+  - `_validate_params()` — adicionado `LINK_ENTITIES: ["source_id", "target_id"]`
+- `apps/api/app/services/ai/shared/unified_tools.py`:
+  - `ASK_GRAPH_TOOL` — operação 6 `link_entities` + param `relation_type` + description com tipos válidos
+- `apps/api/app/services/ai/shared/tool_handlers.py`:
+  - Propagação de `relation_type` do nível superior para `operation_params`
+- `apps/api/app/api/endpoints/graph_ask.py`:
+  - `"link_entities"` adicionado ao `Literal` do `GraphAskRequest`
+
+### Segurança (3 camadas)
+1. `_sanitize_relation_type()` — whitelist de 30+ tipos + regex `^[A-Z][A-Z0-9_]{0,40}$`
+2. `link_entities_async()` — MATCH nas duas entidades (devem existir), MERGE idempotente
+3. Properties de auditoria imutáveis: `source: "user_chat"`, `layer: "user_curated"`, `verified: True`, `created_by: tenant_id`, `created_via: "chat"` (não sobrescrevíveis pelo usuário)
+
+### Fluxo de Uso
+```
+User: "Conecte Art. 5 CF com Súmula 473 STF via INTERPRETA"
+LLM: ask_graph(operation="search", params={query: "Art. 5 CF"}) → entity_id
+LLM: ask_graph(operation="search", params={query: "Súmula 473 STF"}) → entity_id
+LLM: ask_graph(operation="link_entities", params={source_id, target_id, relation_type: "INTERPRETA"})
+```
+
+### Testes
+- `test_graph_write.py`: 11 passed
+- Regressão: 84 passed, 1 skipped, 0 failed
+
+### Primitivas Reutilizadas (não modificadas)
+- `neo4j_mvp.py:link_entities_async()` — escrita segura com whitelist
+- `neo4j_mvp.py:_sanitize_relation_type()` — validação de tipo
+- `legal_schema.py:LEGAL_RELATIONSHIP_TYPES` — whitelist de 30+ tipos
+
+---
+
+## 2026-02-08 — Sessão 141: Opção B — Pattern-Based Factual Relationship Extraction
+
+### Objetivo
+Implementar extração determinística de relações fáticas (PARTICIPA_DE, REPRESENTA) via regex patterns no pipeline KG Builder — complementando a REGRA 11 (LLM) com uma camada de custo zero e latência <1ms.
+
+### Contexto
+O pipeline regex já extraía entidades fáticas (CPF, CNPJ, OAB, Processo) mas não criava arestas entre elas. A Opção B adiciona Step 6 em `_run_regex_extraction()` com 4 sub-steps que criam relações quando entidades coexistem no mesmo chunk com triggers textuais.
+
+### Arquivos Criados
+- `apps/api/tests/test_factual_relationships.py` — **Novo**: 27 testes (trigger lists, PESSOA_ROLE_RE regex, slugify, extract_evidence, stats fields, schema integration)
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py`:
+  - `_PARTICIPA_TRIGGERS` (22 roles processuais: autor/réu/reclamante/apelante/etc.)
+  - `_REPRESENTA_TRIGGERS` (10 roles de representação: advogado/procurador/defensor/etc.)
+  - `_PESSOA_ROLE_RE` — regex para "Nome Completo, papel" com suporte a preposições (da/de/dos/e)
+  - `_slugify_name()` — normaliza nomes para entity IDs (remove acentos, lowercase, underscores)
+  - `_extract_evidence()` — extrai trecho de ~160 chars ao redor do match
+  - **Step 6** com 4 sub-steps:
+    - 6a: CPF/CNPJ → Processo via PARTICIPA_DE (requer trigger de papel processual)
+    - 6b: OAB → CPF/CNPJ via REPRESENTA (requer trigger de representação)
+    - 6c: OAB → Processo via PARTICIPA_DE (implícito, confidence 0.25)
+    - 6d: Pessoa por nome + papel → cria entidade Pessoa + PARTICIPA_DE ao Processo
+  - 4 novos campos de stats: `factual_participa_links`, `factual_representa_links`, `factual_oab_processo_links`, `factual_pessoa_by_name`
+
+### Bugs Encontrados e Corrigidos
+1. **`re.IGNORECASE` quebrando detecção de nomes**: Com IGNORECASE, o padrão de nome `[A-ZÀ-Ú]` casava com minúsculas, fazendo "João, autor" ser match indevido. Solução: remover flag, listar roles em lowercase apenas.
+2. **Espaço faltando entre palavras do nome**: O grupo opcional de preposição continha o `\s+` interno. Sem preposição, não havia espaço entre 1ª e 2ª palavra. Solução: mover `\s+` para fora do grupo opcional.
+3. **Match parcial de "ré" em "reclamante"**: Alternativa `r[eé]` casava "re" no início de "reclamante". Solução: reordenar alternativas (mais longas primeiro) + `\b` word boundary.
+
+### Design Decisions
+- **Strict**: sem trigger = sem link (exceto OAB→Processo, implícito)
+- **Candidate layer**: todos os links usam `layer: "candidate"`, `verified: False`, `dimension: "fatica"`
+- **Deduplica com LLM**: se REGRA 11 criar o mesmo link, o `MERGE` do Neo4j deduplica automaticamente
+- **Case-sensitive por design**: regex sem IGNORECASE — nomes próprios exigem capitalização
+
+### Testes
+- 27 novos testes: todos passaram
+- Suite KG completa (149 testes): 149 passed, 1 skipped, 0 failed
+
+---
+
+## 2026-02-08 — Sessão 140: Factual Strict Parity + Decisões Arquiteturais (GLiNER/RAG)
+
+### Objetivo
+Alinhar extração fática (REGRA 10-12) com a filosofia strict das relações jurídicas, e validar decisões sobre breadth de entidades e REMETE_A semântico.
+
+### Alterações
+- **`legal_graphrag_prompt.py`** — REGRA 0.1: adicionada dimensão "fatica" como 4ª dimensão + mapeamento (PARTICIPA_DE, REPRESENTA, OCORRE_EM, PARTE_DE, RELATED_TO). REGRA 11: adicionado requisito de evidence + dimension + trigger phrases para PARTICIPA_DE e REPRESENTA
+- **`test_factual_extraction.py`** — 4 novos testes: `test_regra_11_requires_evidence`, `test_regra_11_dimension_fatica`, `test_regra_11_has_triggers`, `test_dimension_fatica_in_base_prompt`
+
+### Decisões Arquiteturais
+1. **GLiNER para breadth, LLM para depth**: GLiNER já lida com 19 tipos de entidade (configurável via `GLINER_LABELS`); o prompt LLM foca em 6 tipos fáticos de alto valor onde o LLM agrega com properties e relações
+2. **REMETE_A textual-only**: Conexões semânticas são redundantes com o RAG (Qdrant+OpenSearch+RRF) que já descobre relações semânticas no query time. O grafo armazena apenas relações estruturais explícitas
+3. **Validação com resultados reais**: ingest_v2.py produziu 246 REMETE_A, 62 cross-law, 30 cadeias 3-hops, 181 Art←Decisao→Tese, 20 Sumula→Art→Art — confirmando que extração strict gera grafos ricos
+
+### Testes
+- 65 testes passaram (todos os testes KG)
+
+---
+
+## 2026-02-08 — Sessão 139: Prompt Strict + Verificação de 5 Mudanças do Usuário
+
+### Objetivo
+Decidir filosofia de extração (strict vs agressiva) e verificar 5 alterações feitas pelo usuário no frontend e backend.
+
+### Decisão Arquitetural: Extração Strict com Evidence Obrigatória
+- Testamos abordagem agressiva (v2 original: "Prefira EXTRAIR", evidence opcional) — revertida pelo usuário
+- **Decisão final: strict** — evidence obrigatória, "Na dúvida, OMITA" — prioriza auditabilidade/transparência
+- Ambos os prompts (Iudex e ingest_v2.py) sincronizados com mesma filosofia strict
+- Iudex é superset do v2 (tem AFASTA, anti-hub REGRA 6, factual layer REGRA 10-12, 14 triggers REMETE_A)
+
+### Alterações Verificadas (feitas pelo usuário)
+1. **Prompt strict** em `legal_graphrag_prompt.py` — REGRA 0 anti-contaminação, evidence obrigatória
+2. **UI hops limitado a 5** — `clampGraphHops(Math.max(1, Math.min(5, ...)))` em 3 componentes:
+   - `GraphAuraAgentChat.tsx:46`, `GraphPageClient.tsx:142`, `minuta-settings-drawer.tsx:128`
+3. **`/diagnostics` command** em `GraphAuraAgentChat.tsx:61` — parseia `diagnostics|diag|relatorio|report`
+4. **`relation_details`** em `graph_ask_service.py:283-286,322-325` — retorna `{type, dimension, evidence}` por relação
+5. **Evidence nos samples** de `legal_diagnostics` — `test_graph_ask_diagnostics.py` atualizado com assertions
+
+### Testes
+- 6 arquivos de teste executados: 227 passed, 6 skipped, 0 failed
+
+### Lição
+- Para RAG jurídico com foco em transparência, extração agressiva (mais relações, menos evidence) é contra-produtiva
+- Compensação para grafo esparso: regex layer (REMETE_A, PERTENCE_A, APLICA_SUMULA) + chunk overlap
+
+---
+
+## 2026-02-08 — Sessão 138: Paridade com ingest_v2.py — Prompt, Schema, Post-processing, Chain Analysis
+
+### Objetivo
+Fechar os 4 gaps identificados entre o Iudex KG Builder e o standalone `ingest_v2.py`:
+1. **APLICA_SUMULA**: tipo dedicado para Decisao→Sumula (v2 usa dedicado, Iudex usava genérico APLICA)
+2. **Prompt enriquecido**: arquitetura 3-camadas, tabela de dimensões, 11 triggers REMETE_A, REGRA 7 (Citação entre Decisões), REGRA 8 (Regulamenta e Especializa)
+3. **Post-processing completo**: normalização de nomes de Artigo (Código Civil→CC), remoção de Decisão composta, relabel expandido, migração APLICA→APLICA_SUMULA
+4. **Chain Analysis**: 6 queries Cypher para cadeias 4-5 hops medindo qualidade do grafo
+
+### Arquivos Criados
+- `apps/api/app/services/rag/core/kg_builder/chain_analyzer.py` — **Novo**: 6 chain queries (4h/5h), 17 component count queries, `ChainAnalysisResult` dataclass, `analyze_chains()` function
+- `apps/api/tests/test_chain_analysis.py` — **Novo**: 26 testes (schema, prompt parity, post-processor, chain analyzer)
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — +3 relationship types (APLICA_SUMULA, AFASTA, ESTABELECE_TESE) + 6 patterns
+- `apps/api/app/services/rag/core/kg_builder/legal_graphrag_prompt.py` — Reescrita completa do STRICT_LEGAL_EXTRACTION_PROMPT com arquitetura 3-camadas, dimensões, APLICA_SUMULA nas cadeias-alvo, 11 triggers REMETE_A, REGRA 7 (Citação entre Decisões), REGRA 8 (Regulamenta e Especializa). FACTUAL_EXTRACTION_LAYER renumerado para REGRA 10/11/12
+- `apps/api/app/services/rag/core/kg_builder/legal_postprocessor.py` — +3 stats fields + step 0a (normalização nomes artigo, 14 pares), relabel expandido com patterns v2, step 3b (compound Decisao removal), step 3c (migração APLICA→APLICA_SUMULA)
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py` — APLICA_SUMULA no regex extraction + chain analysis integration (env-gated)
+- `apps/api/tests/test_factual_extraction.py` — Atualização de 4 testes para refletir nova numeração de regras (REGRA 7→10, 8→11, 9→12)
+
+### Env Vars
+- `KG_BUILDER_CHAIN_ANALYSIS=true` — Roda análise de cadeias 4-5 hops após ingestão (default: `false`)
+
+### Testes
+- Novos: 26 passed (test_chain_analysis.py)
+- Suite KG (152 testes): 152 passed, 1 skipped, 0 failed
+- Regressão corrigida: 2 testes em test_factual_extraction.py atualizados (renumeração REGRA 7→10)
+
+### Decisões
+- APLICA_SUMULA coexiste com APLICA genérico (backward compat) — prompt prioriza APLICA_SUMULA
+- Prompt completamente reescrito com 9+3 regras (legal + factual layer) — idêntico ao v2 mas com adições Iudex
+- Post-processing: normalização aplica a Artigo E Sumula (v2 só Artigo)
+- Chain analysis é opt-in (KG_BUILDER_CHAIN_ANALYSIS=false) — roda via asyncio.to_thread para não bloquear
+- Relabel expandido: 8 regex patterns v2 para Decisao→Tribunal (Jurisprudência, Informativo, Caso, etc.)
+
+---
+
+## 2026-02-08 — Sessão 137: Expansão de Entidades Fáticas no KG Builder
+
+### Objetivo
+Expandir o KG Builder para extrair entidades fáticas (Pessoa, Empresa, Evento, CPF, CNPJ, datas, valores monetários) além das entidades doutrinário-legais existentes. Reconciliar com o LLM Knowledge Graph Builder usando ontologia predefinida como seed + descoberta automática.
+
+### Arquivos Criados
+- `apps/api/tests/test_factual_extraction.py` — **Novo**: 35 testes (CPF/CNPJ validation, regex extraction, schema patterns, whitelist, cross-merger equivalences, prompt layer)
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — +3 node types (Pessoa, Empresa, Evento) + 5 rel types (PARTICIPA_DE, IDENTIFICADO_POR, OCORRE_EM, REPRESENTA, PARTE_DE) + 18 patterns
+- `apps/api/app/services/rag/core/kg_builder/legal_graphrag_prompt.py` — +`FACTUAL_EXTRACTION_LAYER` (REGRA 7-9) + `include_factual` param em `StrictLegalExtractionTemplate`
+- `apps/api/app/services/rag/core/neo4j_mvp.py` — +4 EntityTypes (CPF, CNPJ, DATA_JURIDICA, VALOR_MONETARIO) + regex patterns + `_validate_cpf()` + `_validate_cnpj()` + `_extract_factual()` + `include_factual` param em `extract()`/`extract_all()`
+- `apps/api/app/services/rag/core/kg_builder/gliner_extractor.py` — +5 labels (pessoa, empresa, evento, cpf, cnpj) + 5 entries no `_LABEL_MAP`
+- `apps/api/app/services/rag/core/graph_hybrid.py` — +10 entries no whitelist (5 fáticas + 5 gap fix: orgao_publico, prazo, valor_monetario, data_juridica, local)
+- `apps/api/app/services/rag/core/kg_builder/cross_merger.py` — +15 equivalências fáticas (reclamante→pessoa, empregador→empresa, audiencia→evento, etc.)
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py` — Integração do flag `KG_BUILDER_FACTUAL_EXTRACTION` em regex e GraphRAG pipelines + stats fáticos
+
+### Env Vars
+- `KG_BUILDER_FACTUAL_EXTRACTION=true` — Ativa extração de entidades fáticas (regex + prompt LLM). Default: `false`
+
+### Testes
+- Novos: 35 passed (test_factual_extraction.py)
+- Suite KG (181 testes): 181 passed, 1 skipped, 0 failed
+- Suite completa: 1446 passed, 74 skipped, 17 failed (pré-existentes: qdrant/skills/hearing/gemini)
+
+### Decisões
+- Abordagem 4 camadas: Ontologia seed → LLM auto-discovery → GLiNER zero-shot → Regex determinístico
+- CPF/CNPJ com validação algorítmica de dígitos verificadores (Receita Federal)
+- Datas validadas: range DD(1-31)/MM(1-12)/YYYY(1900-2100)
+- Extração fática é opt-in (`KG_BUILDER_FACTUAL_EXTRACTION=false` por default) para segurança em produção
+- Prompt fático é camada aditiva (REGRA 7-9) inserida no STRICT_LEGAL_EXTRACTION_PROMPT, não substitutiva
+- Whitelist gap fix: 5 tipos (orgao_publico, prazo, valor_monetario, data_juridica, local) estavam no schema mas faltavam no whitelist
+
+---
+
+## 2026-02-08 — Sessão 136: Schema Discovery + Cross-Extractor Entity Merger
+
+### Objetivo
+Implementar as duas lacunas identificadas na análise do hybrid ontology approach:
+1. **Schema Discovery** — Tipos descobertos pelo LLM ficavam como `:Entity` genérico sem validação/persistência
+2. **Cross-Extractor Entity Merger** — Regex/GLiNER/LLM produziam entity_ids diferentes para a mesma entidade real
+
+### Arquivos Criados
+- `apps/api/app/services/rag/core/kg_builder/schema_discovery.py` — **Novo**: SchemaDiscoveryProcessor (query unknown types → validate via heuristics → register dynamically → persist as `:DiscoveredSchema`)
+- `apps/api/app/services/rag/core/kg_builder/cross_merger.py` — **Novo**: CrossExtractorMerger (TYPE_EQUIVALENCE_MAP, rapidfuzz matching, APOC-based merge)
+- `apps/api/tests/test_schema_discovery.py` — **Novo**: 20 testes (PascalCase, validation heuristics, dynamic registration, get_all_node_types)
+- `apps/api/tests/test_cross_merger.py` — **Novo**: 11 testes (pick_keeper, types_are_mergeable, canonical_type, equivalence consistency)
+
+### Arquivos Modificados
+- `apps/api/app/services/rag/core/graph_hybrid.py` — `register_dynamic_label()` helper + adicionado "decisao" ao whitelist
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — `get_all_node_types()` retorna tipos base + descobertos
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py` — Integração em `run_kg_builder()` e `_run_graphrag_pipeline()` com novos stats keys
+
+### Env Vars (todas default off)
+- `KG_BUILDER_SCHEMA_DISCOVERY=true` — Ativa discovery pós-GraphRAG
+- `KG_BUILDER_SCHEMA_DISCOVERY_AUTO_REGISTER=true` — Auto-promove tipos ao whitelist
+- `KG_BUILDER_SCHEMA_DISCOVERY_MIN_INSTANCES=2` — Mínimo de entidades para validar tipo
+- `KG_BUILDER_CROSS_MERGER=true` — Ativa merge cross-extractor
+- `KG_BUILDER_CROSS_MERGER_THRESHOLD=88.0` — Threshold fuzzy (> 85 do resolver normal)
+
+### Testes
+- Novos: 31 passed (20 schema_discovery + 11 cross_merger)
+- Suite relacionada: 157 passed, 1 skipped, 0 failed
+- Bug encontrado: "decisao" faltava no `HYBRID_LABELS_BY_ENTITY_TYPE` apesar de ser node type definido → corrigido
+
+### Decisões
+- Schema discovery valida com 6 heurísticas: stopwords, comprimento, forbidden labels, regex safety, min instances, sample quality
+- Cross-merger usa `TYPE_EQUIVALENCE_MAP` conservador (ex: "norma"→"lei", "acordao"→"decisao") para evitar merges incorretos
+- Keeper selection prioriza tipo predefinido > entity_id mais curto (regex-generated = mais canônico)
+- Ambos features são opt-in via env vars (default off) para segurança em produção
+
+---
+
+## 2026-02-08 — Sessão 135: Ecossistema Neo4j (GDS + Communities + MCP + Neo4jSaver)
+
+### Objetivo
+Implementar 4 fases do plano de ecossistema Neo4j para maximizar valor do grafo jurídico: (1) graphdatascience para PageRank/Leiden/Similarity, (2) Community Summaries via Leiden + LLM, (3) Neo4jSaver para LangGraph checkpoints, (4) Neo4j MCP Server para agentes AI.
+
+### Arquivos Criados
+- `apps/api/app/services/rag/core/gds_analytics.py` — **Novo**: Neo4jGDSClient wrapper (PageRank, Leiden, Node Similarity) com projeção de subgrafo tenant-scoped
+- `apps/api/app/services/rag/core/community_summary.py` — **Novo**: Pipeline Leiden→LLM summarization→Neo4j write + retrieval para Stage 9
+- `apps/api/app/services/mcp_servers/neo4j_server.py` — **Novo**: Neo4j MCP Server (5 tools: search, neighbors, path, stats, ranking)
+- `apps/api/tests/test_gds_analytics.py` — **Novo**: 14 testes (PageRank, Leiden, Similarity, singleton)
+- `apps/api/tests/test_community_summary.py` — **Novo**: 8 testes (pipeline, heuristic fallback, retrieval, graceful degradation)
+- `apps/api/tests/test_neo4j_mcp_server.py` — **Novo**: 14 testes (tools, routing, formatting, config registration)
+
+### Arquivos Modificados
+- `apps/api/requirements.txt` — Adicionado `graphdatascience>=1.6.0`, `langchain-neo4j>=0.8.0`
+- `apps/api/app/services/graph_ask_service.py` — Novo RANKING operation + pagerank_score em NEIGHBORS
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — Community node type + BELONGS_TO relationship
+- `apps/api/app/services/rag/pipeline/rag_pipeline.py` — Stage 9: injection de community summaries (env: `RAG_USE_COMMUNITY_SUMMARIES`)
+- `apps/api/app/api/endpoints/advanced.py` — Endpoint POST `/api/advanced/communities/recompute`
+- `apps/api/app/services/ai/langgraph_legal_workflow.py` — Neo4jSaver como opção de checkpointer (env: `LANGGRAPH_CHECKPOINTER=neo4j`)
+- `apps/api/app/services/mcp_config.py` — Registrado neo4j-graph em BUILTIN_MCP_SERVERS
+
+### Env Vars
+- `LANGGRAPH_CHECKPOINTER=neo4j` — Ativa Neo4jSaver (default: SQLite)
+- `RAG_USE_COMMUNITY_SUMMARIES=true` — Ativa community summaries no Stage 9
+- `COMMUNITY_SUMMARY_LLM_PROVIDER=gemini|openai|fallback` — Provider para sumarização
+
+### Testes
+- 38 testes (36 originais + 2 async wrappers): 38 passed, 0 failed
+- Suite Neo4j completa: 118 passed, 0 failed
+- Suite geral: 1348 passed, 17 failed (pré-existentes), 0 regressões
+
+### Fixes pós-review (3 Alta + 2 Média)
+- **[Alta] Import order**: `import os` movido para linha 22, antes de `os.environ.get` (linha 35)
+- **[Alta] Async blocking**: `community_summary.py` agora usa `asyncio.to_thread()` para GDS/LLM e `_neo4j_execute_write/read` com async API preferencial
+- **[Alta] PageRank multi-tenant**: Scores em `(:TenantEntityMetric {tenant_id})` via `[:HAS_TENANT_METRIC]` (não mais global em Entity)
+- **[Média] KG Builder**: `KG_BUILDER_COMPUTE_PAGERANK=true` aciona PageRank pós-ingest via `asyncio.to_thread`
+- **[Média] NEIGHBORS template**: `OPTIONAL MATCH` em `TenantEntityMetric` com `tenant_id` explícito
+
+### Decisões
+- ToolsRetriever/HybridCypherRetriever descartados (incompatíveis com arquitetura tri-database Qdrant+OpenSearch+Neo4j)
+- Neo4jSaver opcional via env var (default mantém SQLite para não exigir Neo4j em dev)
+- Community summaries off por default (requer GDS plugin + custo de LLM)
+- PageRank isolado por tenant via nós dedicados `TenantEntityMetric` (evita sobrescrita cross-tenant)
+
+---
+
+## 2026-02-08 — Sessão 134: Integração GLiNER ao KG Builder
+
+### Objetivo
+Adicionar GLiNER (zero-shot NER) como terceiro extractor no KG Builder pipeline, complementando Regex (padrões fixos) e LLM (semântico/caro).
+
+### Arquivos Alterados
+- `apps/api/requirements.txt` — Adicionado `gliner>=0.2.0`
+- `apps/api/app/services/rag/core/kg_builder/gliner_extractor.py` — **Novo**: GLiNERExtractor component (lazy-load singleton, asyncio.to_thread, dedup via MD5)
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py` — Adicionado `_run_gliner_extraction()` + integração em `run_kg_builder()` via `KG_BUILDER_USE_GLINER=true`
+- `apps/api/app/services/rag/core/kg_builder/__init__.py` — Export de GLiNERExtractor
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — 5 novos node types (OrgaoPublico, Prazo, ValorMonetario, DataJuridica, Local) + 4 patterns
+- `apps/api/tests/test_gliner_extractor.py` — **Novo**: 24 testes (import, entity ID, label mapping, extraction mock, dedup, empty input, pipeline integration)
+
+### Comandos Executados
+- `pip install gliner` — OK (v0.2.24)
+- `pytest tests/test_gliner_extractor.py -v` — 24 passed
+- `pytest tests/test_kg_pipeline_graphrag.py tests/test_text2cypher.py tests/test_ragas_integration.py -v` — 50 passed, 5 skipped (zero regressões)
+
+### Decisões Tomadas
+- Relik NÃO integrado — LLM já faz extração de relações melhor
+- GLiNER desabilitado por padrão (`KG_BUILDER_USE_GLINER=false`) para não impactar performance sem opt-in
+- Modelo default: `urchade/gliner_medium-v2.1` (~209M params, CPU-friendly)
+- Entity IDs com prefixo `gliner_` + MD5 truncado para distinguir de regex entities
+
+---
+
+## 2026-02-08 — Sessão 133: neo4j-graphrag SimpleKGPipeline + Text2Cypher + RAGAs
+
+### Objetivo
+Ativar 3 features Neo4j que estavam incompletas no app:
+1. **SimpleKGPipeline** — corrigir bug de LLM provider e formato de schema
+2. **Text2Cypher** — implementar NL→Cypher com 3 camadas de segurança multi-tenant
+3. **RAGAs** — integrar framework de avaliação com métricas legais existentes
+
+### Arquivos Alterados
+- `apps/api/requirements.txt` — adicionado `ragas>=0.2.0`, `datasets>=2.14.0`
+- `apps/api/app/services/rag/core/kg_builder/legal_schema.py` — adicionado `build_graphrag_schema()` com tipos nativos neo4j-graphrag (GraphSchema, NodeType, RelationshipType, Pattern, PropertyType); adicionado `get_schema_description()` para Text2Cypher
+- `apps/api/app/services/rag/core/kg_builder/pipeline.py` — corrigido `_run_graphrag_pipeline()` (bug: usava OpenAILLM com modelo Gemini); adicionado multi-provider via `_build_graphrag_llm()` (openai/gemini/anthropic/ollama); reuso de driver singleton
+- `apps/api/app/services/graph_ask_service.py` — adicionado Text2Cypher engine com 3 camadas de segurança (keyword blocklist, tenant filter injection, structural validation); `Text2CypherEngine` class com suporte multi-provider LLM; `CypherSecurityError`; método `text2cypher()` no `GraphAskService`
+- `apps/api/app/api/endpoints/graph_ask.py` — adicionado `Text2CypherRequest` schema e endpoint `POST /graph-ask/ask/text2cypher`
+- `apps/api/app/services/ai/rag_evaluator.py` — adicionado `evaluate_with_ragas()` que combina RAGAs (faithfulness, answer_relevancy, context_precision, context_recall) com métricas legais (citation_coverage, temporal_validity, etc.) em score combinado ponderado
+- `apps/api/tests/test_text2cypher.py` — 25 testes de segurança Text2Cypher
+- `apps/api/tests/test_kg_pipeline_graphrag.py` — 14 testes de schema e pipeline
+- `apps/api/tests/test_ragas_integration.py` — 11 testes de métricas RAGAs + legais
+
+### Comandos Executados
+- `pip install neo4j-graphrag ragas datasets` — OK (neo4j-graphrag 1.13.0, ragas 0.4.3)
+- `pytest tests/test_text2cypher.py tests/test_kg_pipeline_graphrag.py tests/test_ragas_integration.py` — 50 passed, 5 skipped, 0 failed
+
+### Decisões Tomadas
+- Text2Cypher desabilitado por padrão (`TEXT2CYPHER_ENABLED=false`) — opt-in explícito
+- 3 camadas de segurança: (1) blocklist tokenizada (evita falsos positivos como CREATED_AT), (2) injeção automática de tenant_id em nós Document, (3) validação estrutural (MATCH/RETURN obrigatório)
+- LLM provider para Text2Cypher via env `TEXT2CYPHER_LLM_PROVIDER` (openai/gemini/anthropic)
+- Score RAGAs+Legal combinado com pesos: 50% RAGAs (faithfulness 15%, relevancy 15%, precision 10%, recall 10%) + 50% Legal (citation 15%, temporal 10%, jurisdiction 10%, entity_precision 7.5%, entity_recall 7.5%)
+- GraphSchema usa Pattern(source, relationship, target) — verificado via introspection
+
+### Env vars novas
+```
+KG_BUILDER_USE_GRAPHRAG=true          # Ativa SimpleKGPipeline
+KG_BUILDER_LLM_PROVIDER=openai        # ou gemini/anthropic/ollama
+TEXT2CYPHER_ENABLED=true               # Ativa Text2Cypher
+TEXT2CYPHER_LLM_PROVIDER=openai        # ou gemini/anthropic
+TEXT2CYPHER_MODEL=gpt-4o-mini
+```
+
+---
+
+## 2026-02-05 — Sessão 132: Plano Agent SDK Integration + ChatInput Layout + UI Audit
+
+### Objetivo
+1. Otimizar layout do ChatInput na Ask page (compactar, alinhar ícones, textarea expansível)
+2. Análise profunda do documento Claude Agent SDK vs implementação Iudex
+3. Criar plano de integração faseado com mapeamento dual-mode
+4. Code review cruzado Claude×GPT — incorporar bugfixes e Fase 4 operacional
+5. Auditoria completa de ícones da Ask page — plano UI layout-safe + checklist de preservação
+
+### Arquivos Alterados
+- `apps/web/src/app/(dashboard)/ask/page.tsx` — padding wrapper (`p-4 pb-5` → `px-4 py-2`), largura (`max-w-3xl` → `max-w-5xl`)
+- `apps/web/src/components/chat/chat-input.tsx` — container compacto (`rounded-2xl p-2`), textarea expansível com `resize-y min-h-[96px]`, ContextUsageBar inline, ícones `h-7 w-7`, botão Minimize2 para reset
+- `docs/PLANO_AGENT_SDK_INTEGRATION.md` — documento completo: gap analysis, plano 5 fases (0-4), mapeamento dual-mode, plano UI (Seção 10), checklist preservação (Seção 11)
+
+### Decisões Tomadas
+- Textarea 96px min (4 linhas) com resize-y manual + botão discreto de reset
+- ContextUsageBar movida para inline ao lado do Send (elimina linha extra)
+- Plano SDK cobre 3 modos de execução: Solo, LangGraph, Parallel — cada item mapeado nos 3 contextos
+- Docs >500pg forçam LANGGRAPH (solo não suporta multi-pass)
+- Skills têm `prefer_workflow` / `prefer_agent` flags para routing
+- **Fase 0 bloqueante** adicionada: 4 bugs de runtime (MCP naming, initialize(), RISK_TO_PERMISSION, delegate_research)
+- **Plano UI**: 15 features de frontend, TODAS encaixam em componentes existentes — zero botões novos
+- Tool approval "lembrar" já existe (session/always) — removido do plano como gap
+- ContextSelector/ContextDashboard são da generator page, não da Ask — removidos da análise
+
+### 2ª Revisão Técnica (GPT → Claude verificação)
+Verificados 8 findings por leitura direta do código-fonte:
+
+| Finding | Veredicto | Correção |
+|---------|:---------:|----------|
+| Raw API não usa PermissionManager (usa dict local) | CORRETO | Item 1.6 reescrito: ambos caminhos ignoram PM |
+| `async with ClaudeAgentExecutor` inválido | CORRETO | Exemplo delegate_subtask reescrito com instanciação direta |
+| Prompt caching system em messages[] | CORRETO | Exemplo reescrito: `kwargs["system"]` como content blocks |
+| Routing `len(selected_models)>1 → PARALLEL` diverge | CORRETO | Seção reescrita: estado atual vs proposta separados |
+| DataJud "não exposto como tool" | PARCIAL | Existe no Tool Gateway, gap é só no SDK path |
+| Skills "criar do zero" | CORRETO | Evoluir LibraryItem + template_loader.py existente |
+| Test files não existem | CORRETO | Adicionado [criar] em cada referência |
+| Path parallel_research.py | CORRETO | Corrigido para subgraphs/ |
+
+### 3ª Revisão Técnica (GPT → Claude verificação)
+Verificados 5 findings (2 HIGH, 2 MEDIUM, 1 LOW OK):
+
+| Finding | Veredicto | Correção |
+|---------|:---------:|----------|
+| `SSEEventType.CONTENT` inexistente + `resolve_tools()` inexistente | CORRETO | Exemplo reescrito: `SSEEventType.TOKEN` + `load_unified_tools()` |
+| Skills sem identidade distinta de agent_template | CORRETO | Nova tag `"skill"`, schema frontmatter, tabela de distinção |
+| Prompt caching não alinhado com `_call_claude()` real | CORRETO | Exemplo reescrito com 2 system blocks, nota sobre `_build_system_prompt()` |
+| Default routing CLAUDE_AGENT = breaking change | CORRETO | Feature flag `IUDEX_DEFAULT_EXECUTOR` + rollout gradual |
+| UI layout-safe sólido | OK | Sem alteração necessária |
+
+### 4ª Revisão — Correção Estrutural (Arquitetura de Modos)
+Descoberta fundamental: plano mapeava 3 modos de execução mas Iudex tem **4 caminhos**:
+
+| Modo UI | Backend | Usa Router? |
+|---------|---------|:-----------:|
+| ⚡ Rápido | `dispatch_turn()` → chamada direta ao modelo | NÃO |
+| ⚖️ Comparar | N modelos em paralelo (direto) | NÃO |
+| 👥 Comitê | `OrchestrationRouter` → LANGGRAPH/AGENT/PARALLEL | SIM |
+| 📄 Canvas | Legacy generateDocument | NÃO |
+
+**Correções**: Seção 5 reescrita com 4 caminhos, tabelas de fase com coluna Rápido, regras de routing restritas ao escopo do Comitê.
+
+### Comandos Executados
+- `npx tsc --noEmit` — OK (apenas erro pré-existente em transcription/page.tsx)
+
+---
+
+## 2026-02-05 — Sessão 131: Reparo Manual de Job e Reinício do Worker
+
+### Objetivo
+Verificar e reparar persistência de dados de áudio e qualidade no job `7531a45f-d56a-45ee-a662-ac6a602fbbe6`.
+
+### Ações Realizadas
+1. Verificação completa dos dados do job
+2. Execução manual do quality_service para gerar validation_report e analysis_result
+3. Atualização do result.json com campos faltantes
+4. Reinício do Celery worker para usar código atualizado
+
+### Status Final do Job
+- ✅ 4 arquivos MP3 em `input/` (29-48 MB cada)
+- ✅ `content.md` (147 KB) - conteúdo formatado
+- ✅ `raw.txt` (136 KB) - transcrição bruta
+- ✅ `audit_issues.json` - 2 issues (tema 1734, ADI 38)
+- ✅ `reports.json` - paths dos relatórios
+- ✅ `result.json` com quality.validation_report (score 9.9/10)
+
+### Comandos Executados
+```bash
+# Parar e reiniciar Celery worker
+kill -9 25306
+nohup .venv/bin/celery -A app.workers.celery_app worker --loglevel=info -Q transcription > /tmp/celery_worker.log 2>&1 &
+```
+
+### Resultado
+- Worker Celery reiniciado (PID 58349)
+- Novos jobs usarão código atualizado que salva todos os campos
+- Job legacy reparado manualmente e agora exibe dados corretamente
+
+---
+
+## 2026-02-05 — Sessão 130: Fix Celery Worker Dados Incompletos (Auditoria/Reports)
+
+### Objetivo
+Corrigir o problema onde o Celery worker salvava dados incompletos no result.json, causando a ausência de dados de auditoria e relatórios na UI.
+
+### Problema
+O `save_data` no Celery worker estava salvando apenas campos básicos:
+```python
+save_data = {
+    "mode": mode,
+    "file_names": file_names,
+    "content": result.get("content", ""),
+    "raw_content": result.get("raw_content"),
+    "validation_report": result.get("validation_report"),
+    "analysis_result": result.get("analysis_result"),
+}
+```
+
+Mas o `TranscriptionService.process_batch_with_progress` retorna campos adicionais:
+- `reports` (paths dos arquivos gerados)
+- `audit_issues` (lista de problemas detectados)
+- `audit_summary` (resumo da auditoria consolidada)
+- `quality` (payload completo de qualidade)
+- `words` (timestamps word-level para player)
+
+### Arquivos Modificados
+- `apps/api/app/workers/tasks/document_tasks.py:506-532` — Expandido save_data para incluir todos os campos
+- `apps/api/app/api/endpoints/transcription.py:725-735` — Adicionado carregamento de `reports` e `audit_summary` diretamente do JSON
+
+### Correção Aplicada
+
+**document_tasks.py:**
+```python
+if isinstance(result, str):
+    save_data = {"mode": mode, "file_names": file_names, "content": result, "raw_content": result}
+else:
+    quality_data = result.get("quality") or {}
+    save_data = {
+        "mode": mode,
+        "file_names": file_names,
+        "content": result.get("content", ""),
+        "raw_content": result.get("raw_content"),
+        "words": result.get("words"),
+        "reports": result.get("reports", {}),
+        "audit_issues": result.get("audit_issues", []),
+        "audit_summary": result.get("audit_summary"),
+        "quality": quality_data,
+        "validation_report": quality_data.get("validation_report"),
+        "analysis_result": quality_data.get("analysis_result"),
+    }
+```
+
+**transcription.py:**
+```python
+elif result_data.get("reports"):
+    reports = result_data.get("reports")
+
+if not audit_summary and result_data.get("audit_summary"):
+    audit_summary = result_data.get("audit_summary")
+```
+
+### Resultado
+- ✅ Aba de auditoria agora aparece corretamente na UI
+- ✅ Dados de qualidade preservados
+- ✅ Reports e paths de arquivos disponíveis
+- ✅ Compatibilidade mantida com formato legacy
+
+---
+
 ## 2026-02-05 — Sessão 129: Code Artifacts com Streaming e Integração Completa
 
 ### Objetivo
@@ -10123,6 +12557,121 @@ Implementar Gap 7 (UI/UX Feedback de Aplicacao) e Gap 8 (Exportacao de Audit Log
 
 ---
 
+## 2026-02-12 — Correção: Aba de Auditoria sem dados em Transcrição
+
+### Resumo
+Identificada e corrigida falha no frontend da página de transcrição: para jobs do tipo `apostila`, o estado `auditSummary` não era atualizado ao concluir/carregar job, fazendo a aba de auditoria exibir "Auditoria não disponível" mesmo com `audit_summary` gerado no backend.
+
+### Arquivos Modificados
+- `apps/web/src/app/(dashboard)/transcription/page.tsx`
+  - Passa a definir `setAuditSummary(...)` no fluxo `audit_complete` do SSE.
+  - Passa a definir `setAuditSummary(...)` na conclusão de job (`handleJobCompletion`) para `apostila`.
+  - Passa a definir `setAuditSummary(...)` no carregamento de job (`handleLoadJobResult`) para `apostila`.
+  - Limpa `auditSummary` ao iniciar/retomar job e ao trocar tipo de transcrição, evitando estado residual.
+
+### Verificação
+- `npm run -w @iudex/web type-check` sem erros.
+
+---
+
+## 2026-02-12 — Robustez de Jobs Paralelos de Transcrição (stale watchdog + isolamento + limites)
+
+### Resumo
+Implementados ajustes para reduzir jobs presos em paralelo: reconciliação automática de jobs órfãos (`running/queued` sem atividade), isolamento de `TranscriptionService` por job assíncrono e limites configuráveis de concorrência para providers cloud.
+
+### Arquivos Modificados
+- `apps/api/app/api/endpoints/transcription.py`
+  - Adicionado watchdog de stale jobs (`_reconcile_stale_transcription_job`) com thresholds por status via env:
+    - `IUDEX_TRANSCRIPTION_STALE_QUEUED_MINUTES` (default 20)
+    - `IUDEX_TRANSCRIPTION_STALE_RUNNING_MINUTES` (default 45)
+  - Reconciliação aplicada em:
+    - `GET /transcription/jobs`
+    - `GET /transcription/jobs/{job_id}`
+    - `GET /transcription/jobs/{job_id}/stream`
+  - Execução local de jobs assíncronos alterada para instância dedicada de `TranscriptionService` por job (`job_service = TranscriptionService()`), evitando compartilhamento de estado entre jobs paralelos.
+  - Normalização de status cancelado no stream/cancel (`canceled` e `cancelled`).
+
+- `apps/api/app/services/transcription_service.py`
+  - Adicionado lock reentrante (`self._vomo_lock`) para proteger mutações de `self.vomo` em cenários concorrentes.
+  - `_get_vomo(...)` encapsulado no lock para evitar corrida de configuração/modelo/provider.
+
+- `apps/api/app/services/transcription_providers.py`
+  - Adicionado parser seguro de concorrência (`_read_max_concurrency`).
+  - Novos limites configuráveis:
+    - `ASSEMBLYAI_MAX_CONCURRENCY` (default 2; `0` = sem limite)
+    - `ELEVENLABS_MAX_CONCURRENCY` (default 2; `0` = sem limite)
+    - `RUNPOD_MAX_CONCURRENCY` segue configurável (default 5).
+
+- `apps/api/app/workers/tasks/document_tasks.py`
+  - Tratamento explícito de retorno `None` do `TranscriptionService` na task Celery, com erro claro para retry/falha terminal.
+
+- `apps/api/tests/test_transcription_queue.py`
+  - Testes atualizados para concorrência cloud configurável (default AssemblyAI=2) e cenário de `ASSEMBLYAI_MAX_CONCURRENCY=0`.
+
+### Verificação
+- `python3 -m py_compile` em:
+  - `apps/api/app/api/endpoints/transcription.py`
+  - `apps/api/app/services/transcription_service.py`
+  - `apps/api/app/services/transcription_providers.py`
+  - `apps/api/app/workers/tasks/document_tasks.py`
+  - `apps/api/tests/test_transcription_queue.py`
+- `pytest -q -o addopts='' tests/test_transcription_queue.py` → **12 passed**
+
+---
+
+## 2026-02-12 — Destrave Operacional de Job de Transcrição Preso
+
+### Resumo
+Job de transcrição identificado como preso em `58%` no stage `transcription`, sem conclusão automática no UI. Realizado destrave operacional no banco de jobs para liberar a fila e evitar bloqueio visual no frontend.
+
+### Contexto
+- Job reportado pelo usuário: `ba396bb-6832-4e60-80f3-281da0f17db0`
+- Job encontrado no `jobs.db`: `cba396bb-6832-4e60-80f3-281da0f17db0` (prefixo com `c`)
+- Estado antes: `running`, `progress=58`, message `"🎙️ Transcrevendo... (23min)"`
+
+### Ação Executada
+- Atualização manual em `apps/api/storage/job_manager/jobs.db`:
+  - `status='error'`
+  - `progress=100`
+  - `stage='error'`
+  - `message='Job destravado manualmente: transcrição ficou presa em 58%.'`
+  - `error='Timeout/stall detectado manualmente em 2026-02-12T23:13Z.'`
+- Após detectar reescrita automática para `running`, foi realizado reinício da API local (`uvicorn`) para encerrar task órfã em memória e reaplicado o status final de erro.
+
+### Verificação
+- Consultas sucessivas no `transcription_jobs` confirmaram persistência em `error` e ausência de retorno para `running` após o destrave.
+
+---
+
+## 2026-02-12 — RAW AssemblyAI: Timestamps 60s + Word-Level End-to-End
+
+### Resumo
+Correção completa do fluxo RAW para AssemblyAI: timestamps em janela de 60s no modo RAW, preservação de `words`/`segments` no backend e propagação desses campos até o frontend (SSE e payload de jobs), permitindo link de áudio por palavra.
+
+### Arquivos Modificados
+- `apps/api/app/services/transcription_service.py`
+  - `_get_timestamp_interval_for_mode` agora inclui `RAW` com intervalo de 60s.
+  - `process_file` passou a usar estado local (`transcription_words`/`transcription_segments`) no retorno RAW, removendo dependência de `_aai_apostila_result` para evitar dados stale.
+  - `process_file_with_progress` retorna `segments` no RAW e preenche `words/segments` em caminhos AssemblyAI/ElevenLabs/fallbacks.
+  - `_transcribe_with_progress_stream` agora retorna também `segments` (quando disponíveis).
+- `apps/api/app/api/endpoints/transcription.py`
+  - Persistência de `words`/`segments` em jobs (`words.json`/`segments.json`) via `_write_vomo_job_result`.
+  - Reidratação desses campos em `_load_job_result_payload`.
+  - SSE single e batch (`/vomo/stream` e `/vomo/batch/stream`) agora enviam `words`/`segments` no evento `complete`.
+- `apps/web/src/lib/api-client.ts`
+  - `transcribeVomoStream` e `transcribeVomoBatchStream` atualizados para aceitar e repassar `words`/`segments` no `onComplete`.
+
+### Decisões
+- `RAW` foi tratado como modo com timestamps de baixa frequência (60s), alinhado ao objetivo de leitura contínua com pontos de navegação.
+- Dados word-level foram propagados no contrato de resposta em vez de depender de estado interno da service.
+- Em `RAW` com provider cloud (`assemblyai`/`elevenlabs`/`runpod`), o cache textual foi ignorado para evitar retorno sem metadados `words/segments`.
+
+### Verificação
+- `python3 -m py_compile apps/api/app/services/transcription_service.py apps/api/app/api/endpoints/transcription.py` sem erros.
+- `npm --prefix apps/web run type-check -- --pretty false` sem erros.
+
+---
+
 <!-- Novas entradas acima desta linha -->
 
 ## 2026-02-05 — Sessão 125: Criação do AskModeToggle
@@ -10156,5 +12705,40 @@ Criar componente de toggle para alternar entre 3 modos de consulta na página /a
 - ✅ ESLint passou sem erros
 - ✅ Padrões do projeto seguidos
 - ✅ Documentação e exemplo criados
+
+---
+
+## 2026-02-07 — Fechamento de Gaps do PLANO_AGENT_SDK_INTEGRATION
+
+### Contexto
+Análise de conformidade do plano identificou 3 gaps pendentes após implementação por subagentes. Todos corrigidos nesta sessão.
+
+### Arquivos Alterados
+
+**Gap 1 — UI Dropdown de Citações (3→12 estilos)**
+- `apps/web/src/components/dashboard/generator-wizard.tsx`
+  - Expandido dropdown de 3 opções (forense/hibrido/abnt) para 12 estilos
+  - Agrupados por região: BR, Americano, Europeu, Simples (mesmo padrão do minuta-settings-drawer.tsx)
+  - Adicionados imports de SelectGroup e SelectLabel do shadcn/ui
+
+**Gap 2 — Modelos Faltantes no Registry (7 novos)**
+- `apps/web/src/config/models.ts`
+  - Adicionados ao ModelId type: gpt-5.2-pro, gpt-5.2-codex, gpt-5.1, gpt-5.1-codex, gpt-5.1-codex-mini, gpt-5-nano
+  - Adicionadas entradas completas no MODEL_REGISTRY para cada modelo
+- `apps/api/app/services/ai/model_registry.py`
+  - Espelhados os mesmos 7 modelos no backend com api_model via env var
+
+**Gap 3 — Admin Endpoint de Feature Flags**
+- `apps/api/app/api/endpoints/admin_flags.py` (NOVO)
+  - GET /admin/feature-flags — snapshot completo (protegido por require_role("admin"))
+  - POST /admin/feature-flags/override — set runtime override
+  - DELETE /admin/feature-flags/override — remove override
+  - POST /admin/feature-flags/clear-overrides — limpa todos
+- `apps/api/app/api/routes.py`
+  - Adicionado import e include_router de admin_flags
+
+### Verificação
+- `python3 -m py_compile` — OK (admin_flags.py, routes.py, model_registry.py)
+- `npx tsc --noEmit` — OK (sem erros de tipo)
 
 ---

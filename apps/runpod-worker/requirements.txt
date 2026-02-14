@@ -1,5 +1,18 @@
-faster-whisper>=1.0.0,<2.0.0
+# Core transcription
+faster-whisper>=1.2.0,<2.0.0
+
+# RunPod serverless SDK
 runpod>=1.7.0,<2.0.0
+
+# HTTP + utils
 requests>=2.31.0
 huggingface_hub>=0.25.0
 filelock>=3.16.0
+
+# Diarization (pyannote)
+pyannote.audio>=3.1.0,<4.0.0
+torch>=2.1.0
+torchaudio>=2.1.0
+
+# WhisperX alignment (optional, installed but gracefully degrades)
+whisperx @ git+https://github.com/m-bain/whisperX.git@main

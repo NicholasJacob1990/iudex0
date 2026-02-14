@@ -28,7 +28,7 @@ jobs:
         run: |
           TAG="${{ github.event.inputs.image_tag }}"
           if [ -z "$TAG" ]; then
-            TAG="v2-$(echo ${{ github.sha }} | cut -c1-7)"
+            TAG="v3-$(echo ${{ github.sha }} | cut -c1-7)"
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Image tag: $TAG"
@@ -51,6 +51,8 @@ jobs:
           tags: |
             ${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.tag }}
             ${{ env.DOCKER_IMAGE }}:latest
+          build-args: |
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -65,7 +67,7 @@ jobs:
           TEMPLATE_RESPONSE=$(curl -s -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "{
-              \"query\": \"mutation { saveTemplate(input: { name: \\\"faster-whisper-iudex-${{ steps.tag.outputs.tag }}\\\", imageName: \\\"${IMAGE}\\\", dockerArgs: \\\"\\\", isServerless: true, containerDiskInGb: 20, volumeInGb: 0, env: [ { key: \\\"WHISPER_MODEL\\\", value: \\\"large-v3\\\" }, { key: \\\"WHISPER_DEVICE\\\", value: \\\"cuda\\\" }, { key: \\\"WHISPER_COMPUTE_TYPE\\\", value: \\\"float16\\\" } ] }) { id name imageName } }\"
+              \"query\": \"mutation { saveTemplate(input: { name: \\\"faster-whisper-iudex-${{ steps.tag.outputs.tag }}\\\", imageName: \\\"${IMAGE}\\\", dockerArgs: \\\"\\\", isServerless: true, containerDiskInGb: 30, volumeInGb: 0, env: [ { key: \\\"WHISPER_MODEL\\\", value: \\\"large-v3-turbo\\\" }, { key: \\\"WHISPER_DEVICE\\\", value: \\\"cuda\\\" }, { key: \\\"WHISPER_COMPUTE_TYPE\\\", value: \\\"int8_float16\\\" }, { key: \\\"WHISPER_BATCH_SIZE\\\", value: \\\"16\\\" }, { key: \\\"HF_TOKEN\\\", value: \\\"${{ secrets.HF_TOKEN }}\\\" } ] }) { id name imageName } }\"
             }")
 
           echo "Template response: $TEMPLATE_RESPONSE"

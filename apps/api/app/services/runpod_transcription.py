@@ -2,35 +2,65 @@
 RunPod Serverless client — pipeline híbrido de transcrição + diarização.
 
 Arquitetura:
-  1. Endpoint de transcrição (worker oficial faster-whisper) → texto + segments
-  2. Endpoint de diarização (custom pyannote worker, opcional) → speaker labels
-  3. Merge dos resultados
+  1. Endpoint primário (worker oficial faster-whisper) → texto + segments
+  2. Endpoint fallback (custom worker v3 unificado) → transcrição + diarização integrada
+  3. Endpoint de diarização legado (pyannote worker separado, deprecado)
+
+O worker custom v3 suporta:
+  - Transcrição + diarização em um único job (sem endpoint separado)
+  - Generator handler (streaming via /stream/{job_id})
+  - Webhook callbacks (elimina polling)
+  - BatchedInferencePipeline, hotwords, anti-hallucination
+  - SRT/VTT output formats
 
 Endpoints RunPod:
-  POST /v2/{endpoint_id}/run       → submete job
+  POST /v2/{endpoint_id}/run         → submete job
+  POST /v2/{endpoint_id}/runsync     → job síncrono (curtos)
   GET  /v2/{endpoint_id}/status/{id} → polling de status
+  GET  /v2/{endpoint_id}/stream/{id} → streaming de segmentos (generator handler)
   POST /v2/{endpoint_id}/cancel/{id} → cancela job
 
 Worker oficial espera:
   { "input": { "audio": "<url>", "model": "turbo", "language": "pt", ... } }
 
-Alguns handlers customizados em RunPod usam chaves diferentes para o áudio
-(ex.: `audio_url`, `input_file`, `file_url`). Para compatibilidade, enviamos
-aliases com a mesma URL.
+Worker custom v3 espera:
+  { "input": { "audio": "<url>", "model": "large-v3-turbo", "language": "pt",
+               "diarize": true, "hotwords": "STJ, STF", ... },
+    "webhook": "https://api.example.com/api/v1/transcription/webhook" }
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, AsyncGenerator, Callable, Coroutine, Dict, List, Optional, Set
 
 import httpx
 
 logger = logging.getLogger(__name__)
 
 RUNPOD_BASE = "https://api.runpod.ai/v2"
+
+# ── Hallucination filter (Bag of Hallucinations) ─────────────────────────
+# Common phrases Whisper hallucinates on silence, music, or noise
+HALLUCINATION_PHRASES: Set[str] = {
+    "obrigado por assistir",
+    "inscreva-se no canal",
+    "legendas pela comunidade",
+    "continue assistindo",
+    "obrigado pela audiência",
+    "transcrição automática",
+    "legendado por",
+    "tradução e legendagem",
+    "thanks for watching",
+    "subscribe to the channel",
+    "like and subscribe",
+    "please subscribe",
+    "subtitles by the community",
+    "amara.org community",
+}
 
 
 @dataclass
@@ -46,18 +76,25 @@ class RunPodResult:
 class RunPodClient:
     """Async HTTP client para RunPod Serverless API.
 
-    Suporta dois endpoints:
-    - endpoint_id: transcrição (worker oficial faster-whisper)
+    Suporta três endpoints:
+    - endpoint_id: transcrição primária (worker oficial faster-whisper)
+    - fallback_endpoint_id: transcrição fallback (custom worker, usado se o primário falhar)
     - diarize_endpoint_id: diarização (custom pyannote worker, opcional)
     """
 
     api_key: str = field(default_factory=lambda: os.getenv("RUNPOD_API_KEY", ""))
     endpoint_id: str = field(default_factory=lambda: os.getenv("RUNPOD_ENDPOINT_ID", ""))
+    fallback_endpoint_id: str = field(
+        default_factory=lambda: os.getenv("RUNPOD_FALLBACK_ENDPOINT_ID", "")
+    )
     diarize_endpoint_id: str = field(
         default_factory=lambda: os.getenv("RUNPOD_DIARIZE_ENDPOINT_ID", "")
     )
     poll_interval: float = 5.0
     timeout: float = 3600.0  # 1h max
+    webhook_url: str = field(
+        default_factory=lambda: os.getenv("RUNPOD_WEBHOOK_URL", "")
+    )
     completed_output_grace_seconds: float = field(
         default_factory=lambda: float(os.getenv("RUNPOD_COMPLETED_OUTPUT_GRACE_SECONDS", "20"))
     )
@@ -83,6 +120,10 @@ class RunPodClient:
     @property
     def is_configured(self) -> bool:
         return bool(self.api_key and self.endpoint_id)
+
+    @property
+    def fallback_configured(self) -> bool:
+        return bool(self.api_key and self.fallback_endpoint_id)
 
     @property
     def diarize_configured(self) -> bool:
@@ -236,6 +277,184 @@ class RunPodClient:
             logger.warning("RunPod cancel failed for %s: %s", run_id, e)
             return False
 
+    async def submit_unified_job(
+        self,
+        audio_url: str,
+        endpoint_id: str,
+        language: str = "pt",
+        diarize: bool = True,
+        num_speakers: Optional[int] = None,
+        hotwords: Optional[str] = None,
+        initial_prompt: Optional[str] = None,
+        preprocess_audio: bool = False,
+        output_formats: Optional[list] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> RunPodResult:
+        """Submit job to custom v3 worker (unified transcription + diarization).
+
+        The v3 worker handles both transcription and diarization in a single job,
+        supports streaming via generator handler, and can call back via webhook.
+        """
+        input_data: Dict[str, Any] = {
+            "language": language,
+            "word_timestamps": True,
+            "diarize": diarize,
+            "beam_size": 5,
+        }
+        input_data = self._with_audio_aliases(input_data, audio_url)
+
+        if num_speakers is not None:
+            input_data["num_speakers"] = num_speakers
+        if hotwords:
+            input_data["hotwords"] = hotwords
+        if initial_prompt:
+            input_data["initial_prompt"] = initial_prompt
+        if preprocess_audio:
+            input_data["preprocess_audio"] = True
+        if output_formats:
+            input_data["output_formats"] = output_formats
+        if metadata:
+            input_data["metadata"] = metadata
+
+        payload: Dict[str, Any] = {"input": input_data}
+
+        # Add webhook if configured (eliminates need for polling)
+        if self.webhook_url:
+            payload["webhook"] = self.webhook_url
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{self._url(endpoint_id)}/run",
+                headers=self._headers,
+                json=payload,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        logger.info(
+            "RunPod unified job submitted: %s (endpoint=%s, diarize=%s, webhook=%s)",
+            data.get("id"), endpoint_id, diarize, bool(self.webhook_url),
+        )
+        return RunPodResult(
+            run_id=data["id"],
+            status=data.get("status", "IN_QUEUE"),
+        )
+
+    async def stream_results(
+        self,
+        run_id: str,
+        endpoint_id: str,
+        on_segment: Optional[Callable[[Dict[str, Any]], Coroutine]] = None,
+        on_progress: Optional[Callable[[str, int, str], Coroutine]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> RunPodResult:
+        """Consume streaming results from a generator handler via /stream/{job_id}.
+
+        The v3 worker yields segments progressively. This method:
+        1. Polls /stream/{job_id} for new chunks
+        2. Calls on_segment for each transcription segment received
+        3. Returns the final aggregated result
+
+        Falls back to regular polling if streaming is not available.
+        """
+        url = f"{self._url(endpoint_id)}/stream/{run_id}"
+        elapsed = 0.0
+        all_segments: list = []
+        final_result: Optional[Dict[str, Any]] = None
+
+        while elapsed < self.timeout:
+            if cancel_check and cancel_check():
+                await self.cancel_job(run_id, endpoint_id)
+                return RunPodResult(run_id=run_id, status="CANCELLED")
+
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.get(url, headers=self._headers)
+
+                    if resp.status_code == 404:
+                        # Stream not available — fall back to polling
+                        logger.info("Stream not available for %s, falling back to polling", run_id)
+                        return await self.poll_until_complete(
+                            run_id=run_id,
+                            endpoint_id=endpoint_id,
+                            on_progress=on_progress,
+                            cancel_check=cancel_check,
+                        )
+
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                # RunPod stream returns {"stream": [...chunks], "status": "..."}
+                stream_chunks = data.get("stream", [])
+                stream_status = data.get("status", "IN_PROGRESS")
+
+                for chunk in stream_chunks:
+                    chunk_output = chunk.get("output", chunk)
+
+                    # Progress updates
+                    if "stage" in chunk_output and on_progress:
+                        await on_progress(
+                            chunk_output.get("stage", "transcribing"),
+                            chunk_output.get("progress", 0),
+                            chunk_output.get("message", ""),
+                        )
+
+                    # Segment streaming
+                    if "segment" in chunk_output:
+                        all_segments.append(chunk_output["segment"])
+                        if on_segment:
+                            await on_segment(chunk_output["segment"])
+
+                    # Final result (has "done": True)
+                    if chunk_output.get("done"):
+                        final_result = chunk_output
+
+                    # Error
+                    if "error" in chunk_output:
+                        return RunPodResult(
+                            run_id=run_id,
+                            status="FAILED",
+                            error=chunk_output["error"],
+                        )
+
+                if stream_status == "COMPLETED" and final_result:
+                    return RunPodResult(
+                        run_id=run_id,
+                        status="COMPLETED",
+                        output=final_result,
+                    )
+
+                if stream_status in ("FAILED", "CANCELLED"):
+                    return RunPodResult(
+                        run_id=run_id,
+                        status=stream_status,
+                        error=data.get("error", f"Job {stream_status}"),
+                    )
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 404:
+                    logger.info("Stream endpoint not found for %s, using polling", run_id)
+                    return await self.poll_until_complete(
+                        run_id=run_id,
+                        endpoint_id=endpoint_id,
+                        on_progress=on_progress,
+                        cancel_check=cancel_check,
+                    )
+                logger.warning("Stream request error for %s: %s", run_id, e)
+            except Exception as e:
+                logger.warning("Stream consumption error for %s: %s", run_id, e)
+
+            await asyncio.sleep(self.poll_interval)
+            elapsed += self.poll_interval
+
+        # Timeout
+        await self.cancel_job(run_id, endpoint_id)
+        return RunPodResult(
+            run_id=run_id,
+            status="FAILED",
+            error=f"Stream timeout após {self.timeout:.0f}s",
+        )
+
     async def poll_until_complete(
         self,
         run_id: str,
@@ -327,16 +546,25 @@ class RunPodClient:
         min_speakers: Optional[int] = None,
         max_speakers: Optional[int] = None,
         initial_prompt: Optional[str] = None,
+        hotwords: Optional[str] = None,
+        preprocess_audio: bool = False,
+        output_formats: Optional[list] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         on_progress: Optional[Callable[[str, int, str], Coroutine]] = None,
+        on_segment: Optional[Callable[[Dict[str, Any]], Coroutine]] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
     ) -> RunPodResult:
-        """Pipeline completo: transcrição + diarização opcional (segundo estágio).
+        """Pipeline completo: transcrição + diarização opcional.
 
-        1. Submete transcrição ao worker oficial
-        2. Se diarização pedida e endpoint configurado, submete diarização em paralelo
-        3. Merge dos resultados
+        Strategy:
+        1. Submit to primary endpoint (official worker — transcription only)
+        2. If primary fails and fallback configured, submit to custom v3 worker
+           (unified: transcription + diarization in one job, with streaming)
+        3. If primary succeeded and diarization requested:
+           a. Prefer custom v3 worker (if fallback configured) for unified diarization
+           b. Fall back to legacy separate pyannote endpoint (if configured)
         """
-        # 1. Transcrição
+        # 1. Transcription — primary endpoint
         transcribe_result = await self.submit_job(
             audio_url=audio_url,
             language=language,
@@ -344,43 +572,135 @@ class RunPodClient:
             initial_prompt=initial_prompt,
         )
 
-        # Poll transcrição
+        # Poll transcription
         final = await self.poll_until_complete(
             run_id=transcribe_result.run_id,
             on_progress=on_progress,
             cancel_check=cancel_check,
         )
 
+        # 2. Fallback — if primary failed, try custom v3 worker (unified)
+        if final.status != "COMPLETED" and self.fallback_configured:
+            logger.warning(
+                "RunPod primary endpoint failed (%s: %s). Trying custom v3 fallback %s...",
+                final.status,
+                final.error,
+                self.fallback_endpoint_id,
+            )
+            if on_progress:
+                await on_progress("transcription", 5, "Primário falhou, tentando worker custom v3...")
+
+            try:
+                # Submit to unified v3 worker (handles diarization internally)
+                fb_result = await self.submit_unified_job(
+                    audio_url=audio_url,
+                    endpoint_id=self.fallback_endpoint_id,
+                    language=language,
+                    diarize=diarization,
+                    num_speakers=max_speakers or min_speakers,
+                    hotwords=hotwords,
+                    initial_prompt=initial_prompt,
+                    preprocess_audio=preprocess_audio,
+                    output_formats=output_formats,
+                    metadata=metadata,
+                )
+
+                # Try streaming first, fall back to polling
+                final = await self.stream_results(
+                    run_id=fb_result.run_id,
+                    endpoint_id=self.fallback_endpoint_id,
+                    on_segment=on_segment,
+                    on_progress=on_progress,
+                    cancel_check=cancel_check,
+                )
+
+                # If v3 worker handled diarization, we're done
+                if final.status == "COMPLETED":
+                    return final
+
+            except Exception as fb_exc:
+                logger.error("RunPod fallback also failed: %s", fb_exc)
+
         if final.status != "COMPLETED":
             return final
 
-        # 2. Diarização (se pedida e endpoint configurado)
-        if diarization and self.diarize_configured:
-            if on_progress:
-                await on_progress("diarization", 0, "Iniciando diarização...")
+        # 3. Diarization — if primary succeeded but didn't include diarization
+        output_has_diarization = (
+            isinstance(final.output, dict)
+            and (final.output.get("has_diarization") or final.output.get("diarization"))
+        )
 
-            try:
-                dia_result = await self.submit_diarize_job(
-                    audio_url=audio_url,
-                    min_speakers=min_speakers,
-                    max_speakers=max_speakers,
-                )
-                dia_final = await self.poll_until_complete(
-                    run_id=dia_result.run_id,
-                    endpoint_id=self.diarize_endpoint_id,
-                    cancel_check=cancel_check,
-                )
-                if dia_final.status == "COMPLETED" and dia_final.output:
-                    # Merge diarização no output da transcrição
-                    final.output["diarization"] = dia_final.output.get("diarization")
-                    if on_progress:
-                        await on_progress("diarization", 100, "Diarização concluída")
-                else:
-                    logger.warning("Diarization failed, returning transcription only: %s", dia_final.error)
-            except Exception as e:
-                logger.warning("Diarization error, returning transcription only: %s", e)
-        elif diarization and not self.diarize_configured:
-            logger.info("Diarization requested but RUNPOD_DIARIZE_ENDPOINT_ID not set — skipping")
+        if diarization and not output_has_diarization:
+            # 3a. Prefer unified v3 worker for diarization (submit new job with diarize=True)
+            if self.fallback_configured:
+                logger.info("Primary lacks diarization — submitting unified job to custom v3 worker")
+                if on_progress:
+                    await on_progress("diarization", 0, "Iniciando diarização no worker v3...")
+
+                try:
+                    dia_result = await self.submit_unified_job(
+                        audio_url=audio_url,
+                        endpoint_id=self.fallback_endpoint_id,
+                        language=language,
+                        diarize=True,
+                        num_speakers=max_speakers or min_speakers,
+                        hotwords=hotwords,
+                        initial_prompt=initial_prompt,
+                    )
+                    dia_final = await self.stream_results(
+                        run_id=dia_result.run_id,
+                        endpoint_id=self.fallback_endpoint_id,
+                        on_progress=on_progress,
+                        cancel_check=cancel_check,
+                    )
+                    if dia_final.status == "COMPLETED" and isinstance(dia_final.output, dict):
+                        diarization_data = dia_final.output.get("diarization")
+                        if diarization_data and isinstance(final.output, dict):
+                            final.output["diarization"] = diarization_data
+                            final.output["has_diarization"] = True
+                            final.output["speakers"] = dia_final.output.get("speakers", [])
+                            final.output["num_speakers"] = dia_final.output.get("num_speakers", 0)
+                            if on_progress:
+                                await on_progress("diarization", 100, "Diarização concluída (v3)")
+                        else:
+                            logger.warning("V3 diarization completed but no diarization data in output")
+                    else:
+                        logger.warning("V3 diarization failed: %s", dia_final.error)
+                except Exception as e:
+                    logger.warning("V3 diarization error: %s — trying legacy endpoint", e)
+
+            # 3b. Legacy separate pyannote endpoint (deprecado, mantido como fallback)
+            output_has_diarization = (
+                isinstance(final.output, dict)
+                and (final.output.get("has_diarization") or final.output.get("diarization"))
+            )
+            if not output_has_diarization and self.diarize_configured:
+                if on_progress:
+                    await on_progress("diarization", 0, "Diarização via endpoint legado...")
+
+                try:
+                    dia_result = await self.submit_diarize_job(
+                        audio_url=audio_url,
+                        min_speakers=min_speakers,
+                        max_speakers=max_speakers,
+                    )
+                    dia_final = await self.poll_until_complete(
+                        run_id=dia_result.run_id,
+                        endpoint_id=self.diarize_endpoint_id,
+                        cancel_check=cancel_check,
+                    )
+                    if dia_final.status == "COMPLETED" and dia_final.output:
+                        if isinstance(final.output, dict):
+                            final.output["diarization"] = dia_final.output.get("diarization")
+                        if on_progress:
+                            await on_progress("diarization", 100, "Diarização concluída (legado)")
+                    else:
+                        logger.warning("Legacy diarization failed: %s", dia_final.error)
+                except Exception as e:
+                    logger.warning("Legacy diarization error: %s", e)
+
+        elif diarization and not output_has_diarization and not self.fallback_configured and not self.diarize_configured:
+            logger.info("Diarization requested but no diarization-capable endpoint configured — skipping")
 
         return final
 
@@ -415,7 +735,11 @@ def _merge_diarization(segments: list, diarization: dict) -> list:
 
         new_seg = {**seg}
         if best_speaker is not None:
-            new_seg["speaker"] = f"SPEAKER_{best_speaker:02d}"
+            # Handle both int (legacy pyannote) and str (v3 worker) speaker labels
+            if isinstance(best_speaker, int):
+                new_seg["speaker"] = f"SPEAKER_{best_speaker:02d}"
+            else:
+                new_seg["speaker"] = str(best_speaker)
         merged.append(new_seg)
 
     return merged
@@ -559,20 +883,36 @@ def _coerce_text(value: Any) -> str:
     return ""
 
 
+def _filter_hallucinated_segments(segments: list) -> tuple:
+    """Remove segments that match known Whisper hallucination phrases.
+
+    Returns (filtered_segments, hallucination_count).
+    """
+    filtered = []
+    count = 0
+    for seg in segments:
+        text = seg.get("text", "").strip().lower().rstrip(".")
+        if text in HALLUCINATION_PHRASES:
+            count += 1
+            continue
+        # Very short repetitive segments
+        if len(text) < 3 and text not in ("é", "e", "a", "o", "eu"):
+            count += 1
+            continue
+        filtered.append(seg)
+    return filtered, count
+
+
 def extract_transcription(result: RunPodResult) -> Optional[Dict[str, Any]]:
     """
     Extrai texto e segments do output do worker faster-whisper.
 
-    O worker oficial retorna:
-    {
-      "segments": [{"id": 0, "start": 0.0, "end": 1.5, "text": "...", ...}],
-      "detected_language": "pt",
-      "transcription": "texto completo...",
-      "device": "cuda",
-      "model": "turbo"
-    }
+    Suporta múltiplos formatos de output:
+    - Worker oficial: {"transcription": "...", "segments": [...], "detected_language": "pt"}
+    - Worker custom v3: {"text": "...", "segments": [...], "diarization": {...}, "has_diarization": true}
+    - Outros workers RunPod com formatos variados
 
-    Se diarização foi executada, o campo "diarization" é adicionado pelo pipeline.
+    Aplica filtro de alucinação (BoH) e validação de integridade.
     """
     if not result.output:
         return None
@@ -616,7 +956,6 @@ def extract_transcription(result: RunPodResult) -> Optional[Dict[str, Any]]:
         text = segments_text
     elif text and segments_text:
         # Alguns workers retornam `transcription` truncado e `segments` completo.
-        # Priorizamos o texto reconstruído quando for materialmente mais rico.
         longer_by_ratio = len(segments_text) > int(len(text) * 1.03)
         truncated_tail = _looks_like_truncated_tail(text) and len(segments_text) >= (len(text) + 24)
         if longer_by_ratio or truncated_tail:
@@ -652,7 +991,6 @@ def extract_transcription(result: RunPodResult) -> Optional[Dict[str, Any]]:
                 len(text),
             )
         if expected_sha and isinstance(expected_sha, str):
-            import hashlib
             actual_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
             if actual_sha != expected_sha:
                 logger.warning(
@@ -666,27 +1004,72 @@ def extract_transcription(result: RunPodResult) -> Optional[Dict[str, Any]]:
     if diarization:
         segments = _merge_diarization(segments, diarization)
 
+    # Apply hallucination filter (BoH)
+    hallucination_count = 0
+    if segments:
+        segments, hallucination_count = _filter_hallucinated_segments(segments)
+        if hallucination_count > 0:
+            logger.info("Filtered %d hallucinated segments from RunPod output", hallucination_count)
+            # Rebuild text from filtered segments if we removed any
+            text = _coerce_text_from_segments(segments) or text
+
     if not words and segments:
         words = _coerce_words_from_segments(segments)
 
-    # Extrair falantes únicos dos segments
+    # Extract unique speakers from segments
     speakers = sorted({
         seg.get("speaker", "")
         for seg in segments
         if seg.get("speaker")
     })
 
-    return {
+    # V3 worker may provide speakers/num_speakers directly
+    if isinstance(output, dict):
+        v3_speakers = output.get("speakers")
+        v3_num_speakers = output.get("num_speakers")
+        if isinstance(v3_speakers, list) and v3_speakers and not speakers:
+            speakers = v3_speakers
+        if v3_num_speakers and isinstance(v3_num_speakers, int):
+            num_speakers = v3_num_speakers
+        else:
+            num_speakers = diarization.get("num_speakers", 0) if isinstance(diarization, dict) else len(speakers)
+    else:
+        num_speakers = diarization.get("num_speakers", 0) if isinstance(diarization, dict) else 0
+
+    result_dict: Dict[str, Any] = {
         "text": text,
         "segments": segments,
         "words": words,
         "language": language,
         "speakers": speakers,
         "has_diarization": len(speakers) > 0,
-        "num_speakers": diarization.get("num_speakers", 0) if diarization else 0,
+        "num_speakers": num_speakers,
         "execution_time_ms": result.execution_time_ms,
         "provider": "runpod",
     }
+
+    # Pass through v3 metadata
+    if isinstance(output, dict):
+        if output.get("srt"):
+            result_dict["srt"] = output["srt"]
+        if output.get("vtt"):
+            result_dict["vtt"] = output["vtt"]
+        if output.get("metadata"):
+            result_dict["metadata"] = output["metadata"]
+        if output.get("model"):
+            result_dict["model"] = output["model"]
+        if output.get("hallucinations_filtered"):
+            result_dict["hallucinations_filtered"] = (
+                output["hallucinations_filtered"] + hallucination_count
+            )
+        elif hallucination_count > 0:
+            result_dict["hallucinations_filtered"] = hallucination_count
+        if output.get("transcription_time"):
+            result_dict["transcription_time"] = output["transcription_time"]
+        if output.get("duration"):
+            result_dict["duration"] = output["duration"]
+
+    return result_dict
 
 
 # Singleton lazy

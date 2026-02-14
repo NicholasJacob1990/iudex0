@@ -3,9 +3,11 @@ import os
 import asyncio
 import json
 import shutil
+import contextlib
 import threading
 import concurrent.futures
 import select
+import socket
 from typing import Optional, Callable, Tuple, Awaitable, Dict, Any
 import logging
 import time
@@ -13,9 +15,15 @@ import wave
 import re
 import hashlib
 import uuid
+import subprocess
+import ipaddress
+import urllib.error
+import urllib.request
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 from tenacity import RetryError
+from app.services.mlx_loader import load_vomo_class
 
 # Import FidelityMatcher para validação de referências legais
 try:
@@ -23,12 +31,21 @@ try:
 except ImportError:
     FidelityMatcher = None
 
-# Adicionar raiz do projeto ao path para importar mlx_vomo
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
-if PROJECT_ROOT not in sys.path:
-    sys.path.append(PROJECT_ROOT)
-
 logger = logging.getLogger(__name__)
+
+_VOMO_CLASS = None
+
+
+def _load_vomo_class():
+    """
+    Carrega VomoMLX com fallback por caminho absoluto.
+    Isso evita falhas quando o runtime da API não resolve a raiz do projeto igual ao CLI.
+    """
+    global _VOMO_CLASS
+    if _VOMO_CLASS is not None:
+        return _VOMO_CLASS
+    _VOMO_CLASS = load_vomo_class(caller_file=__file__)
+    return _VOMO_CLASS
 
 
 def _whisper_transcribe_worker(
@@ -48,7 +65,7 @@ def _whisper_transcribe_worker(
 
     payload: Dict[str, Any] = {"ok": False, "result": None, "error": None}
     try:
-        from mlx_vomo import VomoMLX
+        VomoMLX = _load_vomo_class()
 
         vomo = VomoMLX(provider="gemini")
         full_result = vomo.transcribe_file_full(
@@ -64,6 +81,8 @@ def _whisper_transcribe_worker(
             payload["result"] = {
                 "text": full_result.get("text", ""),
                 "words": full_result.get("words", []),
+                "segments": full_result.get("segments", []),
+                "_needs_external_diarization": full_result.get("_needs_external_diarization", False),
             }
         else:
             payload["result"] = {"text": "", "words": []}
@@ -82,6 +101,8 @@ class TranscriptionService:
         # Lazy init: evita importar/carregar MLX/Gemini no boot da API (mantém backend saudável).
         self.vomo = None
         self.vomo_config: Optional[Tuple[str, str, bool, Optional[str]]] = None
+        # Protege mutações de self.vomo em cenários concorrentes (ex.: instância compartilhada na API).
+        self._vomo_lock = threading.RLock()
 
     def _unwrap_retry_error(self, exc: Exception) -> Exception:
         current = exc
@@ -105,7 +126,11 @@ class TranscriptionService:
         return value not in {"0", "false", "no", "off"}
 
     def _classify_llm_error(self, exc: Exception) -> Optional[str]:
+        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+            return "timeout"
         message = str(exc or "").lower()
+        if any(token in message for token in ("timeout", "timed out", "deadline exceeded")):
+            return "timeout"
         code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
         if code == 429:
             return "quota_exceeded"
@@ -114,6 +139,151 @@ class TranscriptionService:
         if any(token in message for token in ("permission_denied", "unauthorized", "api key", "invalid api key", "401", "403")):
             return "auth"
         return None
+
+    def _safe_int_env(self, name: str, default: int) -> int:
+        try:
+            value = int(os.getenv(name, str(default)))
+            return value if value >= 0 else default
+        except Exception:
+            return default
+
+    def _compute_adaptive_format_timeouts(self, source_text: str) -> Tuple[int, int, int]:
+        chars_per_chunk = max(1000, self._safe_int_env("IUDEX_FORMAT_TIMEOUT_CHARS_PER_CHUNK", 15000))
+        per_chunk_timeout = max(30, self._safe_int_env("IUDEX_FORMAT_TIMEOUT_PER_CHUNK_SECONDS", 120))
+        base_timeout = max(60, self._safe_int_env("IUDEX_FORMAT_TIMEOUT_SECONDS", 900))
+
+        text_len = len(source_text or "")
+        estimated_chunks = max(1, (text_len + chars_per_chunk - 1) // chars_per_chunk)
+        global_timeout = max(base_timeout, estimated_chunks * per_chunk_timeout)
+
+        max_timeout = self._safe_int_env("IUDEX_FORMAT_TIMEOUT_MAX_SECONDS", 0)
+        if max_timeout > 0:
+            global_timeout = min(global_timeout, max_timeout)
+
+        configured_segment = self._safe_int_env("IUDEX_FORMAT_SEGMENT_TIMEOUT_SECONDS", 0)
+        if configured_segment > 0:
+            segment_timeout = configured_segment
+        elif estimated_chunks > 1:
+            auto_segment = self._safe_int_env("IUDEX_FORMAT_SEGMENT_TIMEOUT_AUTO_SECONDS", per_chunk_timeout)
+            segment_timeout = max(30, auto_segment)
+        else:
+            segment_timeout = 0
+
+        return global_timeout, segment_timeout, estimated_chunks
+
+    def _resolve_stable_retry_model(self, model_selection: Optional[str]) -> Optional[str]:
+        fallback_model = (os.getenv("IUDEX_FORMAT_RETRY_STABLE_MODEL", "gemini-2.0-flash") or "").strip()
+        if not fallback_model:
+            return None
+        selected = (model_selection or "gemini-3-flash-preview").strip().lower()
+        if selected.startswith("gemini-3") or "preview" in selected:
+            return fallback_model
+        return None
+
+    async def _run_llm_format_with_resilience(
+        self,
+        *,
+        vomo,
+        source_text: str,
+        video_name: str,
+        output_folder: str,
+        mode: str,
+        custom_prompt: Optional[str],
+        disable_tables: bool,
+        progress_callback: Optional[Callable[[str, int, str], Awaitable[None]]],
+        skip_audit: bool,
+        skip_fidelity_audit: bool,
+        skip_sources_audit: bool,
+        model_selection: Optional[str],
+        thinking_level: Optional[str],
+        include_timestamps: bool = True,
+        allow_indirect: bool = False,
+        allow_summary: bool = False,
+    ):
+        normalized_source = source_text or ""
+        timeout_seconds, segment_timeout_seconds, estimated_chunks = self._compute_adaptive_format_timeouts(normalized_source)
+        format_kwargs = {
+            "video_name": video_name,
+            "output_folder": output_folder,
+            "mode": mode,
+            "custom_prompt": custom_prompt,
+            "disable_tables": bool(disable_tables),
+            "progress_callback": progress_callback,
+            "skip_audit": skip_audit,
+            "skip_fidelity_audit": skip_fidelity_audit,
+            "skip_sources_audit": skip_sources_audit,
+            "include_timestamps": bool(include_timestamps),
+            "allow_indirect": bool(allow_indirect),
+            "allow_summary": bool(allow_summary),
+            "segment_timeout_seconds": segment_timeout_seconds or None,
+        }
+
+        async def _emit_retry(msg: str):
+            if not progress_callback:
+                return
+            try:
+                maybe = progress_callback("formatting", 88, msg)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+            except Exception:
+                pass
+
+        try:
+            formatted = await asyncio.wait_for(
+                vomo.format_transcription_async(normalized_source, **format_kwargs),
+                timeout=timeout_seconds,
+            )
+            return formatted, vomo
+        except Exception as first_exc:
+            first_message, first_root = self._format_exception_message(first_exc)
+            classification = self._classify_llm_error(first_root)
+            if classification not in {"timeout", "quota_exceeded"}:
+                raise
+
+            retry_timeout = max(timeout_seconds, int(timeout_seconds * 1.35))
+            max_timeout = self._safe_int_env("IUDEX_FORMAT_TIMEOUT_MAX_SECONDS", 0)
+            if max_timeout > 0:
+                retry_timeout = min(retry_timeout, max_timeout)
+
+            retry_vomo = vomo
+            retry_model = self._resolve_stable_retry_model(model_selection)
+            retry_label = "mesmo modelo"
+            if retry_model:
+                retry_vomo = self._get_vomo(model_selection=retry_model, thinking_level=thinking_level)
+                retry_label = retry_model
+                for attr in ("_current_language", "_output_language", "_current_mode"):
+                    if hasattr(vomo, attr):
+                        setattr(retry_vomo, attr, getattr(vomo, attr))
+
+            logger.warning(
+                "Formatação falhou na 1ª tentativa (%s). Retentando com %s "
+                "(timeout=%ss, chunks_est=%s, segment_timeout=%ss). Detalhe: %s",
+                classification,
+                retry_label,
+                retry_timeout,
+                estimated_chunks,
+                segment_timeout_seconds or 0,
+                first_message,
+            )
+            await _emit_retry("Primeira tentativa falhou. Repetindo formatação com tolerância maior...")
+
+            try:
+                formatted = await asyncio.wait_for(
+                    retry_vomo.format_transcription_async(normalized_source, **format_kwargs),
+                    timeout=retry_timeout,
+                )
+                logger.info("Formatação recuperada na 2ª tentativa com %s.", retry_label)
+                return formatted, retry_vomo
+            except Exception as retry_exc:
+                retry_message, _ = self._format_exception_message(retry_exc)
+                logger.warning(
+                    "2ª tentativa de formatação também falhou (modelo=%s). Detalhe: %s",
+                    retry_label,
+                    retry_message,
+                )
+                raise RuntimeError(
+                    f"LLM formatting failed after retry ({classification}): {retry_message}"
+                ) from retry_exc
 
     def _fallback_markdown_from_raw(self, raw_text: str, title: str, note: Optional[str] = None) -> str:
         safe_title = (title or "Transcrição").strip() or "Transcrição"
@@ -385,10 +555,15 @@ class TranscriptionService:
                 except re.error:
                     pass
             
-            # Constrói padrão para evidência
+            # Constrói padrão para evidência (com fronteira estrita para evitar matches
+            # dentro de números maiores, ex.: "1578" dentro de "157835").
             escaped = re.escape(reference)
             julgado_pattern = re.sub(r"\\\s+", r"\\s+", escaped)
+            julgado_pattern = rf"(?<![0-9A-Za-z]){julgado_pattern}(?![0-9A-Za-z])"
             evidence = _extract_raw_evidence(julgado_pattern) if julgado_pattern else []
+            if raw_text and not evidence:
+                # Se não há evidência confiável no RAW, o alerta tende a ser falso positivo.
+                continue
             suggested_section = _suggest_section_title(evidence)
             issue = {
                 "id": f"missing_julgado_{hash(item) % 10000}",
@@ -484,6 +659,26 @@ class TranscriptionService:
                 and corrected_text.strip()
                 and corrected_text.strip() != (final_text or "").strip()
             ):
+                # Guard: never lose tables that existed before content fix
+                def _count_tables(text: str) -> int:
+                    cnt = 0
+                    lines = (text or "").splitlines()
+                    sep_pat = re.compile(r'^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$')
+                    for i in range(len(lines) - 1):
+                        h = lines[i].strip()
+                        s = lines[i + 1].strip()
+                        if '|' in h and h.count('|') >= 2 and sep_pat.match(s):
+                            cnt += 1
+                    return cnt
+
+                tables_before = _count_tables(final_text)
+                tables_after = _count_tables(corrected_text)
+                if tables_before > 0 and tables_after == 0:
+                    logger.warning("=" * 80)
+                    logger.warning(f"⚠️ CONTENT FIX REMOVEU TODAS AS TABELAS ({tables_before} → 0), REVERTENDO")
+                    logger.warning("=" * 80)
+                    return final_text, False, []
+
                 char_diff = len(corrected_text) - len(final_text)
                 logger.info("=" * 80)
                 logger.info(f"✅ CORREÇÕES DE CONTEÚDO APLICADAS AUTOMATICAMENTE:")
@@ -579,6 +774,26 @@ class TranscriptionService:
                     logger.warning("=" * 80)
                     return final_text, False, []
 
+                # CRITICAL: Never lose tables that existed before auto-fix
+                def _count_md_tables(text: str) -> int:
+                    count = 0
+                    lines = (text or "").splitlines()
+                    sep_pat = re.compile(r'^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$')
+                    for i in range(len(lines) - 1):
+                        h = lines[i].strip()
+                        s = lines[i + 1].strip()
+                        if '|' in h and h.count('|') >= 2 and sep_pat.match(s):
+                            count += 1
+                    return count
+
+                tables_before = _count_md_tables(final_text)
+                tables_after = _count_md_tables(fixed_content)
+                if tables_before > 0 and tables_after == 0:
+                    logger.warning("=" * 80)
+                    logger.warning(f"⚠️ AUTO-FIX REMOVEU TODAS AS TABELAS ({tables_before} → 0), REVERTENDO")
+                    logger.warning("=" * 80)
+                    return final_text, False, []
+
                 fixes_applied = result.get("fixes_applied", [])
                 if fixes_applied:
                     char_diff = len(fixed_content) - len(final_text)
@@ -628,47 +843,100 @@ class TranscriptionService:
         thinking_level: Optional[str] = None,
         provider: Optional[str] = None
     ):
-        if provider:
-            provider_key = provider.strip().lower()
-            if provider_key == "openai":
-                llm_model = model_selection or "gpt-5-mini-2025-08-07"
-                use_openai_primary = False
-                openai_model = llm_model
+        with self._vomo_lock:
+            if provider:
+                provider_key = provider.strip().lower()
+                if provider_key == "openai":
+                    llm_model = model_selection or "gpt-5-mini-2025-08-07"
+                    use_openai_primary = False
+                    openai_model = llm_model
+                else:
+                    llm_model = model_selection or "gemini-3-flash-preview"
+                    use_openai_primary = False
+                    openai_model = None
+                    if model_selection and model_selection.strip().lower().startswith("gpt"):
+                        use_openai_primary = True
+                        openai_model = model_selection
+                provider = provider_key
             else:
-                llm_model = model_selection or "gemini-3-flash-preview"
-                use_openai_primary = False
-                openai_model = None
-                if model_selection and model_selection.strip().lower().startswith("gpt"):
-                    use_openai_primary = True
-                    openai_model = model_selection
-            provider = provider_key
-        else:
-            provider, llm_model, use_openai_primary, openai_model = self._resolve_model_selection(model_selection)
-        desired_config = (provider, llm_model, use_openai_primary, openai_model)
-        if self.vomo is not None and getattr(self.vomo, "provider", None) == provider:
-            self.vomo.llm_model = llm_model
-            self.vomo.use_openai_primary = use_openai_primary
-            if openai_model:
-                self.vomo.openai_model = openai_model
-            if thinking_level:
-                self.vomo.thinking_level = thinking_level
-            self.vomo_config = desired_config
-            return self.vomo
-        try:
-            from mlx_vomo import VomoMLX  # import tardio (pode falhar por deps opcionais)
-            self.vomo = VomoMLX(provider=provider)
-            if llm_model:
+                provider, llm_model, use_openai_primary, openai_model = self._resolve_model_selection(model_selection)
+            desired_config = (provider, llm_model, use_openai_primary, openai_model)
+            if self.vomo is not None and getattr(self.vomo, "provider", None) == provider:
                 self.vomo.llm_model = llm_model
-            self.vomo.use_openai_primary = use_openai_primary
-            if openai_model:
-                self.vomo.openai_model = openai_model
-            if thinking_level:
-                self.vomo.thinking_level = thinking_level
-            self.vomo_config = desired_config
-            return self.vomo
-        except Exception as e:
-            logger.error(f"❌ VomoMLX indisponível (import/init falhou): {e}")
-            raise RuntimeError(f"VomoMLX indisponível: {e}")
+                self.vomo.use_openai_primary = use_openai_primary
+                if openai_model:
+                    self.vomo.openai_model = openai_model
+                if thinking_level:
+                    self.vomo.thinking_level = thinking_level
+                self.vomo_config = desired_config
+                return self.vomo
+            try:
+                VomoMLX = _load_vomo_class()  # import tardio resiliente
+                self.vomo = VomoMLX(provider=provider)
+                if llm_model:
+                    self.vomo.llm_model = llm_model
+                self.vomo.use_openai_primary = use_openai_primary
+                if openai_model:
+                    self.vomo.openai_model = openai_model
+                if thinking_level:
+                    self.vomo.thinking_level = thinking_level
+                self.vomo_config = desired_config
+                return self.vomo
+            except Exception as e:
+                logger.error(f"❌ VomoMLX indisponível (import/init falhou): {e}")
+                raise RuntimeError(f"VomoMLX indisponível: {e}")
+
+    async def _get_vomo_with_progress(
+        self,
+        *,
+        emit: Callable[[str, int, str], Awaitable[None]],
+        model_selection: Optional[str],
+        thinking_level: Optional[str],
+        ready_message: str,
+    ):
+        """
+        Inicializa VomoMLX sem bloquear o loop de eventos:
+        - roda _get_vomo em thread
+        - emite heartbeat de progresso enquanto inicializa
+        - aplica timeout defensivo para evitar "travamento eterno" em 0%
+        """
+        try:
+            timeout_seconds = int(os.getenv("IUDEX_VOMO_INIT_TIMEOUT_SECONDS", "240"))
+        except Exception:
+            timeout_seconds = 240
+
+        heartbeat_task: Optional[asyncio.Task] = None
+        start_time = time.time()
+
+        async def _heartbeat():
+            while True:
+                await asyncio.sleep(6)
+                elapsed = int(time.time() - start_time)
+                # Mantém visualmente "em inicialização" sem avançar de etapa.
+                await emit("initializing", 1, f"⏳ Inicializando motor... ({elapsed}s)")
+
+        try:
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            vomo = await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._get_vomo,
+                    model_selection,
+                    thinking_level,
+                ),
+                timeout=timeout_seconds,
+            )
+            await emit("initializing", 2, ready_message)
+            return vomo
+        except asyncio.TimeoutError as e:
+            raise RuntimeError(
+                f"Timeout ao inicializar VomoMLX após {timeout_seconds}s. "
+                "Verifique credenciais/modelo e conectividade."
+            ) from e
+        finally:
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await heartbeat_task
 
     def _get_wav_duration_seconds(self, audio_path: str) -> float:
         if not audio_path.lower().endswith(".wav"):
@@ -681,6 +949,45 @@ class TranscriptionService:
                     return float(frames) / float(rate)
         except Exception:
             return 0.0
+        return 0.0
+
+    def _get_audio_duration_seconds(self, audio_path: str) -> float:
+        """
+        Retorna duração em segundos para WAV/MP3/M4A/etc (best effort).
+        Usa wave para WAV e ffprobe para demais formatos.
+        """
+        if not audio_path:
+            return 0.0
+
+        if audio_path.lower().endswith(".wav"):
+            return self._get_wav_duration_seconds(audio_path)
+
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    audio_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0:
+                value = (result.stdout or "").strip()
+                if value:
+                    duration = float(value)
+                    if duration > 0:
+                        return duration
+        except Exception:
+            pass
+
         return 0.0
 
     def _extract_audit_report(self, content: str) -> Optional[str]:
@@ -722,6 +1029,616 @@ class TranscriptionService:
                 os.getenv("ASSEMBLYAI_PRIMARY", "").strip().lower() in ("1", "true", "yes")
                 and os.getenv("ASSEMBLYAI_API_KEY")
             )
+
+    def _allow_assemblyai_fallback_for_whisper(self) -> bool:
+        """
+        Controla fallback Whisper -> AssemblyAI quando o usuário escolhe Whisper explicitamente.
+        Padrão: desabilitado (respeita escolha explícita de engine).
+        """
+        try:
+            from app.core.config import settings
+            return bool(getattr(settings, "ALLOW_ASSEMBLYAI_FALLBACK_FOR_WHISPER", False))
+        except Exception:
+            return os.getenv(
+                "IUDEX_ALLOW_ASSEMBLYAI_FALLBACK_FOR_WHISPER",
+                "false",
+            ).strip().lower() in ("1", "true", "yes", "on")
+
+    def _is_runpod_configured(self) -> bool:
+        """Verifica se RunPod Serverless está configurado."""
+        return bool(os.getenv("RUNPOD_API_KEY") and os.getenv("RUNPOD_ENDPOINT_ID"))
+
+    def _resolve_runpod_base_url(self) -> Tuple[str, str]:
+        """
+        Resolve base URL para servir áudio ao RunPod.
+
+        Precedência:
+        1) IUDEX_RUNPOD_PUBLIC_BASE_URL (recomendado para túnel/deploy)
+        2) IUDEX_PUBLIC_BASE_URL (alias legado)
+        3) IUDEX_BASE_URL
+        4) http://localhost:8000 (fallback local)
+        """
+        for env_key in ("IUDEX_RUNPOD_PUBLIC_BASE_URL", "IUDEX_PUBLIC_BASE_URL", "IUDEX_BASE_URL"):
+            raw_value = os.getenv(env_key, "")
+            value = raw_value.strip().rstrip("/")
+            if value:
+                return value, env_key
+        return "http://localhost:8000", "default"
+
+    def _is_private_or_loopback_host(self, hostname: str) -> bool:
+        host = (hostname or "").strip().lower()
+        if not host:
+            return True
+        if host in {"localhost", "0.0.0.0", "::1"} or host.endswith(".local"):
+            return True
+        try:
+            ip = ipaddress.ip_address(host)
+            return bool(
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            )
+        except ValueError:
+            # Hostname público (DNS)
+            return False
+
+    def _validate_runpod_base_url(self, base_url: str) -> None:
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise RuntimeError(
+                f"Base URL inválida para RunPod: '{base_url}'. "
+                "Use IUDEX_RUNPOD_PUBLIC_BASE_URL com URL absoluta (https://...)."
+            )
+
+        allow_private = os.getenv(
+            "IUDEX_ALLOW_PRIVATE_BASE_URL_FOR_RUNPOD",
+            "false",
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        host = parsed.hostname or ""
+
+        if not allow_private and self._is_private_or_loopback_host(host):
+            raise RuntimeError(
+                "RunPod não consegue acessar IUDEX_BASE_URL privada/local "
+                f"('{base_url}'). Configure IUDEX_RUNPOD_PUBLIC_BASE_URL com uma URL pública "
+                "(ex.: túnel cloudflared/ngrok ou domínio do deploy). "
+                "Para forçar host privado, defina IUDEX_ALLOW_PRIVATE_BASE_URL_FOR_RUNPOD=true."
+            )
+
+    def _extract_transcription_job_id_from_audio_path(self, audio_path: str) -> str:
+        """
+        Extrai job_id a partir do caminho do áudio.
+
+        Compatível com estruturas:
+        - .../transcription_jobs/{job_id}/input/arquivo.ext
+        - .../jobs/{job_id}/input/arquivo.ext
+        Também tolera caminhos com separador '\\\\' (Windows).
+        """
+        normalized = f"/{(audio_path or '').replace(chr(92), '/')}".replace("//", "/")
+
+        match = re.search(r"/(?:transcription_jobs|jobs)/([^/]+)/", normalized)
+        if match:
+            return match.group(1)
+
+        # Fallback defensivo por componentes de path
+        parts = [p for p in Path(audio_path).parts if p]
+        for marker in ("transcription_jobs", "jobs"):
+            if marker in parts:
+                idx = parts.index(marker)
+                if idx + 1 < len(parts):
+                    return parts[idx + 1]
+
+        raise RuntimeError(
+            "Não foi possível extrair job_id de: "
+            f"{audio_path}. Esperado conter '/transcription_jobs/{{job_id}}/' ou '/jobs/{{job_id}}/'."
+        )
+
+    async def _transcribe_runpod(
+        self,
+        file_path: str,
+        audio_path: str,
+        language: str = "pt",
+        diarization: bool = True,
+        emit: Optional[Callable] = None,
+        start_progress: int = 25,
+        end_progress: int = 60,
+    ) -> Optional[dict]:
+        """
+        Transcreve via RunPod Serverless.
+
+        1. Gera URL temporária para o áudio
+        2. Submete job ao RunPod
+        3. Poll com progresso até completar
+        """
+        from app.services.runpod_transcription import get_runpod_client, extract_transcription
+        from app.api.endpoints.transcription import generate_runpod_audio_url
+
+        client = get_runpod_client()
+        if not client.is_configured:
+            raise RuntimeError("RunPod não configurado (RUNPOD_API_KEY / RUNPOD_ENDPOINT_ID)")
+
+        # Gerar URL pública temporária para o áudio
+        base_url, base_url_source = self._resolve_runpod_base_url()
+        self._validate_runpod_base_url(base_url)
+        job_id = self._extract_transcription_job_id_from_audio_path(audio_path)
+
+        audio_url = generate_runpod_audio_url(job_id, base_url)
+        logger.info("RunPod base URL (%s): %s", base_url_source, base_url)
+        logger.info("RunPod audio URL: %s", audio_url.split("?")[0])
+        await asyncio.to_thread(self._preflight_runpod_audio_url, audio_url)
+
+        if emit:
+            await emit("transcription", start_progress, "Submetendo job ao RunPod...")
+
+        # Submeter transcrição ao worker oficial faster-whisper (modelo turbo)
+        result = await client.submit_job(
+            audio_url=audio_url,
+            language=language,
+            diarization=diarization,
+        )
+
+        if emit:
+            await emit("transcription", start_progress + 5, f"Job RunPod: {result.run_id}")
+
+        # Poll com progresso
+        async def _on_runpod_progress(stage: str, pct: int, msg: str):
+            if emit:
+                # Mapear 0-100 do RunPod para start_progress-end_progress
+                mapped = start_progress + int((end_progress - start_progress) * pct / 100)
+                await emit(stage, mapped, msg)
+
+        final = await client.poll_until_complete(
+            run_id=result.run_id,
+            on_progress=_on_runpod_progress,
+        )
+
+        if final.status == "COMPLETED":
+            parsed = extract_transcription(final)
+            if not parsed or not str(parsed.get("text", "")).strip():
+                raise RuntimeError(
+                    "RunPod retornou resultado vazio "
+                    f"({self._summarize_runpod_output(final.output)})"
+                )
+            # Apply post-processing (legal dictionary, punctuation, acronyms)
+            try:
+                from app.services.transcription_postprocessing import postprocess_transcription
+                parsed = postprocess_transcription(parsed)
+            except Exception as pp_exc:
+                logger.warning("Post-processing failed (non-fatal): %s", pp_exc)
+            return parsed
+        elif final.status == "FAILED":
+            raise RuntimeError(f"RunPod job falhou: {self._format_runpod_error(final.error)}")
+        elif final.status == "CANCELLED":
+            raise asyncio.CancelledError("RunPod job cancelado")
+        else:
+            raise RuntimeError(f"RunPod status inesperado: {final.status}")
+
+    async def _diarize_via_runpod(
+        self,
+        audio_path: str,
+        segments: list,
+        emit: Optional[Callable] = None,
+        speakers_expected: Optional[int] = None,
+    ) -> list:
+        """
+        Diarização externa via RunPod diarize endpoint.
+        Recebe segmentos do Whisper local e retorna segmentos com speaker labels.
+        """
+        from app.services.runpod_transcription import get_runpod_client, _merge_diarization
+        from app.api.endpoints.transcription import generate_runpod_audio_url
+
+        client = get_runpod_client()
+        if not client.diarize_configured:
+            raise RuntimeError("RunPod diarize não configurado (RUNPOD_DIARIZE_ENDPOINT_ID)")
+
+        base_url, base_url_source = self._resolve_runpod_base_url()
+        self._validate_runpod_base_url(base_url)
+        job_id = self._extract_transcription_job_id_from_audio_path(audio_path)
+        audio_url = generate_runpod_audio_url(job_id, base_url)
+
+        logger.info("RunPod diarize URL (%s): %s", base_url_source, audio_url.split("?")[0])
+        await asyncio.to_thread(self._preflight_runpod_audio_url, audio_url)
+
+        if emit:
+            await emit("diarization", 60, "🗣️ Enviando para diarização RunPod...")
+
+        dia_result = await client.submit_diarize_job(
+            audio_url=audio_url,
+            min_speakers=1,
+            max_speakers=speakers_expected or 10,
+        )
+        if emit:
+            await emit("diarization", 62, f"🗣️ Job diarização: {dia_result.run_id}")
+
+        dia_final = await client.poll_until_complete(
+            run_id=dia_result.run_id,
+            endpoint_id=client.diarize_endpoint_id,
+        )
+
+        if dia_final.status == "COMPLETED" and dia_final.output:
+            diarization_data = dia_final.output.get("diarization") or dia_final.output
+            merged = _merge_diarization(segments, diarization_data)
+            if emit:
+                num_speakers = diarization_data.get("num_speakers", "?")
+                await emit("diarization", 65, f"🗣️ Diarização concluída ({num_speakers} falantes)")
+            return merged
+        else:
+            logger.warning("RunPod diarize falhou: %s", dia_final.error)
+            raise RuntimeError(f"RunPod diarize falhou: {dia_final.error or dia_final.status}")
+
+    def _preflight_runpod_audio_url(self, audio_url: str) -> None:
+        """
+        Valida rapidamente se a URL pública assinada do áudio está acessível
+        antes de submeter o job ao RunPod.
+        """
+        parsed = urlparse(audio_url)
+        hostname = (parsed.hostname or "").strip().lower()
+        is_cloudflare_tunnel = hostname.endswith(".trycloudflare.com")
+        env_name = (
+            os.getenv("IUDEX_ENV")
+            or os.getenv("ENVIRONMENT")
+            or os.getenv("APP_ENV")
+            or ""
+        ).strip().lower()
+        is_production = env_name in {"prod", "production"}
+        local_preflight_flag = os.getenv("IUDEX_RUNPOD_PREFLIGHT_LOCAL", "auto").strip().lower()
+        if local_preflight_flag in {"1", "true", "yes", "on"}:
+            do_local_preflight = True
+        elif local_preflight_flag in {"0", "false", "no", "off"}:
+            do_local_preflight = False
+        else:
+            # Default: mantém diagnóstico forte em dev/túneis efêmeros, reduzindo latência em produção.
+            do_local_preflight = is_cloudflare_tunnel or not is_production
+
+        req = urllib.request.Request(
+            audio_url,
+            method="GET",
+            headers={
+                "Range": "bytes=0-1",
+                "User-Agent": "Iudex-RunPod-Preflight/1.0",
+            },
+        )
+
+        # 1) Pré-validação local: separa erros de token/arquivo de erros de túnel público.
+        if do_local_preflight:
+            local_port = (os.getenv("IUDEX_API_PORT") or os.getenv("PORT") or "8000").strip()
+            local_url = f"http://127.0.0.1:{local_port}{parsed.path}"
+            if parsed.query:
+                local_url = f"{local_url}?{parsed.query}"
+            local_req = urllib.request.Request(
+                local_url,
+                method="GET",
+                headers={
+                    "Range": "bytes=0-1",
+                    "User-Agent": "Iudex-RunPod-Preflight-Local/1.0",
+                },
+            )
+            try:
+                with urllib.request.urlopen(local_req, timeout=10) as local_response:
+                    local_status = getattr(local_response, "status", 200)
+                    if local_status not in (200, 206):
+                        raise RuntimeError(
+                            f"Pré-validação local falhou (HTTP {local_status}). "
+                            "Verifique assinatura do token e existência do áudio do job."
+                        )
+            except urllib.error.HTTPError as local_exc:
+                if local_exc.code == 403:
+                    raise RuntimeError(
+                        "Pré-validação local rejeitou o token de áudio (HTTP 403). "
+                        "Verifique assinatura/SECRET_KEY e validade do token."
+                    ) from local_exc
+                if local_exc.code == 404:
+                    raise RuntimeError(
+                        "Pré-validação local não encontrou o áudio do job (HTTP 404). "
+                        "Verifique job_id e arquivo de entrada."
+                    ) from local_exc
+                raise RuntimeError(
+                    f"Pré-validação local do áudio rejeitada (HTTP {local_exc.code}). "
+                    "Verifique assinatura do token e disponibilidade da API local."
+                ) from local_exc
+            except urllib.error.URLError as local_exc:
+                raise RuntimeError(
+                    f"Pré-validação local do áudio inacessível: {local_exc.reason}. "
+                    "Verifique se a API está rodando em 127.0.0.1."
+                ) from local_exc
+            except (TimeoutError, socket.timeout) as local_exc:
+                raise RuntimeError(
+                    "Pré-validação local do áudio expirou por timeout. "
+                    "Verifique se a API local está responsiva."
+                ) from local_exc
+
+        # 2) Validação pública: garante acesso externo (RunPod).
+        try:
+            with urllib.request.urlopen(req, timeout=15) as response:
+                status = getattr(response, "status", 200)
+                if status not in (200, 206):
+                    raise RuntimeError(
+                        f"URL pública do áudio retornou HTTP {status}. "
+                        "Verifique tunnel/base URL e assinatura do token."
+                    )
+        except urllib.error.HTTPError as exc:
+            if is_cloudflare_tunnel and exc.code in {502, 521, 522, 523, 524, 530}:
+                raise RuntimeError(
+                    f"URL pública do áudio rejeitada (HTTP {exc.code}). "
+                    "Assinatura/token local estão OK, mas o tunnel Cloudflare está offline/expirado. "
+                    "Reinicie o tunnel e atualize IUDEX_RUNPOD_PUBLIC_BASE_URL."
+                ) from exc
+            raise RuntimeError(
+                f"URL pública do áudio rejeitada (HTTP {exc.code}). "
+                "Verifique tunnel/base URL e assinatura do token."
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(
+                f"URL pública do áudio inacessível: {exc.reason}. "
+                "Verifique se o tunnel está ativo e apontando para a API."
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise RuntimeError(
+                "URL pública do áudio expirou por timeout. "
+                "Verifique se o tunnel/base URL está ativo e saudável."
+            ) from exc
+
+    def _summarize_runpod_output(self, output: Any) -> str:
+        """Resumo curto do payload de saída do RunPod para diagnóstico."""
+        if output is None:
+            return "output=None"
+        if isinstance(output, dict):
+            keys = sorted(str(k) for k in output.keys())
+            return f"dict keys={keys[:12]}"
+        if isinstance(output, list):
+            return f"list len={len(output)}"
+        if isinstance(output, str):
+            snippet = output.strip().replace("\n", " ")
+            if len(snippet) > 120:
+                snippet = snippet[:120] + "..."
+            return f"str='{snippet}'"
+        return f"type={type(output).__name__}"
+
+    def _format_runpod_error(self, error: Any) -> str:
+        """Normaliza erro do RunPod em mensagem acionável."""
+        if error is None:
+            return "sem detalhes"
+
+        payload: Any = error
+        if isinstance(error, str):
+            stripped = error.strip()
+            if not stripped:
+                return "sem detalhes"
+            try:
+                payload = json.loads(stripped)
+            except Exception:
+                return stripped
+
+        if isinstance(payload, dict):
+            msg = str(payload.get("error_message") or payload.get("message") or payload.get("error") or "")
+            tb = str(payload.get("error_traceback") or "")
+            combined = f"{msg}\n{tb}".lower()
+            if (
+                "no such file or directory: 'none'" in combined
+                or ("filenotfounderror" in combined and "none" in combined)
+            ):
+                return (
+                    "worker RunPod recebeu áudio inválido/ausente (input None). "
+                    "Verifique o handler do endpoint e a URL pública do áudio."
+                )
+            return json.dumps(payload, ensure_ascii=False)
+
+        return str(payload)
+
+    def _is_provider_fallback_allowed(
+        self,
+        *,
+        requested_engine: Optional[str],
+        from_provider: str,
+        to_provider: str,
+        allow_provider_fallback: Optional[bool],
+    ) -> bool:
+        """
+        Regra central para decidir se troca automática de provider é permitida.
+
+        Precedência:
+        1) Flag explícita da requisição (`allow_provider_fallback`)
+        2) Regra legado de Whisper -> AssemblyAI (env)
+        3) Se o usuário escolheu engine explícita, NÃO fazer fallback
+        4) Fallback permitido apenas quando nenhuma engine foi solicitada
+        """
+        if allow_provider_fallback is not None:
+            return bool(allow_provider_fallback)
+
+        requested = (requested_engine or "").strip().lower()
+        if requested == "whisper" and from_provider == "whisper" and to_provider == "assemblyai":
+            return self._allow_assemblyai_fallback_for_whisper()
+
+        # Se o usuário escolheu uma engine específica, respeitar a escolha
+        if requested and requested == from_provider:
+            return False
+
+        return True
+
+    def _enforce_fidelity_critical_fallback(
+        self,
+        *,
+        mode: Optional[str],
+        allow_provider_fallback: Optional[bool],
+    ) -> Optional[bool]:
+        """
+        Em modo FIDELIDADE, prioriza consistência de engine:
+        fallback automático fica desabilitado por padrão.
+        """
+        mode_upper = (mode or "").strip().upper()
+        if mode_upper != "FIDELIDADE":
+            return allow_provider_fallback
+
+        force_disable = os.getenv(
+            "IUDEX_DISABLE_FALLBACK_IN_FIDELIDADE",
+            "true",
+        ).strip().lower() in ("1", "true", "yes", "on")
+
+        if force_disable:
+            if allow_provider_fallback is not False:
+                logger.info(
+                    "🔒 Modo FIDELIDADE: fallback de provider forçado para OFF "
+                    "(IUDEX_DISABLE_FALLBACK_IN_FIDELIDADE=true)."
+                )
+            return False
+
+        return allow_provider_fallback
+
+    def _provider_switch_message(
+        self,
+        *,
+        from_provider: str,
+        to_provider: str,
+        allow_provider_fallback: Optional[bool],
+    ) -> str:
+        provider_labels = {
+            "whisper": "Whisper",
+            "assemblyai": "AssemblyAI",
+            "elevenlabs": "ElevenLabs",
+            "runpod": "RunPod",
+        }
+        source = provider_labels.get(from_provider, from_provider)
+        target = provider_labels.get(to_provider, to_provider)
+        basis = "consentido na UI" if allow_provider_fallback is True else "fallback automático"
+        return f"⚠️ {source} indisponível, trocando para {target} ({basis})."
+
+    def _normalize_diarization_provider(self, diarization_provider: Optional[str]) -> str:
+        provider = (diarization_provider or "auto").strip().lower()
+        if provider in {"auto", "local", "runpod", "assemblyai"}:
+            return provider
+        if provider:
+            logger.warning("Provider de diarização inválido '%s' (usando auto).", provider)
+        return "auto"
+
+    async def _apply_external_diarization_if_needed(
+        self,
+        *,
+        transcription_result: Dict[str, Any],
+        diarization_enabled: bool,
+        diarization_required: bool,
+        diarization_provider: Optional[str],
+        audio_path: str,
+        speakers_expected: Optional[int] = None,
+        speaker_roles: Optional[list] = None,
+        language: Optional[str] = None,
+        mode: Optional[str] = None,
+        speaker_id_type: Optional[str] = None,
+        speaker_id_values: Optional[list] = None,
+        emit: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
+    ) -> Tuple[list, list]:
+        """
+        Aplica diarização externa quando Whisper sinaliza ausência de pyannote local.
+        Respeita o provider solicitado pelo usuário: auto/local/runpod/assemblyai.
+        """
+        words = transcription_result.get("words", []) if isinstance(transcription_result, dict) else []
+        segments = transcription_result.get("segments", []) if isinstance(transcription_result, dict) else []
+        needs_external = bool(
+            isinstance(transcription_result, dict)
+            and transcription_result.get("_needs_external_diarization")
+        )
+        if not diarization_enabled or not needs_external:
+            return words, segments
+
+        provider = self._normalize_diarization_provider(diarization_provider)
+        errors: list[str] = []
+
+        if provider == "local":
+            raise RuntimeError(
+                "Diarização via Local (pyannote) foi solicitada, mas pyannote não está disponível. "
+                "Instale pyannote.audio localmente ou selecione RunPod/AssemblyAI."
+            )
+
+        # 1) RunPod (quando auto ou explicitamente runpod)
+        if provider in {"auto", "runpod"}:
+            from app.services.runpod_transcription import get_runpod_client
+
+            runpod_client = get_runpod_client()
+            if runpod_client.diarize_configured:
+                try:
+                    merged = await self._diarize_via_runpod(
+                        audio_path=audio_path,
+                        segments=segments,
+                        emit=emit,
+                        speakers_expected=speakers_expected,
+                    )
+                    return words, merged
+                except Exception as dia_exc:
+                    logger.warning("RunPod diarize falhou: %s", dia_exc)
+                    errors.append(f"RunPod: {dia_exc}")
+            else:
+                errors.append("RunPod diarize não configurado (RUNPOD_DIARIZE_ENDPOINT_ID)")
+
+            if provider == "runpod":
+                raise RuntimeError(
+                    "Diarização via RunPod foi solicitada, mas está indisponível. "
+                    + "; ".join(errors)
+                )
+
+        # 2) AssemblyAI (quando auto ou explicitamente assemblyai)
+        if provider in {"auto", "assemblyai"}:
+            if self._get_assemblyai_key():
+                try:
+                    if emit:
+                        await emit("diarization", 60, "🗣️ Diarização via AssemblyAI...")
+                        aai_result = await self._transcribe_assemblyai_with_progress(
+                            audio_path=audio_path,
+                            emit=emit,
+                            speaker_roles=speaker_roles,
+                            language=language or "pt",
+                            speakers_expected=speakers_expected,
+                            mode=mode,
+                            start_progress=60,
+                            end_progress=65,
+                            speaker_id_type=speaker_id_type,
+                            speaker_id_values=speaker_id_values,
+                        )
+                    else:
+                        aai_result = await asyncio.to_thread(
+                            self._transcribe_assemblyai_with_roles,
+                            audio_path,
+                            speaker_roles,
+                            language or "pt",
+                            speakers_expected,
+                            mode,
+                            None,
+                            None,
+                            None,
+                            speaker_id_type,
+                            speaker_id_values,
+                        )
+                    if aai_result:
+                        if emit:
+                            await emit("diarization", 65, "🗣️ Diarização AssemblyAI concluída ✓")
+                        return (
+                            aai_result.get("words", words) or words,
+                            aai_result.get("segments", segments) or segments,
+                        )
+                    errors.append("AssemblyAI retornou resultado vazio")
+                except Exception as aai_exc:
+                    logger.warning("AssemblyAI diarize falhou: %s", aai_exc)
+                    errors.append(f"AssemblyAI: {aai_exc}")
+            else:
+                errors.append("ASSEMBLYAI_API_KEY não configurada")
+
+            if provider == "assemblyai":
+                raise RuntimeError(
+                    "Diarização via AssemblyAI foi solicitada, mas está indisponível. "
+                    + "; ".join(errors)
+                )
+
+        if diarization_required:
+            detail = "; ".join(errors) if errors else "nenhum provider externo disponível"
+            raise RuntimeError(
+                "Diarização obrigatória, mas indisponível. "
+                f"Detalhes: {detail}. "
+                "Instale pyannote.audio localmente ou configure RunPod/AssemblyAI."
+            )
+
+        if errors:
+            logger.warning("Diarização externa não aplicada (modo soft): %s", "; ".join(errors))
+        return words, segments
 
     def _extract_audio_for_cloud(
         self,
@@ -1158,6 +2075,13 @@ class TranscriptionService:
         max_polls = 4800  # ~4 horas
         poll_timeout = (10, 30)
         poll_start_time = time.time()
+        fallback_audio_duration = self._get_audio_duration_seconds(audio_path)
+        try:
+            unknown_duration_estimated_seconds = float(
+                os.getenv("IUDEX_ASSEMBLYAI_UNKNOWN_DURATION_SECONDS", "1800")
+            )
+        except Exception:
+            unknown_duration_estimated_seconds = 1800.0
         try:
             max_poll_minutes = float(os.getenv("IUDEX_ASSEMBLYAI_MAX_POLL_MINUTES", "240"))
         except Exception:
@@ -1192,12 +2116,16 @@ class TranscriptionService:
 
             # Atualizar progresso baseado no tempo (estimativa)
             # AssemblyAI geralmente processa ~10x mais rápido que tempo real
-            audio_duration = poll_resp.get("audio_duration") or 0
-            if audio_duration and audio_duration > 0:
-                estimated_total = audio_duration / 10  # ~10x realtime
-                progress_ratio = min(0.95, elapsed_min * 60 / max(estimated_total, 60))
+            provider_audio_duration = poll_resp.get("audio_duration") or 0
+            effective_audio_duration = provider_audio_duration or fallback_audio_duration
+            if effective_audio_duration and effective_audio_duration > 0:
+                estimated_total = effective_audio_duration / 10  # ~10x realtime
+                progress_ratio = min(0.99, elapsed_min * 60 / max(estimated_total, 60))
             else:
-                progress_ratio = min(0.95, poll_count / 100)  # Fallback
+                progress_ratio = min(
+                    0.99,
+                    elapsed_min * 60 / max(unknown_duration_estimated_seconds, 300),
+                )
 
             progress = poll_start + int(progress_ratio * (poll_end - poll_start))
 
@@ -1206,8 +2134,8 @@ class TranscriptionService:
                 if status == "queued":
                     msg = f"⏳ Na fila do AssemblyAI... ({elapsed_min:.0f}min)"
                 elif status == "processing":
-                    if audio_duration and audio_duration > 0:
-                        dur_min = audio_duration / 60
+                    if effective_audio_duration and effective_audio_duration > 0:
+                        dur_min = effective_audio_duration / 60
                         est_remaining = max(0, (dur_min / 10) - elapsed_min)
                         msg = f"🎙️ Transcrevendo ({elapsed_min:.0f}min, ~{est_remaining:.0f}min restantes)"
                     else:
@@ -1314,12 +2242,16 @@ class TranscriptionService:
             result_cached=True,
         )
 
+        # Construir texto com timestamps (paridade com path sync)
+        text_with_timestamps = self._build_text_with_timestamps(segments, timestamp_interval=ts_interval)
+
         return {
             "segments": segments,
             "speakers": speaker_set,
             "elapsed_seconds": elapsed,
             "audio_duration": audio_duration,
             "text": poll_resp.get("text", ""),
+            "text_with_timestamps": text_with_timestamps,
             "words": words,
             "utterances": utterances,
             "backend": "assemblyai",
@@ -1404,12 +2336,17 @@ class TranscriptionService:
 
         audio_duration = poll_resp.get("audio_duration", 0)
 
+        # Construir texto com timestamps (paridade com path sync)
+        ts_interval = self._get_timestamp_interval_for_mode(mode) or 0
+        text_with_timestamps = self._build_text_with_timestamps(segments, timestamp_interval=ts_interval)
+
         return {
             "segments": segments,
             "speakers": speaker_set,
             "elapsed_seconds": elapsed,
             "audio_duration": audio_duration,
             "text": poll_resp.get("text", ""),
+            "text_with_timestamps": text_with_timestamps,
             "words": words,
             "utterances": utterances,
             "backend": "assemblyai",
@@ -1440,6 +2377,13 @@ class TranscriptionService:
         poll_count = 0
         max_polls = 4800  # ~4 horas
         poll_timeout = (10, 30)
+        fallback_audio_duration = self._get_audio_duration_seconds(audio_path)
+        try:
+            unknown_duration_estimated_seconds = float(
+                os.getenv("IUDEX_ASSEMBLYAI_UNKNOWN_DURATION_SECONDS", "1800")
+            )
+        except Exception:
+            unknown_duration_estimated_seconds = 1800.0
 
         while poll_count < max_polls:
             try:
@@ -1455,12 +2399,16 @@ class TranscriptionService:
             elapsed_min = (time.time() - poll_start_time) / 60
 
             # Atualizar progresso baseado no tempo (estimativa)
-            audio_duration = poll_resp.get("audio_duration") or 0
-            if audio_duration and audio_duration > 0:
-                estimated_total = audio_duration / 10
-                progress_ratio = min(0.95, elapsed_min * 60 / max(estimated_total, 60))
+            provider_audio_duration = poll_resp.get("audio_duration") or 0
+            effective_audio_duration = provider_audio_duration or fallback_audio_duration
+            if effective_audio_duration and effective_audio_duration > 0:
+                estimated_total = effective_audio_duration / 10
+                progress_ratio = min(0.99, elapsed_min * 60 / max(estimated_total, 60))
             else:
-                progress_ratio = min(0.95, poll_count / 100)
+                progress_ratio = min(
+                    0.99,
+                    elapsed_min * 60 / max(unknown_duration_estimated_seconds, 300),
+                )
 
             progress = poll_start + int(progress_ratio * (poll_end - poll_start))
 
@@ -1468,8 +2416,8 @@ class TranscriptionService:
                 if status == "queued":
                     msg = f"⏳ Na fila do AssemblyAI... ({elapsed_min:.0f}min)"
                 elif status == "processing":
-                    if audio_duration and audio_duration > 0:
-                        dur_min = audio_duration / 60
+                    if effective_audio_duration and effective_audio_duration > 0:
+                        dur_min = effective_audio_duration / 60
                         est_remaining = max(0, (dur_min / 10) - elapsed_min)
                         msg = f"🎙️ Transcrevendo ({elapsed_min:.0f}min, ~{est_remaining:.0f}min restantes)"
                     else:
@@ -1944,11 +2892,11 @@ class TranscriptionService:
         """
         Retorna intervalo de timestamps baseado no modo.
 
-        - APOSTILA/FIDELIDADE: 60s (aulas longas, menos trocas)
+        - APOSTILA/FIDELIDADE/RAW: 60s (aulas longas, menos trocas)
         - Outros modos: 0 (por utterance, cada segmento tem timestamp)
         """
         mode_upper = (mode or "").upper()
-        if mode_upper in ("APOSTILA", "FIDELIDADE"):
+        if mode_upper in ("APOSTILA", "FIDELIDADE", "RAW"):
             return 60
         return 0  # Por utterance
 
@@ -2778,7 +3726,7 @@ class TranscriptionService:
         """Dispara Whisper local em thread separada para benchmark (apostila com AAI primário)."""
         def _run():
             try:
-                from mlx_vomo import VomoMLX
+                VomoMLX = _load_vomo_class()
                 vomo_bench = VomoMLX()
                 whisper_start = time.time()
                 text = vomo_bench.transcribe_file(
@@ -3039,6 +3987,7 @@ class TranscriptionService:
             "legal_audit_path": f"{video_name}_{mode_suffix}_AUDITORIA.md",
             "preventive_fidelity_json_path": f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.json",
             "preventive_fidelity_md_path": f"{video_name}_{mode_suffix}_AUDITORIA_FIDELIDADE.md",
+            "title_drift_path": f"{video_name}_{mode_suffix}_TITLE_DRIFT.json",
         }
 
         copied = {}
@@ -3055,6 +4004,28 @@ class TranscriptionService:
         if copied.get("legal_audit_path"):
             copied["audit_path"] = copied["legal_audit_path"]
         return copied
+
+    def _load_title_drift_telemetry(self, report_paths: Optional[dict]) -> dict:
+        if not isinstance(report_paths, dict):
+            return {}
+        drift_path = report_paths.get("title_drift_path")
+        if not drift_path:
+            return {}
+        try:
+            path = Path(drift_path)
+            if not path.exists():
+                return {}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return {
+                    "headers_changed_count": int(data.get("headers_changed_count") or 0),
+                    "headers_restored_count": int(data.get("headers_restored_count") or 0),
+                    "headers_degraded_count": int(data.get("headers_degraded_count") or 0),
+                    "headers_diff": data.get("headers_diff") or [],
+                }
+        except Exception as exc:
+            logger.warning(f"Falha ao carregar telemetria de drift de títulos: {exc}")
+        return {}
 
     def _write_hil_suggestions(
         self,
@@ -3386,12 +4357,74 @@ class TranscriptionService:
                 err = (payload.get("error") or {}).get("message") or "Whisper worker falhou"
                 raise RuntimeError(err)
             result = payload.get("result") or {}
-            return {"text": result.get("text") or "", "words": result.get("words") or []}
+            return {
+                "text": result.get("text") or "",
+                "words": result.get("words") or [],
+                "segments": result.get("segments") or [],
+                "_needs_external_diarization": result.get("_needs_external_diarization", False),
+            }
         finally:
             try:
                 os.unlink(out_path)
             except Exception:
                 pass
+
+    async def _transcribe_whisper_with_optional_external_diarization(
+        self,
+        *,
+        vomo,
+        audio_path: str,
+        mode: str,
+        high_accuracy: bool,
+        diarization: Optional[bool],
+        diarization_strict: bool,
+        language: Optional[str],
+        diarization_enabled: bool,
+        diarization_required: bool,
+        diarization_provider: Optional[str],
+        speakers_expected: Optional[int] = None,
+        speaker_roles: Optional[list] = None,
+        speaker_id_type: Optional[str] = None,
+        speaker_id_values: Optional[list] = None,
+        emit: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
+    ) -> dict:
+        """
+        Executa Whisper (full result) e, quando necessário, aplica diarização externa.
+        """
+        result = await asyncio.to_thread(
+            vomo.transcribe_file_full,
+            audio_path,
+            mode=mode,
+            high_accuracy=high_accuracy,
+            diarization=diarization,
+            diarization_strict=diarization_strict,
+            language=language,
+        )
+        if not isinstance(result, dict):
+            result = {"text": str(result or ""), "words": [], "segments": []}
+
+        words, segments = await self._apply_external_diarization_if_needed(
+            transcription_result=result,
+            diarization_enabled=diarization_enabled,
+            diarization_required=diarization_required,
+            diarization_provider=diarization_provider,
+            audio_path=audio_path,
+            speakers_expected=speakers_expected,
+            speaker_roles=speaker_roles,
+            language=language,
+            mode=mode,
+            speaker_id_type=speaker_id_type,
+            speaker_id_values=speaker_id_values,
+            emit=emit,
+        )
+        result["words"] = words
+        result["segments"] = segments
+        return {
+            "text": result.get("text") or "",
+            "words": result.get("words") or [],
+            "segments": result.get("segments") or [],
+            "_needs_external_diarization": bool(result.get("_needs_external_diarization")),
+        }
 
     async def process_file(
         self,
@@ -3418,6 +4451,8 @@ class TranscriptionService:
         subtitle_format: Optional[str] = None,
         area: Optional[str] = None,
         custom_keyterms: Optional[list] = None,
+        allow_provider_fallback: Optional[bool] = None,
+        diarization_provider: Optional[str] = None,
     ) -> str:
         """
         Processa um arquivo de áudio/vídeo usando MLX Vomo.
@@ -3427,6 +4462,10 @@ class TranscriptionService:
         try:
             if skip_audit is not None:
                 skip_legal_audit = skip_legal_audit or skip_audit
+            allow_provider_fallback = self._enforce_fidelity_critical_fallback(
+                mode=mode,
+                allow_provider_fallback=allow_provider_fallback,
+            )
             apply_fixes = auto_apply_fixes
             vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
             vomo._current_language = (language or "pt").strip().lower()
@@ -3440,17 +4479,28 @@ class TranscriptionService:
                 )
             except Exception:
                 pass
+            diarization_provider = self._normalize_diarization_provider(diarization_provider)
 
             file_ext = Path(file_path).suffix.lower()
             is_text_input = file_ext in [".txt", ".md"]
             transcription_text = None
+            transcription_words: list = []
+            transcription_segments: list = []
             cache_hash = None
             _benchmark_future = None
             _local_segments = None
             _whisper_elapsed = 0.0
-            if use_cache:
+            _requested_engine_cache = (transcription_engine or "whisper").strip().lower()
+            _skip_raw_cache = (
+                (mode or "").upper() == "RAW"
+                and not is_text_input
+                and _requested_engine_cache in {"assemblyai", "elevenlabs", "runpod"}
+            )
+            if use_cache and not _skip_raw_cache:
                 cache_hash = self._compute_file_hash(file_path)
                 transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
+            elif use_cache and _skip_raw_cache:
+                logger.info("RAW + provider cloud: cache de texto desabilitado para preservar words/segments")
 
             if transcription_text:
                 logger.info("♻️ RAW cache hit (pulando transcrição)")
@@ -3464,8 +4514,9 @@ class TranscriptionService:
                     # 2. Transcrever
                     if diarization_enabled:
                         logger.info(
-                            "🗣️  Diarização habilitada (%s)",
+                            "🗣️  Diarização habilitada (%s, provider=%s)",
                             "strict" if diarization_required else "soft",
+                            diarization_provider,
                         )
                     if high_accuracy:
                         logger.info("🎯 Usando Beam Search (High Accuracy)")
@@ -3485,22 +4536,41 @@ class TranscriptionService:
                     _force_aai = self._is_assemblyai_primary_forced()
                     _engine_aai = transcription_engine == "assemblyai"
                     _engine_whisper = transcription_engine == "whisper"
-                    _force_aai_effective = _force_aai and not (
-                        _engine_whisper and _mode_upper in ("APOSTILA", "FIDELIDADE")
-                    )
+                    _force_aai_effective = _force_aai and not _engine_whisper
                     _aai_primary = (
                         not _elevenlabs_primary
                         and self._get_assemblyai_key()
                         and (
                             _engine_aai  # Selecionado via frontend
-                            or _force_aai_effective  # Forçado via env (exceto quando Whisper explícito em apostila/fidelidade)
+                            or _force_aai_effective  # Forçado via env (exceto quando Whisper explícito)
                             or (
+                                not _engine_whisper
+                                and
                                 _mode_upper not in ("APOSTILA", "FIDELIDADE")
                                 and diarization_enabled
                                 and speaker_roles
                             )
                         )
                     )
+                    _requested_engine = (transcription_engine or "whisper").strip().lower()
+                    if _requested_engine in {"assemblyai", "elevenlabs"} and not _elevenlabs_primary and not _aai_primary:
+                        _can_switch_missing_provider = self._is_provider_fallback_allowed(
+                            requested_engine=transcription_engine,
+                            from_provider=_requested_engine,
+                            to_provider="whisper",
+                            allow_provider_fallback=allow_provider_fallback,
+                        )
+                        if not _can_switch_missing_provider:
+                            raise RuntimeError(
+                                f"{_requested_engine} indisponível e fallback para Whisper foi desabilitado."
+                            )
+                        logger.warning(
+                            self._provider_switch_message(
+                                from_provider=_requested_engine,
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                        )
 
                     if _elevenlabs_primary:
                         logger.info("🎬 ElevenLabs primário para legendas")
@@ -3514,17 +4584,35 @@ class TranscriptionService:
                                 tag_audio_events=True,
                             )
                         except Exception as el_exc:
-                            logger.warning("ElevenLabs falhou, tentando AssemblyAI: %s", el_exc)
+                            logger.warning("ElevenLabs falhou: %s", el_exc)
 
                         if el_result:
                             # Usar texto com timestamps se disponível (como Whisper faz)
                             transcription_text = el_result.get("text_with_timestamps") or el_result["text"]
+                            transcription_words = el_result.get("words", []) or []
+                            transcription_segments = el_result.get("segments", []) or []
                             _whisper_elapsed = time.time() - _el_start
                             self._elevenlabs_result = el_result
                             self._aai_apostila_result = None
                         elif self._get_assemblyai_key():
+                            _can_eleven_to_aai = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="elevenlabs",
+                                to_provider="assemblyai",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _can_eleven_to_aai:
+                                raise RuntimeError(
+                                    "ElevenLabs indisponível e fallback para AssemblyAI foi desabilitado."
+                                )
                             # Fallback: AssemblyAI (em thread separada para não bloquear)
-                            logger.info("↩️ Fallback para AssemblyAI (legendas)")
+                            logger.warning(
+                                self._provider_switch_message(
+                                    from_provider="elevenlabs",
+                                    to_provider="assemblyai",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                )
+                            )
                             aai_result = await asyncio.to_thread(
                                 self._transcribe_assemblyai_with_roles,
                                 audio_path, None, language or "pt", None, mode,
@@ -3532,26 +4620,84 @@ class TranscriptionService:
                             if aai_result:
                                 # Usar texto com timestamps se disponível
                                 transcription_text = aai_result.get("text_with_timestamps") or aai_result["text"]
+                                transcription_words = aai_result.get("words", []) or []
+                                transcription_segments = aai_result.get("segments", []) or []
                                 self._aai_apostila_result = aai_result
                                 self._elevenlabs_result = None
                             else:
-                                # Fallback final: Whisper
-                                logger.info("↩️ Fallback para Whisper local (legendas)")
-                                transcription_text = vomo.transcribe_file(
-                                    audio_path, mode=mode, high_accuracy=high_accuracy,
-                                    diarization=diarization, diarization_strict=diarization_strict,
-                                    language=language,
+                                _can_aai_to_whisper = self._is_provider_fallback_allowed(
+                                    requested_engine=transcription_engine,
+                                    from_provider="assemblyai",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
                                 )
+                                if not _can_aai_to_whisper:
+                                    raise RuntimeError(
+                                        "AssemblyAI indisponível após fallback e troca para Whisper foi desabilitada."
+                                    )
+                                # Fallback final: Whisper
+                                logger.warning(
+                                    self._provider_switch_message(
+                                        from_provider="assemblyai",
+                                        to_provider="whisper",
+                                        allow_provider_fallback=allow_provider_fallback,
+                                    )
+                                )
+                                whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                    vomo=vomo,
+                                    audio_path=audio_path,
+                                    mode=mode,
+                                    high_accuracy=high_accuracy,
+                                    diarization=diarization,
+                                    diarization_strict=diarization_strict,
+                                    language=language,
+                                    diarization_enabled=diarization_enabled,
+                                    diarization_required=diarization_required,
+                                    diarization_provider=diarization_provider,
+                                    speakers_expected=speakers_expected,
+                                    speaker_roles=speaker_roles,
+                                )
+                                transcription_text = whisper_result.get("text", "")
+                                transcription_words = whisper_result.get("words", [])
+                                transcription_segments = whisper_result.get("segments", [])
                                 self._aai_apostila_result = None
                                 self._elevenlabs_result = None
                         else:
-                            # Fallback: Whisper
-                            logger.info("↩️ Fallback para Whisper local (legendas)")
-                            transcription_text = vomo.transcribe_file(
-                                audio_path, mode=mode, high_accuracy=high_accuracy,
-                                diarization=diarization, diarization_strict=diarization_strict,
-                                language=language,
+                            _can_eleven_to_whisper = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="elevenlabs",
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
                             )
+                            if not _can_eleven_to_whisper:
+                                raise RuntimeError(
+                                    "ElevenLabs indisponível e fallback para Whisper foi desabilitado."
+                                )
+                            # Fallback: Whisper
+                            logger.warning(
+                                self._provider_switch_message(
+                                    from_provider="elevenlabs",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                )
+                            )
+                            whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                vomo=vomo,
+                                audio_path=audio_path,
+                                mode=mode,
+                                high_accuracy=high_accuracy,
+                                diarization=diarization,
+                                diarization_strict=diarization_strict,
+                                language=language,
+                                diarization_enabled=diarization_enabled,
+                                diarization_required=diarization_required,
+                                diarization_provider=diarization_provider,
+                                speakers_expected=speakers_expected,
+                                speaker_roles=speaker_roles,
+                            )
+                            transcription_text = whisper_result.get("text", "")
+                            transcription_words = whisper_result.get("words", [])
+                            transcription_segments = whisper_result.get("segments", [])
                             self._aai_apostila_result = None
                             self._elevenlabs_result = None
 
@@ -3580,21 +4726,48 @@ class TranscriptionService:
                         if aai_result:
                             # Usar texto com timestamps se disponível (como Whisper faz)
                             transcription_text = aai_result.get("text_with_timestamps") or aai_result["text"]
+                            transcription_words = aai_result.get("words", []) or []
+                            transcription_segments = aai_result.get("segments", []) or []
                             _whisper_elapsed = time.time() - _aai_start
                             # Salvar artefatos AAI (serão colocados no output_dir após persist)
                             self._aai_apostila_result = aai_result
                         else:
+                            _can_aai_to_whisper = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="assemblyai",
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _can_aai_to_whisper:
+                                raise RuntimeError(
+                                    "AssemblyAI indisponível e fallback para Whisper foi desabilitado."
+                                )
                             # Fallback: Whisper local
-                            logger.info("↩️ Fallback para Whisper local (apostila)")
+                            logger.warning(
+                                self._provider_switch_message(
+                                    from_provider="assemblyai",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                )
+                            )
                             _whisper_start = time.time()
-                            transcription_text = vomo.transcribe_file(
-                                audio_path,
+                            whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                vomo=vomo,
+                                audio_path=audio_path,
                                 mode=mode,
                                 high_accuracy=high_accuracy,
                                 diarization=diarization,
                                 diarization_strict=diarization_strict,
                                 language=language,
+                                diarization_enabled=diarization_enabled,
+                                diarization_required=diarization_required,
+                                diarization_provider=diarization_provider,
+                                speakers_expected=speakers_expected,
+                                speaker_roles=speaker_roles,
                             )
+                            transcription_text = whisper_result.get("text", "")
+                            transcription_words = whisper_result.get("words", [])
+                            transcription_segments = whisper_result.get("segments", [])
                             _whisper_elapsed = time.time() - _whisper_start
                             self._aai_apostila_result = None
                     else:
@@ -3615,14 +4788,23 @@ class TranscriptionService:
                             )
 
                         _whisper_start = time.time()
-                        transcription_text = vomo.transcribe_file(
-                            audio_path,
+                        whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                            vomo=vomo,
+                            audio_path=audio_path,
                             mode=mode,
                             high_accuracy=high_accuracy,
                             diarization=diarization,
                             diarization_strict=diarization_strict,
                             language=language,
+                            diarization_enabled=diarization_enabled,
+                            diarization_required=diarization_required,
+                            diarization_provider=diarization_provider,
+                            speakers_expected=speakers_expected,
+                            speaker_roles=speaker_roles,
                         )
+                        transcription_text = whisper_result.get("text", "")
+                        transcription_words = whisper_result.get("words", [])
+                        transcription_segments = whisper_result.get("segments", [])
                         _whisper_elapsed = time.time() - _whisper_start
 
                         # Capturar segmentos locais para benchmark (usa cache do VomoMLX)
@@ -3642,9 +4824,27 @@ class TranscriptionService:
                     )
             
             if mode == "RAW":
-                return {"content": transcription_text, "raw_content": transcription_text, "reports": {}}
+                _raw_result: Dict[str, Any] = {
+                    "content": transcription_text,
+                    "raw_content": transcription_text,
+                    "reports": {},
+                }
+                if transcription_words:
+                    _raw_result["words"] = transcription_words
+                if transcription_segments:
+                    _raw_result["segments"] = transcription_segments
+                return _raw_result
 
             # 3. Formatar (LLM)
+            if vomo is None:
+                logger.warning("⚠️ Vomo ausente antes da formatação em process_file — fallback sync")
+                vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
+                if vomo is None:
+                    raise RuntimeError("Motor de formatação indisponível (VomoMLX não inicializado).")
+                vomo._current_language = (language or "pt").strip().lower()
+                vomo._output_language = (output_language or "").strip().lower() or None
+                vomo._current_mode = (mode or "APOSTILA").strip().upper()
+
             # Observação: em `mlx_vomo.py`, `custom_prompt` tem comportamento dependente do modo:
             # - APOSTILA/AUDIENCIA/REUNIAO: personaliza apenas tabelas/extras (preserva tom/estilo/estrutura do modo).
             # - Outros modos: substitui STYLE+TABLE (preserva HEAD/STRUCTURE/FOOTER).
@@ -3663,17 +4863,113 @@ class TranscriptionService:
             report_paths = {}
             with tempfile.TemporaryDirectory() as temp_dir:
                 llm_warning: Optional[str] = None
+                table_recovery_meta: Optional[dict] = None
                 try:
-                    final_text = await vomo.format_transcription_async(
-                        transcription_text,
+                    final_text, vomo = await self._run_llm_format_with_resilience(
+                        vomo=vomo,
+                        source_text=transcription_text,
                         video_name=video_name,
                         output_folder=temp_dir,
                         mode=mode,
                         custom_prompt=system_prompt,
+                        disable_tables=False,
+                        progress_callback=None,
                         skip_audit=skip_legal_audit,
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
+                        model_selection=model_selection,
+                        thinking_level=thinking_level,
                     )
+
+                    try:
+                        mode_upper = (mode or 'APOSTILA').strip().upper()
+                        raw_words = len(re.findall(r'\S+', transcription_text or ''))
+                        def _has_md_table(markdown_text: str) -> bool:
+                            lines_md = (markdown_text or '').splitlines()
+                            sep_pattern = re.compile(r'^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$')
+                            for idx_line in range(len(lines_md) - 1):
+                                header = lines_md[idx_line].strip()
+                                sep = lines_md[idx_line + 1].strip()
+                                if '|' not in header or '|' not in sep:
+                                    continue
+                                if header.count('|') < 2:
+                                    continue
+                                if sep_pattern.match(sep):
+                                    return True
+                            return False
+                        has_table = _has_md_table(final_text or '')
+
+                        if mode_upper in {'APOSTILA', 'FIDELIDADE'} and not has_table and raw_words >= 1200:
+                            preventive_path = Path(temp_dir) / f'{video_name}_{mode_upper}_AUDITORIA_FIDELIDADE.json'
+                            retention_ratio = None
+                            fidelity_score = None
+                            if preventive_path.exists():
+                                try:
+                                    payload = json.loads(preventive_path.read_text(encoding='utf-8', errors='ignore') or '{}')
+                                    if isinstance(payload, dict):
+                                        metricas = payload.get('metricas') if isinstance(payload.get('metricas'), dict) else {}
+                                        if metricas.get('taxa_retencao') is not None:
+                                            retention_ratio = float(metricas.get('taxa_retencao'))
+                                        elif payload.get('taxa_compressao_estimada') is not None:
+                                            compressao = float(payload.get('taxa_compressao_estimada'))
+                                            if compressao > 1:
+                                                compressao = compressao / 100.0
+                                            if 0 <= compressao <= 1:
+                                                retention_ratio = 1.0 - compressao
+                                        if payload.get('nota_fidelidade') is not None:
+                                            fidelity_score = float(payload.get('nota_fidelidade'))
+                                except Exception:
+                                    retention_ratio = None
+
+                            if retention_ratio is None:
+                                fmt_words = len(re.findall(r'\S+', final_text or ''))
+                                retention_ratio = (fmt_words / raw_words) if raw_words > 0 else None
+
+                            low_retention = retention_ratio is not None and retention_ratio < 0.60
+                            low_score = fidelity_score is not None and fidelity_score <= 6.0
+
+                            if low_retention or low_score:
+                                table_recovery_meta = {
+                                    'triggered': True,
+                                    'reason': 'missing_tables_with_content_loss',
+                                    'retention_ratio': retention_ratio,
+                                    'fidelity_score': fidelity_score,
+                                    'mode': mode_upper,
+                                }
+                                retry_prompt = ((system_prompt.strip() + '\n\n') if system_prompt and system_prompt.strip() else '') + (
+                                    'MODO DE RECUPERACAO AUTOMATICA DE TABELAS\n'
+                                    '- Preserve fidelidade ao RAW.\n'
+                                    '- Reintroduza tabelas markdown quando houver comparacao de itens.\n'
+                                    '- Nao invente fatos.'
+                                )
+                                recovered_text = await vomo.format_transcription_async(
+                                    transcription_text,
+                                    video_name=video_name,
+                                    output_folder=temp_dir,
+                                    mode=mode,
+                                    custom_prompt=retry_prompt,
+                                    disable_tables=False,
+                                    skip_audit=skip_legal_audit,
+                                    skip_fidelity_audit=skip_fidelity_audit,
+                                    skip_sources_audit=skip_sources_audit,
+                                )
+                                recovered_has_table = _has_md_table(recovered_text or '')
+                                rec_words = len(re.findall(r'\S+', recovered_text or ''))
+                                recovered_retention = (rec_words / raw_words) if raw_words > 0 else None
+                                retention_gain = (
+                                    (recovered_retention - retention_ratio)
+                                    if (retention_ratio is not None and recovered_retention is not None)
+                                    else 0.0
+                                )
+                                if recovered_has_table or retention_gain >= 0.08:
+                                    final_text = recovered_text
+                                    table_recovery_meta['applied'] = True
+                                else:
+                                    table_recovery_meta['applied'] = False
+                                table_recovery_meta['recovered_has_table'] = recovered_has_table
+                                table_recovery_meta['recovered_retention_ratio'] = recovered_retention
+                    except Exception as table_recovery_err:
+                        logger.warning(f'Falha na recuperacao automatica de tabelas: {table_recovery_err}')
                 except Exception as format_exc:
                     format_message, root_exc = self._format_exception_message(format_exc)
                     classification = self._classify_llm_error(root_exc)
@@ -3803,6 +5099,8 @@ class TranscriptionService:
                         "enabled": True,
                         "reason": llm_warning,
                     }
+                if table_recovery_meta:
+                    report_paths['table_recovery'] = table_recovery_meta
                 suggestions_path = self._write_hil_suggestions(
                     output_dir, video_name, mode_suffix, cli_issues
                 )
@@ -3843,6 +5141,8 @@ class TranscriptionService:
                     )
                     if original_docx_path:
                         report_paths["original_docx_path"] = original_docx_path
+
+                title_drift = self._load_title_drift_telemetry(report_paths)
 
             # Benchmark: finalizar comparação em background (não bloqueia retorno)
             _benchmark_output_dir = report_paths.get("output_dir") if report_paths else None
@@ -3905,6 +5205,7 @@ class TranscriptionService:
         transcription_engine: str = "whisper",
         diarization: Optional[bool] = None,
         diarization_strict: bool = False,
+        diarization_provider: Optional[str] = None,
         on_progress: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
         model_selection: Optional[str] = None,
         use_cache: bool = True,
@@ -3923,35 +5224,96 @@ class TranscriptionService:
         custom_keyterms: Optional[list] = None,
         speaker_id_type: Optional[str] = None,
         speaker_id_values: Optional[list] = None,
+        allow_provider_fallback: Optional[bool] = None,
+        job_id: Optional[str] = None,
     ) -> dict:
         """
         Process file with progress callback for SSE streaming.
 
         on_progress: async callable(stage: str, progress: int, message: str)
         """
+        _last_registry_update = [0.0]
+
         async def emit(stage: str, progress: int, message: str):
             if on_progress:
                 await on_progress(stage, progress, message)
+            # Atualizar job registry a cada 3s para que polling reflita progresso real
+            now = time.time()
+            if job_id and now - _last_registry_update[0] >= 3.0:
+                _last_registry_update[0] = now
+                try:
+                    job_manager.update_transcription_job(
+                        job_id, progress=progress, stage=stage, message=message,
+                    )
+                except Exception:
+                    pass
+
+        title_drift: dict = {
+            "headers_changed_count": 0,
+            "headers_restored_count": 0,
+            "headers_degraded_count": 0,
+            "headers_diff": [],
+        }
 
         try:
             if skip_audit is not None:
                 skip_legal_audit = skip_legal_audit or skip_audit
+            allow_provider_fallback = self._enforce_fidelity_critical_fallback(
+                mode=mode,
+                allow_provider_fallback=allow_provider_fallback,
+            )
             apply_fixes = auto_apply_fixes
 
-            # Determinar se AAI é primário ANTES de inicializar vomo
+            # Determinar se AAI/RunPod é primário ANTES de inicializar vomo
             _mode_upper_early = (mode or "APOSTILA").upper()
-            _engine_aai_early = transcription_engine == "assemblyai"
+            _requested_engine_sse = (transcription_engine or "whisper").strip().lower()
+            _engine_aai_early = _requested_engine_sse == "assemblyai"
             _aai_key_available = self._get_assemblyai_key() is not None
             _use_aai_primary_early = _engine_aai_early and _aai_key_available
+            _engine_runpod_early = _requested_engine_sse == "runpod"
+            _use_runpod_primary_early = _engine_runpod_early and self._is_runpod_configured()
+            _skip_vomo_init = _use_aai_primary_early or _use_runpod_primary_early
 
             # Emit progress BEFORE initializing vomo (can be slow due to Vertex AI/Gemini connection)
             await emit("initializing", 0, "🚀 Inicializando motor de transcrição...")
+            if _requested_engine_sse in {"assemblyai", "elevenlabs", "runpod"}:
+                _provider_available = (
+                    (_requested_engine_sse == "assemblyai" and self._get_assemblyai_key() is not None)
+                    or (_requested_engine_sse == "elevenlabs" and self._get_elevenlabs_key() is not None)
+                    or (_requested_engine_sse == "runpod" and self._is_runpod_configured())
+                )
+                if not _provider_available:
+                    _can_switch_missing_provider = self._is_provider_fallback_allowed(
+                        requested_engine=transcription_engine,
+                        from_provider=_requested_engine_sse,
+                        to_provider="whisper",
+                        allow_provider_fallback=allow_provider_fallback,
+                    )
+                    if not _can_switch_missing_provider:
+                        raise RuntimeError(
+                            f"{_requested_engine_sse} indisponível e fallback para Whisper foi desabilitado."
+                        )
+                    await emit(
+                        "initializing",
+                        2,
+                        self._provider_switch_message(
+                            from_provider=_requested_engine_sse,
+                            to_provider="whisper",
+                            allow_provider_fallback=allow_provider_fallback,
+                        ),
+                    )
 
-            # Só inicializar VomoMLX se não for AAI primário
+            # Só inicializar VomoMLX se não for AAI/RunPod primário
             vomo = None
-            if not _use_aai_primary_early:
-                vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
-                await emit("initializing", 2, "✅ Motor de transcrição pronto (Whisper)")
+            if not _skip_vomo_init:
+                vomo = await self._get_vomo_with_progress(
+                    emit=emit,
+                    model_selection=model_selection,
+                    thinking_level=thinking_level,
+                    ready_message="✅ Motor de transcrição pronto (Whisper)",
+                )
+            elif _use_runpod_primary_early:
+                await emit("initializing", 2, "✅ Motor RunPod GPU selecionado")
             else:
                 await emit("initializing", 2, "✅ Motor AssemblyAI selecionado")
 
@@ -3964,8 +5326,129 @@ class TranscriptionService:
                 vomo._output_language = _output_language
                 vomo._current_mode = _current_mode
 
+            async def _ensure_vomo_for_whisper_fallback():
+                nonlocal vomo
+                if vomo is None:
+                    await emit("transcription", 36, "🔄 Inicializando Whisper para fallback...")
+                    try:
+                        timeout_seconds = int(os.getenv("IUDEX_VOMO_INIT_TIMEOUT_SECONDS", "240"))
+                    except Exception:
+                        timeout_seconds = 240
+
+                    start_ts = time.time()
+                    heartbeat_task: Optional[asyncio.Task] = None
+
+                    async def _heartbeat():
+                        while True:
+                            await asyncio.sleep(6)
+                            elapsed = int(time.time() - start_ts)
+                            await emit("transcription", 36, f"⏳ Inicializando Whisper para fallback... ({elapsed}s)")
+
+                    try:
+                        heartbeat_task = asyncio.create_task(_heartbeat())
+                        vomo = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._get_vomo,
+                                model_selection,
+                                thinking_level,
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                    except asyncio.TimeoutError as e:
+                        raise RuntimeError(
+                            f"Timeout ao inicializar Whisper fallback após {timeout_seconds}s."
+                        ) from e
+                    finally:
+                        if heartbeat_task:
+                            heartbeat_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await heartbeat_task
+                    vomo._current_language = _current_language
+                    vomo._output_language = _output_language
+                    vomo._current_mode = _current_mode
+                return vomo
+
+            async def _ensure_vomo_for_formatting():
+                nonlocal vomo
+                if vomo is None:
+                    await emit("formatting", 66, "🔄 Inicializando motor de formatação...")
+                    try:
+                        timeout_seconds = int(os.getenv("IUDEX_VOMO_INIT_TIMEOUT_SECONDS", "240"))
+                    except Exception:
+                        timeout_seconds = 240
+
+                    start_ts = time.time()
+                    heartbeat_task: Optional[asyncio.Task] = None
+
+                    async def _heartbeat():
+                        while True:
+                            await asyncio.sleep(6)
+                            elapsed = int(time.time() - start_ts)
+                            await emit("formatting", 66, f"⏳ Inicializando motor de formatação... ({elapsed}s)")
+
+                    try:
+                        heartbeat_task = asyncio.create_task(_heartbeat())
+                        vomo = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                self._get_vomo,
+                                model_selection,
+                                thinking_level,
+                            ),
+                            timeout=timeout_seconds,
+                        )
+                    except asyncio.TimeoutError as e:
+                        raise RuntimeError(
+                            f"Timeout ao inicializar motor de formatação após {timeout_seconds}s."
+                        ) from e
+                    finally:
+                        if heartbeat_task:
+                            heartbeat_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await heartbeat_task
+                    vomo._current_language = _current_language
+                    vomo._output_language = _output_language
+                    vomo._current_mode = _current_mode
+                return vomo
+
+            async def _run_whisper_with_external_diarization(
+                whisper_engine,
+                *,
+                start_progress: int,
+                end_progress: int,
+            ) -> dict:
+                result = await self._transcribe_with_progress_stream(
+                    whisper_engine,
+                    audio_path,
+                    emit,
+                    start_progress=start_progress,
+                    end_progress=end_progress,
+                    mode=mode,
+                    high_accuracy=high_accuracy,
+                    diarization=diarization,
+                    diarization_strict=diarization_strict,
+                    language=language,
+                )
+                words, segments = await self._apply_external_diarization_if_needed(
+                    transcription_result=result,
+                    diarization_enabled=diarization_enabled,
+                    diarization_required=diarization_required,
+                    diarization_provider=diarization_provider,
+                    audio_path=audio_path,
+                    speakers_expected=speakers_expected,
+                    speaker_roles=speaker_roles,
+                    language=language,
+                    mode=mode,
+                    speaker_id_type=speaker_id_type,
+                    speaker_id_values=speaker_id_values,
+                    emit=emit,
+                )
+                result["words"] = words
+                result["segments"] = segments
+                return result
+
             logger.info(f"🎤 Iniciando processamento Vomo com SSE: {file_path} [{mode}] [lang={_current_language}] [engine={transcription_engine}]")
             diarization_enabled, diarization_required = (False, False)
+            diarization_provider = self._normalize_diarization_provider(diarization_provider)
 
             # Resolver política de diarização
             if vomo:
@@ -3991,14 +5474,22 @@ class TranscriptionService:
             cache_hash = None
             transcription_text = None
             transcription_words: list = []  # Word-level timestamps para player interativo
+            transcription_segments: list = []  # Segmentos temporais para fallback de visualização
 
-            if use_cache:
+            _skip_raw_cache_sse = (
+                (mode or "").upper() == "RAW"
+                and not is_text_input
+                and _requested_engine_sse in {"assemblyai", "elevenlabs", "runpod"}
+            )
+            if use_cache and not _skip_raw_cache_sse:
                 try:
                     cache_hash = self._compute_file_hash(file_path)
                     transcription_text = self._load_cached_raw(cache_hash, high_accuracy, diarization_enabled)
                 except Exception as cache_error:
                     logger.warning(f"Falha ao carregar cache RAW: {cache_error}")
                     transcription_text = None
+            elif use_cache and _skip_raw_cache_sse:
+                logger.info("RAW + provider cloud (SSE): cache de texto desabilitado para preservar words/segments")
 
             if is_text_input:
                 await emit("audio_optimization", 0, f"📄 Texto detectado ({file_ext.upper()}, {file_size_mb:.1f}MB)")
@@ -4028,6 +5519,7 @@ class TranscriptionService:
                     await emit("audio_optimization", 5, "🔧 Convertendo para formato otimizado (16kHz mono)...")
 
                 audio_path = None
+                cloud_audio_prepared = False
                 if transcription_text:
                     await emit("audio_optimization", 20, "♻️ Cache RAW encontrado — pulando otimização de áudio")
                 else:
@@ -4047,7 +5539,19 @@ class TranscriptionService:
                         )
                     )
                     try:
-                        audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+                        if vomo is not None:
+                            audio_path = await asyncio.to_thread(vomo.optimize_audio, file_path)
+                        elif self._should_extract_audio_for_cloud(file_path):
+                            audio_path = await asyncio.to_thread(
+                                self._extract_audio_for_cloud,
+                                file_path,
+                                "mp3",
+                                "64k",
+                            )
+                            cloud_audio_prepared = True
+                        else:
+                            audio_path = file_path
+                            cloud_audio_prepared = True
                     finally:
                         done_event.set()
                         try:
@@ -4056,7 +5560,10 @@ class TranscriptionService:
                             pass
                     audio_duration = self._get_wav_duration_seconds(audio_path)
                     duration_str = f"{int(audio_duration // 60)}m{int(audio_duration % 60)}s" if audio_duration > 0 else "estimando..."
-                    if is_video:
+                    if cloud_audio_prepared:
+                        prepared_size_mb = os.path.getsize(audio_path) / (1024 * 1024) if audio_path and os.path.exists(audio_path) else 0.0
+                        await emit("audio_optimization", 20, f"✅ Áudio preparado para provider cloud ({prepared_size_mb:.0f}MB)")
+                    elif is_video:
                         await emit("audio_optimization", 20, f"✅ Áudio extraído do vídeo ({duration_str})")
                     else:
                         await emit("audio_optimization", 20, f"✅ Áudio otimizado ({duration_str})")
@@ -4069,18 +5576,23 @@ class TranscriptionService:
                     audio_duration = self._get_wav_duration_seconds(audio_path)
                     if diarization_enabled:
                         logger.info(
-                            "🗣️  Diarização habilitada (%s)",
+                            "🗣️  Diarização habilitada (%s, provider=%s)",
                             "strict" if diarization_required else "soft",
+                            diarization_provider,
                         )
                     if high_accuracy:
                         logger.info("🎯 Usando Beam Search (High Accuracy)")
 
                     # Decidir backend: ElevenLabs primário quando selecionado
-                    _engine_elevenlabs_sse = transcription_engine == "elevenlabs"
+                    _engine_elevenlabs_sse = _requested_engine_sse == "elevenlabs"
                     _elevenlabs_primary_sse = (
                         _engine_elevenlabs_sse
                         and self._get_elevenlabs_key()
                     )
+
+                    # RunPod primário quando selecionado e configurado
+                    _engine_runpod_sse = _requested_engine_sse == "runpod"
+                    _runpod_primary_sse = _engine_runpod_sse and self._is_runpod_configured()
 
                     # AAI primário se diarização + roles + key (e não é legenda/aula)
                     # NOTA: Para APOSTILA/FIDELIDADE (aulas), Whisper é primário por padrão
@@ -4088,18 +5600,18 @@ class TranscriptionService:
                     # OU via transcription_engine="assemblyai" no frontend
                     _mode_upper_sse = (mode or "APOSTILA").upper()
                     _force_aai_sse = self._is_assemblyai_primary_forced()
-                    _engine_aai_sse = transcription_engine == "assemblyai"
-                    _engine_whisper_sse = transcription_engine == "whisper"
-                    _force_aai_effective_sse = _force_aai_sse and not (
-                        _engine_whisper_sse and _mode_upper_sse in ("APOSTILA", "FIDELIDADE")
-                    )
+                    _engine_aai_sse = _requested_engine_sse == "assemblyai"
+                    _engine_whisper_sse = _requested_engine_sse == "whisper"
+                    _force_aai_effective_sse = _force_aai_sse and not _engine_whisper_sse
                     _aai_primary_sse = (
                         not _elevenlabs_primary_sse
                         and self._get_assemblyai_key()
                         and (
                             _engine_aai_sse  # Selecionado via frontend
-                            or _force_aai_effective_sse  # Forçado via env (exceto quando Whisper explícito em apostila/fidelidade)
+                            or _force_aai_effective_sse  # Forçado via env (exceto quando Whisper explícito)
                             or (
+                                not _engine_whisper_sse
+                                and
                                 _mode_upper_sse not in ("APOSTILA", "FIDELIDADE")
                                 and diarization_enabled
                                 and speaker_roles
@@ -4109,7 +5621,7 @@ class TranscriptionService:
 
                     # Preparar áudio otimizado para cloud se AAI/ElevenLabs for primário
                     cloud_audio_path = audio_path  # Default: usa WAV existente
-                    if (_aai_primary_sse or _elevenlabs_primary_sse) and self._should_extract_audio_for_cloud(file_path):
+                    if (not cloud_audio_prepared) and (_aai_primary_sse or _elevenlabs_primary_sse) and self._should_extract_audio_for_cloud(file_path):
                         try:
                             await emit("audio_optimization", 22, "🔄 Otimizando para upload cloud (MP3)...")
                             cloud_audio_path = await asyncio.to_thread(
@@ -4151,42 +5663,106 @@ class TranscriptionService:
 
                         if el_result_sse:
                             transcription_text = el_result_sse["text"]
+                            transcription_words = el_result_sse.get("words", [])
+                            transcription_segments = el_result_sse.get("segments", [])
                             self._elevenlabs_result = el_result_sse
                             self._aai_apostila_result = None
                             await emit("transcription", 60, "Transcrição ElevenLabs concluída ✓")
                         elif self._get_assemblyai_key():
+                            _can_eleven_to_aai_sse = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="elevenlabs",
+                                to_provider="assemblyai",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _can_eleven_to_aai_sse:
+                                raise RuntimeError(
+                                    "ElevenLabs indisponível e fallback para AssemblyAI foi desabilitado."
+                                )
                             # Fallback AAI
-                            await emit("transcription", 35, "↩️ Fallback AssemblyAI...")
+                            await emit(
+                                "transcription",
+                                35,
+                                self._provider_switch_message(
+                                    from_provider="elevenlabs",
+                                    to_provider="assemblyai",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                ),
+                            )
                             aai_result_fallback = await asyncio.to_thread(
                                 self._transcribe_assemblyai_with_roles,
                                 cloud_audio_path, None, language or "pt", None, mode,  # Usar áudio otimizado
                             )
                             if aai_result_fallback:
-                                transcription_text = aai_result_fallback["text"]
+                                transcription_text = aai_result_fallback.get("text_with_timestamps") or aai_result_fallback["text"]
+                                transcription_words = aai_result_fallback.get("words", [])
+                                transcription_segments = aai_result_fallback.get("segments", [])
                                 self._aai_apostila_result = aai_result_fallback
                                 self._elevenlabs_result = None
                                 await emit("transcription", 60, "Transcrição AssemblyAI concluída ✓")
                             else:
-                                # Fallback Whisper
-                                await emit("transcription", 40, "↩️ Fallback Whisper...")
-                                transcription_text = await asyncio.to_thread(
-                                    vomo.transcribe_file, audio_path,
-                                    mode=mode, high_accuracy=high_accuracy,
-                                    diarization=diarization, diarization_strict=diarization_strict,
-                                    language=language,
+                                _can_aai_to_whisper_sse = self._is_provider_fallback_allowed(
+                                    requested_engine=transcription_engine,
+                                    from_provider="assemblyai",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
                                 )
+                                if not _can_aai_to_whisper_sse:
+                                    raise RuntimeError(
+                                        "AssemblyAI indisponível após fallback e troca para Whisper foi desabilitada."
+                                    )
+                                # Fallback Whisper
+                                await emit(
+                                    "transcription",
+                                    40,
+                                    self._provider_switch_message(
+                                        from_provider="assemblyai",
+                                        to_provider="whisper",
+                                        allow_provider_fallback=allow_provider_fallback,
+                                    ),
+                                )
+                                whisper_vomo = await _ensure_vomo_for_whisper_fallback()
+                                whisper_result = await _run_whisper_with_external_diarization(
+                                    whisper_vomo,
+                                    start_progress=40,
+                                    end_progress=60,
+                                )
+                                transcription_text = whisper_result.get("text", "")
+                                transcription_words = whisper_result.get("words", [])
+                                transcription_segments = whisper_result.get("segments", [])
                                 self._aai_apostila_result = None
                                 self._elevenlabs_result = None
                                 await emit("transcription", 60, "Transcrição Whisper concluída ✓")
                         else:
-                            # Fallback Whisper (sem AAI key)
-                            await emit("transcription", 35, "↩️ Fallback Whisper...")
-                            transcription_text = await asyncio.to_thread(
-                                vomo.transcribe_file, audio_path,
-                                mode=mode, high_accuracy=high_accuracy,
-                                diarization=diarization, diarization_strict=diarization_strict,
-                                language=language,
+                            _can_eleven_to_whisper_sse = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="elevenlabs",
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
                             )
+                            if not _can_eleven_to_whisper_sse:
+                                raise RuntimeError(
+                                    "ElevenLabs indisponível e fallback para Whisper foi desabilitado."
+                                )
+                            # Fallback Whisper (sem AAI key)
+                            await emit(
+                                "transcription",
+                                35,
+                                self._provider_switch_message(
+                                    from_provider="elevenlabs",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                ),
+                            )
+                            whisper_vomo = await _ensure_vomo_for_whisper_fallback()
+                            whisper_result = await _run_whisper_with_external_diarization(
+                                whisper_vomo,
+                                start_progress=35,
+                                end_progress=60,
+                            )
+                            transcription_text = whisper_result.get("text", "")
+                            transcription_words = whisper_result.get("words", [])
+                            transcription_segments = whisper_result.get("segments", [])
                             self._aai_apostila_result = None
                             self._elevenlabs_result = None
                             await emit("transcription", 60, "Transcrição Whisper concluída ✓")
@@ -4219,33 +5795,96 @@ class TranscriptionService:
                             logger.warning("AssemblyAI falhou (SSE): %s", aai_exc)
 
                         if aai_result_sse:
-                            transcription_text = aai_result_sse["text"]
+                            transcription_text = aai_result_sse.get("text_with_timestamps") or aai_result_sse["text"]
+                            transcription_words = aai_result_sse.get("words", [])
+                            transcription_segments = aai_result_sse.get("segments", [])
                             self._aai_apostila_result = aai_result_sse
                             await emit("transcription", 60, "Transcrição AssemblyAI concluída ✓")
                         else:
-                            # Fallback Whisper
-                            await emit("transcription", 35, "↩️ Fallback Whisper MLX...")
-                            self._aai_apostila_result = None
-                            done_event2 = asyncio.Event()
-                            ticker2 = asyncio.create_task(
-                                self._emit_progress_while_running(
-                                    emit, done_event2, "transcription", 35, 60,
-                                    "Transcrevendo (Whisper fallback)",
-                                    audio_duration * 0.9 if audio_duration > 0 else 0.0,
+                            _can_aai_to_whisper_sse = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="assemblyai",
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _can_aai_to_whisper_sse:
+                                raise RuntimeError(
+                                    "AssemblyAI indisponível e fallback para Whisper foi desabilitado."
                                 )
+                            # Fallback Whisper
+                            await emit(
+                                "transcription",
+                                35,
+                                self._provider_switch_message(
+                                    from_provider="assemblyai",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                ),
                             )
-                            transcription_text = await asyncio.to_thread(
-                                vomo.transcribe_file, audio_path,
-                                mode=mode, high_accuracy=high_accuracy,
-                                diarization=diarization,
-                                diarization_strict=diarization_strict,
-                                language=language,
+                            self._aai_apostila_result = None
+                            whisper_vomo = await _ensure_vomo_for_whisper_fallback()
+                            whisper_result = await _run_whisper_with_external_diarization(
+                                whisper_vomo,
+                                start_progress=35,
+                                end_progress=60,
                             )
-                            done_event2.set()
-                            try:
-                                await ticker2
-                            except Exception:
-                                pass
+                            transcription_text = whisper_result.get("text", "")
+                            transcription_words = whisper_result.get("words", [])
+                            transcription_segments = whisper_result.get("segments", [])
+                            await emit("transcription", 60, "Transcrição Whisper concluída ✓")
+                    elif _runpod_primary_sse:
+                        # RunPod Serverless: transcrição via GPU cloud
+                        self._aai_apostila_result = None
+                        _benchmark_future_sse = None
+                        await emit("transcription", 25, "Enviando para RunPod GPU cloud...")
+                        try:
+                            runpod_result = await self._transcribe_runpod(
+                                file_path=file_path,
+                                audio_path=audio_path,
+                                language=language or "pt",
+                                diarization=diarization_enabled,
+                                emit=emit,
+                                start_progress=25,
+                                end_progress=60,
+                            )
+                            if runpod_result and str(runpod_result.get("text", "")).strip():
+                                transcription_text = runpod_result["text"]
+                                transcription_words = runpod_result.get("words", []) or []
+                                transcription_segments = runpod_result.get("segments", []) or []
+                                await emit("transcription", 60, "Transcrição RunPod concluída ✓")
+                            else:
+                                raise RuntimeError("RunPod retornou resultado vazio")
+                        except Exception as runpod_exc:
+                            logger.warning("RunPod falhou (SSE): %s", runpod_exc)
+                            await emit("transcription", 34, f"⚠️ RunPod falhou: {runpod_exc}")
+                            _can_runpod_to_whisper = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="runpod",
+                                to_provider="whisper",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _can_runpod_to_whisper:
+                                raise RuntimeError(
+                                    f"RunPod indisponível e fallback para Whisper foi desabilitado: {runpod_exc}"
+                                )
+                            await emit(
+                                "transcription", 35,
+                                self._provider_switch_message(
+                                    from_provider="runpod",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                ),
+                            )
+                            whisper_vomo = await _ensure_vomo_for_whisper_fallback()
+                            whisper_result = await _run_whisper_with_external_diarization(
+                                whisper_vomo,
+                                start_progress=35,
+                                end_progress=60,
+                            )
+                            transcription_text = whisper_result.get("text", "")
+                            transcription_words = whisper_result.get("words", [])
+                            transcription_segments = whisper_result.get("segments", [])
+                            self._aai_apostila_result = None
                             await emit("transcription", 60, "Transcrição Whisper concluída ✓")
                     else:
                         # Fluxo padrão: Whisper primário com progresso em tempo real
@@ -4253,19 +5892,26 @@ class TranscriptionService:
                         _benchmark_future_sse = None
                         await emit("transcription", 25, "Iniciando transcrição com Whisper MLX...")
                         try:
-                            transcription_result = await self._transcribe_with_progress_stream(
-                                vomo, audio_path, emit,
-                                start_progress=25, end_progress=60,
-                                mode=mode, high_accuracy=high_accuracy,
-                                diarization=diarization,
-                                diarization_strict=diarization_strict,
-                                language=language,
+                            transcription_result = await _run_whisper_with_external_diarization(
+                                vomo,
+                                start_progress=25,
+                                end_progress=60,
                             )
                             transcription_text = transcription_result.get("text", "")
                             transcription_words = transcription_result.get("words", [])
+                            transcription_segments = transcription_result.get("segments", [])
                             await emit("transcription", 60, "Transcrição concluída ✓")
                         except Exception as whisper_exc:
-                            logger.warning("Whisper falhou (SSE), tentando fallback: %s", whisper_exc)
+                            logger.warning("Whisper falhou (SSE), avaliando fallback: %s", whisper_exc)
+                            _allow_aai_fallback = self._is_provider_fallback_allowed(
+                                requested_engine=transcription_engine,
+                                from_provider="whisper",
+                                to_provider="assemblyai",
+                                allow_provider_fallback=allow_provider_fallback,
+                            )
+                            if not _allow_aai_fallback:
+                                logger.warning("Fallback Whisper->AssemblyAI desabilitado para esta execução.")
+                                raise
                             if not self._get_assemblyai_key():
                                 raise
 
@@ -4281,7 +5927,15 @@ class TranscriptionService:
                                 logger.warning("Fallback cloud falhou, usando WAV: %s", cloud_extract_err)
                                 fallback_cloud = audio_path
 
-                            await emit("transcription", 30, "↩️ Fallback AssemblyAI...")
+                            await emit(
+                                "transcription",
+                                30,
+                                self._provider_switch_message(
+                                    from_provider="whisper",
+                                    to_provider="assemblyai",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                ),
+                            )
                             aai_result_fallback = None
                             try:
                                 aai_result_fallback = await self._transcribe_assemblyai_with_progress(
@@ -4302,8 +5956,9 @@ class TranscriptionService:
                             if not aai_result_fallback:
                                 raise
 
-                            transcription_text = aai_result_fallback.get("text") or ""
-                            transcription_words = []
+                            transcription_text = aai_result_fallback.get("text_with_timestamps") or aai_result_fallback.get("text") or ""
+                            transcription_words = aai_result_fallback.get("words", [])
+                            transcription_segments = aai_result_fallback.get("segments", [])
                             self._aai_apostila_result = aai_result_fallback
                             await emit("transcription", 60, "Transcrição AssemblyAI concluída ✓")
 
@@ -4317,11 +5972,28 @@ class TranscriptionService:
                         )
             
             if mode == "RAW":
-                return transcription_text
+                raw_result = {
+                    "content": transcription_text,
+                    "raw_content": transcription_text,
+                    "words": transcription_words,
+                    "reports": {},
+                }
+                if transcription_segments:
+                    raw_result["segments"] = transcription_segments
+                return raw_result
 
             # Stage 3: Formatting (60-100%)
             await emit("formatting", 65, "Preparando formatação com IA...")
-            
+            vomo = await _ensure_vomo_for_formatting()
+            if vomo is None:
+                logger.warning("⚠️ _ensure_vomo_for_formatting retornou None — fallback sync")
+                vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
+                if vomo is None:
+                    raise RuntimeError("Motor de formatação indisponível (VomoMLX não inicializado).")
+                vomo._current_language = _current_language
+                vomo._output_language = _output_language
+                vomo._current_mode = _current_mode
+
             # Observação: `custom_prompt` em `mlx_vomo.py` sobrescreve apenas a camada de estilo/tabelas.
             # Para manter paridade com o CLI, só enviamos `custom_prompt` quando o usuário fornece.
             system_prompt = (custom_prompt or "").strip() or None
@@ -4336,9 +6008,11 @@ class TranscriptionService:
             with tempfile.TemporaryDirectory() as temp_dir:
                 llm_warning: Optional[str] = None
                 llm_fallback = False
+                table_recovery_meta: Optional[dict] = None
                 try:
-                    final_text = await vomo.format_transcription_async(
-                        transcription_text,
+                    final_text, vomo = await self._run_llm_format_with_resilience(
+                        vomo=vomo,
+                        source_text=transcription_text,
                         video_name=video_name,
                         output_folder=temp_dir,
                         mode=mode,
@@ -4348,7 +6022,102 @@ class TranscriptionService:
                         skip_audit=skip_legal_audit,
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
+                        model_selection=model_selection,
+                        thinking_level=thinking_level,
                     )
+
+                    try:
+                        mode_upper = (mode or 'APOSTILA').strip().upper()
+                        raw_words = len(re.findall(r'\S+', transcription_text or ''))
+                        def _has_md_table(markdown_text: str) -> bool:
+                            lines_md = (markdown_text or '').splitlines()
+                            sep_pattern = re.compile(r'^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$')
+                            for idx_line in range(len(lines_md) - 1):
+                                header = lines_md[idx_line].strip()
+                                sep = lines_md[idx_line + 1].strip()
+                                if '|' not in header or '|' not in sep:
+                                    continue
+                                if header.count('|') < 2:
+                                    continue
+                                if sep_pattern.match(sep):
+                                    return True
+                            return False
+                        has_table = _has_md_table(final_text or '')
+
+                        if mode_upper in {'APOSTILA', 'FIDELIDADE'} and not bool(disable_tables) and not has_table and raw_words >= 1200:
+                            preventive_path = Path(temp_dir) / f'{video_name}_{mode_upper}_AUDITORIA_FIDELIDADE.json'
+                            retention_ratio = None
+                            fidelity_score = None
+                            if preventive_path.exists():
+                                try:
+                                    payload = json.loads(preventive_path.read_text(encoding='utf-8', errors='ignore') or '{}')
+                                    if isinstance(payload, dict):
+                                        metricas = payload.get('metricas') if isinstance(payload.get('metricas'), dict) else {}
+                                        if metricas.get('taxa_retencao') is not None:
+                                            retention_ratio = float(metricas.get('taxa_retencao'))
+                                        elif payload.get('taxa_compressao_estimada') is not None:
+                                            compressao = float(payload.get('taxa_compressao_estimada'))
+                                            if compressao > 1:
+                                                compressao = compressao / 100.0
+                                            if 0 <= compressao <= 1:
+                                                retention_ratio = 1.0 - compressao
+                                        if payload.get('nota_fidelidade') is not None:
+                                            fidelity_score = float(payload.get('nota_fidelidade'))
+                                except Exception:
+                                    retention_ratio = None
+
+                            if retention_ratio is None:
+                                fmt_words = len(re.findall(r'\S+', final_text or ''))
+                                retention_ratio = (fmt_words / raw_words) if raw_words > 0 else None
+
+                            low_retention = retention_ratio is not None and retention_ratio < 0.60
+                            low_score = fidelity_score is not None and fidelity_score <= 6.0
+
+                            if low_retention or low_score:
+                                table_recovery_meta = {
+                                    'triggered': True,
+                                    'reason': 'missing_tables_with_content_loss',
+                                    'retention_ratio': retention_ratio,
+                                    'fidelity_score': fidelity_score,
+                                    'mode': mode_upper,
+                                }
+                                await emit('formatting', 90, 'Detectado risco de perda critica sem tabelas. Aplicando segunda passada...')
+                                retry_prompt = ((system_prompt.strip() + '\n\n') if system_prompt and system_prompt.strip() else '') + (
+                                    'MODO DE RECUPERACAO AUTOMATICA DE TABELAS\n'
+                                    '- Preserve fidelidade ao RAW.\n'
+                                    '- Reintroduza tabelas markdown quando houver comparacao de itens.\n'
+                                    '- Nao invente fatos.'
+                                )
+                                recovered_text = await vomo.format_transcription_async(
+                                    transcription_text,
+                                    video_name=video_name,
+                                    output_folder=temp_dir,
+                                    mode=mode,
+                                    custom_prompt=retry_prompt,
+                                    disable_tables=False,
+                                    progress_callback=emit,
+                                    skip_audit=skip_legal_audit,
+                                    skip_fidelity_audit=skip_fidelity_audit,
+                                    skip_sources_audit=skip_sources_audit,
+                                )
+                                recovered_has_table = _has_md_table(recovered_text or '')
+                                rec_words = len(re.findall(r'\S+', recovered_text or ''))
+                                recovered_retention = (rec_words / raw_words) if raw_words > 0 else None
+                                retention_gain = (
+                                    (recovered_retention - retention_ratio)
+                                    if (retention_ratio is not None and recovered_retention is not None)
+                                    else 0.0
+                                )
+                                if recovered_has_table or retention_gain >= 0.08:
+                                    final_text = recovered_text
+                                    table_recovery_meta['applied'] = True
+                                    await emit('formatting', 95, 'Segunda passada concluiu recuperacao de tabelas.')
+                                else:
+                                    table_recovery_meta['applied'] = False
+                                table_recovery_meta['recovered_has_table'] = recovered_has_table
+                                table_recovery_meta['recovered_retention_ratio'] = recovered_retention
+                    except Exception as table_recovery_err:
+                        logger.warning(f'Falha na recuperacao automatica de tabelas (SSE): {table_recovery_err}')
                     await emit("formatting", 95, "Documento formatado ✓")
                 except Exception as format_exc:
                     format_message, root_exc = self._format_exception_message(format_exc)
@@ -4529,6 +6298,8 @@ class TranscriptionService:
                         "enabled": True,
                         "reason": llm_warning,
                     }
+                if table_recovery_meta:
+                    report_paths['table_recovery'] = table_recovery_meta
                 suggestions_path = self._write_hil_suggestions(
                     output_dir, video_name, mode_suffix, cli_issues
                 )
@@ -4570,6 +6341,8 @@ class TranscriptionService:
                     if original_docx_path:
                         report_paths["original_docx_path"] = original_docx_path
 
+                title_drift = self._load_title_drift_telemetry(report_paths)
+
                 await emit("audit_complete", 98, json.dumps({
                     "issues": issues,
                     "total_issues": len(issues),
@@ -4580,6 +6353,7 @@ class TranscriptionService:
                     "auto_applied_fixes": auto_applied_fixes,
                     "llm_fallback": bool(llm_warning),
                     "llm_message": llm_warning,
+                    "title_drift": title_drift,
                 }))
 
             # Benchmark AAI apostila (SSE): finalizar se AAI primário
@@ -4628,6 +6402,10 @@ class TranscriptionService:
                 "audit_issues": issues,
                 "audit_summary": audit_summary,
                 "quality": quality_payload,
+                "headers_changed_count": title_drift.get("headers_changed_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_restored_count": title_drift.get("headers_restored_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_degraded_count": title_drift.get("headers_degraded_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_diff": title_drift.get("headers_diff", []) if isinstance(title_drift, dict) else [],
             }
 
         except Exception as e:
@@ -4649,6 +6427,7 @@ class TranscriptionService:
         transcription_engine: str = "whisper",
         diarization: Optional[bool] = None,
         diarization_strict: bool = False,
+        diarization_provider: Optional[str] = None,
         on_progress: Optional[Callable[[str, int, str], Awaitable[None]]] = None,
         model_selection: Optional[str] = None,
         use_cache: bool = True,
@@ -4660,6 +6439,7 @@ class TranscriptionService:
         skip_sources_audit: bool = False,
         language: Optional[str] = None,
         output_language: Optional[str] = None,
+        allow_provider_fallback: Optional[bool] = None,
     ) -> dict:
         """
         Process multiple files in sequence, unifying transcriptions.
@@ -4677,15 +6457,56 @@ class TranscriptionService:
             if on_progress:
                 await on_progress(stage, progress, message)
 
+        title_drift: dict = {
+            "headers_changed_count": 0,
+            "headers_restored_count": 0,
+            "headers_degraded_count": 0,
+            "headers_diff": [],
+        }
+
         try:
             if skip_audit is not None:
                 skip_legal_audit = skip_legal_audit or skip_audit
+            allow_provider_fallback = self._enforce_fidelity_critical_fallback(
+                mode=mode,
+                allow_provider_fallback=allow_provider_fallback,
+            )
             apply_fixes = auto_apply_fixes
+            _requested_engine_batch = (transcription_engine or "whisper").strip().lower()
 
             # Emit progress BEFORE initializing vomo (can be slow due to Vertex AI/Gemini connection)
             await emit("initializing", 0, "🚀 Inicializando motor de transcrição...")
-            vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
-            await emit("initializing", 2, "✅ Motor de transcrição pronto")
+            if _requested_engine_batch in {"assemblyai", "elevenlabs"}:
+                _provider_available = (
+                    (_requested_engine_batch == "assemblyai" and self._get_assemblyai_key() is not None)
+                    or (_requested_engine_batch == "elevenlabs" and self._get_elevenlabs_key() is not None)
+                )
+                if not _provider_available:
+                    _can_switch_missing_provider = self._is_provider_fallback_allowed(
+                        requested_engine=transcription_engine,
+                        from_provider=_requested_engine_batch,
+                        to_provider="whisper",
+                        allow_provider_fallback=allow_provider_fallback,
+                    )
+                    if not _can_switch_missing_provider:
+                        raise RuntimeError(
+                            f"{_requested_engine_batch} indisponível e fallback para Whisper foi desabilitado."
+                        )
+                    await emit(
+                        "initializing",
+                        2,
+                        self._provider_switch_message(
+                            from_provider=_requested_engine_batch,
+                            to_provider="whisper",
+                            allow_provider_fallback=allow_provider_fallback,
+                        ),
+                    )
+            vomo = await self._get_vomo_with_progress(
+                emit=emit,
+                model_selection=model_selection,
+                thinking_level=thinking_level,
+                ready_message="✅ Motor de transcrição pronto",
+            )
 
             vomo._current_language = (language or "pt").strip().lower()
             vomo._output_language = (output_language or "").strip().lower() or None
@@ -4699,6 +6520,7 @@ class TranscriptionService:
                 )
             except Exception:
                 pass
+            diarization_provider = self._normalize_diarization_provider(diarization_provider)
             
             logger.info(f"🎤 Iniciando processamento em lote: {total_files} arquivos [{mode}]")
             
@@ -4772,12 +6594,9 @@ class TranscriptionService:
                         # Verificar se AAI deve ser primário (para áudios longos)
                         _force_aai_batch = self._is_assemblyai_primary_forced()
                         _aai_key = self._get_assemblyai_key()
-                        _mode_upper_batch = (mode or "APOSTILA").upper()
                         _engine_aai_batch = transcription_engine == "assemblyai"
                         _engine_whisper_batch = transcription_engine == "whisper"
-                        _force_aai_effective_batch = _force_aai_batch and not (
-                            _engine_whisper_batch and _mode_upper_batch in ("APOSTILA", "FIDELIDADE")
-                        )
+                        _force_aai_effective_batch = _force_aai_batch and not _engine_whisper_batch
                         audio_duration = self._get_wav_duration_seconds(audio_path)
 
                         if (_engine_aai_batch or _force_aai_effective_batch) and _aai_key:
@@ -4829,18 +6648,41 @@ class TranscriptionService:
                                     except Exception as bench_exc:
                                         logger.debug(f"Benchmark ainda rodando ou falhou: {bench_exc}")
                             else:
-                                # Fallback para Whisper se AAI falhar
-                                logger.warning(f"⚠️ AAI falhou para {file_name}, usando Whisper")
-                                await emit("batch", transcribe_progress + 5, f"[{file_num}/{total_files}] ↩️ Fallback Whisper...")
-                                transcription_text = await asyncio.to_thread(
-                                    vomo.transcribe_file,
-                                    audio_path,
-                                    mode=mode,
-                                    high_accuracy=high_accuracy,
-                                    diarization=diarization,
-                                    diarization_strict=diarization_strict,
-                                    language=language,
+                                _can_aai_to_whisper_batch = self._is_provider_fallback_allowed(
+                                    requested_engine=transcription_engine,
+                                    from_provider="assemblyai",
+                                    to_provider="whisper",
+                                    allow_provider_fallback=allow_provider_fallback,
                                 )
+                                if not _can_aai_to_whisper_batch:
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] ❌ AssemblyAI indisponível e fallback para Whisper desabilitado",
+                                    )
+                                    transcription_text = "[ERRO: AssemblyAI indisponível e fallback para Whisper desabilitado]"
+                                    logger.error("Fallback AssemblyAI->Whisper desabilitado para %s", file_name)
+                                # Fallback para Whisper se AAI falhar
+                                if _can_aai_to_whisper_batch:
+                                    logger.warning(f"⚠️ AAI falhou para {file_name}, usando Whisper")
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] {self._provider_switch_message(from_provider='assemblyai', to_provider='whisper', allow_provider_fallback=allow_provider_fallback)}",
+                                    )
+                                    whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                        vomo=vomo,
+                                        audio_path=audio_path,
+                                        mode=mode,
+                                        high_accuracy=high_accuracy,
+                                        diarization=diarization,
+                                        diarization_strict=diarization_strict,
+                                        language=language,
+                                        diarization_enabled=diarization_enabled,
+                                        diarization_required=diarization_required,
+                                        diarization_provider=diarization_provider,
+                                    )
+                                    transcription_text = whisper_result.get("text", "")
                         else:
                             # Whisper como primário (padrão)
                             await emit("batch", transcribe_progress, f"[{file_num}/{total_files}] 🎙️ Whisper Transcrevendo: {file_name}")
@@ -4862,8 +6704,9 @@ class TranscriptionService:
 
                             if diarization_enabled:
                                 logger.info(
-                                    "🗣️  Diarização habilitada (%s) para %s",
+                                    "🗣️  Diarização habilitada (%s, provider=%s) para %s",
                                     "strict" if diarization_required else "soft",
+                                    diarization_provider,
                                     file_name,
                                 )
                             if high_accuracy:
@@ -4871,46 +6714,68 @@ class TranscriptionService:
 
                             # v2.34: Tratamento de erro para arquivos muito longos
                             try:
-                                transcription_text = await asyncio.to_thread(
-                                    vomo.transcribe_file,
-                                    audio_path,
+                                whisper_result = await self._transcribe_whisper_with_optional_external_diarization(
+                                    vomo=vomo,
+                                    audio_path=audio_path,
                                     mode=mode,
                                     high_accuracy=high_accuracy,
                                     diarization=diarization,
                                     diarization_strict=diarization_strict,
                                     language=language,
+                                    diarization_enabled=diarization_enabled,
+                                    diarization_required=diarization_required,
+                                    diarization_provider=diarization_provider,
                                 )
+                                transcription_text = whisper_result.get("text", "")
                             except Exception as whisper_exc:
                                 logger.error(f"❌ Erro Whisper para {file_name}: {whisper_exc}")
-                                await emit("batch", transcribe_progress + 5, f"[{file_num}/{total_files}] ⚠️ Erro Whisper, tentando AAI...")
-                                # Fallback para AssemblyAI se disponível
-                                _fallback_aai_key = self._get_assemblyai_key()
-                                if _fallback_aai_key:
-                                    try:
-                                        # Criar emit wrapper para o fallback
-                                        async def _fallback_emit(stage: str, progress: int, message: str):
-                                            pct = (progress - 25) / 35
-                                            actual_progress = transcribe_progress + int(pct * (file_progress_increment - 5))
-                                            await emit("batch", actual_progress, f"[{file_num}/{total_files}] {message}")
-
-                                        aai_fallback_result = await self._transcribe_assemblyai_with_progress(
-                                            audio_path,
-                                            _fallback_emit,
-                                            speaker_roles=None,
-                                            language=language or "pt",
-                                            speakers_expected=None,
-                                            mode=mode,
-                                            start_progress=25,
-                                            end_progress=60,
-                                        )
-                                        if aai_fallback_result:
-                                            transcription_text = aai_fallback_result.get("text_with_timestamps") or aai_fallback_result.get("text", "")
-                                            logger.info(f"✅ Fallback AAI concluído para {file_name}")
-                                    except Exception as aai_fb_exc:
-                                        logger.error(f"❌ Fallback AAI também falhou: {aai_fb_exc}")
-                                        transcription_text = f"[ERRO: Transcrição falhou - {whisper_exc}]"
+                                _allow_aai_fallback_batch = self._is_provider_fallback_allowed(
+                                    requested_engine=transcription_engine,
+                                    from_provider="whisper",
+                                    to_provider="assemblyai",
+                                    allow_provider_fallback=allow_provider_fallback,
+                                )
+                                if not _allow_aai_fallback_batch:
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] ❌ Erro Whisper (fallback para AssemblyAI desabilitado)",
+                                    )
+                                    transcription_text = f"[ERRO: Transcrição Whisper falhou - {whisper_exc}]"
                                 else:
-                                    transcription_text = f"[ERRO: Transcrição falhou - {whisper_exc}]"
+                                    await emit(
+                                        "batch",
+                                        transcribe_progress + 5,
+                                        f"[{file_num}/{total_files}] {self._provider_switch_message(from_provider='whisper', to_provider='assemblyai', allow_provider_fallback=allow_provider_fallback)}",
+                                    )
+                                    # Fallback para AssemblyAI se disponível
+                                    _fallback_aai_key = self._get_assemblyai_key()
+                                    if _fallback_aai_key:
+                                        try:
+                                            # Criar emit wrapper para o fallback
+                                            async def _fallback_emit(stage: str, progress: int, message: str):
+                                                pct = (progress - 25) / 35
+                                                actual_progress = transcribe_progress + int(pct * (file_progress_increment - 5))
+                                                await emit("batch", actual_progress, f"[{file_num}/{total_files}] {message}")
+
+                                            aai_fallback_result = await self._transcribe_assemblyai_with_progress(
+                                                audio_path,
+                                                _fallback_emit,
+                                                speaker_roles=None,
+                                                language=language or "pt",
+                                                speakers_expected=None,
+                                                mode=mode,
+                                                start_progress=25,
+                                                end_progress=60,
+                                            )
+                                            if aai_fallback_result:
+                                                transcription_text = aai_fallback_result.get("text_with_timestamps") or aai_fallback_result.get("text", "")
+                                                logger.info(f"✅ Fallback AAI concluído para {file_name}")
+                                        except Exception as aai_fb_exc:
+                                            logger.error(f"❌ Fallback AAI também falhou: {aai_fb_exc}")
+                                            transcription_text = f"[ERRO: Transcrição falhou - {whisper_exc}]"
+                                    else:
+                                        transcription_text = f"[ERRO: Transcrição falhou - {whisper_exc}]"
 
                             done_event.set()
                             try:
@@ -4949,6 +6814,14 @@ class TranscriptionService:
             
             # Stage 3: Format unified document (60-100%)
             await emit("formatting", 65, "Preparando formatação unificada...")
+            if vomo is None:
+                logger.warning("⚠️ Vomo ausente antes da formatação em lote — fallback sync")
+                vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
+                if vomo is None:
+                    raise RuntimeError("Motor de formatação indisponível (VomoMLX não inicializado).")
+                vomo._current_language = (language or "pt").strip().lower()
+                vomo._output_language = (output_language or "").strip().lower() or None
+                vomo._current_mode = (mode or "APOSTILA").strip().upper()
             
             # Observação: `custom_prompt` em `mlx_vomo.py` sobrescreve apenas a camada de estilo/tabelas.
             # Para manter paridade com o CLI, só enviamos `custom_prompt` quando o usuário fornece.
@@ -4966,9 +6839,11 @@ class TranscriptionService:
             with tempfile.TemporaryDirectory() as temp_dir:
                 llm_warning: Optional[str] = None
                 llm_fallback = False
+                table_recovery_meta: Optional[dict] = None
                 try:
-                    final_text = await vomo.format_transcription_async(
-                        unified_raw,
+                    final_text, vomo = await self._run_llm_format_with_resilience(
+                        vomo=vomo,
+                        source_text=unified_raw,
                         video_name=video_name,
                         output_folder=temp_dir,
                         mode=mode,
@@ -4978,7 +6853,102 @@ class TranscriptionService:
                         skip_audit=skip_legal_audit,
                         skip_fidelity_audit=skip_fidelity_audit,
                         skip_sources_audit=skip_sources_audit,
+                        model_selection=model_selection,
+                        thinking_level=thinking_level,
                     )
+
+                    try:
+                        mode_upper = (mode or 'APOSTILA').strip().upper()
+                        raw_words = len(re.findall(r'\S+', unified_raw or ''))
+                        def _has_md_table(markdown_text: str) -> bool:
+                            lines_md = (markdown_text or '').splitlines()
+                            sep_pattern = re.compile(r'^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$')
+                            for idx_line in range(len(lines_md) - 1):
+                                header = lines_md[idx_line].strip()
+                                sep = lines_md[idx_line + 1].strip()
+                                if '|' not in header or '|' not in sep:
+                                    continue
+                                if header.count('|') < 2:
+                                    continue
+                                if sep_pattern.match(sep):
+                                    return True
+                            return False
+                        has_table = _has_md_table(final_text or '')
+
+                        if mode_upper in {'APOSTILA', 'FIDELIDADE'} and not bool(disable_tables) and not has_table and raw_words >= 1200:
+                            preventive_path = Path(temp_dir) / f'{video_name}_{mode_upper}_AUDITORIA_FIDELIDADE.json'
+                            retention_ratio = None
+                            fidelity_score = None
+                            if preventive_path.exists():
+                                try:
+                                    payload = json.loads(preventive_path.read_text(encoding='utf-8', errors='ignore') or '{}')
+                                    if isinstance(payload, dict):
+                                        metricas = payload.get('metricas') if isinstance(payload.get('metricas'), dict) else {}
+                                        if metricas.get('taxa_retencao') is not None:
+                                            retention_ratio = float(metricas.get('taxa_retencao'))
+                                        elif payload.get('taxa_compressao_estimada') is not None:
+                                            compressao = float(payload.get('taxa_compressao_estimada'))
+                                            if compressao > 1:
+                                                compressao = compressao / 100.0
+                                            if 0 <= compressao <= 1:
+                                                retention_ratio = 1.0 - compressao
+                                        if payload.get('nota_fidelidade') is not None:
+                                            fidelity_score = float(payload.get('nota_fidelidade'))
+                                except Exception:
+                                    retention_ratio = None
+
+                            if retention_ratio is None:
+                                fmt_words = len(re.findall(r'\S+', final_text or ''))
+                                retention_ratio = (fmt_words / raw_words) if raw_words > 0 else None
+
+                            low_retention = retention_ratio is not None and retention_ratio < 0.60
+                            low_score = fidelity_score is not None and fidelity_score <= 6.0
+
+                            if low_retention or low_score:
+                                table_recovery_meta = {
+                                    'triggered': True,
+                                    'reason': 'missing_tables_with_content_loss',
+                                    'retention_ratio': retention_ratio,
+                                    'fidelity_score': fidelity_score,
+                                    'mode': mode_upper,
+                                }
+                                await emit('formatting', 90, 'Detectado risco de perda critica sem tabelas. Aplicando segunda passada...')
+                                retry_prompt = ((system_prompt.strip() + '\n\n') if system_prompt and system_prompt.strip() else '') + (
+                                    'MODO DE RECUPERACAO AUTOMATICA DE TABELAS\n'
+                                    '- Preserve fidelidade ao RAW.\n'
+                                    '- Reintroduza tabelas markdown quando houver comparacao de itens.\n'
+                                    '- Nao invente fatos.'
+                                )
+                                recovered_text = await vomo.format_transcription_async(
+                                    unified_raw,
+                                    video_name=video_name,
+                                    output_folder=temp_dir,
+                                    mode=mode,
+                                    custom_prompt=retry_prompt,
+                                    disable_tables=False,
+                                    progress_callback=emit,
+                                    skip_audit=skip_legal_audit,
+                                    skip_fidelity_audit=skip_fidelity_audit,
+                                    skip_sources_audit=skip_sources_audit,
+                                )
+                                recovered_has_table = _has_md_table(recovered_text or '')
+                                rec_words = len(re.findall(r'\S+', recovered_text or ''))
+                                recovered_retention = (rec_words / raw_words) if raw_words > 0 else None
+                                retention_gain = (
+                                    (recovered_retention - retention_ratio)
+                                    if (retention_ratio is not None and recovered_retention is not None)
+                                    else 0.0
+                                )
+                                if recovered_has_table or retention_gain >= 0.08:
+                                    final_text = recovered_text
+                                    table_recovery_meta['applied'] = True
+                                    await emit('formatting', 95, 'Segunda passada concluiu recuperacao de tabelas.')
+                                else:
+                                    table_recovery_meta['applied'] = False
+                                table_recovery_meta['recovered_has_table'] = recovered_has_table
+                                table_recovery_meta['recovered_retention_ratio'] = recovered_retention
+                    except Exception as table_recovery_err:
+                        logger.warning(f'Falha na recuperacao automatica de tabelas (batch): {table_recovery_err}')
                 except Exception as format_exc:
                     format_message, root_exc = self._format_exception_message(format_exc)
                     classification = self._classify_llm_error(root_exc)
@@ -5112,6 +7082,8 @@ class TranscriptionService:
                         "enabled": True,
                         "reason": llm_warning,
                     }
+                if table_recovery_meta:
+                    report_paths['table_recovery'] = table_recovery_meta
                 suggestions_path = self._write_hil_suggestions(
                     output_dir, video_name, mode_suffix, cli_issues
                 )
@@ -5153,6 +7125,8 @@ class TranscriptionService:
                     if original_docx_path:
                         report_paths["original_docx_path"] = original_docx_path
 
+                title_drift = self._load_title_drift_telemetry(report_paths)
+
                 await emit("audit_complete", 98, json.dumps({
                     "issues": issues,
                     "total_issues": len(issues),
@@ -5163,6 +7137,7 @@ class TranscriptionService:
                     "auto_applied_fixes": auto_applied_fixes,
                     "llm_fallback": bool(llm_warning),
                     "llm_message": llm_warning,
+                    "title_drift": title_drift,
                 }))
 
             await emit("formatting", 100, f"Documento unificado ({total_files} partes) ✓")
@@ -5181,6 +7156,10 @@ class TranscriptionService:
                 "audit_issues": issues,
                 "audit_summary": audit_summary,
                 "quality": quality_payload,
+                "headers_changed_count": title_drift.get("headers_changed_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_restored_count": title_drift.get("headers_restored_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_degraded_count": title_drift.get("headers_degraded_count", 0) if isinstance(title_drift, dict) else 0,
+                "headers_diff": title_drift.get("headers_diff", []) if isinstance(title_drift, dict) else [],
             }
 
         except Exception as e:
@@ -7253,19 +9232,57 @@ Responda APENAS com JSON válido:
         speaker_roles: Optional[list] = None,
         speakers_expected: Optional[int] = None,
         transcription_engine: str = "whisper",
+        allow_provider_fallback: Optional[bool] = None,
     ) -> dict:
         async def emit(stage: str, progress: int, message: str):
             if on_progress:
                 await on_progress(stage, progress, message)
 
+        allow_provider_fallback = self._enforce_fidelity_critical_fallback(
+            mode=format_mode,
+            allow_provider_fallback=allow_provider_fallback,
+        )
+
         # Determinar motor de transcrição
-        _use_elevenlabs_hearing = transcription_engine == "elevenlabs" and self._get_elevenlabs_key() is not None
-        _use_aai_hearing = transcription_engine == "assemblyai" and self._get_assemblyai_key() is not None
+        _requested_engine_hearing = (transcription_engine or "whisper").strip().lower()
+        _use_elevenlabs_hearing = _requested_engine_hearing == "elevenlabs" and self._get_elevenlabs_key() is not None
+        _use_aai_hearing = _requested_engine_hearing == "assemblyai" and self._get_assemblyai_key() is not None
         _use_whisper_hearing = not _use_aai_hearing and not _use_elevenlabs_hearing
         logger.info(f"🎤 Motor de transcrição (hearing): {transcription_engine} [EL={_use_elevenlabs_hearing}] [AAI={_use_aai_hearing}]")
 
         # Inicializar VomoMLX (necessário para otimização de áudio e fallback)
-        vomo = self._get_vomo(model_selection=model_selection, thinking_level=thinking_level)
+        await emit("initializing", 0, "🚀 Inicializando motor de transcrição...")
+        if _requested_engine_hearing in {"assemblyai", "elevenlabs"}:
+            _provider_available = (
+                (_requested_engine_hearing == "assemblyai" and self._get_assemblyai_key() is not None)
+                or (_requested_engine_hearing == "elevenlabs" and self._get_elevenlabs_key() is not None)
+            )
+            if not _provider_available:
+                _can_switch_missing_provider = self._is_provider_fallback_allowed(
+                    requested_engine=transcription_engine,
+                    from_provider=_requested_engine_hearing,
+                    to_provider="whisper",
+                    allow_provider_fallback=allow_provider_fallback,
+                )
+                if not _can_switch_missing_provider:
+                    raise RuntimeError(
+                        f"{_requested_engine_hearing} indisponível e fallback para Whisper foi desabilitado."
+                    )
+                await emit(
+                    "initializing",
+                    3,
+                    self._provider_switch_message(
+                        from_provider=_requested_engine_hearing,
+                        to_provider="whisper",
+                        allow_provider_fallback=allow_provider_fallback,
+                    ),
+                )
+        vomo = await self._get_vomo_with_progress(
+            emit=emit,
+            model_selection=model_selection,
+            thinking_level=thinking_level,
+            ready_message="✅ Motor de transcrição pronto",
+        )
         # Setar idioma antes de qualquer chamada de transcrição
         vomo._current_language = (language or "pt").strip().lower()
         vomo._output_language = (output_language or "").strip().lower() or None
@@ -7401,6 +9418,27 @@ Responda APENAS com JSON válido:
                     logger.warning(f"Falha ao salvar AAI raw: {save_exc}")
 
             if not _hearing_aai_result and not _hearing_elevenlabs_result:
+                if not _use_whisper_hearing:
+                    _source_provider = "assemblyai" if _use_aai_hearing else "elevenlabs"
+                    _can_switch_to_whisper = self._is_provider_fallback_allowed(
+                        requested_engine=transcription_engine,
+                        from_provider=_source_provider,
+                        to_provider="whisper",
+                        allow_provider_fallback=allow_provider_fallback,
+                    )
+                    if not _can_switch_to_whisper:
+                        raise RuntimeError(
+                            f"{_source_provider} indisponível e fallback para Whisper foi desabilitado."
+                        )
+                    await emit(
+                        "transcription",
+                        30,
+                        self._provider_switch_message(
+                            from_provider=_source_provider,
+                            to_provider="whisper",
+                            allow_provider_fallback=allow_provider_fallback,
+                        ),
+                    )
                 # Whisper local (fluxo principal ou fallback)
                 engine_msg = "Whisper MLX" if _use_whisper_hearing else "Whisper MLX (fallback)"
                 await emit("transcription", 30, f"Transcrevendo com {engine_msg}...")
@@ -7615,16 +9653,20 @@ Responda APENAS com JSON válido:
             llm_warning: Optional[str] = None
             llm_fallback = False
             try:
-                formatted_text = await vomo.format_transcription_async(
-                    format_source_text,
+                formatted_text, vomo = await self._run_llm_format_with_resilience(
+                    vomo=vomo,
+                    source_text=format_source_text,
                     video_name=video_name,
                     output_folder=str(run_dir),
                     mode=format_mode_normalized,
                     custom_prompt=custom_prompt,
+                    disable_tables=False,
                     progress_callback=emit,
                     skip_audit=skip_legal_audit,
                     skip_fidelity_audit=skip_fidelity_audit,
                     skip_sources_audit=skip_sources_audit,
+                    model_selection=model_selection,
+                    thinking_level=thinking_level,
                     include_timestamps=bool(include_timestamps),
                     allow_indirect=allow_indirect,
                     allow_summary=allow_summary,
