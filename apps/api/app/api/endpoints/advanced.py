@@ -361,7 +361,7 @@ async def align_diarization(request: DiarizeRequest, current_user: User = Depend
                  raise HTTPException(status_code=500, detail="HUGGING_FACE_TOKEN not set")
                  
             pipeline = Pipeline.from_pretrained(
-                "pyannote/speaker-diarization-3.1",
+                "pyannote/speaker-diarization-community-1",
                 token=hf_token
             )
             device = "mps" if torch.backends.mps.is_available() else "cpu"

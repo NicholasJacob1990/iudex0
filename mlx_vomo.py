@@ -196,6 +196,13 @@ try:
 except ImportError:
     AUTO_FIX_AVAILABLE = False
 
+# v3.0: Relatório unificado (cross-referencing entre camadas)
+try:
+    from audit_unified import UnifiedAuditEngine, generate_unified_markdown, UnifiedReport, compare_reports
+    UNIFIED_AUDIT_AVAILABLE = True
+except ImportError:
+    UNIFIED_AUDIT_AVAILABLE = False
+
 try:
     import mlx_whisper
 except ImportError:
@@ -581,10 +588,10 @@ def detectar_tabelas_em_par(texto: str) -> list:
     """
     v2.28: Detecta pares de tabelas (Quadro-síntese + Pegadinhas).
 
-    Padrão esperado:
-    - #### 📋 Quadro-síntese — [Título]
+    Padrão esperado (flexível):
+    - #### 📋 [título contextual]
     - Tabela 5 colunas
-    - #### 🎯 Tabela — Como a banca cobra / pegadinhas
+    - #### 🎯 [título contextual]
     - Tabela 3 colunas
 
     Returns:
@@ -597,8 +604,8 @@ def detectar_tabelas_em_par(texto: str) -> list:
     while i < len(linhas):
         linha = linhas[i].strip()
 
-        # Detectar início de quadro-síntese
-        if re.match(r'^#{3,5}\s*📋.*[Qq]uadro', linha):
+        # Detectar início de quadro-síntese / tabela principal (título contextual com 📋)
+        if re.match(r'^#{3,5}\s*📋', linha):
             par = {
                 'quadro_titulo': linha,
                 'quadro_linha': i,
@@ -633,7 +640,7 @@ def detectar_tabelas_em_par(texto: str) -> list:
                 else i + 1
             )
             while j < len(linhas) and j < i + 50:
-                if re.match(r'^#{3,5}\s*🎯.*[Tt]abela', linhas[j]):
+                if re.match(r'^#{3,5}\s*🎯', linhas[j]):
                     par['pegadinha_titulo'] = linhas[j].strip()
                     par['pegadinha_linha'] = j
 
@@ -1978,7 +1985,7 @@ def aplicar_correcoes_automaticas(texto: str, *, mode: str | None = None) -> tup
         import os
 
         env_key = "IUDEX_APOSTILA_MAX_PARAGRAPH_CHARS" if mode_norm == "APOSTILA" else "IUDEX_FIDELIDADE_MAX_PARAGRAPH_CHARS"
-        default_max = "900" if mode_norm == "APOSTILA" else "1200"
+        default_max = "500" if mode_norm == "APOSTILA" else "1200"  # v2.41: APOSTILA 900→500 (mais granular, alinhado com format_transcription_gemini)
         try:
             max_chars = int(os.getenv(env_key, default_max))
         except Exception:
@@ -2155,6 +2162,8 @@ Corrija problemas detalhados de formatação:
 - Use **MÁXIMO 3** níveis de hierarquia (##, ###, ####).
 - Nunca use # (H1) para subtópicos (apenas para o título principal do documento).
 - Preserve a ordem cronológica geral.
+- **ANTI-FRAGMENTAÇÃO (CRÍTICO):** Se há 4+ seções ## consecutivas que tratam de aspectos do MESMO tema, **REBAIXE-AS** para ### subtópicos de um ## tema-mãe. Exemplo: "## Citação", "## Intimação", "## Notificação" dentro de Atos de Comunicação → devem virar "## Atos de Comunicação" com "### Citação", "### Intimação", "### Notificação".
+- **MARCOS LEGAIS como subtópicos:** Súmulas, Teses e Artigos explicados em profundidade devem ser ### (não ##).
 
 ## DOCUMENTO PARA REVISAR:
 {documento}
@@ -2396,6 +2405,262 @@ def _extract_headings(lines: list[str]) -> list[dict]:
             }
         )
     return headings
+
+
+_CONVERSATIONAL_HEADING_PREFIXES = (
+    "já ",
+    "na prova",
+    "para quem",
+    "minha proposta",
+    "bom dia",
+    "gente ",
+    "pessoal ",
+    "vamos ",
+    "então ",
+    "logo ",
+)
+
+_TECHNICAL_HEADING_TOKENS = (
+    "licita",
+    "contrat",
+    "lei",
+    "decreto",
+    "súmula",
+    "sumula",
+    "tcu",
+    "stj",
+    "stf",
+    "juris",
+    "administra",
+    "governan",
+    "execução",
+    "execucao",
+    "fiscal",
+    "responsabil",
+    "constituci",
+    "nulidade",
+    "compet",
+    "proced",
+    "auditoria",
+    "fidelidade",
+)
+
+
+def _normalize_heading_title(raw_title: str) -> str:
+    title = (raw_title or "").strip()
+    nm = _HEADING_NUMBER_RE.match(title)
+    if nm:
+        return nm.group(2).strip()
+    return title
+
+
+def _contains_technical_signal(title: str) -> bool:
+    t = (title or "").lower()
+    return any(tok in t for tok in _TECHNICAL_HEADING_TOKENS)
+
+
+def _heading_quality_flags(title: str, level: int) -> list[str]:
+    flags: list[str] = []
+    normalized = re.sub(r"\s+", " ", (title or "").strip())
+    lower = normalized.lower()
+    words = re.findall(r"[A-Za-zÀ-ÿ0-9]+", normalized)
+
+    if not normalized:
+        flags.append("empty")
+        return flags
+
+    if len(normalized) > 110:
+        flags.append("too_long_chars")
+    if len(words) > 20:
+        flags.append("too_long_words")
+    if any(lower.startswith(pfx) for pfx in _CONVERSATIONAL_HEADING_PREFIXES):
+        flags.append("conversational_prefix")
+    if level == 2 and "na prova de" in lower:
+        flags.append("exam_phrase_h2")
+    if level in (2, 3) and not _contains_technical_signal(lower):
+        flags.append("missing_technical_signal")
+
+    return flags
+
+
+def _extract_h2_h3_heading_entries(text: str) -> list[dict]:
+    lines = (text or "").splitlines()
+    entries: list[dict] = []
+    for idx, line in enumerate(lines):
+        m = _HEADING_RE.match(line.strip())
+        if not m:
+            continue
+        level = len(m.group(1))
+        if level not in (2, 3):
+            continue
+        raw_title = m.group(2).strip()
+        entries.append(
+            {
+                "line_idx": idx,
+                "level": level,
+                "raw_title": raw_title,
+                "title": _normalize_heading_title(raw_title),
+            }
+        )
+    return entries
+
+
+def enforce_fidelity_heading_guard(
+    original_text: str,
+    revised_text: str,
+    *,
+    freeze_h2_h3: bool = True,
+) -> tuple[str, dict]:
+    """
+    Garante estabilidade de títulos no modo FIDELIDADE.
+
+    - Compara H2/H3 entre texto original e revisado.
+    - Opcionalmente congela H2/H3 (sempre restaura título original quando mudou).
+    - Aplica rollback seletivo para títulos degradados (frase corrida/conversacional etc.).
+    - Retorna texto corrigido + telemetria de drift.
+    """
+    orig_entries = _extract_h2_h3_heading_entries(original_text or "")
+    rev_entries = _extract_h2_h3_heading_entries(revised_text or "")
+    lines = (revised_text or "").splitlines()
+
+    changed_count = 0
+    restored_count = 0
+    degraded_count = 0
+    diffs: list[dict] = []
+
+    for idx, (orig, rev) in enumerate(zip(orig_entries, rev_entries), start=1):
+        original_title = (orig.get("raw_title") or "").strip()
+        revised_title = (rev.get("raw_title") or "").strip()
+        if not original_title or not revised_title:
+            continue
+        if original_title == revised_title:
+            continue
+
+        changed_count += 1
+        flags = _heading_quality_flags(revised_title, int(rev.get("level") or 2))
+        degraded = len(flags) > 0
+        if degraded:
+            degraded_count += 1
+
+        should_restore = freeze_h2_h3 or degraded
+        if should_restore:
+            prefix = "#" * int(rev.get("level") or 2)
+            target_line = int(rev.get("line_idx") or 0)
+            if 0 <= target_line < len(lines):
+                lines[target_line] = f"{prefix} {original_title}"
+                restored_count += 1
+
+        diffs.append(
+            {
+                "index": idx,
+                "level": int(rev.get("level") or 2),
+                "original": original_title,
+                "revised": revised_title,
+                "restored": bool(should_restore),
+                "quality_flags": flags,
+            }
+        )
+
+    telemetry = {
+        "freeze_h2_h3": bool(freeze_h2_h3),
+        "headers_changed_count": changed_count,
+        "headers_restored_count": restored_count,
+        "headers_degraded_count": degraded_count,
+        "headers_diff": diffs,
+    }
+    return "\n".join(lines), telemetry
+
+
+# ---------------------------------------------------------------------------
+# Sanitização de títulos na estrutura mapeada (v2.47)
+# ---------------------------------------------------------------------------
+
+_GREETING_TITLE_PREFIXES = (
+    "bom dia", "boa tarde", "boa noite", "já ", "pessoal ",
+    "gente ", "olha ", "obrigado", "obrigada",
+)
+
+_CANONICAL_LABEL_L1 = "Introdução e Contextualização"
+_CANONICAL_LABEL_SUB = "Abertura"
+
+_MAX_MAPPED_TITLE_WORDS = 8
+_MAX_MAPPED_TITLE_CHARS = 70
+
+
+def _sanitize_mapped_structure(estrutura: str) -> str:
+    """Valida e corrige títulos de estrutura que são trechos literais de fala.
+
+    Reutiliza ``_heading_quality_flags`` e ``_CONVERSATIONAL_HEADING_PREFIXES``
+    para detectar títulos degradados no mapeamento.
+
+    Regras (alinhadas com PROMPT_MAPEAMENTO regra 8):
+    - Títulos > 8 palavras ou > 70 chars → rótulo canônico
+    - Prefixos conversacionais (saudações, logística) → rótulo canônico
+    - Preserva âncoras ``| ABRE: "..." | FECHA: "..."`` intactas
+    """
+    if not estrutura:
+        return estrutura
+
+    lines = estrutura.split('\n')
+    fixed_lines: list[str] = []
+    sanitized_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        # Detecta linhas numeradas: "1. Título", "   1.1. Subtítulo"
+        m = re.match(r'^(\s*\d+(?:\.\d+)*\.?\s+)(.*)', stripped)
+        if not m:
+            fixed_lines.append(line)
+            continue
+
+        prefix_num = m.group(1)
+        rest = m.group(2).strip()
+
+        # Separa âncoras ABRE/FECHA preservando literalmente (incluindo aspas)
+        anchor_part = ""
+        title = rest
+        anchor_idx = rest.find("| ABRE:")
+        if anchor_idx >= 0:
+            title = rest[:anchor_idx].strip()
+            anchor_part = " " + rest[anchor_idx:]
+
+        # Deriva nível: "1." → level 2, "1.1." → level 3
+        parts_count = len([p for p in prefix_num.strip().rstrip('.').split('.') if p.strip().isdigit()])
+        level = min(parts_count + 1, 4)  # 1. → 2, 1.1. → 3, 1.1.1. → 4
+
+        # Aplica heading quality flags existentes
+        flags = _heading_quality_flags(title, level)
+
+        needs_fix = False
+        # Flags de qualidade indicam problema
+        if "conversational_prefix" in flags or "too_long_chars" in flags or "too_long_words" in flags:
+            needs_fix = True
+        # Backup: checa limites alinhados com o prompt (8 palavras, 70 chars)
+        words = re.findall(r'[A-Za-zÀ-ÿ0-9]+', title)
+        if len(title) > _MAX_MAPPED_TITLE_CHARS or len(words) > _MAX_MAPPED_TITLE_WORDS:
+            needs_fix = True
+
+        if needs_fix:
+            is_level1 = parts_count == 1
+            title_lower = title.lower()
+
+            if any(title_lower.startswith(pfx) for pfx in _GREETING_TITLE_PREFIXES):
+                canonical = _CANONICAL_LABEL_L1 if is_level1 else _CANONICAL_LABEL_SUB
+            elif is_level1:
+                canonical = _CANONICAL_LABEL_L1
+            else:
+                canonical = _CANONICAL_LABEL_SUB
+
+            sanitized_count += 1
+            print(f"{Fore.YELLOW}⚠️  Título sanitizado: '{title[:60]}' → '{canonical}'{Style.RESET_ALL}")
+            fixed_lines.append(f"{prefix_num}{canonical}{anchor_part}")
+        else:
+            fixed_lines.append(line)
+
+    if sanitized_count:
+        print(f"{Fore.CYAN}🔧 {sanitized_count} título(s) de estrutura sanitizado(s){Style.RESET_ALL}")
+
+    return '\n'.join(fixed_lines)
 
 
 def _extract_table_blocks(lines: list[str], start: int, end: int) -> list[dict]:
@@ -2758,7 +3023,7 @@ PROMPT_STRUCTURE_REVIEW_LITE = """Você é um revisor editorial especializado em
 1. Uma **Estrutura de Mapeamento Inicial** (planejada antes da formatação)
 2. O **Documento Processado** (resultado da formatação por chunks)
 
-Sua tarefa é analisar ambos e garantir que os títulos estejam **descritivos, hierarquicamente corretos e alinhados com o conteúdo real**, sem jamais alterar a ordem cronológica.
+Sua tarefa é analisar ambos e garantir que os títulos estejam **hierarquicamente corretos e alinhados com o conteúdo real**, sem jamais alterar a ordem cronológica.
 
 ---
 
@@ -2768,19 +3033,21 @@ Sua tarefa é analisar ambos e garantir que os títulos estejam **descritivos, h
 ---
 
 ## ✅ O QUE VOCÊ DEVE FAZER:
-1. **Comparar Títulos:** Verifique se os títulos do documento refletem corretamente os tópicos do mapeamento. Se um título estiver genérico mas o mapeamento indicar um tema específico, refine-o.
+1. **NÃO REESCREVER TÍTULOS EXISTENTES:** preserve o texto dos headings já presentes no documento. Ajuste apenas nível/hierarquia quando estritamente necessário.
 2. **Validar Hierarquia:** Confirme que a estrutura (##, ###, ####) segue uma lógica consistente (ex: seções > subseções > detalhes).
 3. **Decidir a Melhor Estrutura:** Se houver conflito entre mapeamento e documento, escolha a estrutura que melhor reflete o CONTEÚDO REAL do texto.
 4. **Subtópicos Órfãos:** Se detectar headers como "A.", "B.", "C." isolados como tópicos principais, converta-os em subníveis do tópico anterior (ex: ## para ###).
-5. **Títulos Descritivos:** Refine títulos genéricos (ex: "Questão 1") para algo que cite o tema técnico (ex: "Questão 1: Responsabilidade Civil").
-6. **Corrigir Sintaxe Markdown:** Tabelas, listas, espaçamento.
-7. **Remover Vazios:** Títulos sem conteúdo abaixo.
+5. **Corrigir Sintaxe Markdown:** Tabelas, listas, espaçamento.
+6. **Remover Vazios:** Títulos sem conteúdo abaixo.
+7. **NUNCA alterar conteúdo de parágrafos** (somente forma/sintaxe).
+
+## 🔴 REGRAS CRÍTICAS DE HIERARQUIA:
+- Use **MÁXIMO 3** níveis de hierarquia (##, ###, ####). Nunca use # (H1) para subtópicos.
+- **ANTI-FRAGMENTAÇÃO (CRÍTICO):** Se há 4+ seções ## consecutivas que tratam de aspectos do MESMO tema, **REBAIXE-AS** para ### subtópicos de um ## tema-mãe. Exemplo: "## Citação", "## Intimação", "## Notificação" dentro de Atos de Comunicação → devem virar "## Atos de Comunicação" com "### Citação", "### Intimação", "### Notificação".
+- **MARCOS LEGAIS como subtópicos:** Súmulas, Teses de Repercussão Geral e Artigos explicados em profundidade devem ser ### (não ##).
+- Preserve a ordem cronológica geral.
 
 ## 📌 EXEMPLOS DE CORREÇÃO:
-
-**Títulos Genéricos → Descritivos:**
-- ANTES: `### Questão`
-- DEPOIS: `### Questão 1: Responsabilidade Civil Objetiva`
 
 **Subtópicos Órfãos → Hierarquia Correta:**
 - ANTES:
@@ -2806,12 +3073,12 @@ Sua tarefa é analisar ambos e garantir que os títulos estejam **descritivos, h
 
 ## 📝 RELATÓRIO ESPERADO:
 Ao final do documento, inclua um bloco de comentário (que será removido) indicando:
-- Quantos títulos foram refinados
+- Quantos níveis de heading foram ajustados (sem reescrever o texto dos títulos)
 - Se a estrutura final segue o mapeamento ou foi adaptada
 - Discrepâncias encontradas (se houver)
 
 Formato:
-<!-- RELATÓRIO: X títulos refinados | Estrutura: [MAPEAMENTO/ADAPTADA] | Discrepâncias: [Nenhuma/Lista] -->
+<!-- RELATÓRIO: X níveis ajustados | Estrutura: [MAPEAMENTO/ADAPTADA] | Discrepâncias: [Nenhuma/Lista] -->
 
 ---
 
@@ -2827,13 +3094,13 @@ async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None,
     """
     v2.3: Revisão LEVE de formatação Markdown com VALIDAÇÃO CRUZADA.
     Compara o documento processado com a estrutura de mapeamento inicial.
-    Refina títulos, valida hierarquia, e reporta discrepâncias.
+    NÃO reescreve texto de títulos; valida hierarquia/sintaxe e reporta discrepâncias.
     NÃO reorganiza nem mescla conteúdo.
 
     Melhorias v2.3:
-    - Split paralelo para docs > 400k chars (em vez de truncar)
     - Melhor tratamento de rate limits
     - Integração com MetricsCollector
+    - Opção de contexto total (sem split/truncate) para máxima fidelidade
     """
     from difflib import SequenceMatcher
     import asyncio
@@ -2844,12 +3111,14 @@ async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None,
 
     start_time = time.time()
 
-    # v2.3: Threshold para split (antes era 800k com truncate)
+    # v2.45: Modo totalidade de janela ativo por padrão absoluto
+    # para preservar contexto máximo na revisão leve.
+    use_full_context = True
     split_threshold = int(os.getenv("IUDEX_SPLIT_REVIEW_THRESHOLD", "400000"))
-    max_doc_chars = 800000  # Máximo por parte
+    max_doc_chars = 800000
 
     # v2.3: Se documento muito grande, dividir em partes e processar em paralelo
-    if len(texto) > split_threshold:
+    if not use_full_context and len(texto) > split_threshold:
         print(f"{Fore.CYAN}   🔀 Documento grande ({len(texto)//1000}k chars), dividindo em partes paralelas...{Style.RESET_ALL}")
 
         # Dividir em partes de ~350k chars cada, com overlap de 10k para contexto
@@ -2916,8 +3185,8 @@ async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None,
         print(f"{Fore.GREEN}   ✅ Revisão paralela concluída ({len(parts)} partes, {duration:.1f}s).{Style.RESET_ALL}")
         return final_text
 
-    # Processamento single-shot para docs menores
-    if len(texto) > max_doc_chars:
+    # Processamento single-shot
+    if not use_full_context and len(texto) > max_doc_chars:
         print(f"{Fore.YELLOW}   ⚠️ Documento muito longo ({len(texto)} chars), truncando para {max_doc_chars//1000}k...{Style.RESET_ALL}")
         texto_para_revisao = texto[:max_doc_chars] + "\n\n[... documento truncado para revisão ...]"
     else:
@@ -2925,7 +3194,7 @@ async def ai_structure_review_lite(texto, client, model, estrutura_mapeada=None,
     
     # Preparar estrutura mapeada (se disponível)
     if estrutura_mapeada:
-        estrutura_str = estrutura_mapeada[:50000]  # Limitar estrutura a 50k chars
+        estrutura_str = estrutura_mapeada if use_full_context else estrutura_mapeada[:50000]
         print(f"{Fore.CYAN}   📋 Usando estrutura de mapeamento inicial ({len(estrutura_mapeada)} chars) para validação cruzada.{Style.RESET_ALL}")
     else:
         estrutura_str = "[Estrutura de mapeamento não disponível - analisar documento para inferir estrutura ideal]"
@@ -3044,7 +3313,7 @@ async def ai_structure_review(texto, client, model, estrutura_mapeada=None, metr
     Corrige: questões duplicadas, subtópicos órfãos, fragmentação excessiva.
     
     Melhorias v2.2:
-    - Limite aumentado para 800k chars
+    - Contexto total por padrão na revisão semântica (APOSTILA)
     - Validação de ordem dos headers
     - Integração com MetricsCollector
     - Suporte a relatório JSON
@@ -3059,17 +3328,19 @@ async def ai_structure_review(texto, client, model, estrutura_mapeada=None, metr
     
     start_time = time.time()
     
-    # Gemini 3 Flash suporta 1M tokens (~4M chars) - usar até 800k chars
+    # v2.45: Para APOSTILA, usar contexto completo por padrão (sem truncamento).
+    # Mantém opção de voltar ao legado via env em cenários extremos.
+    use_full_context = _env_truthy("IUDEX_APOSTILA_FULL_CONTEXT", default=True)
     max_doc_chars = 800000
-    if len(texto) > max_doc_chars:
+    if not use_full_context and len(texto) > max_doc_chars:
         print(f"   ⚠️ Documento muito longo ({len(texto)} chars), truncando para {max_doc_chars//1000}k...")
         texto_para_revisao = texto[:max_doc_chars] + "\n\n[... documento truncado para revisão estrutural ...]"
     else:
         texto_para_revisao = texto
-    
+
     # Preparar estrutura mapeada (se disponível)
     if estrutura_mapeada:
-        estrutura_str = estrutura_mapeada[:50000]  # Limitar estrutura a 50k chars
+        estrutura_str = estrutura_mapeada if use_full_context else estrutura_mapeada[:50000]
         print(f"{Fore.CYAN}   📋 Usando estrutura de mapeamento inicial ({len(estrutura_mapeada)} chars) para validação cruzada.{Style.RESET_ALL}")
     else:
         estrutura_str = "[Estrutura de mapeamento não disponível - analisar documento autonomamente]"
@@ -3807,7 +4078,7 @@ def garantir_titulo_tabela_banca(texto: str) -> str:
 
     def _is_banca_title(line: str) -> bool:
         s = (line or "").strip().lower()
-        return s.startswith('#') and ('banca cobra' in s or 'pegadinha' in s)
+        return s.startswith('#') and ('🎯' in s or 'banca cobra' in s or 'pegadinha' in s)
 
     def _is_heading(line: str) -> bool:
         return (line or "").strip().startswith('#')
@@ -3947,6 +4218,214 @@ def limpar_estrutura_para_review(mapping: str) -> str:
         return mapping
     return re.sub(r'\s*\|\s*(?:ABRE|FECHA):\s*["\'][^"\']*["\']', '', mapping)
     
+def filtrar_niveis_excessivos(estrutura: str, max_nivel: int = 3) -> str:
+    """
+    v2.41: Remove itens da estrutura mais profundos que max_nivel.
+    Ex.: se max_nivel=3, remove 1.1.1.1.
+    Portado de format_transcription_gemini.py.
+    """
+    if not estrutura:
+        return estrutura
+    linhas = estrutura.strip().split('\n')
+    filtradas = []
+    removidos = 0
+    for linha in linhas:
+        match = re.match(r'^(\d+(?:\.\d+)*)', linha.strip())
+        if match:
+            partes = [p for p in match.group(1).split('.') if p.isdigit()]
+            if len(partes) <= max_nivel:
+                filtradas.append(linha)
+            else:
+                removidos += 1
+        else:
+            filtradas.append(linha)
+    if removidos:
+        print(f"{Fore.CYAN}✂️  Filtrados {removidos} itens com nível > {max_nivel}{Style.RESET_ALL}")
+    return '\n'.join(filtradas)
+
+
+def _sample_evenly(items: list[str], limit: int) -> list[str]:
+    """Seleciona itens distribuídos ao longo da lista preservando início e fim."""
+    if limit <= 0 or len(items) <= limit:
+        return list(items)
+    if limit == 1:
+        return [items[0]]
+
+    step = (len(items) - 1) / (limit - 1)
+    selected = []
+    used = set()
+    for i in range(limit):
+        idx = int(round(i * step))
+        idx = max(0, min(len(items) - 1, idx))
+        if idx not in used:
+            selected.append(items[idx])
+            used.add(idx)
+
+    # Se o arredondamento gerar menos itens únicos, completa com faltantes na ordem.
+    if len(selected) < limit:
+        for item in items:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= limit:
+                break
+    return selected[:limit]
+
+
+def _extract_outline_key(line: str) -> str | None:
+    """
+    Extrai chave numérica de outline (ex.: '1.2.3') de uma linha.
+    Retorna None para linhas sem numeração hierárquica detectável.
+    """
+    if not line:
+        return None
+    m = re.match(r'^\s*(\d+(?:\.\d+)*)\.?\s+', line.strip())
+    return m.group(1) if m else None
+
+
+def _sample_with_parents(items: list[str], limit: int) -> list[str]:
+    """
+    Amostra distribuída com fechamento pai-filho:
+    se um item filho for selecionado, inclui seus pais quando presentes.
+    """
+    if limit <= 0 or len(items) <= limit:
+        return list(items)
+
+    key_to_idx: dict[str, int] = {}
+    idx_to_key: dict[int, str] = {}
+    for idx, line in enumerate(items):
+        key = _extract_outline_key(line)
+        if not key:
+            continue
+        # Mantém a primeira ocorrência para preservar ordem natural do outline.
+        if key not in key_to_idx:
+            key_to_idx[key] = idx
+            idx_to_key[idx] = key
+
+    def _closure(sampled_indexes: set[int]) -> set[int]:
+        expanded = set(sampled_indexes)
+        for idx in list(sampled_indexes):
+            key = idx_to_key.get(idx)
+            if not key:
+                continue
+            parts = key.split(".")
+            for depth in range(len(parts) - 1, 0, -1):
+                parent_key = ".".join(parts[:depth])
+                parent_idx = key_to_idx.get(parent_key)
+                if parent_idx is not None:
+                    expanded.add(parent_idx)
+        return expanded
+
+    def _sample_indexes_evenly(indexes: list[int], sample_limit: int) -> list[int]:
+        if sample_limit <= 0 or len(indexes) <= sample_limit:
+            return list(indexes)
+        if sample_limit == 1:
+            return [indexes[0]]
+        step = (len(indexes) - 1) / (sample_limit - 1)
+        picked: list[int] = []
+        used_pos = set()
+        for i in range(sample_limit):
+            pos = int(round(i * step))
+            pos = max(0, min(len(indexes) - 1, pos))
+            if pos not in used_pos:
+                picked.append(indexes[pos])
+                used_pos.add(pos)
+        if len(picked) < sample_limit:
+            for idx in indexes:
+                if idx not in picked:
+                    picked.append(idx)
+                if len(picked) >= sample_limit:
+                    break
+        return picked[:sample_limit]
+
+    # Ajusta a amostra-base até caber junto com ancestrais.
+    base_limit = min(limit, len(items))
+    selected_indexes: set[int] = set()
+    all_indexes = list(range(len(items)))
+    while base_limit > 0:
+        base_indexes = set(_sample_indexes_evenly(all_indexes, base_limit))
+        expanded = _closure(base_indexes)
+        if len(expanded) <= limit:
+            selected_indexes = expanded
+            break
+        base_limit -= 1
+
+    if not selected_indexes:
+        selected_indexes = {0}
+
+    # Preenche vagas remanescentes distribuindo no restante sem quebrar o fechamento já construído.
+    remaining_slots = limit - len(selected_indexes)
+    if remaining_slots > 0:
+        remaining = [i for i in range(len(items)) if i not in selected_indexes]
+        if remaining:
+            sampled_remaining = _sample_indexes_evenly(remaining, remaining_slots)
+            for idx in sampled_remaining:
+                selected_indexes.add(idx)
+                if len(selected_indexes) >= limit:
+                    break
+
+    ordered_indexes = sorted(selected_indexes)[:limit]
+    return [items[i] for i in ordered_indexes]
+
+
+def simplificar_estrutura_se_necessario(
+    estrutura: str,
+    max_linhas: int = 120,
+    max_nivel: int = 3,
+) -> str:
+    """
+    v2.42: Se a estrutura tiver mais de max_linhas itens, preserva níveis até max_nivel
+    para evitar prompt bloat nos chunks.
+    Portado de format_transcription_gemini.py.
+    """
+    if not estrutura:
+        return estrutura
+    max_nivel = max(1, min(3, int(max_nivel or 3)))
+    linhas = [l for l in estrutura.strip().split('\n') if l.strip()]
+    if len(linhas) <= max_linhas:
+        return estrutura
+
+    print(
+        f"{Fore.CYAN}📉 Estrutura longa ({len(linhas)} itens). "
+        f"Simplificando para níveis 1-{max_nivel}, máx {max_linhas}...{Style.RESET_ALL}"
+    )
+    nivel1 = []
+    nivel2 = []
+    nivel3 = []
+    for l in linhas:
+        s = l.strip()
+        if re.match(r'^\d+\.\s', s):
+            nivel1.append(l)
+        elif re.match(r'^\d+\.\d+\.?\s', s):
+            nivel2.append(l)
+        elif re.match(r'^\d+\.\d+\.\d+\.?\s', s):
+            nivel3.append(l)
+
+    retained = set(nivel1 + nivel2)
+    if max_nivel >= 3:
+        retained.update(nivel3)
+
+    if len(retained) < 5:
+        return estrutura  # fallback
+
+    nova = []
+    vistos = set()
+    for l in linhas:
+        if l in vistos:
+            continue
+        if l in retained:
+            nova.append(l)
+            vistos.add(l)
+    if len(nova) > max_linhas:
+        # Evita viés para o começo e preserva coerência pai-filho.
+        nova = _sample_with_parents(nova, max_linhas)
+
+    print(
+        f"{Fore.GREEN}✅ Estrutura simplificada: {len(linhas)} → {len(nova)} linhas "
+        f"(níveis 1-{max_nivel}).{Style.RESET_ALL}"
+    )
+    return '\n'.join(nova)
+
+
 def dividir_sequencial(transcricao_completa, chars_por_parte=25000, estrutura_global=None):
     """
     v2.26: Divide documento em chunks SEQUENCIAIS com preferência por âncoras verbatim.
@@ -4683,7 +5162,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 2. **Limpeza**: Remova gírias, vocativos e cacoetes ("né", "tipo assim", "então", "meu irmão", "cara", "mano", "galera") e vícios de oralidade. Se houver parentesco factual (ex.: "Rodolfo (irmão do professor)"), mantenha a informação de forma formal.
 3. **Coesão**: Use conectivos e pontuação adequada para tornar o texto fluido.
 4. **Legibilidade Visual** (OBRIGATÓRIO):
-   - **PARÁGRAFOS CURTOS**: máximo **4-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
+   - **PARÁGRAFOS CURTOS**: máximo **3-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
    - **RECUOS COM MARCADORES**: Use `>` para citações, destaques ou observações importantes.
    - **NEGRITO MODERADO**: Destaque conceitos-chave com **negrito**, mas sem exagero.
    - **ITÁLICO**: Use para termos em latim, expressões estrangeiras ou ênfase leve.
@@ -4699,24 +5178,71 @@ Para garantir legibilidade superior:
 2. **Use listas** sempre que houver enumeração de mais de 2 itens.
 3. **Use citações recuadas** (`>`) para destacar teses jurídicas, pontos polêmicos, observações práticas e dicas de prova.
 4. **Separe visualmente** diferentes aspectos de um mesmo tema com subseções.
+5. **Questões e Exercícios**: Se o professor ditar uma questão, exercício ou caso hipotético, **isole-o** em um bloco de citação:
+   > **Questão:** O prazo para agravo de petição é de...
+   - Separe claramente o enunciado da questão da explicação/gabarito subsequente.
+6. **Destaques com Emojis** (use com moderação para facilitar escaneamento visual):
+   - 💡 **Dica de Prova** ou **Observação Pedagógica**: Quando o professor der uma dica específica para provas ou concursos.
+   - ⚠️ **Atenção** ou **Cuidado**: Para alertas, pegadinhas ou pontos polêmicos.
+   - 📌 **Ponto Importante**: Para conceitos-chave que merecem destaque especial.
+   - Exemplo: `> 💡 **Dica de Prova:** Esse tema caiu 3 vezes na PGM-Rio.`
 
 ## 💎 PILAR 1: ESTILO (VOZ ATIVA E DIRETA)
 > 🚫 **PROIBIDO VOZ PASSIVA EXCESSIVA:** "Anunciou-se", "Informou-se".
 > ✅ **PREFIRA VOZ ATIVA:** "O professor explica...", "A doutrina define...", "O Art. 37 estabelece..."."""
 
-    PROMPT_STRUCTURE_APOSTILA = """## 📝 ESTRUTURA E TÍTULOS
-- Mantenha a sequência exata das falas.
-- Use Títulos Markdown (##, ###, ####) para organizar os tópicos.
-- **NÃO crie subtópicos para frases soltas.**
-- Use títulos **APENAS** para mudanças reais de assunto.
-- **CRIE SUBSEÇÕES** (###) quando o professor abordar aspectos diferentes de um mesmo tema."""
+    PROMPT_STRUCTURE_APOSTILA = """## 📝 ESTRUTURA HIERÁRQUICA (CRÍTICO)
+
+### REGRA DE OURO: TÓPICOS-MÃE COM SUBTÓPICOS
+Organize o conteúdo em **hierarquia pai→filho**. Se o professor aborda múltiplos aspectos de um mesmo tema, eles devem ser **subtópicos** (###) de um **tópico-mãe** (##), NUNCA tópicos ## separados.
+
+### NÍVEIS DE HIERARQUIA (MÁXIMO 3):
+| Nível | Markdown | Uso | Exemplo |
+|-------|----------|-----|---------|
+| **Tema principal** | `##` | Mudança real de matéria/assunto | `## 2. Execução Fiscal` |
+| **Subtema** | `###` | Aspecto, instituto ou marco legal dentro do tema | `### 2.1. Procedimento da LEF (Lei 6.830/80)` |
+| **Detalhamento** | `####` | Detalhe específico, exemplo extenso ou ponto controverso | `#### 2.1.1. Citação por Hora Certa` |
+
+### EXEMPLO DE HIERARQUIA CORRETA:
+```
+## 2. Execução Fiscal
+### 2.1. Procedimento da LEF (Lei 6.830/80)
+### 2.2. Súmula 314 do STJ — Citação por Hora Certa
+### 2.3. Tema 444 do STJ — Redirecionamento ao Sócio
+#### 2.3.1. Requisitos e Prazo
+### 2.4. Exceção de Pré-Executividade
+## 3. Embargos à Execução
+### 3.1. Conceito e Natureza Jurídica
+### 3.2. Hipóteses de Cabimento
+```
+
+### ❌ ERRADO (tudo como ## sem hierarquia):
+```
+## 2. Execução Fiscal
+## 3. Procedimento da LEF          ← ERRADO! Deveria ser ### 2.1
+## 4. Súmula 314 do STJ            ← ERRADO! Deveria ser ### 2.2
+## 5. Tema 444 do STJ              ← ERRADO! Deveria ser ### 2.3
+## 6. Exceção de Pré-Executividade  ← ERRADO! Deveria ser ### 2.4
+```
+
+### REGRAS ADICIONAIS:
+- Mantenha a **sequência cronológica** exata das falas.
+- **NÃO crie subtópicos para frases soltas** — use títulos APENAS para mudanças reais de assunto.
+- Se uma frase parece título mas não inicia seção, use **negrito** no texto, não crie heading.
+- **Marcos Legais** como subtópicos: Súmulas, Teses de Repercussão Geral e Artigos de Lei explicados em profundidade devem virar ### subtópicos (ex: `### 2.3. Súmula 314 do STJ`).
+- **Anti-fragmentação**: Se o professor trata 4+ aspectos de um tema, TODOS devem ser ### sob um ## tema-mãe.
+- Nunca use # (H1) para subtópicos — apenas para o título principal do documento."""
 
     PROMPT_TABLE_APOSTILA = """## 📊 QUADRO-SÍNTESE (OBRIGATÓRIO)
 Ao final de CADA tópico principal (## ou ###), faça um fechamento didático com UM quadro-síntese.
 SEMPRE que houver diferenciação de conceitos, prazos, procedimentos, requisitos ou regras, o quadro é OBRIGATÓRIO.
 
-1) Adicione um subtítulo de fechamento (use o título do tópico):
-#### 📋 Quadro-síntese — [título do tópico]
+1) Adicione um subtítulo de fechamento **adaptado ao caso concreto**:
+- Comece sempre com `#### 📋` (obrigatório para organização interna).
+- Depois, use um rótulo contextual específico do tema (evite repetir sempre "Quadro-síntese").
+- **Preferência:** use o título original do tópico como base e apenas complemente/especialize quando necessário.
+- Exemplo: `#### 📋 Matriz comparativa — Competência tributária municipal`
+- Exemplo: `#### 📋 Requisitos essenciais — Improbidade administrativa`
 
 2) Em seguida, gere UMA tabela Markdown (sem placeholders):
 
@@ -4730,6 +5256,7 @@ SEMPRE que houver diferenciação de conceitos, prazos, procedimentos, requisito
 4. **Compatibilidade:** PROIBIDO usar o caractere `|` dentro de células (isso quebra a tabela). Evite quebras de linha dentro das células.
 5. **Sem código:** PROIBIDO blocos de código em células.
 6. **Posicionamento:** o quadro vem **APENAS AO FINAL** do bloco concluído (fechamento lógico da seção).
+7. **Lastro obrigatório no texto:** cada linha da tabela deve corresponder a conteúdo **já exposto antes** no texto explicativo do mesmo tópico/bloco. **PROIBIDO antecipar** conceito, exceção, fundamento legal ou dica ainda não explicados.
 
 ## ⚠️ ORDEM OBRIGATÓRIA: CONTEÚDO PRIMEIRO, TABELA DEPOIS
 **NUNCA** gere a tabela antes de terminar TODO o conteúdo explicativo do tópico.
@@ -4762,8 +5289,12 @@ Mais explicação...   ← TODO conteúdo primeiro
 ## 🎯 TABELA 2 (QUANDO APLICÁVEL): COMO A BANCA COBRA / PEGADINHAS
 Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **pegadinhas**, “isso cai”, “cuidado”, “tema recorrente” ou exemplos de como a questão aparece:
 
-1) Adicione um subtítulo:
-#### 🎯 Tabela — Como a banca cobra / pegadinhas
+1) Adicione um subtítulo **adaptado ao caso concreto**:
+- Comece sempre com `#### 🎯` (obrigatório para organização interna).
+- Depois, use um rótulo contextual de prova/armadilha para o tema.
+- **Preferência:** use o título original do tópico/bloco como base e apenas complemente para destacar cobrança, risco ou pegadinha.
+- Exemplo: `#### 🎯 Armadilhas de prova — Controle de constitucionalidade`
+- Exemplo: `#### 🎯 Como a banca explora o tema — Imunidades tributárias`
 
 2) Gere UMA tabela Markdown:
 | Como a banca cobra | Resposta correta (curta) | Erro comum / pegadinha |
@@ -4774,6 +5305,7 @@ Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **
 - 1 linha por pegadinha/dica/forma de cobrança mencionada.
 - Respostas objetivas (1–2 frases curtas por célula).
 - PROIBIDO usar `|` dentro de células e evitar quebras de linha dentro das células.
+- **Somente com base no já exposto:** não inclua na tabela de pegadinhas conteúdo que não tenha sido explicado antes no mesmo bloco.
 - Se não houver material de prova no bloco, **NÃO crie** esta Tabela 2."""
 
     # --- FIDELIDADE MODE ---
@@ -4826,25 +5358,43 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
    - **TRANSFORME** perguntas retóricas em afirmações quando possível.
 3. **Coesão**: Utilize conectivos para tornar o texto mais fluido. Aplique pontuação adequada.
 4. **Legibilidade**:
-   - **PARÁGRAFOS CURTOS**: máximo **3-6 linhas visuais** por parágrafo.
+   - **USE TEXTO CORRIDO NA MEDIDA DO POSSÍVEL.**
+   - **PARÁGRAFOS CURTOS**: máximo **3-5 linhas visuais** por parágrafo.
    - **QUEBRE** blocos de texto maciços em parágrafos menores.
    - Seja didático sem perder detalhes e conteúdo.
-5. **Formatação Didática** (use com moderação):
+5. **Linguagem**: Ajuste a linguagem coloquial para português padrão, mantendo o significado original.
+6. **Citações**: Use *itálico* para citações curtas e recuo em itálico para citações longas.
+7. **Negrito**: Use **negrito** para destacar conceitos-chave (sem exagero).
+8. **Formatação Didática** (use com moderação, sem excesso):
    - **Bullet points** para enumerar elementos, requisitos ou características.
    - **Listas numeradas** para etapas, correntes ou exemplos.
-   - **Marcadores relacionais** como "→" para consequências lógicas."""
+   - **Marcadores relacionais** como "→" para consequências lógicas.
+9. **Questões e Exercícios**:
+   - Se o professor ditar uma questão, exercício ou caso hipotético, **ISOLE-O** em um bloco de citação:
+   > **Questão:** O prazo para agravo de petição é de...
+   - Separe claramente o enunciado da questão da explicação/gabarito subsequente.
+10. **Destaques com Emojis** (use com moderação para facilitar escaneamento visual):
+   - 💡 **Dica de Prova** ou **Observação Pedagógica**
+   - ⚠️ **Atenção** ou **Cuidado** (pegadinhas, pontos polêmicos)
+   - 📌 **Ponto Importante** (conceitos-chave)
+   - Exemplo: `> 💡 **Dica de Prova:** Esse tema caiu 3 vezes na PGM-Rio.`"""
 
     PROMPT_STRUCTURE_FIDELIDADE = """## 📝 ESTRUTURA E TÍTULOS
 - Mantenha a sequência exata das falas.
 - Use Títulos Markdown (##, ###) para organizar os tópicos, se identificáveis.
 - **NÃO crie subtópicos para frases soltas.**
-- Use títulos **APENAS** para mudanças reais de assunto."""
+- Use títulos **APENAS** para mudanças reais de assunto.
+- Se uma frase parece um título mas não inicia uma nova seção, mantenha como texto normal e use **negrito** se necessário."""
 
     PROMPT_TABLE_FIDELIDADE = """## 📊 QUADRO-SÍNTESE (CAPTURA COMPLETA)
 Ao final de cada **bloco temático relevante**, produza um quadro-síntese didático.
 
-1) Adicione um subtítulo de fechamento (use o título do tópico):
-#### 📋 Quadro-síntese — [título do tópico]
+1) Adicione um subtítulo de fechamento **adaptado ao caso concreto**:
+- Comece sempre com `#### 📋` (obrigatório para organização interna).
+- Depois, use um rótulo contextual específico do tema (evite repetir sempre "Quadro-síntese").
+- **Preferência:** use o título original do tópico como base e apenas complemente/especialize quando necessário.
+- Exemplo: `#### 📋 Matriz comparativa — Competência tributária municipal`
+- Exemplo: `#### 📋 Requisitos essenciais — Improbidade administrativa`
 
 2) Em seguida, gere UMA tabela Markdown (sem placeholders):
 
@@ -4866,15 +5416,20 @@ Ao final de cada **bloco temático relevante**, produza um quadro-síntese didá
 3. **Concisão:** máximo ~35–45 palavras por célula.
 4. **Compatibilidade:** PROIBIDO usar o caractere `|` dentro de células. Evite quebras de linha dentro das células.
 5. **Sem código:** PROIBIDO blocos de código em células.
-6. **Posicionamento:** o quadro vem **APENAS AO FINAL** do bloco concluído, **NUNCA** no meio de explicação."""
+6. **Posicionamento:** o quadro vem **APENAS AO FINAL** do bloco concluído, **NUNCA** no meio de explicação.
+7. **Lastro obrigatório no texto:** a tabela deve refletir somente itens **já tratados anteriormente** no texto do mesmo bloco temático. **NÃO introduza** informação nova na tabela."""
 
     PROMPT_TABLE_FIDELIDADE += """
 
 ## 🎯 TABELA 2 (QUANDO APLICÁVEL): COMO A BANCA COBRA / PEGADINHAS
 Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **pegadinhas**, “isso cai”, “cuidado” ou exemplos de como a questão aparece:
 
-1) Adicione um subtítulo:
-#### 🎯 Tabela — Como a banca cobra / pegadinhas
+1) Adicione um subtítulo **adaptado ao caso concreto**:
+- Comece sempre com `#### 🎯` (obrigatório para organização interna).
+- Depois, use um rótulo contextual de prova/armadilha para o tema.
+- **Preferência:** use o título original do tópico/bloco como base e apenas complemente para destacar cobrança, risco ou pegadinha.
+- Exemplo: `#### 🎯 Armadilhas de prova — Controle de constitucionalidade`
+- Exemplo: `#### 🎯 Como a banca explora o tema — Imunidades tributárias`
 
 2) Gere UMA tabela Markdown:
 | Como a banca cobra | Resposta correta (curta) | Erro comum / pegadinha |
@@ -4885,6 +5440,7 @@ Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **
 - 1 linha por pegadinha/dica/forma de cobrança mencionada.
 - Respostas objetivas (1–2 frases curtas por célula).
 - PROIBIDO usar `|` dentro de células e evitar quebras de linha dentro das células.
+- **Somente com base no já exposto:** não inclua na tabela de pegadinhas conteúdo que não tenha sido explicado antes no mesmo bloco.
 - Se não houver material de prova no bloco, **NÃO crie** esta Tabela 2."""
 
     # --- AUDIÊNCIA MODE ---
@@ -5056,6 +5612,48 @@ VOCÊ É UM REDATOR TÉCNICO FORENSE.
     PROMPT_TABLE_DEPOIMENTO = """## 📌 OBSERVAÇÃO SOBRE TABELAS
 Não gere quadros-síntese automaticamente."""
 
+    # --- SIMULADO / CORREÇÃO DE PROVA ADDON ---
+    # Injetado dinamicamente quando o mapeamento detecta tipo SIMULADO ou CORREÇÃO.
+    PROMPT_SIMULADO_ADDON = """
+## 📝 REGRAS ESPECIAIS: CORREÇÃO DE QUESTÕES / SIMULADO
+
+Este material contém **correção de questões** ou **simulado**. Aplique as regras abaixo ALÉM das regras gerais:
+
+### ESTRUTURA POR QUESTÃO (OBRIGATÓRIO)
+Cada questão deve seguir a estrutura:
+```
+## N. Questão X: [Título descritivo] — [Área do Direito]
+
+### N.1. Enunciado
+> [Texto integral da questão em blockquote]
+
+### N.2. Fundamentação / Análise
+[Explicação completa do professor: doutrina, jurisprudência, artigos citados]
+
+### N.3. Resposta / Gabarito
+[Resposta esperada, espelho de correção, pontuação se mencionada]
+```
+
+### REGRAS CRÍTICAS:
+1. **PRESERVE O ENUNCIADO INTEGRAL** da questão em blockquote (`>`). NUNCA resuma o enunciado.
+2. **SEPARE CLARAMENTE** enunciado, fundamentação e resposta — mesmo que o professor misture na explicação oral.
+3. **PRESERVE TODAS as alternativas** (A, B, C, D, E) quando existirem, indicando a correta.
+4. **Pontuação e critérios**: Se o professor mencionar pontuação, peso ou critérios de correção, capture em uma linha destacada:
+   > 📌 **Pontuação:** X pontos | **Critérios:** ...
+5. **Espelho de Correção**: Se o professor detalhar o espelho, formate como lista numerada com os pontos esperados.
+6. **Gabarito de Múltipla Escolha**: Se for questão objetiva, destaque:
+   > ✅ **Gabarito:** Alternativa **C** — [justificativa curta]
+7. **Referências cruzadas**: Se o professor comparar com questões anteriores ou de outras bancas, preserve a referência.
+8. **NÃO FUNDA questões diferentes** em uma única seção — cada questão é um bloco ## independente.
+
+### TABELA DE GABARITO (ao final do documento)
+Se houver múltiplas questões, gere uma tabela consolidada ao final:
+
+#### 📋 Gabarito Consolidado
+| Questão | Área do Direito | Gabarito / Resposta-chave | Fundamento principal |
+| :--- | :--- | :--- | :--- |
+"""
+
     # --- SHARED FOOTER (Anti-Duplication) ---
     PROMPT_FOOTER = """## ⚠️ REGRA ANTI-DUPLICAÇÃO (CRÍTICA)
 Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
@@ -5119,6 +5717,10 @@ N. Considerações Finais / Dúvidas
 3. **Mantenha a ORDEM** cronológica da transcrição
 4. **Mapeie do INÍCIO ao FIM** — não omita partes
 5. **Identifique a ÁREA DO DIREITO** de cada bloco quando possível
+6. **PREFIRA SUBTÓPICOS (1.1.) a novos tópicos (2.)**: Abra novo tópico de nível 1 SOMENTE quando o macroassunto mudar de verdade (ex.: de Direito Administrativo para Direito Civil). Aspectos, institutos e marcos legais DENTRO do mesmo macroassunto devem ser subtópicos (1.1., 1.2., etc.), NUNCA tópicos de nível 1 separados.
+7. **ANTI-FRAGMENTAÇÃO**: Se o professor trata 4+ aspectos de um tema, todos devem ser subtópicos de um único tema-mãe. Exemplo correto: `2. Execução Fiscal` com `2.1. Procedimento`, `2.2. Citação`, `2.3. Exceção de Pré-Executividade`. Exemplo ERRADO: `2. Execução Fiscal`, `3. Procedimento`, `4. Citação`.
+8. **TÍTULOS SÃO RÓTULOS, NÃO FALAS**: Os títulos devem ser rótulos descritivos curtos (máx 8 palavras), NUNCA trechos literais da fala do professor. Exemplo ERRADO: "1. Já estávamos conversando aqui antes de começar". Exemplo CORRETO: "1. Introdução e Apresentação".
+9. **SAUDAÇÕES E LOGÍSTICA → "Introdução"**: Boas-vindas, apresentação pessoal, ajustes técnicos → agrupar sob "Introdução" ou "Apresentação e Contextualização", nunca com a fala literal como título.
 
 ## 🏛️ REGRA ESPECIAL: MARCOS LEGAIS (v2.17)
 Quando identificar marcos legais importantes, crie subtópicos específicos:
@@ -5181,8 +5783,7 @@ VOCÊ É UM EXCELENTÍSSIMO REDATOR TÉCNICO E DIDÁTICO.
 1. **NÃO RESUMA**. O tamanho do texto de saída deve ser próximo ao de entrada.
 2. **NÃO OMITA** informações, exemplos, casos concretos ou explicações.
 3. **NÃO ALTERE** o significado ou a sequência das ideias e das falas do professor.
-4. **NÃO CRIE MUITOS BULLET POINTS**. PREFIRA UM FORMATO DE MANUAL DIDÁTICO, não checklist.
-5. **NÃO USE NEGRITOS EM EXCESSO**. Use apenas para conceitos-chave realmente importantes.
+
 
 ## ❌ PRESERVE OBRIGATORIAMENTE
 - **NÚMEROS EXATOS**: Artigos, Leis, Súmulas, Julgados (REsp/Informativos). **NUNCA OMITA NÚMEROS DE LEIS OU SÚMULAS**.
@@ -5218,7 +5819,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
    - **TRANSFORME** perguntas retóricas em afirmações quando possível.
 3. **Coesão**: Utilize conectivos para tornar o texto mais fluido. Aplique pontuação adequada.
 4. **Legibilidade**:
-   - **PARÁGRAFOS CURTOS**: máximo **3-6 linhas visuais** por parágrafo.
+   - **PARÁGRAFOS CURTOS**: máximo **3-5 linhas visuais** por parágrafo.
    - **QUEBRE** blocos de texto maciços em parágrafos menores.
    - Seja didático sem perder detalhes e conteúdo.
 5. **Formatação Didática** (use com moderação):
@@ -5235,8 +5836,12 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 ## 📊 QUADRO-SÍNTESE (CAPTURA COMPLETA)
 Ao final de cada **bloco temático relevante**, produza um quadro-síntese didático.
 
-1) Adicione um subtítulo de fechamento (use o título do tópico):
-#### 📋 Quadro-síntese — [título do tópico]
+1) Adicione um subtítulo de fechamento **adaptado ao caso concreto**:
+- Comece sempre com `#### 📋` (obrigatório para organização interna).
+- Depois, use um rótulo contextual específico do tema (evite repetir sempre "Quadro-síntese").
+- **Preferência:** use o título original do tópico como base e apenas complemente/especialize quando necessário.
+- Exemplo: `#### 📋 Matriz comparativa — Competência tributária municipal`
+- Exemplo: `#### 📋 Requisitos essenciais — Improbidade administrativa`
 
 2) Em seguida, gere UMA tabela Markdown (sem placeholders):
 
@@ -5254,8 +5859,12 @@ Ao final de cada **bloco temático relevante**, produza um quadro-síntese didá
 ## 🎯 TABELA 2 (QUANDO APLICÁVEL): COMO A BANCA COBRA / PEGADINHAS
 Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **pegadinhas**, “isso cai”, “cuidado”, “tema recorrente” ou exemplos de como a questão aparece:
 
-1) Adicione um subtítulo:
-#### 🎯 Tabela — Como a banca cobra / pegadinhas
+1) Adicione um subtítulo **adaptado ao caso concreto**:
+- Comece sempre com `#### 🎯` (obrigatório para organização interna).
+- Depois, use um rótulo contextual de prova/armadilha para o tema.
+- **Preferência:** use o título original do tópico/bloco como base e apenas complemente para destacar cobrança, risco ou pegadinha.
+- Exemplo: `#### 🎯 Armadilhas de prova — Controle de constitucionalidade`
+- Exemplo: `#### 🎯 Como a banca explora o tema — Imunidades tributárias`
 
 2) Gere UMA tabela Markdown:
 | Como a banca cobra | Resposta correta (curta) | Erro comum / pegadinha |
@@ -5293,7 +5902,7 @@ VOCÊ É UM EXCELENTÍSSIMO REDATOR JURÍDICO E DIDÁTICO.
 1. **NÃO RESUMA**. O tamanho do texto de saída deve ser próximo ao de entrada.
 2. **NÃO OMITA** informações, exemplos, casos concretos ou explicações.
 3. **NÃO ALTERE** o significado ou a sequência das ideias.
-4. **NÃO CRIE PARÁGRAFOS LONGOS**. Máximo 3-6 linhas visuais por parágrafo.
+4. **NÃO CRIE PARÁGRAFOS LONGOS**. Máximo 3-5 linhas visuais por parágrafo.
 
 ## ❌ PRESERVE OBRIGATORIAMENTE
 - **IDENTIFICAÇÃO DE FALANTES**: Se houver SPEAKER A/B/C ou similar, identifique o professor pelo contexto (quando ele se apresentar: "Eu sou o professor João", "Meu nome é Maria"). Substitua "SPEAKER X" pelo nome identificado. Se não identificar, use "Professor" ou "Palestrante".
@@ -5326,7 +5935,7 @@ Aulas presenciais frequentemente contêm informações valiosas sobre:
 2. **Limpeza**: Remova gírias, vocativos e cacoetes ("né", "tipo assim", "então", "meu irmão", "cara", "mano", "galera") e vícios de oralidade. Se houver parentesco factual, reescreva de forma formal.
 3. **Coesão**: Use conectivos e pontuação adequada para tornar o texto fluido.
 4. **Legibilidade Visual** (OBRIGATÓRIO):
-   - **PARÁGRAFOS CURTOS**: máximo **4-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
+   - **PARÁGRAFOS CURTOS**: máximo **3-5 linhas visuais** por parágrafo. **QUEBRE SEMPRE.**
    - **RECUOS COM MARCADORES**: Use `>` para citações, destaques ou observações importantes.
    - **NEGRITO MODERADO**: Destaque conceitos-chave com **negrito**, mas sem exagero.
    - **ITÁLICO**: Use para termos em latim, expressões estrangeiras ou ênfase leve.
@@ -5358,8 +5967,12 @@ Para garantir legibilidade superior:
 Ao final de CADA tópico principal (## ou ###), faça um fechamento didático com UM quadro-síntese.
 SEMPRE que houver diferenciação de conceitos, prazos, procedimentos, requisitos ou regras, o quadro é OBRIGATÓRIO.
 
-1) Adicione um subtítulo de fechamento (use o título do tópico):
-#### 📋 Quadro-síntese — [título do tópico]
+1) Adicione um subtítulo de fechamento **adaptado ao caso concreto**:
+- Comece sempre com `#### 📋` (obrigatório para organização interna).
+- Depois, use um rótulo contextual específico do tema (evite repetir sempre "Quadro-síntese").
+- **Preferência:** use o título original do tópico como base e apenas complemente/especialize quando necessário.
+- Exemplo: `#### 📋 Matriz comparativa — Competência tributária municipal`
+- Exemplo: `#### 📋 Requisitos essenciais — Improbidade administrativa`
 
 2) Em seguida, gere UMA tabela Markdown (sem placeholders):
 
@@ -5377,8 +5990,12 @@ SEMPRE que houver diferenciação de conceitos, prazos, procedimentos, requisito
 ## 🎯 TABELA 2 (QUANDO APLICÁVEL): COMO A BANCA COBRA / PEGADINHAS
 Se (e somente se) o bloco contiver **dicas de prova**, menções a **banca**, **pegadinhas**, “isso cai”, “cuidado”, “tema recorrente” ou exemplos de como a questão aparece:
 
-1) Adicione um subtítulo:
-#### 🎯 Tabela — Como a banca cobra / pegadinhas
+1) Adicione um subtítulo **adaptado ao caso concreto**:
+- Comece sempre com `#### 🎯` (obrigatório para organização interna).
+- Depois, use um rótulo contextual de prova/armadilha para o tema.
+- **Preferência:** use o título original do tópico/bloco como base e apenas complemente para destacar cobrança, risco ou pegadinha.
+- Exemplo: `#### 🎯 Armadilhas de prova — Controle de constitucionalidade`
+- Exemplo: `#### 🎯 Como a banca explora o tema — Imunidades tributárias`
 
 2) Gere UMA tabela Markdown:
 | Como a banca cobra | Resposta correta (curta) | Erro comum / pegadinha |
@@ -5534,6 +6151,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         self,
         mode: str = "APOSTILA",
         custom_style_override: str = None,
+        custom_prompt_scope: str = "tables_only",
         disable_tables: bool = False,
         allow_indirect: bool = False,
         allow_summary: bool = False,
@@ -5636,16 +6254,15 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         footer = self.PROMPT_FOOTER
 
         custom_override = (custom_style_override or "").strip()
-        if custom_override and disable_tables and mode.upper() in {"APOSTILA", "AUDIENCIA", "REUNIAO"}:
+        scope = (custom_prompt_scope or "tables_only").lower()
+
+        if custom_override and disable_tables and scope == "tables_only":
             print(
-                f"{Fore.YELLOW}⚠️  Tabelas/extras desabilitados: ignorando prompt customizado (ele só afeta tabelas/extras nesses modos).{Style.RESET_ALL}"
+                f"{Fore.YELLOW}⚠️  Tabelas/extras desabilitados: ignorando prompt customizado (ele só afeta tabelas/extras neste modo).{Style.RESET_ALL}"
             )
             custom_override = ""
 
         if custom_override:
-            # Guardrails: custom prompt is intended to be safe and not fight with structure.
-            # - For APOSTILA: treat custom prompt as TABLE/EXTRAS customization only (keep original tone/style/structure).
-            # - For other modes: keep legacy behavior (override STYLE+TABLE layers).
             custom_lower = custom_override.lower()
 
             # Warn only for "structural" headings (#/##/###). ####+ is acceptable for intra-section extras.
@@ -5660,9 +6277,14 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     f"Para evitar conflitos, restrinja o custom a TABELAS e EXTRAS (resumo/fluxograma/mapa mental/questionário).{Style.RESET_ALL}"
                 )
 
-            if mode.upper() in {"APOSTILA", "AUDIENCIA", "REUNIAO"}:
-                label = "APOSTILA" if mode.upper() == "APOSTILA" else ("AUDIÊNCIA" if mode.upper() == "AUDIENCIA" else "REUNIÃO")
-                print(f"{Fore.YELLOW}🧩 Usando PROMPT CUSTOMIZADO ({label}: apenas tabelas/extras) ({len(custom_override):,} chars)")
+            if scope == "tables_only":
+                # tables_only (padrão para TODOS os modos, incluindo FIDELIDADE):
+                # custom_prompt afeta SOMENTE tabelas/extras, preservando estilo/estrutura.
+                mode_label = {
+                    "APOSTILA": "APOSTILA", "AUDIENCIA": "AUDIÊNCIA",
+                    "REUNIAO": "REUNIÃO", "FIDELIDADE": "FIDELIDADE",
+                }.get(mode.upper(), mode.upper())
+                print(f"{Fore.YELLOW}🧩 Usando PROMPT CUSTOMIZADO ({mode_label}: apenas tabelas/extras) ({len(custom_override):,} chars)")
                 table_with_custom = (
                     f"{table}\n\n"
                     "## 🧩 PERSONALIZAÇÕES (TABELAS / EXTRAS)\n"
@@ -5677,10 +6299,13 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     f"{custom_override}\n"
                 )
                 composed = f"{head}\n\n{style}\n\n{structure}\n\n{table_with_custom}\n\n{footer}"
-            else:
-                # Legacy: User provides custom style+table instructions
-                print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO de estilo/tabela ({len(custom_override):,} chars)")
+            elif scope == "style_and_tables":
+                # Avançado (opt-in explícito): substitui STYLE+TABLE layers
+                print(f"{Fore.YELLOW}🎨 Usando PROMPT CUSTOMIZADO avançado de estilo+tabela ({len(custom_override):,} chars)")
                 composed = f"{head}\n\n{custom_override}\n\n{structure}\n\n{table}\n\n{footer}"
+            else:
+                # Fallback seguro para scope desconhecido → tables_only
+                composed = f"{head}\n\n{style}\n\n{structure}\n\n{table}\n\n{footer}"
         else:
             # Use default components
             composed = f"{head}\n\n{style}\n\n{structure}\n\n{table}\n\n{footer}"
@@ -6327,7 +6952,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             try:
                 self._ensure_diarization_available_or_raise()
                 diarization_pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-community-1",
                     token=token
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -6648,7 +7273,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             try:
                 print("   🗣️  Iniciando Diarização (Pyannote)...")
                 pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-community-1",
                     token=token
                 )
                 
@@ -6911,7 +7536,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         if self._diarization_enabled and Pipeline and "torch" in globals() and token:
             try:
                 pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-community-1",
                     token=token
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -7040,7 +7665,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         if self._diarization_enabled and Pipeline and "torch" in globals() and token:
             try:
                 pipeline = Pipeline.from_pretrained(
-                    "pyannote/speaker-diarization-3.1",
+                    "pyannote/speaker-diarization-community-1",
                     token=token
                 )
                 device = "mps" if torch.backends.mps.is_available() else "cpu"
@@ -8118,7 +8743,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         v2.27: Detecta se o texto termina com uma tabela/quadro aberto mas não concluído.
         
         Casos detectados:
-        1. Título de quadro-síntese (#### 📋 Quadro-síntese) sem tabela depois
+        1. Título de tabela principal (#### 📋 [rótulo contextual]) sem tabela depois
         2. Tabela iniciada mas incompleta (menos linhas que o esperado)
         
         Returns:
@@ -8130,9 +8755,9 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         lines = text.strip().splitlines()
         last_50 = lines[-50:] if len(lines) > 50 else lines
         
-        # Caso 1: Título de quadro-síntese sem tabela
+        # Caso 1: Título de tabela principal (📋) sem tabela
         for i, line in enumerate(last_50):
-            if re.match(r'^#{3,5}\s*📋.*[Qq]uadro', line):
+            if re.match(r'^#{3,5}\s*📋', line):
                 # Há um título de quadro, verifica se tabela foi gerada depois
                 remaining = last_50[i+1:]
                 has_table = any('|' in l and l.strip().startswith('|') for l in remaining)
@@ -8141,7 +8766,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                     return {
                         "needs_table_continuation": True,
                         "open_section_title": section_title,
-                        "context_hint": f"\n\n⚠️ **CONTINUAÇÃO OBRIGATÓRIA**: O chunk anterior terminou com o título '{section_title}' mas SEM a tabela correspondente. Você DEVE gerar a tabela Markdown para esse quadro-síntese ANTES de qualquer novo conteúdo."
+                        "context_hint": f"\n\n⚠️ **CONTINUAÇÃO OBRIGATÓRIA**: O chunk anterior terminou com o título '{section_title}' mas SEM a tabela correspondente. Você DEVE gerar a tabela Markdown desse bloco ANTES de qualquer novo conteúdo."
                     }
         
         # Caso 2: Última linha é tabela (pode precisar continuação se poucos dados)
@@ -8287,11 +8912,38 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             last_pipes = data_rows[-1].count("|")
             return header_pipes >= 2 and last_pipes < header_pipes
 
+        def _has_missing_table(text: str) -> bool:
+            """v2.41: Detecta se o output tem títulos de quadro-síntese (📋) sem tabela correspondente."""
+            if not text:
+                return False
+            lines = text.splitlines()
+            i = 0
+            while i < len(lines):
+                line = lines[i].strip()
+                # Detecta título de quadro-síntese
+                if re.match(r'^#{3,5}\s*📋', line):
+                    # Procura tabela nas próximas 5 linhas não-vazias
+                    found_table = False
+                    for j in range(i + 1, min(i + 8, len(lines))):
+                        next_line = lines[j].strip()
+                        if next_line.startswith('|') and '|' in next_line[1:]:
+                            found_table = True
+                            break
+                        if next_line.startswith('#'):
+                            break  # Novo heading sem tabela
+                    if not found_table:
+                        return True
+                i += 1
+            return False
+
         async def _retry_incomplete_table(result_text: str):
             incomplete_table = _has_incomplete_table(result_text or "")
-            if incomplete_table and not table_retry and depth < 2 and len(chunk_text) > 4000:
-                retry_tokens = max_output_tokens_override or 12000
-                print(f"{Fore.MAGENTA}✂️ Tabela incompleta detectada no Chunk {idx}. Reprocessando com mais tokens...")
+            missing_table = _has_missing_table(result_text or "")
+            needs_retry = incomplete_table or missing_table
+            if needs_retry and not table_retry and depth < 2 and len(chunk_text) > 4000:
+                reason = "incompleta" if incomplete_table else "ausente (título 📋 sem tabela)"
+                retry_tokens = max_output_tokens_override or 32000
+                print(f"{Fore.MAGENTA}✂️ Tabela {reason} no Chunk {idx}. Reprocessando com mais tokens...")
                 retry_result = await self.process_chunk_async(
                     chunk_text,
                     idx=idx,
@@ -8370,7 +9022,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         try:
             # Configuração de Segurança (Block None) e Parâmetros
-            max_output_tokens = max_output_tokens_override or 16384  # v2.27: Aumentado de 8k para 16k
+            max_output_tokens = max_output_tokens_override or 32000  # v2.41: Aumentado de 16k para 32k (alinhado com format_transcription_gemini)
             safety_config = [
                 types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
                 types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
@@ -8549,7 +9201,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
             # Executa chamada síncrona em thread separada com timeout
             start_time = time.time()
-            timeout_seconds = int(os.getenv("IUDEX_GEMINI_TIMEOUT_SECONDS", "300"))
+            timeout_seconds = int(os.getenv("IUDEX_GEMINI_TIMEOUT_SECONDS", "120"))
             try:
                 response = await asyncio.wait_for(asyncio.to_thread(call_gemini), timeout=timeout_seconds)
             except asyncio.TimeoutError as e:
@@ -9676,7 +10328,8 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
 
     async def map_structure(self, full_text):
         """Creates a global structure skeleton to guide the formatting."""
-        print(f"{Fore.CYAN}🗺️  Mapeando estrutura global do documento...")
+        _map_t0 = time.time()
+        print(f"{Fore.CYAN}🗺️  Mapeando estrutura global do documento... [start={time.strftime('%H:%M:%S')}]")
         
         full_text = full_text or ""
         max_single = int(os.getenv("IUDEX_MAP_MAX_SINGLE_CHARS", self.MAP_MAX_SINGLE_CHARS))
@@ -9867,19 +10520,27 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     parts.append(mapped)
 
             if not parts:
+                _elapsed = time.time() - _map_t0
+                print(f"{Fore.YELLOW}🗺️  map_structure finalizado SEM resultado em {_elapsed:.1f}s")
                 return None
             if len(parts) == 1:
-                return parts[0]
+                _elapsed = time.time() - _map_t0
+                print(f"{Fore.GREEN}🗺️  map_structure OK em {_elapsed:.1f}s (1 parte)")
+                return _sanitize_mapped_structure(parts[0])
 
             merged = _merge_structure_maps(parts)
             if merged:
-                print(f"{Fore.CYAN}   🧩 Estrutura global consolidada (chunks merged).")
-                return merged
+                _elapsed = time.time() - _map_t0
+                print(f"{Fore.CYAN}   🧩 Estrutura global consolidada (chunks merged) em {_elapsed:.1f}s.")
+                return _sanitize_mapped_structure(merged)
             # Fallback: concatena (melhor do que perder estrutura)
-            return "\n\n".join(parts).strip()
+            _elapsed = time.time() - _map_t0
+            print(f"{Fore.CYAN}🗺️  map_structure OK (concat fallback) em {_elapsed:.1f}s")
+            return _sanitize_mapped_structure("\n\n".join(parts).strip())
         except Exception as e:
-            print(f"{Fore.YELLOW}⚠️  Falha no mapeamento via {self.provider}: {e}")
-            
+            _elapsed = time.time() - _map_t0
+            print(f"{Fore.YELLOW}⚠️  Falha no mapeamento via {self.provider} após {_elapsed:.1f}s: {e}")
+
             # Fallback Universal
             if self.openai_client:
                 print(f"{Fore.CYAN}🤖 Fallback: Mapeando com OpenAI ({self.openai_model})...")
@@ -9893,13 +10554,16 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                     )
                     _record_openai_usage(response, model=self.openai_model)
                     content = response.choices[0].message.content.replace('```markdown', '').replace('```', '')
-                    print(f"{Fore.GREEN}   ✅ Estrutura mapeada com sucesso (OpenAI Fallback).")
-                    return content
+                    _elapsed = time.time() - _map_t0
+                    print(f"{Fore.GREEN}   ✅ Estrutura mapeada (OpenAI Fallback) em {_elapsed:.1f}s.")
+                    return _sanitize_mapped_structure(content)
                 except Exception as e_openai:
-                    print(f"{Fore.RED}❌ Falha também no OpenAI: {e_openai}")
+                    _elapsed = time.time() - _map_t0
+                    print(f"{Fore.RED}❌ Falha também no OpenAI após {_elapsed:.1f}s: {e_openai}")
                     return None
             else:
-                 print(f"{Fore.RED}   ❌ Erro ao mapear estrutura e sem fallback.")
+                 _elapsed = time.time() - _map_t0
+                 print(f"{Fore.RED}   ❌ Erro ao mapear estrutura e sem fallback ({_elapsed:.1f}s).")
                  return None
 
     async def _ai_reassign_tables(self, texto: str, *, max_tables: int = 3) -> tuple[str, list[str]]:
@@ -10040,14 +10704,27 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         aai_key = os.getenv("ASSEMBLYAI_API_KEY", "").strip()
         if aai_primary and aai_key:
             return True, "AssemblyAI (externo)"
-        # Fallback: verificar diarização local (pyannote)
+        # Verificar diarização local (pyannote)
+        if Pipeline and self._get_hf_token():
+            return True, "pyannote (local)"
+        # Fallback: RunPod diarize endpoint
+        runpod_diarize = os.getenv("RUNPOD_DIARIZE_ENDPOINT_ID", "").strip()
+        runpod_key = os.getenv("RUNPOD_API_KEY", "").strip()
+        if runpod_diarize and runpod_key:
+            return True, "RunPod (externo)"
+        # Fallback: AssemblyAI (mesmo não sendo primário, pode fazer diarização)
+        if aai_key:
+            return True, "AssemblyAI (externo, não-primário)"
+        # Nenhum provider disponível
         if not Pipeline:
             return False, "pyannote.audio não instalado"
-        if "torch" not in globals():
-            return False, "torch não instalado"
         if not self._get_hf_token():
             return False, "HUGGING_FACE_TOKEN/HF_TOKEN não configurado"
-        return True, ""
+        return False, "nenhum provider de diarização disponível"
+
+    def _local_diarization_available(self) -> bool:
+        """Verifica se diarização LOCAL (pyannote) está disponível."""
+        return bool(Pipeline and self._get_hf_token())
 
     def _ensure_diarization_available_or_raise(self) -> None:
         ok, reason = self._diarization_available()
@@ -10115,9 +10792,26 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
 
         if enabled:
             self._ensure_diarization_available_or_raise()
-            if high_accuracy:
-                return self.transcribe_beam_with_segments(audio_path)
-            return self.transcribe_with_segments(audio_path)
+            if self._local_diarization_available():
+                # Diarização local via pyannote
+                if high_accuracy:
+                    return self.transcribe_beam_with_segments(audio_path)
+                return self.transcribe_with_segments(audio_path)
+            else:
+                # Diarização disponível externamente (RunPod/AAI) — transcrever sem diarização local,
+                # o chamador (transcription_service) fará a diarização via provider externo
+                print(f"{Fore.YELLOW}⚠️  pyannote indisponível localmente — diarização será feita externamente")
+                original_diarization_enabled = self._diarization_enabled
+                try:
+                    self._diarization_enabled = False
+                    if high_accuracy:
+                        result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size())
+                    else:
+                        result = self.transcribe_with_segments(audio_path)
+                    result["_needs_external_diarization"] = True
+                    return result
+                finally:
+                    self._diarization_enabled = original_diarization_enabled
 
         # Sem diarização: ainda precisamos obter words para o player
         # Usar transcribe_with_segments mas forçar diarização desabilitada
@@ -10134,27 +10828,36 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
 
     def renumber_headings(self, text):
         """
-        Post-processing: Enforces strictly sequential numbering (1, 2, 3...) 
+        Post-processing: Enforces strictly sequential numbering (1, 2, 3...)
         for H2/H3/H4 headers using a STACK-BASED approach for correct nesting.
-        
+
         v2.16: Fixed to properly reset child counters when parent level changes.
+        v2.41: Added semantic title merge (SequenceMatcher) to fuse near-duplicates
+               from chunk boundaries — prevents title inflation.
         """
-        print(f"{Fore.CYAN}🔢 Renumerando tópicos sequencialmente (Stack-Based v2.16)...")
+        from difflib import SequenceMatcher
+
+        print(f"{Fore.CYAN}🔢 Renumerando tópicos sequencialmente (Stack-Based v2.41)...")
         lines = text.split('\n')
         new_lines = []
-        
+
         # Stack-based counters: [H1_count, H2_count, H3_count, H4_count]
         # Index 0 = H1 (usually title, skip), Index 1 = H2, etc.
         counters = [0, 0, 0, 0, 0]  # Extra slot for safety
-        
+
         # Keywords to skip numbering (summary tables, etc.)
         skip_keywords = ['resumo', 'quadro', 'tabela', 'síntese', 'esquema', 'bibliografia', 'referências', 'sumário']
-        
+
         # Emoji pattern to detect decorative headers like "## 📋 Sumário"
         emoji_pattern = re.compile(r'^[\U0001F300-\U0001F9FF]')
         seen_h2_numbers = set()
         level_adjustments = 0
-        
+
+        # v2.41: Semantic merge tracking
+        last_h2_text = ""
+        last_h3_text = ""
+        merge_count = 0
+
         for line in lines:
             stripped = line.strip()
             
@@ -10192,19 +10895,37 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 
                 # Clean existing numbers from title (e.g., "1.2.3. Title" -> "Title")
                 title_text = re.sub(r'^(\d+(\.\d+)*\.?\s*)+', '', raw_title).strip()
-                
+
                 # Skip H1 (document title) - just clean and pass through
                 if level == 1:
                     new_lines.append(f"# {title_text}")
                     continue
-                
+
+                # v2.41: Semantic merge — fuse near-duplicate titles from chunk boundaries
+                title_norm = re.sub(r'\s*\(Continuação\)\s*$', '', title_text, flags=re.IGNORECASE).strip().lower()
+                if level == 2 and last_h2_text:
+                    ratio = SequenceMatcher(None, title_norm, last_h2_text).ratio()
+                    if ratio > 0.85:
+                        merge_count += 1
+                        continue  # skip duplicate — content flows under existing H2
+                if level == 3 and last_h3_text:
+                    ratio = SequenceMatcher(None, title_norm, last_h3_text).ratio()
+                    if ratio > 0.85:
+                        merge_count += 1
+                        continue
+                if level == 2:
+                    last_h2_text = title_norm
+                    last_h3_text = ""  # reset H3 tracker when H2 changes
+                elif level == 3:
+                    last_h3_text = title_norm
+
                 # Check if this header should be skipped from numbering
                 title_lower = title_text.lower()
                 should_skip = (
                     any(k in title_lower for k in skip_keywords) or
                     emoji_pattern.match(title_text)  # Headers starting with emoji
                 )
-                
+
                 if should_skip:
                     new_lines.append(f"{'#' * level} {title_text}")
                 else:
@@ -10225,6 +10946,8 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         
         if level_adjustments:
             print(f"{Fore.YELLOW}   ℹ️  Ajustes de nível aplicados: {level_adjustments}")
+        if merge_count:
+            print(f"{Fore.YELLOW}   🔄 Títulos duplicados mesclados: {merge_count}")
         print(f"{Fore.GREEN}   ✅ Renumeração concluída: {counters[2]} seções H2, {counters[3]} H3, {counters[4]} H4")
         return '\n'.join(new_lines)
 
@@ -10291,14 +11014,31 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 formatted_headers.append((level, title_normalized, title))
         
         # Extract expected structure from global mapping
+        # v2.41: Support both markdown (## Title) and numbered (1. Title, 1.1. Title) formats
         expected_headers = []
         for line in global_structure.split('\n'):
-            match = re.match(r'^(#{2,3})\s+(.+)$', line.strip())
-            if match:
-                level = len(match.group(1))
-                title = match.group(2).strip()
+            stripped = line.strip()
+            # Try markdown format first: ## Title, ### Title
+            md_match = re.match(r'^(#{2,3})\s+(.+)$', stripped)
+            if md_match:
+                level = len(md_match.group(1))
+                title = md_match.group(2).strip()
+                # Remove ABRE/FECHA anchors if present
+                title = re.sub(r'\s*\|\s*(?:ABRE|FECHA):\s*["\'][^"\']*["\']', '', title).strip()
                 title_normalized = title.lower()
                 expected_headers.append((level, title_normalized, title))
+                continue
+            # Try numbered format: 1. Title (level 2), 1.1. Title (level 3), 1.1.1. Title (level 4)
+            num_match = re.match(r'^(\d+(?:\.\d+)*)\.\s+(.+)$', stripped)
+            if num_match:
+                depth = num_match.group(1).count('.') + 1  # 1. = depth 1 → H2, 1.1. = depth 2 → H3
+                level = min(depth + 1, 4)  # map to markdown level: depth 1→H2, depth 2→H3, depth 3→H4
+                title = num_match.group(2).strip()
+                # Remove ABRE/FECHA anchors if present
+                title = re.sub(r'\s*\|\s*(?:ABRE|FECHA):\s*["\'][^"\']*["\']', '', title).strip()
+                title_normalized = title.lower()
+                if level <= 3:  # Only compare H2 and H3 for audit
+                    expected_headers.append((level, title_normalized, title))
         
         # Find duplicates in formatted headers
         seen_titles = {}
@@ -10344,6 +11084,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         output_folder,
         mode="APOSTILA",
         custom_prompt=None,
+        custom_prompt_scope: str = "tables_only",
         dry_run=False,
         progress_callback=None,
         skip_audit=False,
@@ -10354,6 +11095,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         allow_indirect: bool = False,
         allow_summary: bool = False,
         disable_tables: bool = False,
+        segment_timeout_seconds: Optional[int] = None,
     ):
         """
         Orquestrador Principal com Checkpoint e Robustez (Sequential Mode)
@@ -10363,10 +11105,9 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             video_name: Nome do vídeo
             output_folder: Pasta de saída
             mode: "APOSTILA", "FIDELIDADE", "AUDIENCIA", "REUNIAO" ou "DEPOIMENTO"
-            custom_prompt: Campo de customização opcional.
-                          - Em APOSTILA: personaliza apenas TABELAS/EXTRAS (resumo/fluxograma/mapa mental/questionário),
-                            preservando tom/estilo/estrutura do modo.
-                          - Em outros modos: substitui STYLE+TABLE do modo; HEAD/STRUCTURE/FOOTER são preservados.
+            custom_prompt: Campo de customização opcional (controlado por custom_prompt_scope).
+            custom_prompt_scope: 'tables_only' (padrão) → afeta apenas tabelas/extras em TODOS os modos;
+                                 'style_and_tables' (avançado, opt-in) → substitui STYLE+TABLE layers.
             dry_run: Se True, apenas valida divisão de chunks
             skip_audit: Se True, pula a auditoria jurídica
             skip_sources_audit: Se True, pula a auditoria de fontes integrada
@@ -10393,6 +11134,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         self.prompt_apostila = self._build_system_prompt(
             mode=mode,
             custom_style_override=custom_prompt,
+            custom_prompt_scope=custom_prompt_scope,
             disable_tables=bool(disable_tables),
             allow_indirect=allow_indirect,
             allow_summary=allow_summary,
@@ -10418,9 +11160,47 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
 
         await emit("formatting", 60, "Iniciando formatação...")
 
-        # 0.1 Global Structure Mapping (NEW)
-        global_structure = await self.map_structure(transcription)
+        # 0.1 Global Structure Mapping (NEW) — with heartbeat to prevent stall appearance
+        _map_hb_done = asyncio.Event()
+        _map_hb_start = time.time()
+        async def _map_heartbeat():
+            while not _map_hb_done.is_set():
+                try:
+                    await asyncio.wait_for(_map_hb_done.wait(), timeout=8)
+                except asyncio.TimeoutError:
+                    elapsed = time.time() - _map_hb_start
+                    await emit("formatting", 64, f"Mapeando estrutura... ({elapsed:.0f}s)")
+        _map_hb_task = asyncio.create_task(_map_heartbeat())
+        try:
+            global_structure = await self.map_structure(transcription)
+        finally:
+            _map_hb_done.set()
+            _map_hb_task.cancel()
+            try:
+                await _map_hb_task
+            except (asyncio.CancelledError, Exception):
+                pass
         await emit("formatting", 68, "Estrutura global mapeada")
+
+        # v2.41: Pré-filtro e separação cut vs hierarchy
+        if global_structure:
+            global_structure = filtrar_niveis_excessivos(global_structure, max_nivel=3)
+            simplify_max_lines = _safe_int(os.getenv("IUDEX_MAP_SIMPLIFY_MAX_LINES")) or 120
+            simplify_max_depth = _safe_int(os.getenv("IUDEX_MAP_SIMPLIFY_MAX_DEPTH")) or 3
+            global_structure = simplificar_estrutura_se_necessario(
+                global_structure,
+                max_linhas=simplify_max_lines,
+                max_nivel=simplify_max_depth,
+            )
+
+        # v2.42: Detectar tipo de conteúdo e injetar addon SIMULADO se aplicável
+        _tipo_match = re.search(r'\[TIPO:\s*(SIMULADO|CORREÇÃO|CORRECAO)\]', global_structure or '', re.IGNORECASE)
+        if _tipo_match:
+            _tipo = _tipo_match.group(1).upper()
+            print(f"{Fore.MAGENTA}🎯 Tipo detectado: {_tipo} — Injetando regras de questões/simulado no prompt")
+            self.prompt_apostila += self.PROMPT_SIMULADO_ADDON
+        # Estrutura limpa (sem ABRE/FECHA) para guiar hierarquia nos chunks
+        hierarchy_structure = limpar_estrutura_para_review(global_structure) if global_structure else None
 
         # 1. Sequential Slicing (v2.17: Com âncoras de estrutura)
         mode_norm = (mode or "APOSTILA").strip().upper()
@@ -10443,7 +11223,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         # Fallback: slicing sequencial com âncoras (aulas/apostilas e quando não há blocos).
         if not chunks_info:
             print(f"   ℹ️  Usando divisão sequencial (com âncoras v2.17)...")
-            chunks_info = dividir_sequencial(transcription, chars_por_parte=25000, estrutura_global=global_structure)
+            chunks_info = dividir_sequencial(transcription, chars_por_parte=15000, estrutura_global=global_structure)
         validar_chunks(chunks_info, transcription)
         
         total_segments = len(chunks_info)
@@ -10472,7 +11252,12 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         # v2.19: Context Caching Setup
         cached_context = None
         if total_segments > 1: # Só cache se tiver múltiplos chunks
-            cached_context = self.create_context_cache(transcription, global_structure)
+            # v2.41: cache deve receber estrutura limpa para orientar hierarquia (H2/H3),
+            # mantendo ABRE/FECHA apenas para o corte de chunks.
+            cached_context = self.create_context_cache(
+                transcription,
+                hierarchy_structure or global_structure,
+            )
                 
         # 3. Sequential Processing Loop
         ordered_results = []
@@ -10507,15 +11292,17 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             await rate_limiter.wait_if_needed_async()
 
             # Lógica de Estrutura Local (Janela Deslizante)
+            # v2.41: Usa hierarchy_structure (sem ABRE/FECHA) para guiar H2/H3
             estrutura_referencia = None
-            if global_structure and not cached_context:
+            _struct_source = hierarchy_structure or global_structure
+            if _struct_source and not cached_context:
                 max_lines = int(
                     os.getenv(
                         "IUDEX_MAP_MAX_LINES_PER_CHUNK",
                         self.MAP_MAX_LINES_PER_CHUNK,
                     )
                 )
-                itens_estrutura = [ln for ln in global_structure.split('\n') if ln.strip()]
+                itens_estrutura = [ln for ln in _struct_source.split('\n') if ln.strip()]
                 if len(itens_estrutura) > 8 and total_segments > 1:
                     ratio = len(itens_estrutura) / total_segments
                     center_idx = int(i * ratio)
@@ -10542,7 +11329,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                             slice_itens.append("[... Tópicos posteriores ...]")
                         estrutura_referencia = '\n'.join(slice_itens)
                 else:
-                    estrutura_referencia = global_structure
+                    estrutura_referencia = _struct_source
 
             # v2.26: Contexto de continuidade
             continuidade_nota = ""
@@ -10576,10 +11363,16 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             heartbeat_every = float(os.getenv("IUDEX_PROGRESS_HEARTBEAT_SECONDS", "12"))
         except Exception:
             heartbeat_every = 12.0
-        try:
-            segment_timeout_seconds = int(os.getenv("IUDEX_FORMAT_SEGMENT_TIMEOUT_SECONDS", "0"))
-        except Exception:
-            segment_timeout_seconds = 0
+        if segment_timeout_seconds is None:
+            try:
+                segment_timeout_seconds = int(os.getenv("IUDEX_FORMAT_SEGMENT_TIMEOUT_SECONDS", "0"))
+            except Exception:
+                segment_timeout_seconds = 0
+        else:
+            try:
+                segment_timeout_seconds = int(segment_timeout_seconds)
+            except Exception:
+                segment_timeout_seconds = 0
 
         if start_idx < total_segments:
             if parallel_chunks <= 1 or total_segments - start_idx <= 2:
@@ -10747,8 +11540,12 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         await emit("formatting", 97, "Passada 2.7: Mesclando tabelas divididas...")
         full_formatted = mesclar_tabelas_divididas(full_formatted)
 
-        print("  Passada 2.8: Ajustando títulos de tabela de banca...")
-        await emit("formatting", 97, "Passada 2.8: Ajustando títulos de tabela...")
+        print("  Passada 2.8: Movendo tabelas para fim de seção (v2.41)...")
+        await emit("formatting", 97, "Passada 2.8: Reorganizando tabelas...")
+        full_formatted = mover_tabelas_para_fim_de_secao(full_formatted)
+
+        print("  Passada 2.9: Ajustando títulos de tabela de banca...")
+        await emit("formatting", 97, "Passada 2.9: Ajustando títulos de tabela...")
         full_formatted = garantir_titulo_tabela_banca(full_formatted)
         
         print("  Passada 3: Normalizando títulos similares...")
@@ -10762,6 +11559,14 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         else:
             print(f"{Fore.YELLOW}  ℹ️  Modo FIDELIDADE: Pulando reorganização para preservar linearidade exata.")
         
+        title_drift_telemetry = {
+            "freeze_h2_h3": False,
+            "headers_changed_count": 0,
+            "headers_restored_count": 0,
+            "headers_degraded_count": 0,
+            "headers_diff": [],
+        }
+
         if mode != "FIDELIDADE":
             print("  Passada 4: Revisão Semântica por IA...")
             await emit("formatting", 98, "Passada 4: Revisão Semântica por IA...")
@@ -10769,7 +11574,24 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         else:
             print(f"{Fore.MAGENTA}  Passada 4: Revisão Leve de Formatação (Modo Fidelidade)...")
             await emit("formatting", 98, "Passada 4: Revisão Leve (Fidelidade)...")
-            full_formatted = await ai_structure_review_lite(full_formatted, self.client, self.llm_model, estrutura_mapeada=limpar_estrutura_para_review(global_structure))
+            _fidelity_original_text = full_formatted
+            _fidelity_reviewed_text = await ai_structure_review_lite(
+                full_formatted,
+                self.client,
+                self.llm_model,
+                estrutura_mapeada=limpar_estrutura_para_review(global_structure),
+            )
+            full_formatted, title_drift_telemetry = enforce_fidelity_heading_guard(
+                _fidelity_original_text,
+                _fidelity_reviewed_text,
+                freeze_h2_h3=True,
+            )
+            if title_drift_telemetry.get("headers_restored_count", 0) > 0:
+                print(
+                    f"{Fore.YELLOW}   ♻️ Heading guard: "
+                    f"{title_drift_telemetry['headers_restored_count']} título(s) restaurado(s) "
+                    f"de {title_drift_telemetry.get('headers_changed_count', 0)} alterado(s)."
+                )
         
         # Passada 4.5: Renumeração Determinística (Camada de Segurança)
         try:
@@ -10782,7 +11604,17 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         full_formatted = self.renumber_headings(full_formatted)
 
         # Passada 4.7: Auditoria determinística de hierarquia (subtópicos vs tópicos)
-        strict_subtopic_fix = os.getenv("IUDEX_STRICT_SUBTOPIC_FIX", "1").strip().lower() in ("1", "true", "yes")
+        strict_subtopic_fix = _env_truthy("IUDEX_STRICT_SUBTOPIC_FIX", default=True)
+        strict_subtopic_fix = True if strict_subtopic_fix is None else bool(strict_subtopic_fix)
+        mode_norm_fix = (mode or "").strip().upper()
+        # Em modos de apostila/fidelidade, inconsistência de nível tende a degradar
+        # toda a estrutura final; forçamos correção ativa por segurança.
+        if mode_norm_fix in {"APOSTILA", "FIDELIDADE"} and not strict_subtopic_fix:
+            print(
+                f"{Fore.YELLOW}⚠️ IUDEX_STRICT_SUBTOPIC_FIX=0 ignorado para modo {mode_norm_fix}; "
+                f"forçando correção de hierarquia.{Style.RESET_ALL}"
+            )
+            strict_subtopic_fix = True
         fixed_text, level_issues = audit_heading_levels(full_formatted, apply_fixes=strict_subtopic_fix)
         if level_issues:
             print(f"{Fore.YELLOW}⚠️  {len(level_issues)} inconsistências de hierarquia detectadas")
@@ -11112,6 +11944,16 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 print(f"📄 Relatório de fidelidade (fallback) salvo: {fidelity_path.name}")
             except Exception as e:
                 print(f"{Fore.YELLOW}⚠️ Falha ao salvar relatório de fidelidade fallback: {e}")
+
+        # Telemetria de drift de títulos (modo FIDELIDADE)
+        if mode_suffix == "FIDELIDADE":
+            try:
+                drift_path = Path(output_folder) / f"{video_name}_{mode_suffix}_TITLE_DRIFT.json"
+                with open(drift_path, "w", encoding="utf-8") as f:
+                    json.dump(title_drift_telemetry, f, ensure_ascii=False, indent=2)
+                print(f"📄 Telemetria de drift de títulos salva: {drift_path.name}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}⚠️ Falha ao salvar telemetria de drift de títulos: {e}")
 
         # Checkpoint cleanup success
         delete_checkpoint(video_name, output_folder)
@@ -11984,6 +12826,18 @@ def process_single_video(
             primary_fidelity_written = False
             validation_result = None
 
+            # v3.0: Carregar relatório unificado anterior para comparação
+            _previous_unified = None
+            if UNIFIED_AUDIT_AVAILABLE:
+                _prev_unified_path = Path(folder) / f"{video_name}_{mode_suffix}_UNIFIED_AUDIT.json"
+                if _prev_unified_path.exists():
+                    try:
+                        _previous_unified = UnifiedReport.load_json(str(_prev_unified_path))
+                        _prev_active = [f for f in _previous_unified.findings if f.verdict.value != "FALSO_POSITIVO"]
+                        print(f"   📊 Relatório unificado anterior: {len(_prev_active)} findings carregados para comparação")
+                    except Exception as e:
+                        print(f"   ⚠️ Falha ao carregar relatório anterior: {e}")
+
             # Revalidação preventiva (opcional) após correções manuais
             if FIDELITY_AUDIT_AVAILABLE and FIDELITY_AUDIT_ENABLED and not skip_fidelity_audit:
                 print(f"\n{Fore.CYAN}🔬 Revalidando Auditoria Preventiva de Fidelidade...")
@@ -12161,7 +13015,57 @@ def process_single_video(
                     print(f"{Fore.GREEN}   ✅ Nenhum problema estrutural detectado.")
             except Exception as e:
                 print(f"{Fore.YELLOW}   ⚠️ Erro no Auto-Fix: {e}")
-        
+
+        # v3.0: Relatório Unificado (cross-referencing entre camadas)
+        if UNIFIED_AUDIT_AVAILABLE:
+            try:
+                engine = UnifiedAuditEngine(video_name, mode)
+                # Ingerir auditoria preventiva (já salva em disco)
+                prev_json = Path(folder) / f"{video_name}_{mode}_AUDITORIA_FIDELIDADE.json"
+                if prev_json.exists():
+                    with open(prev_json, "r", encoding="utf-8") as f:
+                        engine.ingest_fidelity(json.load(f))
+                # Ingerir backup
+                backup_json = Path(folder) / f"{video_name}_{mode}_fidelidade_backup.json"
+                if backup_json.exists():
+                    with open(backup_json, "r", encoding="utf-8") as f:
+                        engine.ingest_backup(json.load(f))
+                # Ingerir structural (variável local do bloco acima)
+                if AUTO_FIX_AVAILABLE and 'issues' in dir() and isinstance(issues, dict):
+                    engine.ingest_structural(issues)
+                unified_report = engine.build()
+                # Salvar
+                unified_json_path = os.path.join(folder, f"{video_name}_{mode}_UNIFIED_AUDIT.json")
+                unified_md_path = os.path.join(folder, f"{video_name}_{mode}_UNIFIED_AUDIT.md")
+                unified_report.save_json(unified_json_path)
+                generate_unified_markdown(unified_report, unified_md_path)
+                summary = unified_report.summary
+                print(f"\n{Fore.CYAN}📊 Relatório Unificado (v3.0):")
+                print(f"   Nota Geral: {unified_report.nota_geral:.1f}/10 (Fidelidade: {unified_report.nota_fidelidade:.1f} | Estrutural: {unified_report.nota_estrutural:.1f})")
+                print(f"   Findings: {summary.get('total_findings', 0)} ativos ({summary.get('false_positives_removed', 0)} FP removidos)")
+                by_sev = summary.get('by_severity', {})
+                sev_parts = [f"{k}: {v}" for k, v in by_sev.items() if v > 0]
+                if sev_parts:
+                    print(f"   Severidade: {' | '.join(sev_parts)}")
+                print(f"   Salvos: {os.path.basename(unified_json_path)} + {os.path.basename(unified_md_path)}")
+                # Comparação com relatório anterior (resume-hil)
+                if '_previous_unified' in dir() and _previous_unified is not None:
+                    try:
+                        delta = compare_reports(_previous_unified, unified_report)
+                        print(f"   📈 Delta HIL: {delta['resolved_count']} resolvidos | {delta['persistent_count']} persistentes | {delta['new_count']} novos")
+                    except Exception:
+                        pass
+                # HIL unificado
+                if hil_strict and unified_report.hil_recommendation.pausar:
+                    save_hil_output(formatted, video_name, folder, mode_suffix, reason="unified_audit")
+                    raise HILCheckpointException(
+                        f"Auditoria unificada requer revisão. Veja: {os.path.basename(unified_md_path)}"
+                    )
+            except HILCheckpointException:
+                raise
+            except Exception as e:
+                print(f"{Fore.YELLOW}   ⚠️ Erro no relatório unificado: {e}")
+
         print(f"{Fore.GREEN}✨ SUCESSO!")
         
     except HILCheckpointException as e:

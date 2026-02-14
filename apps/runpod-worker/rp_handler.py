@@ -140,9 +140,9 @@ def _get_diarization_pipeline():
         import torch
 
         hf_token = os.environ.get("HF_TOKEN", "")
-        logger.info("Loading pyannote/speaker-diarization-3.1...")
+        logger.info("Loading pyannote/speaker-diarization-community-1...")
         _diarization_pipeline = PyannotePipeline.from_pretrained(
-            "pyannote/speaker-diarization-3.1",
+            "pyannote/speaker-diarization-community-1",
             use_auth_token=hf_token if hf_token else None,
         )
         if torch.cuda.is_available():

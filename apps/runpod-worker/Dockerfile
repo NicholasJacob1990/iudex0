@@ -55,7 +55,7 @@ print('Both models cached successfully')" \
 RUN if [ -n "$HF_TOKEN" ]; then \
     python -c "\
 from pyannote.audio import Pipeline; \
-Pipeline.from_pretrained('pyannote/speaker-diarization-3.1'); \
+Pipeline.from_pretrained('pyannote/speaker-diarization-community-1'); \
 print('Diarization model cached')" || echo "WARNING: Diarization model cache skipped"; \
     else echo "HF_TOKEN not set — diarization model will download on first use"; fi
 
