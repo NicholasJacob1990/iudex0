@@ -47,7 +47,7 @@ export function QuickActions() {
           <MotionDiv
             key={action.id}
             variants={fadeUp}
-            className="group card-premium glow-hover rounded-3xl border border-white/80 bg-white/90 p-5 shadow-soft"
+            className="group card-premium glow-hover rounded-3xl border border-black/[0.06] bg-white/80 p-5 shadow-soft backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.04]"
           >
             <div className="flex items-start justify-between">
               <div>

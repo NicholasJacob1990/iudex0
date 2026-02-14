@@ -84,10 +84,11 @@ class SPLADEResult:
 
 
 class SPLADECache:
-    """Thread-safe TTL cache for SPLADE encodings."""
+    """Thread-safe TTL cache for SPLADE encodings (token-id sparse vectors)."""
 
     def __init__(self, max_items: int = 10000, ttl_seconds: int = 3600):
-        self._cache: Dict[str, Tuple[float, Dict[str, float]]] = {}
+        # key -> (expires_at, (indices, values))
+        self._cache: Dict[str, Tuple[float, Tuple[List[int], List[float]]]] = {}
         self._lock = threading.RLock()
         self._max_items = max_items
         self._ttl = ttl_seconds
@@ -98,8 +99,8 @@ class SPLADECache:
         """Compute cache key from text."""
         return hashlib.sha256(text.encode("utf-8")).hexdigest()[:32]
 
-    def get(self, text: str) -> Optional[Dict[str, float]]:
-        """Get cached sparse vector if present and not expired."""
+    def get(self, text: str) -> Optional[Tuple[List[int], List[float]]]:
+        """Get cached (indices, values) if present and not expired."""
         key = self._compute_key(text)
         now = time.time()
 
@@ -107,14 +108,15 @@ class SPLADECache:
             entry = self._cache.get(key)
             if entry and entry[0] > now:
                 self._hits += 1
-                return entry[1].copy()  # Return copy to prevent modification
+                idx, vals = entry[1]
+                return (list(idx), list(vals))
             elif entry:
                 # Expired
                 self._cache.pop(key, None)
             self._misses += 1
             return None
 
-    def set(self, text: str, sparse_vector: Dict[str, float]) -> None:
+    def set(self, text: str, indices: List[int], values: List[float]) -> None:
         """Store sparse vector in cache."""
         key = self._compute_key(text)
         now = time.time()
@@ -124,7 +126,7 @@ class SPLADECache:
             if len(self._cache) >= self._max_items:
                 self._evict(now)
 
-            self._cache[key] = (now + self._ttl, sparse_vector.copy())
+            self._cache[key] = (now + self._ttl, (list(indices), list(values)))
 
     def _evict(self, now: float) -> None:
         """Evict expired and oldest entries."""
@@ -294,16 +296,13 @@ class SPLADEEncoder:
         start_time = time.time()
 
         try:
-            sparse_vector = self._encode_single(text)
+            idx, vals = self.encode_sparse(text, use_cache=use_cache)
+            sparse_vector = self._decode_sparse(idx, vals)
 
             # Update stats
             elapsed_ms = (time.time() - start_time) * 1000
             self._encode_count += 1
             self._total_encode_time_ms += elapsed_ms
-
-            # Cache result
-            if use_cache and self._cache:
-                self._cache.set(text, sparse_vector)
 
             logger.debug(
                 f"SPLADE encoded text (len={len(text)}) -> "
@@ -315,8 +314,33 @@ class SPLADEEncoder:
             logger.error(f"SPLADE encoding failed: {e}")
             raise
 
-    def _encode_single(self, text: str) -> Dict[str, float]:
-        """Internal: encode single text to sparse vector."""
+    def encode_sparse(self, text: str, use_cache: bool = True) -> Tuple[List[int], List[float]]:
+        """
+        Encode text into a sparse vector representation suitable for Qdrant.
+
+        Returns:
+            (indices, values) where indices are vocabulary token ids.
+        """
+        if not text or not text.strip():
+            return ([], [])
+
+        text = text.strip()
+
+        # Cache
+        if use_cache and self._cache:
+            cached = self._cache.get(text)
+            if cached is not None:
+                return cached
+
+        # Encode (no cache)
+        self._lazy_init()
+        idx, vals = self._encode_single_indices_values(text)
+        if use_cache and self._cache:
+            self._cache.set(text, idx, vals)
+        return idx, vals
+
+    def _encode_single_indices_values(self, text: str) -> Tuple[List[int], List[float]]:
+        """Internal: encode single text to (indices, values)."""
         import torch
 
         # Tokenize
@@ -347,13 +371,10 @@ class SPLADEEncoder:
             # Get sparse vector
             activations = activations.squeeze(0)  # [vocab_size]
 
-        # Convert to sparse representation
-        sparse_vector = self._to_sparse_dict(activations)
+        return self._to_sparse_indices_values(activations)
 
-        return sparse_vector
-
-    def _to_sparse_dict(self, activations: "torch.Tensor") -> Dict[str, float]:
-        """Convert activation tensor to sparse dictionary."""
+    def _to_sparse_indices_values(self, activations: "torch.Tensor") -> Tuple[List[int], List[float]]:
+        """Convert activation tensor to sparse (indices, values)."""
         import torch
 
         # Get non-zero indices and values
@@ -367,18 +388,29 @@ class SPLADEEncoder:
             indices = indices[top_indices]
             values = values[top_indices]
 
-        # Convert to dictionary
-        sparse_dict: Dict[str, float] = {}
-        indices_cpu = indices.cpu().numpy()
-        values_cpu = values.cpu().numpy()
+        idx_list = [int(i) for i in indices.detach().cpu().tolist()]
+        val_list = [float(v) for v in values.detach().cpu().tolist()]
+        return idx_list, val_list
 
-        for idx, val in zip(indices_cpu, values_cpu):
-            token = self._tokenizer.decode([int(idx)]).strip()
-            if token and not token.startswith("[") and not token.startswith("##"):
-                # Skip special tokens and subword prefixes
-                sparse_dict[token.lower()] = float(val)
+    def _decode_sparse(self, indices: List[int], values: List[float]) -> Dict[str, float]:
+        """Decode token ids into a human-readable token->weight map."""
+        if not indices or not values:
+            return {}
+        if self._tokenizer is None:
+            return {}
 
-        return sparse_dict
+        out: Dict[str, float] = {}
+        for idx, val in zip(indices, values):
+            try:
+                token = self._tokenizer.decode([int(idx)]).strip()
+            except Exception:
+                continue
+            if not token:
+                continue
+            if token.startswith("[") or token.startswith("##"):
+                continue
+            out[token.lower()] = float(val)
+        return out
 
     def encode_batch(
         self, texts: List[str], use_cache: bool = True
@@ -409,7 +441,7 @@ class SPLADEEncoder:
             if use_cache and self._cache:
                 cached = self._cache.get(text)
                 if cached is not None:
-                    results.append(cached)
+                    results.append(self._decode_sparse(cached[0], cached[1]))
                     continue
 
             # Track index for later insertion
@@ -430,12 +462,12 @@ class SPLADEEncoder:
                 batch = to_encode[batch_start:batch_end]
 
                 batch_texts = [t[1] for t in batch]
-                batch_results = self._encode_batch_internal(batch_texts)
+                batch_sparse = self._encode_batch_internal_sparse(batch_texts)
 
-                for (orig_idx, text), sparse_vec in zip(batch, batch_results):
-                    results[orig_idx] = sparse_vec
+                for (orig_idx, text), (idx, vals) in zip(batch, batch_sparse):
+                    results[orig_idx] = self._decode_sparse(idx, vals)
                     if use_cache and self._cache:
-                        self._cache.set(text, sparse_vec)
+                        self._cache.set(text, idx, vals)
 
             elapsed_ms = (time.time() - start_time) * 1000
             self._encode_count += len(to_encode)
@@ -452,8 +484,8 @@ class SPLADEEncoder:
 
         return results
 
-    def _encode_batch_internal(self, texts: List[str]) -> List[Dict[str, float]]:
-        """Internal: batch encode texts."""
+    def _encode_batch_internal_sparse(self, texts: List[str]) -> List[Tuple[List[int], List[float]]]:
+        """Internal: batch encode texts into (indices, values)."""
         import torch
 
         # Tokenize batch
@@ -477,11 +509,11 @@ class SPLADEEncoder:
             if self.config.apply_log1p:
                 activations = torch.log1p(activations)
 
-        # Convert each to sparse dict
-        results = []
+        # Convert each to sparse indices/values
+        results: List[Tuple[List[int], List[float]]] = []
         for i in range(len(texts)):
-            sparse_vec = self._to_sparse_dict(activations[i])
-            results.append(sparse_vec)
+            idx, vals = self._to_sparse_indices_values(activations[i])
+            results.append((idx, vals))
 
         return results
 
@@ -507,9 +539,10 @@ class SPLADEEncoder:
             if cached is not None:
                 from_cache = True
                 elapsed_ms = (time.time() - start_time) * 1000
+                decoded = self._decode_sparse(cached[0], cached[1])
                 return SPLADEResult(
-                    sparse_vector=cached,
-                    num_active_terms=len(cached),
+                    sparse_vector=decoded,
+                    num_active_terms=len(decoded),
                     encoding_time_ms=elapsed_ms,
                     from_cache=True,
                 )
@@ -653,6 +686,13 @@ class SPLADEEncoder:
     # Utility Methods
     # ---------------------------------------------------------------------------
 
+    def clear_cache(self) -> Dict[str, int]:
+        """Clear the encoding cache."""
+        if self._cache:
+            cleared = self._cache.clear()
+            return {"cleared_entries": cleared}
+        return {"cleared_entries": 0}
+
     def get_stats(self) -> Dict[str, Any]:
         """Get encoder statistics."""
         stats = {
@@ -671,13 +711,6 @@ class SPLADEEncoder:
             stats["cache"] = self._cache.stats()
 
         return stats
-
-    def clear_cache(self) -> Dict[str, int]:
-        """Clear the encoding cache."""
-        if self._cache:
-            cleared = self._cache.clear()
-            return {"cleared_entries": cleared}
-        return {"cleared_entries": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -718,3 +751,12 @@ def reset_splade_encoder() -> None:
     with _encoder_lock:
         _encoder = None
         logger.info("SPLADE encoder singleton reset")
+
+
+__all__ = [
+    "SPLADEConfig",
+    "SPLADEResult",
+    "SPLADEEncoder",
+    "get_splade_encoder",
+    "reset_splade_encoder",
+]

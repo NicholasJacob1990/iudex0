@@ -319,7 +319,7 @@ export function ContextUsageBar({ className, compact = false }: ContextUsageBarP
           <div className="flex justify-between">
             <span>💾 Cache:</span>
             <span className="font-mono text-emerald-600 dark:text-emerald-400">
-              -{formatTokens(breakdown.cacheSavedTokens)} (-{breakdown.cacheSavedPercent.toFixed(0)}%)
+              -{formatTokens(breakdown.cacheSavedTokens)} tokens (-{breakdown.cacheSavedPercent.toFixed(0)}%)
             </span>
           </div>
         )}

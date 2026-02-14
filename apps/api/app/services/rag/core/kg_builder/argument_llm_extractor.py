@@ -180,7 +180,9 @@ REGRAS:
 - Textos de claims: máximo 250 caracteres, em português
 - Textos de evidência: máximo 200 caracteres
 - Polarity: +1 para afirmação, -1 para negação/contestação, 0 para neutro
-- Confidence: 0.9+ para explícito, 0.7 para implícito, 0.5 para inferido
+- Extraia SOMENTE o que estiver EXPLÍCITO no texto (anti-contaminação).
+- Se uma tese/evidência/ator NÃO tiver âncora textual clara, OMITA.
+- Confidence: use apenas valores altos (0.9 a 1.0) quando explícito; caso contrário, OMITA o item.
 - cited_entities: entidades legais mencionadas (Lei X, Art. Y, Súmula Z)
 
 TEXTO:
@@ -205,9 +207,17 @@ class ArgumentLLMExtractor:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         max_tokens: int = 4096,
-        temperature: float = 0.1,
+        temperature: float = 0.0,
     ):
-        self._model = model or os.getenv("KG_BUILDER_LLM_MODEL", "gemini-2.0-flash")
+        # Keep ArgumentRAG extraction independent from chat models.
+        # Prefer a fast "flash" model, but allow explicit override.
+        self._model = (
+            model
+            or os.getenv("ARGUMENT_LLM_MODEL")
+            or os.getenv("GEMINI_3_FLASH_API_MODEL")
+            or os.getenv("KG_BUILDER_LLM_MODEL")
+            or "gemini-2.0-flash"
+        )
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         self._max_tokens = max_tokens
         self._temperature = temperature
@@ -290,6 +300,25 @@ class ArgumentLLMExtractor:
             if not isinstance(result, dict):
                 return {"claims": [], "evidence": [], "actors": [], "issues": []}
 
+            # Conservative post-filter to avoid "reasoning contamination":
+            # keep only high-confidence items unless explicitly configured.
+            min_conf = float(os.getenv("ARGUMENT_LLM_MIN_CONFIDENCE", "0.85") or "0.85")
+            try:
+                claims = [
+                    c for c in (result.get("claims") or [])
+                    if isinstance(c, dict) and float(c.get("confidence", 0.0) or 0.0) >= min_conf
+                ]
+                evidence = [
+                    e for e in (result.get("evidence") or [])
+                    if isinstance(e, dict)
+                ]
+                actors = [a for a in (result.get("actors") or []) if isinstance(a, dict)]
+                issues = [i for i in (result.get("issues") or []) if isinstance(i, dict)]
+                result = {"claims": claims, "evidence": evidence, "actors": actors, "issues": issues}
+            except Exception:
+                # Fail-open (but still returns whatever was parsed)
+                pass
+
             logger.info(
                 "LLM extracted %d claims, %d evidence, %d actors, %d issues from chunk %s",
                 len(result.get("claims", [])),
@@ -334,6 +363,7 @@ class ArgumentLLMExtractor:
 
             svc = get_argument_neo4j()
             stats = {"llm_claims": 0, "llm_evidence": 0, "llm_actors": 0, "llm_relationships": 0}
+            cite_links = 0
 
             # Ingest claims
             claim_ids = []
@@ -388,6 +418,36 @@ class ArgumentLLMExtractor:
                                 "to_claim_id": claim_ids[opp_idx],
                                 "weight": claim.get("confidence", 0.7),
                             })
+                            stats["llm_relationships"] += 1
+                        except Exception:
+                            pass
+
+                # Link claim -> cited legal entities (best-effort, only if entity_id resolves)
+                cited = claim.get("cited_entities") or []
+                if isinstance(cited, list) and cited:
+                    try:
+                        from app.services.rag.core.neo4j_mvp import Neo4jEntityExtractor
+                    except Exception:
+                        Neo4jEntityExtractor = None
+                    for raw in cited[:8]:
+                        if not raw or not isinstance(raw, str):
+                            continue
+                        ent_id = ""
+                        if Neo4jEntityExtractor is not None:
+                            try:
+                                extracted = Neo4jEntityExtractor.extract(raw)
+                                if extracted and isinstance(extracted, list):
+                                    ent_id = str(extracted[0].get("entity_id") or "").strip()
+                            except Exception:
+                                ent_id = ""
+                        if not ent_id:
+                            continue
+                        try:
+                            svc._execute_write(ArgumentCypher.LINK_CLAIM_ENTITY, {
+                                "claim_id": claim_id,
+                                "entity_id": ent_id,
+                            })
+                            cite_links += 1
                             stats["llm_relationships"] += 1
                         except Exception:
                             pass
@@ -487,6 +547,7 @@ class ArgumentLLMExtractor:
                             pass
 
             stats["ingested"] = True
+            stats["llm_cite_links"] = cite_links
             return stats
 
         except Exception as e:

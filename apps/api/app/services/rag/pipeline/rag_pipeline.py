@@ -32,11 +32,13 @@ Stage Breakdown:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -1686,7 +1688,7 @@ class RAGPipeline:
                             top_k=top_k,
                             filters=filters,
                         )
-                    elif use_neo4j and hasattr(self._neo4j, "search_chunks_fulltext"):
+                    elif use_neo4j and hasattr(self._neo4j, "search_chunks_fulltext_async"):
                         f = filters or {}
                         include_global = bool(f.get("include_global", True))
                         include_private = bool(f.get("include_private", True))
@@ -1707,8 +1709,7 @@ class RAGPipeline:
                         if not allowed_scopes:
                             allowed_scopes = ["global"]
 
-                        query_results = await asyncio.to_thread(
-                            self._neo4j.search_chunks_fulltext,
+                        query_results = await self._neo4j.search_chunks_fulltext_async(
                             query_text=query,
                             tenant_id=str(f.get("tenant_id") or "default"),
                             allowed_scopes=allowed_scopes,
@@ -1849,6 +1850,17 @@ class RAGPipeline:
                 stage.skip("Unsupported Qdrant interface for pipeline")
                 return results
 
+            # Optional: Qdrant hybrid dense+sparse (SPLADE) using Query API fusion.
+            sparse_enabled = bool(getattr(self._base_config, "qdrant_sparse_enabled", False))
+            splade = None
+            if sparse_enabled and hasattr(self._qdrant, "search_hybrid_multi_collection_async"):
+                try:
+                    from app.services.rag.core.splade_encoder import get_splade_encoder
+                    splade = get_splade_encoder()
+                except Exception as e:
+                    logger.debug("SPLADE unavailable, disabling sparse hybrid: %s", e)
+                    sparse_enabled = False
+
             f = filters or {}
             tenant = str(f.get("tenant_id") or "")
             user = str(f.get("user_id") or "")
@@ -1915,10 +1927,55 @@ class RAGPipeline:
             max_conc = max(1, min(max_conc, 16))
             sem = asyncio.Semaphore(max_conc)
 
+            # Query classifier for dynamic sparse/dense weights
+            _classifier_enabled = sparse_enabled and bool(
+                getattr(self._base_config, "hybrid_query_classifier_llm", True)
+            )
+            _classifier_model = str(
+                getattr(self._base_config, "hybrid_query_classifier_model", "gemini-2.0-flash") or "gemini-2.0-flash"
+            )
+            _default_w_sparse = float(
+                getattr(self._base_config, "hybrid_default_sparse_weight", 0.50) or 0.50
+            )
+            _default_w_dense = float(
+                getattr(self._base_config, "hybrid_default_dense_weight", 0.50) or 0.50
+            )
+
             async def _search_one(query_text: str, embedding: List[float]) -> List[Dict[str, Any]]:
                 q = (query_text or "").strip()
                 if not q:
                     return []
+                q_sparse_idx: List[int] = []
+                q_sparse_vals: List[float] = []
+                if sparse_enabled and splade is not None:
+                    try:
+                        q_sparse_idx, q_sparse_vals = await asyncio.to_thread(
+                            splade.encode_sparse, q, True
+                        )
+                    except Exception:
+                        q_sparse_idx, q_sparse_vals = [], []
+
+                # Classify query for dynamic weights
+                q_w_sparse = _default_w_sparse
+                q_w_dense = _default_w_dense
+                q_category = "general"
+                q_used_llm = False
+                if _classifier_enabled and q_sparse_idx and q_sparse_vals:
+                    try:
+                        from app.services.rag.core.query_classifier import classify_query
+                        cr = await classify_query(
+                            q,
+                            use_llm=True,
+                            llm_model=_classifier_model,
+                            default_sparse=_default_w_sparse,
+                            default_dense=_default_w_dense,
+                        )
+                        q_w_sparse = cr.w_sparse
+                        q_w_dense = cr.w_dense
+                        q_category = cr.category.value
+                        q_used_llm = cr.used_llm
+                    except Exception as _clf_err:
+                        logger.debug("Query classifier failed, using defaults: %s", _clf_err)
                 async with sem:
                     # Apply tipo_peca only to the pecas collection(s) to avoid filtering out other datasets.
                     pecas_collections = [c for c in collections if "pecas" in str(c)] if tipo_peca else []
@@ -1940,6 +1997,48 @@ class RAGPipeline:
                     ) -> Dict[str, Any]:
                         if not coll_types:
                             return {}
+                        if (
+                            sparse_enabled
+                            and q_sparse_idx
+                            and q_sparse_vals
+                            and hasattr(self._qdrant, "search_hybrid_multi_collection_async")
+                        ):
+                            # Use weighted RRF when weights differ
+                            if (
+                                abs(q_w_sparse - q_w_dense) >= 0.01
+                                and hasattr(self._qdrant, "search_hybrid_weighted_multi_collection_async")
+                            ):
+                                return await self._qdrant.search_hybrid_weighted_multi_collection_async(
+                                    collection_types=coll_types,
+                                    dense_vector=embedding,
+                                    sparse_indices=q_sparse_idx,
+                                    sparse_values=q_sparse_vals,
+                                    w_sparse=q_w_sparse,
+                                    w_dense=q_w_dense,
+                                    tenant_id=tenant,
+                                    user_id=user,
+                                    top_k=self.config.max_results_per_source,
+                                    scopes=scopes_value,
+                                    sigilo_levels=sigilo_levels,
+                                    group_ids=group_ids,
+                                    case_id=case_id,
+                                    metadata_filters=metadata_filters,
+                                )
+                            # Equal weights → native fusion (faster)
+                            return await self._qdrant.search_hybrid_multi_collection_async(
+                                collection_types=coll_types,
+                                dense_vector=embedding,
+                                sparse_indices=q_sparse_idx,
+                                sparse_values=q_sparse_vals,
+                                tenant_id=tenant,
+                                user_id=user,
+                                top_k=self.config.max_results_per_source,
+                                scopes=scopes_value,
+                                sigilo_levels=sigilo_levels,
+                                group_ids=group_ids,
+                                case_id=case_id,
+                                metadata_filters=metadata_filters,
+                            )
                         return await self._qdrant.search_multi_collection_async(
                             collection_types=coll_types,
                             query_vector=embedding,
@@ -2054,6 +2153,21 @@ class RAGPipeline:
                             query_results.append(as_dict)
                     for r in query_results:
                         r["_source_type"] = "vector"
+
+                    # Telemetry: log hybrid search classification
+                    if sparse_enabled and q_sparse_idx and q_sparse_vals:
+                        logger.info(
+                            "hybrid_search_telemetry",
+                            extra={
+                                "query_category": q_category,
+                                "w_sparse": q_w_sparse,
+                                "w_dense": q_w_dense,
+                                "total_results": len(query_results),
+                                "fusion_method": "weighted_rrf" if abs(q_w_sparse - q_w_dense) >= 0.01 else "native_rrf",
+                                "classifier_used_llm": q_used_llm,
+                            },
+                        )
+
                     return query_results
 
             tasks = [
@@ -2351,9 +2465,8 @@ class RAGPipeline:
                 stage.skip("No entities extracted from query")
                 return results
 
-            # Query Neo4j for chunks — synchronous driver, run in thread
-            graph_chunks = await asyncio.to_thread(
-                self._neo4j.query_chunks_by_entities,
+            # Query Neo4j for chunks (async driver)
+            graph_chunks = await self._neo4j.query_chunks_by_entities_async(
                 entity_ids=entity_ids,
                 tenant_id=tenant_id or "default",
                 scope=scope,
@@ -2519,7 +2632,7 @@ class RAGPipeline:
                 return existing_results
 
             # Get chunks from Neo4j
-            graph_chunks = self._neo4j.query_chunks_by_entities(
+            graph_chunks = await self._neo4j.query_chunks_by_entities_async(
                 entity_ids=entity_ids,
                 tenant_id=tenant_id or "default",
                 scope=scope,
@@ -3519,7 +3632,7 @@ class RAGPipeline:
                     # Find paths for explainable context.
                     # Use argument-aware traversal only when debate intent is detected,
                     # keeping entity-only mode as default to avoid contamination.
-                    neo4j_paths = self._neo4j.find_paths(
+                    neo4j_paths = await self._neo4j.find_paths_async(
                         entity_ids=entity_ids[:10],  # Limit entities
                         tenant_id=tenant_id or "default",
                         allowed_scopes=allowed_scopes,
@@ -3550,7 +3663,7 @@ class RAGPipeline:
 
                     # Find co-occurring entities (chunks with multiple matches)
                     if len(entity_ids) >= 2:
-                        cooccur = self._neo4j.find_cooccurrence(
+                        cooccur = await self._neo4j.find_cooccurrence_async(
                             entity_ids=entity_ids[:5],
                             tenant_id=tenant_id or "default",
                             allowed_scopes=allowed_scopes,
@@ -3613,6 +3726,33 @@ class RAGPipeline:
             if not graph_context.summary and graph_context.entities:
                 graph_context.summary = self._generate_graph_summary(graph_context)
 
+            # Community summaries (Leiden clusters) — appended to summary
+            community_summaries_used = 0
+            if _env_bool("RAG_USE_COMMUNITY_SUMMARIES", False) and entity_ids:
+                try:
+                    from app.services.rag.core.community_summary import (
+                        get_community_summaries_for_entities,
+                    )
+                    comm_results = await get_community_summaries_for_entities(
+                        entity_ids=entity_ids[:15],
+                        tenant_id=tenant_id or "default",
+                        limit=3,
+                    )
+                    if comm_results:
+                        community_summaries_used = len(comm_results)
+                        comm_text = "\n".join(
+                            f"- {c.get('name', 'Cluster')}: {c.get('summary', '')}"
+                            for c in comm_results
+                            if c.get("summary")
+                        )
+                        if comm_text:
+                            prefix = graph_context.summary + "\n\n" if graph_context.summary else ""
+                            graph_context.summary = (
+                                prefix + f"[CONTEXTO MACRO — Clusters temáticos]\n{comm_text}"
+                            )
+                except Exception as e:
+                    logger.debug("Community summary enrichment failed: %s", e)
+
             # Deduplicate
             graph_context.related_articles = list(set(graph_context.related_articles))[:10]
             graph_context.related_cases = list(set(graph_context.related_cases))[:10]
@@ -3624,6 +3764,7 @@ class RAGPipeline:
                     "relationships_found": len(graph_context.relationships),
                     "neo4j_used": has_neo4j and bool(neo4j_paths),
                     "networkx_used": has_networkx and not neo4j_paths,
+                    "community_summaries": community_summaries_used,
                 },
             )
 
@@ -3728,6 +3869,7 @@ class RAGPipeline:
         collections: List[str],
         filters: Optional[Dict[str, Any]],
         top_k: int,
+        graph_hops: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Execute CogGRAG (Cognitive Graph RAG) pipeline for complex queries.
@@ -3764,6 +3906,13 @@ class RAGPipeline:
 
         try:
             cfg = self._base_config
+            # Align CogGRAG's Neo4j traversal depth with UI-configurable GraphRAG hops.
+            # UI clamps to 1..5; keep the same clamp here to avoid unexpected deep traversals.
+            try:
+                requested_hops = cfg.cograg_graph_evidence_max_hops if graph_hops is None else int(graph_hops)
+            except (TypeError, ValueError):
+                requested_hops = cfg.cograg_graph_evidence_max_hops
+            effective_graph_evidence_hops = max(1, min(int(requested_hops or 1), 5))
 
             user_id = None
             group_ids = None
@@ -3801,7 +3950,7 @@ class RAGPipeline:
                 audit_mode=cfg.cograg_audit_mode,
                 mindmap_explain_format=cfg.cograg_mindmap_explain_format,
                 graph_evidence_enabled=cfg.cograg_graph_evidence_enabled,
-                graph_evidence_max_hops=cfg.cograg_graph_evidence_max_hops,
+                graph_evidence_max_hops=effective_graph_evidence_hops,
                 graph_evidence_limit=cfg.cograg_graph_evidence_limit,
                 llm_max_concurrency=cfg.cograg_llm_max_concurrency,
             )
@@ -3999,6 +4148,7 @@ class RAGPipeline:
                     collections=collections,
                     filters=filters,
                     top_k=final_top_k,
+                    graph_hops=graph_hops,
                 )
 
                 # If CogGRAG succeeded, use its results directly
@@ -4355,6 +4505,20 @@ class RAGPipeline:
 
             return result
 
+    async def search_fast(self, query: str, **kwargs) -> PipelineResult:
+        """Fast search — lexical + vector + RRF + graph/cograg. No HyDE/CRAG/Compress.
+
+        Disables heavy query-enhancement stages while keeping graph retrieval,
+        argument graph, and CogRAG active (controlled by their respective config flags).
+        """
+        kwargs.setdefault("hyde_enabled", False)
+        kwargs.setdefault("multi_query", False)
+        kwargs.setdefault("compression_enabled", False)
+        kwargs.setdefault("parent_child_enabled", False)
+        kwargs.setdefault("crag_gate", False)
+        kwargs.setdefault("corrective_rag", False)
+        return await self.search(query, **kwargs)
+
     def search_sync(
         self,
         query: str,
@@ -4480,6 +4644,389 @@ class RAGPipeline:
                     visual_search_enabled=visual_search_enabled,
                 )
             )
+
+    # =========================================================================
+    # Ingestion (Chunking + Indexing)
+    # =========================================================================
+
+    @staticmethod
+    def _compute_doc_hash(text: str) -> str:
+        """
+        Stable-ish document fingerprint used to disambiguate chunk_uids across edits.
+        Keeps only a short prefix to avoid huge IDs.
+        """
+        raw = (text or "").encode("utf-8", errors="ignore")
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+    def _dataset_to_opensearch_index(self, dataset: str) -> str:
+        ds = (dataset or "").strip().lower()
+        cfg = self._base_config
+        if ds in ("lei",):
+            return cfg.opensearch_index_lei
+        if ds in ("juris", "jurisprudencia", "jurisprudência"):
+            return cfg.opensearch_index_juris
+        if ds in ("pecas_modelo", "pecas", "peças", "peças_modelo"):
+            return cfg.opensearch_index_pecas
+        if ds in ("doutrina",):
+            return cfg.opensearch_index_doutrina
+        if ds in ("sei",):
+            return cfg.opensearch_index_sei
+        if ds in ("local", "local_chunks"):
+            return cfg.opensearch_index_local
+        return cfg.opensearch_index_local
+
+    @staticmethod
+    def _dataset_to_qdrant_collection_type(dataset: str) -> str:
+        ds = (dataset or "").strip().lower()
+        if ds in ("local", "local_chunks"):
+            return "local_chunks"
+        if ds in ("pecas", "peças", "peças_modelo"):
+            return "pecas_modelo"
+        return ds or "local_chunks"
+
+    async def ingest_to_collection(
+        self,
+        *,
+        text: str,
+        collection: str,
+        metadata: Dict[str, Any],
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+        embedding_vector: Optional[List[float]] = None,
+        embedding_vectors: Optional[List[List[float]]] = None,
+        refresh_opensearch: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Ingest a text document into OpenSearch (BM25) + Qdrant (vectors).
+
+        Notes:
+        - Stored chunk text remains unchanged.
+        - When contextual embeddings are enabled in config, we embed a metadata-derived
+          context prefix prepended to the chunk text (Contextual Retrieval).
+
+        Args:
+            text: Document text
+            collection: Dataset/collection hint. Can be a logical dataset (lei/juris/...)
+                or an already-resolved Qdrant collection name.
+            metadata: Arbitrary metadata (must include tenant_id and scope for security)
+            chunk_size: Chunk size in characters (defaults to ingest utils default)
+            chunk_overlap: Overlap in characters
+            embedding_vector: Optional precomputed embedding (only used when 1 chunk)
+            embedding_vectors: Optional precomputed embeddings, one per chunk (from EmbeddingRouter)
+            refresh_opensearch: Whether to refresh OpenSearch after bulk indexing
+        """
+        self._ensure_components()
+
+        if self._qdrant is None or self._opensearch is None or self._embeddings is None:
+            raise RuntimeError("RAG ingestion requires Qdrant + OpenSearch + Embeddings services")
+
+        raw_text = (text or "").strip()
+        if not raw_text:
+            return {"indexed": 0, "skipped": 0, "chunk_ids": [], "error": "empty_text"}
+
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        tenant_id = str(metadata.get("tenant_id") or "").strip()
+        scope = str(metadata.get("scope") or "").strip().lower() or "global"
+        doc_id = str(metadata.get("doc_id") or metadata.get("document_id") or "").strip() or str(uuid.uuid4())
+
+        if not tenant_id:
+            raise ValueError("metadata.tenant_id is required for ingestion")
+
+        # Chunking
+        try:
+            from app.services.rag.utils.ingest import chunk_document
+        except Exception as e:
+            raise RuntimeError(f"Chunking utilities unavailable: {e}") from e
+
+        eff_chunk_size = int(chunk_size) if chunk_size else 1200
+        eff_overlap = int(chunk_overlap) if chunk_overlap is not None else 200
+        eff_chunk_size = max(200, min(eff_chunk_size, 10000))
+        eff_overlap = max(0, min(eff_overlap, max(0, eff_chunk_size - 50)))
+
+        chunks = chunk_document(raw_text, chunk_chars=eff_chunk_size, overlap=eff_overlap, doc_id=doc_id)
+        if not chunks:
+            return {"indexed": 0, "skipped": 0, "chunk_ids": [], "error": "no_chunks"}
+
+        # Stable identifiers and base fields
+        doc_hash = str(metadata.get("doc_hash") or "").strip() or self._compute_doc_hash(raw_text)
+        doc_version = int(metadata.get("doc_version") or 1)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        dataset_hint = str(metadata.get("source_type") or metadata.get("dataset") or collection or "").strip().lower()
+        os_index = self._dataset_to_opensearch_index(dataset_hint or collection)
+
+        qdrant_collection = collection  # can be resolved type or actual name
+        qdrant_collection_type = self._dataset_to_qdrant_collection_type(collection)
+
+        # Contextual embeddings (optional)
+        contextual_enabled = bool(getattr(self._base_config, "enable_contextual_embeddings", False))
+        max_prefix = int(getattr(self._base_config, "contextual_embeddings_max_prefix_chars", 240) or 240)
+        try:
+            from app.services.rag.core.contextual_embeddings import build_embedding_input
+        except Exception:
+            build_embedding_input = None  # type: ignore
+
+        # If embeddings are precomputed by a contextualized embedding model (e.g., Voyage Context 3),
+        # avoid applying the manual Contextual Retrieval prefix to chunk texts (double-context).
+        precomputed_provider = str((metadata or {}).get("embedding_provider") or "").strip().lower()
+        if precomputed_provider in ("voyage_context", "voyage-context", "voyage-context-3"):
+            contextual_enabled = False
+
+        embed_texts: List[str] = []
+        embed_infos: List[Dict[str, Any]] = []
+        for c in chunks:
+            chunk_text = str(c.get("text") or "")
+            if contextual_enabled and build_embedding_input is not None:
+                emb_in, info = build_embedding_input(
+                    chunk_text,
+                    metadata,
+                    enabled=True,
+                    max_prefix_chars=max_prefix,
+                )
+                embed_texts.append(emb_in)
+                embed_infos.append(info.to_payload_fields())
+            else:
+                embed_texts.append(chunk_text.strip())
+                if precomputed_provider in ("voyage_context", "voyage-context", "voyage-context-3"):
+                    embed_infos.append({"_embedding_variant": "voyage-context-3"})
+                else:
+                    embed_infos.append({"_embedding_variant": "raw"})
+
+        # Embeddings
+        vectors: List[List[float]] = []
+        if embedding_vectors is not None and len(embedding_vectors) == len(chunks):
+            # Pre-computed vectors from EmbeddingRouter (one per chunk)
+            vectors = [list(v) for v in embedding_vectors]
+            logger.info(
+                "ingest_to_collection: using %d pre-computed vectors (dim=%d)",
+                len(vectors), len(vectors[0]) if vectors else 0,
+            )
+        elif embedding_vectors is not None:
+            logger.warning(
+                "embedding_vectors count (%d) != chunks count (%d), "
+                "falling back to default embeddings provider",
+                len(embedding_vectors), len(chunks),
+            )
+            vectors = await asyncio.to_thread(self._embeddings.embed_many, embed_texts, False)
+        elif embedding_vector is not None and len(chunks) == 1:
+            vectors = [list(embedding_vector)]
+        else:
+            vectors = await asyncio.to_thread(self._embeddings.embed_many, embed_texts, False)
+
+        if len(vectors) != len(chunks):
+            raise RuntimeError(f"Embedding count mismatch: vectors={len(vectors)} chunks={len(chunks)}")
+
+        # Ensure backends exist
+        try:
+            self._opensearch.ensure_index(os_index)
+        except Exception:
+            # best-effort; indexing below will still error if OpenSearch is down
+            pass
+
+        try:
+            if not self._qdrant.collection_exists(qdrant_collection_type):
+                # Infer vector_size from pre-computed vectors when available
+                explicit_dim = len(vectors[0]) if vectors else None
+                self._qdrant.create_collection(qdrant_collection_type, vector_size=explicit_dim)
+        except Exception:
+            # best-effort; upsert below will still error if Qdrant is down
+            pass
+
+        # Build and write OpenSearch docs
+        os_docs: List[Dict[str, Any]] = []
+        chunk_uids: List[str] = []
+
+        for c, extra in zip(chunks, embed_infos):
+            chunk_index = int(c.get("chunk_index") or 0)
+            page = c.get("page") or c.get("page_number")
+            chunk_uid = f"{doc_id}:{doc_hash}:{chunk_index}"
+            chunk_uids.append(chunk_uid)
+
+            base_doc: Dict[str, Any] = {
+                "chunk_uid": chunk_uid,
+                "text": str(c.get("text") or ""),
+                "doc_id": doc_id,
+                "scope": scope,
+                "sigilo": str(metadata.get("sigilo") or "publico"),
+                "doc_hash": doc_hash,
+                "doc_version": doc_version,
+                "chunk_index": chunk_index,
+                "uploaded_at": now_iso,
+            }
+
+            # Optional top-level filters
+            if tenant_id:
+                base_doc["tenant_id"] = tenant_id
+            if metadata.get("case_id"):
+                base_doc["case_id"] = metadata.get("case_id")
+            if metadata.get("group_ids"):
+                base_doc["group_ids"] = metadata.get("group_ids")
+            if metadata.get("allowed_users"):
+                base_doc["allowed_users"] = metadata.get("allowed_users")
+            if page is not None:
+                base_doc["page"] = page
+            if metadata.get("title"):
+                base_doc["title"] = metadata.get("title")
+            if dataset_hint:
+                base_doc["source_type"] = dataset_hint
+
+            # Nested metadata: keep the full request metadata + embedding variant for audits.
+            base_doc["metadata"] = {
+                **{k: v for k, v in (metadata or {}).items() if k not in ("text",)},
+                **extra,
+                "collection": collection,
+            }
+            os_docs.append(base_doc)
+
+        os_result = {"success": 0, "failed": len(os_docs)}
+        try:
+            os_result = self._opensearch.index_chunks_bulk(os_docs, os_index, refresh=refresh_opensearch)
+        except Exception as e:
+            logger.warning("OpenSearch bulk ingest failed: %s", e)
+
+        # Build and write Qdrant points
+        try:
+            from app.services.rag.storage.qdrant_service import UpsertPayload
+        except Exception as e:
+            raise RuntimeError(f"Qdrant UpsertPayload unavailable: {e}") from e
+
+        sparse_enabled = bool(getattr(self._base_config, "qdrant_sparse_enabled", False))
+        splade = None
+        if sparse_enabled:
+            try:
+                from app.services.rag.core.splade_encoder import get_splade_encoder
+                splade = get_splade_encoder()
+            except Exception as e:
+                logger.debug("SPLADE unavailable for ingestion, skipping sparse vectors: %s", e)
+                sparse_enabled = False
+
+        payloads: List[Any] = []
+        for c, vec, uid, extra in zip(chunks, vectors, chunk_uids, embed_infos):
+            sparse_idx: Optional[List[int]] = None
+            sparse_vals: Optional[List[float]] = None
+            if sparse_enabled and splade is not None:
+                try:
+                    sparse_idx, sparse_vals = await asyncio.to_thread(
+                        splade.encode_sparse,
+                        str(c.get("text") or ""),
+                        True,
+                    )
+                except Exception:
+                    sparse_idx, sparse_vals = None, None
+
+            q_meta = {
+                **{k: v for k, v in (metadata or {}).items() if k not in ("text",)},
+                **extra,
+                "doc_id": doc_id,
+                "doc_hash": doc_hash,
+                "doc_version": doc_version,
+                "chunk_index": int(c.get("chunk_index") or 0),
+                "page": c.get("page") or c.get("page_number"),
+                "collection": collection,
+                "source_type": dataset_hint or collection,
+            }
+            payloads.append(
+                UpsertPayload(
+                    chunk_uid=uid,
+                    vector=[float(x) for x in (vec or [])],
+                    sparse_indices=sparse_idx,
+                    sparse_values=sparse_vals,
+                    text=str(c.get("text") or ""),
+                    tenant_id=tenant_id,
+                    scope=scope,
+                    sigilo=str(metadata.get("sigilo") or "publico"),
+                    group_ids=list(metadata.get("group_ids") or []),
+                    case_id=str(metadata.get("case_id") or "") or None,
+                    allowed_users=list(metadata.get("allowed_users") or []),
+                    uploaded_at=int(time.time()),
+                    metadata=q_meta,
+                )
+            )
+
+        q_success = 0
+        q_failed = len(payloads)
+        try:
+            q_success, q_failed = self._qdrant.upsert_batch(
+                collection_type=qdrant_collection_type if qdrant_collection_type else qdrant_collection,
+                payloads=payloads,
+                batch_size=int(getattr(self._base_config, "embedding_batch_size", 100) or 100),
+                wait=True,
+            )
+        except Exception as e:
+            logger.warning("Qdrant upsert failed: %s", e)
+
+        indexed = int(min(len(chunk_uids), os_result.get("success", 0) or 0))
+        if indexed <= 0 and q_success > 0:
+            indexed = int(q_success)
+
+        return {
+            "indexed": indexed,
+            "skipped": 0,
+            "chunk_ids": chunk_uids,
+            "opensearch": os_result,
+            "qdrant": {"success": q_success, "failed": q_failed},
+            "collection": collection,
+            "opensearch_index": os_index,
+            "qdrant_collection_type": qdrant_collection_type,
+        }
+
+    async def ingest_local(
+        self,
+        *,
+        text: str,
+        metadata: Dict[str, Any],
+        tenant_id: str,
+        case_id: str,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+        embedding_vectors: Optional[List[List[float]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Ingest a local (case-scoped) document.
+
+        Stores:
+        - OpenSearch: local index
+        - Qdrant: local_chunks collection
+        """
+        meta = dict(metadata or {})
+        meta.setdefault("tenant_id", tenant_id)
+        meta.setdefault("scope", "local")
+        meta.setdefault("case_id", case_id)
+        return await self.ingest_to_collection(
+            text=text,
+            collection="local",
+            metadata=meta,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            embedding_vectors=embedding_vectors,
+        )
+
+    async def ingest_global(
+        self,
+        *,
+        text: str,
+        metadata: Dict[str, Any],
+        dataset: str,
+        chunk_size: Optional[int] = None,
+        chunk_overlap: Optional[int] = None,
+        embedding_vectors: Optional[List[List[float]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Ingest a global corpus document into a dataset (lei/juris/doutrina/...).
+        """
+        meta = dict(metadata or {})
+        meta.setdefault("scope", "global")
+        meta.setdefault("source_type", str(meta.get("source_type") or dataset))
+        return await self.ingest_to_collection(
+            text=text,
+            collection=str(dataset or "").strip().lower() or "lei",
+            metadata=meta,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            embedding_vectors=embedding_vectors,
+        )
 
 
 # =============================================================================

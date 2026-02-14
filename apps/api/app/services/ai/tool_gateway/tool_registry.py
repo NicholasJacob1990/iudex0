@@ -9,6 +9,7 @@ Registers all legal tools from claude_agent/tools with metadata:
 
 from typing import Any, Callable, Dict, List, Optional
 from dataclasses import dataclass, field
+from dataclasses import asdict, is_dataclass
 from enum import Enum
 
 from loguru import logger
@@ -43,6 +44,19 @@ class ToolDefinition:
     requires_context: bool = True
     version: str = "1.0"
     tags: List[str] = field(default_factory=list)
+
+
+def _normalize_result(data: Any) -> Any:
+    """Convert nested dataclass results into plain JSON-serializable structures."""
+    if is_dataclass(data):
+        return asdict(data)
+    if isinstance(data, list):
+        return [_normalize_result(item) for item in data]
+    if isinstance(data, tuple):
+        return [_normalize_result(item) for item in data]
+    if isinstance(data, dict):
+        return {str(k): _normalize_result(v) for k, v in data.items()}
+    return data
 
 
 class ToolRegistry:
@@ -164,8 +178,8 @@ class ToolRegistry:
 
             risk_to_policy = {
                 ToolRiskLevel.LOW: ToolPolicy.ALLOW,
-                ToolRiskLevel.MEDIUM: ToolPolicy.ALLOW,
-                ToolRiskLevel.HIGH: ToolPolicy.ALLOW,
+                ToolRiskLevel.MEDIUM: ToolPolicy.ASK,
+                ToolRiskLevel.HIGH: ToolPolicy.DENY,
             }
 
             category_map = {
@@ -201,6 +215,13 @@ class ToolRegistry:
         except ImportError as e:
             logger.warning(f"Unified tools not available: {e}")
 
+        # 2b. Enable graph tools (ask_graph + graph risk/audit) which may be declared
+        # as metadata-only unified tools (handler=None) by default.
+        try:
+            self._register_graph_tools()
+        except Exception as e:
+            logger.warning(f"Graph tools not available: {e}")
+
         # 3. Register DataJud/DJEN tools
         self._register_datajud_tools()
 
@@ -209,6 +230,103 @@ class ToolRegistry:
 
         self._initialized = True
         logger.info(f"Tool registry fully initialized with {len(self._tools)} tools")
+
+    def _register_graph_tools(self) -> None:
+        """
+        Ensure graph tools have real handlers in the tool gateway registry.
+
+        Note: the MCP server injects `tenant_id`, `user_id`, and `case_id` into tool arguments.
+        Workflows/tool_call should also pass these via state injection.
+        """
+        from typing import Any as _Any
+
+        from app.services.graph_ask_service import get_graph_ask_service
+        from app.services.graph_risk_service import get_graph_risk_service
+
+        async def ask_graph(
+            operation: str = "search",
+            params: Optional[Dict[str, _Any]] = None,
+            scope: Optional[str] = None,
+            include_global: bool = True,
+            tenant_id: Optional[str] = None,
+            case_id: Optional[str] = None,
+            **_: _Any,
+        ) -> Dict[str, _Any]:
+            if not tenant_id:
+                return {
+                    "success": False,
+                    "operation": operation,
+                    "results": [],
+                    "error": "tenant_id ausente (bloqueado por segurança)",
+                }
+            service = get_graph_ask_service()
+            res = await service.ask(
+                operation=operation,
+                params=params or {},
+                tenant_id=str(tenant_id),
+                scope=scope,
+                case_id=case_id,
+                include_global=bool(include_global),
+            )
+            return res.to_dict()
+
+        async def scan_graph_risk(
+            tenant_id: Optional[str] = None,
+            user_id: Optional[str] = None,
+            **kwargs: _Any,
+        ) -> Dict[str, _Any]:
+            if not tenant_id:
+                return {"success": False, "error": "tenant_id ausente (bloqueado por segurança)"}
+            if not user_id:
+                return {"success": False, "error": "user_id ausente (bloqueado por segurança)"}
+
+            from app.core.database import AsyncSessionLocal
+            from app.schemas.graph_risk import RiskScanRequest
+
+            req = RiskScanRequest(**(kwargs or {}))
+            service = get_graph_risk_service()
+            async with AsyncSessionLocal() as db:
+                res = await service.scan(
+                    tenant_id=str(tenant_id),
+                    user_id=str(user_id),
+                    db=db,
+                    request=req,
+                )
+                return res.model_dump()
+
+        async def audit_graph_edge(
+            tenant_id: Optional[str] = None,
+            **kwargs: _Any,
+        ) -> Dict[str, _Any]:
+            if not tenant_id:
+                return {"success": False, "error": "tenant_id ausente (bloqueado por segurança)"}
+            from app.schemas.graph_risk import AuditEdgeRequest
+            service = get_graph_risk_service()
+            req = AuditEdgeRequest(**(kwargs or {}))
+            res = await service.audit_edge(tenant_id=str(tenant_id), request=req)
+            return res.model_dump()
+
+        async def audit_graph_chain(
+            tenant_id: Optional[str] = None,
+            **kwargs: _Any,
+        ) -> Dict[str, _Any]:
+            if not tenant_id:
+                return {"success": False, "error": "tenant_id ausente (bloqueado por segurança)"}
+            from app.schemas.graph_risk import AuditChainRequest
+            service = get_graph_risk_service()
+            req = AuditChainRequest(**(kwargs or {}))
+            res = await service.audit_chain(tenant_id=str(tenant_id), request=req)
+            return res.model_dump()
+
+        # Override dummy handlers if present
+        if "ask_graph" in self._tools:
+            self._tools["ask_graph"].function = ask_graph
+        if "scan_graph_risk" in self._tools:
+            self._tools["scan_graph_risk"].function = scan_graph_risk
+        if "audit_graph_edge" in self._tools:
+            self._tools["audit_graph_edge"].function = audit_graph_edge
+        if "audit_graph_chain" in self._tools:
+            self._tools["audit_graph_chain"].function = audit_graph_chain
 
     def _register_datajud_tools(self) -> None:
         """Register DataJud and DJEN integration tools."""
@@ -220,8 +338,30 @@ class ToolRegistry:
         ) -> Dict[str, Any]:
             """Consulta processo no DataJud (CNJ)."""
             try:
-                from app.services.djen_service import djen_service
-                return await djen_service.consultar_processo(numero_processo, tribunal)
+                from app.services.djen_service import extract_tribunal_from_npu, get_djen_service
+
+                numero = str(numero_processo or "").strip()
+                if not numero:
+                    return {"error": "numero_processo is required", "success": False}
+
+                tribunal_sigla = (tribunal or "").strip().upper() or extract_tribunal_from_npu(numero)
+                if not tribunal_sigla:
+                    return {
+                        "error": "Tribunal nao identificado pelo NPU. Informe a sigla em 'tribunal'.",
+                        "success": False,
+                    }
+
+                djen_service = get_djen_service()
+                if not djen_service.datajud.api_key:
+                    return {"error": "CNJ_API_KEY not configured", "success": False}
+
+                results = await djen_service.fetch_metadata(numero, tribunal_sigla)
+                return {
+                    "success": True,
+                    "results": _normalize_result(results),
+                    "total": len(results),
+                    "tribunal": tribunal_sigla,
+                }
             except Exception as e:
                 return {"error": str(e), "success": False}
 
@@ -234,13 +374,22 @@ class ToolRegistry:
         ) -> Dict[str, Any]:
             """Busca publicações no Diário de Justiça Eletrônico."""
             try:
-                from app.services.djen_service import djen_service
-                return await djen_service.buscar_publicacoes(
-                    numero_processo=numero_processo,
+                from app.services.djen_service import get_djen_service
+
+                djen_service = get_djen_service()
+                results = await djen_service.search_by_process(
+                    numero_processo=str(numero_processo or ""),
+                    tribunal_sigla=(tribunal or None),
                     data_inicio=data_inicio,
                     data_fim=data_fim,
-                    tribunal=tribunal,
+                    meio=str(kwargs.get("meio", "D")),
+                    max_pages=int(kwargs.get("max_pages", 10)),
                 )
+                return {
+                    "success": True,
+                    "results": _normalize_result(results),
+                    "total": len(results),
+                }
             except Exception as e:
                 return {"error": str(e), "success": False}
 

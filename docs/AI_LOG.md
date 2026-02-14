@@ -5,22 +5,63 @@
 
 ---
 
+## 2026-02-13 — Uniformização custom_prompt + ASR Hints Multi-Provider + Telemetria
+
+### Resumo
+Implementação de 6 fases para uniformizar hints ASR em todos os providers de transcrição (AssemblyAI, RunPod, Whisper local, ElevenLabs), corrigir cache hashing, uniformizar custom_prompt `tables_only` em FIDELIDADE, e adicionar suporte a custom_spelling + telemetria no AssemblyAI.
+
+### Arquivos Alterados
+- `apps/api/app/services/transcription_service.py` — `_normalize_hints()` centralizado, `_hash_list()`/`_hash_spelling()` helpers, cache hashes enriched (hints_fingerprint, speaker_id, custom_spelling, prompt_mode), AAI modo exclusivo prompt/keyterms, `speech_model_used` logging, RunPod hints via initial_prompt, Whisper hints via `_transcribe_whisper_with_optional_external_diarization()`, ElevenLabs scribe_v2 feature-flagged
+- `mlx_vomo.py` — `extra_terms` param em `_get_whisper_initial_prompt_for_asr()`, `transcribe_with_segments()`, `transcribe_beam_with_segments()`, `transcribe()`, `_transcribe_with_segments_chunked()`, `transcribe_file_full()`, `_build_system_prompt()` com `custom_prompt_scope`
+- `apps/api/app/schemas/transcription.py` — `CustomPromptScopeType`, `SpellingCorrection` model, `custom_prompt_scope` + `custom_spelling` fields
+- `apps/api/app/api/endpoints/transcription.py` — `custom_prompt_scope` Form em 6 endpoints, `area`/`custom_keyterms` em hearing endpoints
+
+### Arquivos Criados (testes)
+- `apps/api/tests/test_normalize_hints.py` — 35 testes
+- `apps/api/tests/test_custom_prompt_scope.py` — 7 testes
+- `apps/api/tests/test_assemblyai_improvements.py` — 14 testes
+- `apps/api/tests/test_runpod_hints.py` — 8 testes
+- `apps/api/tests/test_whisper_hints.py` — 14 testes
+- `apps/api/tests/test_elevenlabs_v2.py` — 12 testes
+
+### Decisões Tomadas
+- Provider limits: AAI=1000, RunPod=200, ElevenLabs=100, Whisper=50
+- AAI modo exclusivo: >50 keyterms → keyterms_only; ≤50 → both; sem → prompt_only
+- Whisper hints via `extra_terms` param explícito (sem estado global mutável)
+- ElevenLabs scribe_v2 feature-flagged via `ELEVENLABS_USE_SCRIBE_V2=true`
+- FIDELIDADE agora usa `tables_only` por padrão (opt-in `style_and_tables` para legacy)
+
+### Testes
+- 90/90 testes passando em todas as 6 fases
+
+### Env Vars Novas
+- `ELEVENLABS_USE_SCRIBE_V2=true` — ativa scribe_v2 com keyterms
+
+---
+
 ## 2026-02-13 — Embedding Provider Standardization: voyage-4-large 1024d
 
 ### Resumo
-Padronização dos providers de embedding no Iudex para usar voyage-4-large (1024d) como modelo padrão para direito BR, substituindo JurisBERT (768d). Implementação de 8 melhorias ordenadas por impacto/esforço.
+Padronização dos providers de embedding no Iudex para usar voyage-4-large (1024d) como modelo padrão para direito BR, substituindo JurisBERT (768d). Implementação de 8 melhorias ordenadas por impacto/esforço + correção de 6 findings de code review (2 HIGH, 4 MEDIUM).
 
-### Arquivos Alterados
+### Arquivos Alterados (8 melhorias)
 - `apps/api/app/services/rag/embedding_router.py` — Adicionado VOYAGE_V4 ao enum, nova collection legal_br_v4 (1024d), BR roteia para voyage-4-large, usage tracking, deprecation warning para legacy collections
-- `apps/api/app/services/rag/voyage_embeddings.py` — Default model mudado para voyage-4-large, OpenAI fallback hardcodado em 3072d
-- `apps/api/app/services/rag/kanon_embeddings.py` — OpenAI fallback hardcodado em 3072d
-- `apps/api/app/services/rag/jurisbert_embeddings.py` — OpenAI fallback hardcodado em 3072d
+- `apps/api/app/services/rag/voyage_embeddings.py` — Default model mudado para voyage-4-large, OpenAI fallback com Matryoshka dimension reduction compatível com target
+- `apps/api/app/services/rag/kanon_embeddings.py` — OpenAI fallback usa self._dimensions (Matryoshka) em vez de 3072d hardcoded
+- `apps/api/app/services/rag/jurisbert_embeddings.py` — OpenAI fallback usa JURISBERT_DIMENSIONS (768) em vez de 3072d hardcoded
 - `apps/api/app/services/rag/core/neo4j_mvp.py` — vector_dimensions default 768→1024, NEO4J_VECTOR_DIM separado de NEO4J_EMBEDDING_DIM
 - `apps/api/app/services/rag/core/graph_neo4j.py` — Env var separada NEO4J_KG_EMBEDDING_DIM para KG embeddings (128d)
 - `apps/api/app/services/rag/core/embeddings.py` — VOYAGE_DEFAULT_MODEL default atualizado
 - `apps/api/app/services/rag/legal_embeddings.py` — VOYAGE_DEFAULT_MODEL default atualizado
 - `apps/api/app/services/rag/config.py` — Comentários clarificando dimensões por provider
 - `apps/api/app/services/rag/.env.example` — Documentação de routing overrides e voyage-context-3
+
+### Arquivos Alterados (6 findings de code review)
+- `apps/api/app/services/rag/core/contextual_embeddings.py` — `_RE_ART_WITH_LEI` regex agora com `re.IGNORECASE` e `[A-Za-z]` (era `[A-Z]`)
+- `apps/api/app/services/rag/core/kg_builder/legal_postprocessor.py` — `_apply_normalization()` paginado com SKIP/LIMIT (era `list()` de todos os nós)
+- `apps/neo4j-rag/neo4j_rag/pipeline.py` — `ensure_indexes()` separa critical vs optional; critical falha com RuntimeError
+- `apps/neo4j-rag/neo4j_rag/ingest/graph_builder.py` — `ingest_document()` usa `session.execute_write()` para atomicidade transacional
+- `apps/neo4j-rag/neo4j_rag/cli.py` — `ingest` command retorna exit code 1 quando há erros
 
 ### Arquivos Criados
 - `apps/api/scripts/bench_embedding_providers.py` — Script de benchmark JurisBERT vs voyage-4-large
@@ -30,6 +71,9 @@ Padronização dos providers de embedding no Iudex para usar voyage-4-large (102
 - Dimensões hardcodadas por provider nos fallback paths (elimina ambiguidade EMBEDDING_DIMENSIONS)
 - NEO4J_VECTOR_DIM separado de NEO4J_EMBEDDING_DIM para evitar conflito chunk vs KG embeddings
 - Legacy collections (lei, juris, etc.) mantidas com warning de deprecação
+- OpenAI fallback usa Matryoshka dimension reduction para gerar vetores na dimensão do provider original (1024d para Voyage/Kanon, 768d para JurisBERT)
+- ensure_indexes distingue critical (vector, fulltext, constraints) de optional (lookup indexes)
+- graph_builder.py usa managed transactions (session.execute_write) para rollback atômico por documento
 
 ---
 

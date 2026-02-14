@@ -1,3 +1,4 @@
+import asyncio
 from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, BackgroundTasks
@@ -197,7 +198,7 @@ async def upload_document_to_case(
             status=DocumentStatus.PROCESSING,
             size=file_size,
             url=f"/uploads/{current_user.id}/{filename}",
-            doc_metadata={},
+            doc_metadata={"local_path": file_path},
             tags=[],
         )
         db.add(document)
@@ -503,7 +504,7 @@ async def _ingest_document_to_graph(
             })
 
         # Ingest to Neo4j with semantic extraction (Gemini Flash)
-        neo4j.ingest_document(
+        await neo4j.ingest_document_async(
             doc_hash=doc_hash,
             chunks=chunks,
             metadata={
@@ -548,58 +549,30 @@ async def _process_and_ingest_document(
     """Background task to process document (extract text) and trigger ingestion."""
     from app.core.database import async_session_maker
     from app.models.document import DocumentStatus
+    from app.services.document_extraction_service import extract_text_from_path
 
     try:
         logger.info(f"Processing document doc={doc_id} file={file_path}")
 
-        # Extract text based on document type
-        extracted_text = ""
-
-        if doc_type.value == "PDF":
-            try:
-                import fitz  # PyMuPDF
-                doc = fitz.open(file_path)
-                for page in doc:
-                    extracted_text += page.get_text()
-                doc.close()
-            except Exception as e:
-                logger.warning(f"PDF extraction failed: {e}")
-
-        elif doc_type.value == "DOCX":
-            try:
-                from docx import Document as DocxDocument
-                doc = DocxDocument(file_path)
-                for para in doc.paragraphs:
-                    extracted_text += para.text + "\n"
-            except Exception as e:
-                logger.warning(f"DOCX extraction failed: {e}")
-
-        elif doc_type.value == "TXT":
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    extracted_text = f.read()
-            except Exception as e:
-                logger.warning(f"TXT extraction failed: {e}")
-
-        elif doc_type.value == "HTML":
-            try:
-                from bs4 import BeautifulSoup
-                with open(file_path, "r", encoding="utf-8") as f:
-                    soup = BeautifulSoup(f.read(), "html.parser")
-                    extracted_text = soup.get_text()
-            except Exception as e:
-                logger.warning(f"HTML extraction failed: {e}")
+        extraction = await extract_text_from_path(
+            file_path,
+            min_pdf_chars=50,
+            allow_pdf_ocr_fallback=True,
+        )
+        extracted_text = extraction.text or ""
+        extraction_meta = extraction.metadata if isinstance(extraction.metadata, dict) else {}
 
         # Update document with extracted text
         async with async_session_maker() as db:
-            await db.execute(
-                update(Document)
-                .where(Document.id == doc_id)
-                .values(
-                    extracted_text=extracted_text,
-                    status=DocumentStatus.READY if extracted_text else DocumentStatus.ERROR,
-                )
-            )
+            result = await db.execute(select(Document).where(Document.id == doc_id))
+            doc = result.scalar_one_or_none()
+            if doc is None:
+                logger.warning(f"Documento {doc_id} não encontrado para atualização")
+                return
+            current_meta = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+            doc.extracted_text = extracted_text
+            doc.doc_metadata = {**current_meta, **extraction_meta}
+            doc.status = DocumentStatus.READY if extracted_text else DocumentStatus.ERROR
             await db.commit()
 
         if not extracted_text:

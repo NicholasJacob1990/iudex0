@@ -29,11 +29,23 @@ HYBRID_LABELS_BY_ENTITY_TYPE: Dict[str, str] = {
     "tribunal": "Tribunal",
     "processo": "Processo",
     "recurso": "Recurso",
+    "decisao": "Decisao",
     "acordao": "Acordao",
     "ministro": "Ministro",
     "relator": "Relator",
     # Additional types
     "oab": "OAB",
+    # Factual entities
+    "pessoa": "Pessoa",
+    "empresa": "Empresa",
+    "evento": "Evento",
+    "cpf": "Pessoa",
+    "cnpj": "Empresa",
+    "orgao_publico": "OrgaoPublico",
+    "prazo": "Prazo",
+    "valor_monetario": "ValorMonetario",
+    "data_juridica": "DataJuridica",
+    "local": "Local",
     # Semantic extraction
     "semanticentity": "SemanticEntity",
     # ArgumentRAG
@@ -42,6 +54,33 @@ HYBRID_LABELS_BY_ENTITY_TYPE: Dict[str, str] = {
     "actor": "Actor",
     "issue": "Issue",
 }
+
+
+def register_dynamic_label(entity_type: str, label: str) -> bool:
+    """Register a dynamically discovered label into the runtime whitelist.
+
+    Validates safety and idempotently adds to HYBRID_LABELS_BY_ENTITY_TYPE.
+
+    Returns True if registered, False if rejected.
+    """
+    key = entity_type.strip().lower()
+    if not key or len(key) < 3:
+        return False
+
+    if not _SAFE_LABEL_RE.fullmatch(label):
+        logger.warning("Dynamic label rejected (unsafe): %r", label)
+        return False
+
+    if label in FORBIDDEN_LABELS:
+        logger.warning("Dynamic label rejected (forbidden): %r", label)
+        return False
+
+    if key in HYBRID_LABELS_BY_ENTITY_TYPE:
+        return True  # already registered, idempotent
+
+    HYBRID_LABELS_BY_ENTITY_TYPE[key] = label
+    logger.info("Registered dynamic label: %s -> %s", key, label)
+    return True
 
 
 def label_for_entity_type(entity_type: Optional[str]) -> Optional[str]:

@@ -9,12 +9,16 @@ Supported node types:
 - selection: Present choices to user
 - condition: Branch based on state value
 - prompt: LLM call (Claude/GPT/Gemini)
+- claude_agent: Claude Agent SDK/raw executor as a single LangGraph node
+- parallel_agents: fan-out of multiple Claude agent branches with fan-in merge
 - rag_search: Search knowledge base
 - human_review: Pause for human approval (HIL)
 - tool_call: Execute a pre-configured tool via MCP
 - review_table: Extract structured fields from multiple documents into a comparative table
 - output: Assemble final response from variable references
 - user_input: Collect text/files/selections with optional defaults
+- trigger: Entry point for event-driven workflows (teams, email, djen, schedule, webhook)
+- delivery: Dispatch output to destinations (email, teams, calendar, webhook, outlook reply)
 """
 
 from __future__ import annotations
@@ -44,6 +48,8 @@ except ImportError:
 
 class WorkflowState(TypedDict, total=False):
     """State that flows through the workflow graph."""
+    # Execution context (used to stream progress via JobManager, e.g. hard deep research)
+    job_id: Optional[str]
     input: str
     output: str
     current_node: str
@@ -60,6 +66,9 @@ class WorkflowState(TypedDict, total=False):
     step_outputs: dict   # {node_id: {output: str, sources: list, metadata: dict}}
     # User context for per-user credential resolution (PJe, etc.)
     user_id: Optional[str]
+    # Trigger/delivery context for event-driven workflows
+    trigger_event: dict       # Data from the event that triggered the workflow
+    delivery_results: list    # Results from each delivery dispatch
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +126,11 @@ def _create_selection_node(node_config: Dict[str, Any]) -> Callable:
 
     def selection_node(state: WorkflowState) -> WorkflowState:
         selections = dict(state.get("selections", {}))
-        # Value comes from input_data at runtime
-        value = state.get("input", "")
+        # Prefer explicit selections payload (common for API runs), fallback to legacy
+        # `state.input` (older callers/UX that feed values step-by-step).
+        value = selections.get(field_name, "")
+        if not value:
+            value = state.get("input", "")
 
         # Apply default template if optional and empty
         if not value and is_optional and default_template:
@@ -288,6 +300,292 @@ def _create_prompt_node(node_config: Dict[str, Any]) -> Callable:
     return prompt_node
 
 
+def _create_deep_research_node(node_config: Dict[str, Any]) -> Callable:
+    """
+    Deep research node — runs either standard deep research (single provider) or
+    hard deep research (multi-provider + Claude agentic loop).
+    """
+    node_id = node_config.get("id", "deep_research")
+    query_template = node_config.get("query", "") or node_config.get("prompt", "")
+    mode = str(node_config.get("mode") or "hard").strip().lower()
+    effort = str(node_config.get("effort") or "medium").strip().lower()
+    provider = (node_config.get("provider") or "").strip().lower() or None
+    providers = node_config.get("providers") or [
+        "gemini",
+        "perplexity",
+        "openai",
+        "rag_global",
+        "rag_local",
+    ]
+    timeout_per_provider = int(node_config.get("timeout_per_provider") or 120)
+    total_timeout = int(node_config.get("total_timeout") or 300)
+    search_focus = node_config.get("search_focus")
+    domain_filter = node_config.get("domain_filter")
+    include_sources = bool(node_config.get("include_sources", True))
+
+    async def deep_research_node(state: WorkflowState) -> WorkflowState:
+        from app.services.ai.variable_resolver import VariableResolver
+        from app.services.job_manager import job_manager
+
+        resolver = VariableResolver()
+        query = resolver.resolve(query_template or "", state) if query_template else ""
+        if not query:
+            query = str(state.get("input", "") or state.get("output", "") or "").strip()
+
+        # Backwards-compat for legacy placeholders like {input}
+        legacy_ctx = {
+            "input": state.get("input", ""),
+            "output": state.get("output", ""),
+            "rag_results": json.dumps(state.get("rag_results", []), ensure_ascii=False),
+            **(state.get("selections", {}) or {}),
+        }
+        for k, v in legacy_ctx.items():
+            query = query.replace(f"{{{k}}}", str(v))
+
+        logger.info(f"[Workflow] deep_research node {node_id}: mode={mode} effort={effort}")
+
+        job_id = state.get("job_id")
+        report_text = ""
+        sources: list[dict] = []
+        metadata: dict = {"mode": mode, "effort": effort}
+
+        if mode == "hard":
+            from app.services.ai.deep_research_hard_service import deep_research_hard_service
+
+            hard_cfg = {
+                "effort": effort,
+                "providers": providers,
+                "tenant_id": state.get("tenant_id"),
+                "case_id": state.get("case_id"),
+                "search_focus": search_focus,
+                "domain_filter": domain_filter,
+                "timeout_per_provider": timeout_per_provider,
+                "total_timeout": total_timeout,
+                "plan_key": node_id,
+            }
+
+            try:
+                async for ev in deep_research_hard_service.stream_hard_research(query, config=hard_cfg):
+                    etype = str((ev or {}).get("type", "") or "hard_research_event")
+
+                    if etype == "study_token":
+                        delta = str(ev.get("delta", "") or "")
+                        if delta:
+                            report_text += delta
+                            if job_id:
+                                job_manager.emit_event(
+                                    job_id,
+                                    "token",
+                                    {"token": delta, "node_id": node_id, "kind": "hard_research"},
+                                    phase="workflow",
+                                    node=node_id,
+                                )
+                        continue
+
+                    if etype == "study_done":
+                        sources = ev.get("sources", []) or []
+                        metadata.update(
+                            {
+                                "sources_count": ev.get("sources_count"),
+                                "iterations": ev.get("iterations"),
+                                "elapsed_ms": ev.get("elapsed_ms"),
+                                "provider_summaries": ev.get("provider_summaries"),
+                                "providers": providers,
+                            }
+                        )
+
+                    if job_id:
+                        # Keep for debug/observability in RunViewer.
+                        job_manager.emit_event(
+                            job_id,
+                            etype,
+                            {**dict(ev), "node_id": node_id},
+                            phase="workflow",
+                            node=node_id,
+                        )
+            except Exception as exc:
+                logger.exception(f"[Workflow] deep_research hard failed: {exc}")
+                report_text = report_text or f"[Erro no Hard Deep Research: {exc}]"
+                metadata["error"] = str(exc)
+
+        else:
+            from app.services.ai.deep_research_service import DeepResearchService
+
+            cfg = {
+                "effort": effort,
+                **({"provider": provider} if provider else {}),
+                "search_focus": search_focus,
+                "domain_filter": domain_filter,
+                "require_sources": True,
+            }
+            svc = DeepResearchService()
+            try:
+                res = await svc.run_research_task(query, config=cfg)
+                report_text = str(getattr(res, "text", "") or "")
+                sources = list(getattr(res, "sources", []) or []) if include_sources else []
+                metadata.update(
+                    {
+                        "from_cache": bool(getattr(res, "from_cache", False)),
+                        "success": bool(getattr(res, "success", True)),
+                    }
+                )
+                if job_id and report_text:
+                    chunk_size = 200
+                    for i in range(0, len(report_text), chunk_size):
+                        job_manager.emit_event(
+                            job_id,
+                            "token",
+                            {"token": report_text[i : i + chunk_size], "node_id": node_id, "kind": "deep_research"},
+                            phase="workflow",
+                            node=node_id,
+                        )
+            except Exception as exc:
+                logger.exception(f"[Workflow] deep_research failed: {exc}")
+                report_text = f"[Erro no Deep Research: {exc}]"
+                metadata["error"] = str(exc)
+
+        # Convert sources -> citations for UI panel (best-effort)
+        citations: list[dict] = []
+        if include_sources and sources:
+            try:
+                from app.services.ai.citations.base import stable_numbering, sources_to_citations
+
+                url_title: list[tuple[str, str]] = []
+                for s in sources:
+                    if not isinstance(s, dict):
+                        continue
+                    url = str(s.get("url") or s.get("uri") or "").strip()
+                    title = str(s.get("title") or s.get("name") or url).strip()
+                    if url:
+                        url_title.append((url, title or url))
+                _, stable_sources = stable_numbering(url_title)
+                citations = sources_to_citations(stable_sources)
+            except Exception:
+                citations = []
+
+        llm_responses = dict(state.get("llm_responses", {}))
+        llm_responses[node_id] = report_text
+
+        variables = dict(state.get("variables", {}))
+        variables[f"@{node_id}"] = report_text
+        variables[f"@{node_id}.output"] = report_text
+        variables[f"@{node_id}.metadata"] = metadata
+
+        step_outputs = dict(state.get("step_outputs", {}))
+        step_outputs[node_id] = {
+            "output": report_text,
+            "metadata": metadata,
+            "sources": sources if include_sources else [],
+            "citations": citations,
+        }
+
+        return {
+            **state,
+            "output": report_text,
+            "current_node": node_id,
+            "llm_responses": llm_responses,
+            "variables": variables,
+            "step_outputs": step_outputs,
+            "logs": state.get("logs", []) + [{"node": node_id, "event": "deep_research", **metadata}],
+        }
+
+    return deep_research_node
+
+
+def _create_claude_agent_node(node_config: Dict[str, Any]) -> Callable:
+    """Claude agent node — executes ClaudeAgentExecutor inside workflow graph."""
+    from app.services.ai.langgraph.nodes import ClaudeAgentNode
+
+    node_id = node_config.get("id", "claude_agent")
+    prompt_template = node_config.get("prompt", "{input}")
+    model = node_config.get("model", "claude-opus-4-6")
+    system_prompt = node_config.get("system_prompt", "")
+    max_iterations = int(node_config.get("max_iterations", 8) or 8)
+    max_tokens = int(node_config.get("max_tokens", 4096) or 4096)
+    include_mcp = bool(node_config.get("include_mcp", True))
+    use_sdk = bool(node_config.get("use_sdk", True))
+
+    tool_names_raw = node_config.get("tool_names")
+    tool_names: Optional[List[str]] = None
+    if isinstance(tool_names_raw, str):
+        names = [x.strip() for x in tool_names_raw.split(",") if x and x.strip()]
+        tool_names = names or None
+    elif isinstance(tool_names_raw, list):
+        names = [str(x).strip() for x in tool_names_raw if str(x).strip()]
+        tool_names = names or None
+
+    node = ClaudeAgentNode(
+        node_id=node_id,
+        prompt_template=prompt_template,
+        model=model,
+        system_prompt=system_prompt,
+        max_iterations=max_iterations,
+        max_tokens=max_tokens,
+        include_mcp=include_mcp,
+        tool_names=tool_names,
+        use_sdk=use_sdk,
+    )
+
+    async def run_node(state: WorkflowState) -> WorkflowState:
+        return await node(state)
+
+    return run_node
+
+
+def _create_parallel_agents_node(node_config: Dict[str, Any]) -> Callable:
+    """Parallel agents node - runs multiple Claude branches in parallel."""
+    from app.services.ai.langgraph.nodes import ParallelAgentsNode
+
+    node_id = node_config.get("id", "parallel_agents")
+    prompt_template = str(node_config.get("prompt", "") or "").strip()
+    prompts_raw = node_config.get("prompts")
+    prompt_templates: List[str] = []
+    if isinstance(prompts_raw, list):
+        prompt_templates = [str(p).strip() for p in prompts_raw if str(p).strip()]
+    elif isinstance(prompts_raw, str):
+        prompt_templates = [part.strip() for part in prompts_raw.split("\n---\n") if part.strip()]
+    if not prompt_templates and prompt_template:
+        prompt_templates = [prompt_template]
+
+    model_raw = node_config.get("model")
+    models_raw = node_config.get("models")
+    models: List[str] = []
+    if isinstance(models_raw, list):
+        models = [str(m).strip() for m in models_raw if str(m).strip()]
+    elif isinstance(models_raw, str):
+        models = [part.strip() for part in models_raw.split(",") if part.strip()]
+    elif isinstance(model_raw, str) and model_raw.strip():
+        models = [model_raw.strip()]
+
+    tool_names_raw = node_config.get("tool_names")
+    tool_names: Optional[List[str]] = None
+    if isinstance(tool_names_raw, list):
+        parsed_names = [str(item).strip() for item in tool_names_raw if str(item).strip()]
+        tool_names = parsed_names or None
+    elif isinstance(tool_names_raw, str):
+        parsed_names = [part.strip() for part in tool_names_raw.split(",") if part.strip()]
+        tool_names = parsed_names or None
+
+    node = ParallelAgentsNode(
+        node_id=node_id,
+        prompt_templates=prompt_templates,
+        models=models or None,
+        system_prompt=str(node_config.get("system_prompt", "") or ""),
+        max_iterations=int(node_config.get("max_iterations", 4) or 4),
+        max_tokens=int(node_config.get("max_tokens", 2048) or 2048),
+        include_mcp=bool(node_config.get("include_mcp", False)),
+        tool_names=tool_names,
+        use_sdk=bool(node_config.get("use_sdk", False)),
+        max_parallel=int(node_config.get("max_parallel", 3) or 3),
+        aggregation_strategy=str(node_config.get("aggregation_strategy", "concat") or "concat"),
+    )
+
+    async def run_node(state: WorkflowState) -> WorkflowState:
+        return await node(state)
+
+    return run_node
+
+
 def _create_rag_search_node(node_config: Dict[str, Any]) -> Callable:
     """RAG search node — queries knowledge base."""
     sources = node_config.get("sources", [])
@@ -370,11 +668,39 @@ def _create_tool_call_node(node_config: Dict[str, Any]) -> Callable:
             if not tool_def:
                 raise ValueError(f"Tool '{tool_name}' not found in registry")
 
-            # Build arguments from state
-            args = {
-                "query": state.get("input", "") or state.get("output", ""),
-                **(node_config.get("arguments", {})),
-            }
+            # Build arguments from node config (supports legacy tool_input from early UI)
+            args: Dict[str, Any] = {}
+            raw_args = node_config.get("arguments", None)
+            if isinstance(raw_args, dict):
+                args.update(raw_args)
+            elif raw_args is not None:
+                # If arguments are a string accidentally, ignore (UI bug / legacy)
+                pass
+
+            if not args:
+                legacy = node_config.get("tool_input", None)
+                if isinstance(legacy, dict):
+                    args.update(legacy)
+                elif isinstance(legacy, str) and legacy.strip():
+                    try:
+                        parsed = json.loads(legacy)
+                        if isinstance(parsed, dict):
+                            args.update(parsed)
+                    except Exception:
+                        pass
+
+            # Inject workflow context (similar to MCP server injection)
+            if "tenant_id" in state and "tenant_id" not in args:
+                args["tenant_id"] = state.get("tenant_id")
+            if state.get("user_id") and "user_id" not in args:
+                args["user_id"] = state.get("user_id")
+            if "case_id" in state and "case_id" not in args:
+                args["case_id"] = state.get("case_id")
+
+            # Only pass the free-text query if the tool schema accepts it.
+            schema_props = (tool_def.input_schema or {}).get("properties") if isinstance(tool_def.input_schema, dict) else {}
+            if isinstance(schema_props, dict) and "query" in schema_props and "query" not in args:
+                args["query"] = state.get("input", "") or state.get("output", "")
             result = await tool_def.function(**args)
         except Exception as e:
             logger.error(f"[Workflow] tool_call {tool_name} failed: {e}")
@@ -864,6 +1190,111 @@ def _create_user_input_node(node_config: Dict[str, Any]) -> Callable:
     return user_input_node
 
 
+def _create_trigger_node(node_config: Dict[str, Any]) -> Callable:
+    """Trigger node — entry point for event-driven workflows.
+
+    Injects the trigger_event data into WorkflowState from input_data.
+    Supported trigger_types: teams_command, outlook_email, djen_movement, schedule, webhook.
+    """
+    node_id = node_config.get("id", "trigger")
+    trigger_type = node_config.get("trigger_type", "webhook")
+
+    def trigger_node(state: WorkflowState) -> WorkflowState:
+        # The trigger_event comes from input_data when the Celery task runs
+        trigger_event = state.get("trigger_event", {})
+        if not trigger_event:
+            # Fallback: entire input_data is the trigger event
+            trigger_event = {
+                "type": trigger_type,
+                "input": state.get("input", ""),
+            }
+
+        logger.debug(
+            f"[Workflow] trigger {node_id}: type={trigger_type}, "
+            f"event_keys={list(trigger_event.keys())}"
+        )
+
+        variables = dict(state.get("variables", {}))
+        variables[f"@{node_id}"] = str(trigger_event)
+        variables[f"@{node_id}.type"] = trigger_type
+
+        # Expose common event fields as variables
+        for key in ("subject", "body", "sender", "command", "text", "npu", "tipo"):
+            if key in trigger_event:
+                variables[f"@{node_id}.{key}"] = str(trigger_event[key])
+
+        step_outputs = dict(state.get("step_outputs", {}))
+        step_outputs[node_id] = {
+            "output": str(trigger_event),
+            "trigger_type": trigger_type,
+            "event": trigger_event,
+        }
+
+        # Also set input from event text/body for downstream prompt nodes
+        input_text = (
+            trigger_event.get("text")
+            or trigger_event.get("body")
+            or trigger_event.get("command")
+            or state.get("input", "")
+        )
+
+        return {
+            **state,
+            "input": input_text,
+            "trigger_event": trigger_event,
+            "variables": variables,
+            "step_outputs": step_outputs,
+            "current_node": node_id,
+            "logs": state.get("logs", []) + [
+                {"node": node_id, "event": "trigger", "trigger_type": trigger_type}
+            ],
+        }
+
+    return trigger_node
+
+
+def _create_delivery_node(node_config: Dict[str, Any]) -> Callable:
+    """Delivery node — dispatches workflow output to external destination.
+
+    Supported delivery_types: email, teams_message, calendar_event, webhook_out, outlook_reply.
+
+    In sync execution (SSE), this is a passthrough that records the config.
+    In async execution (Celery), the delivery is dispatched by _run_triggered().
+    """
+    node_id = node_config.get("id", "delivery")
+    delivery_type = node_config.get("delivery_type", "email")
+    delivery_config = node_config.get("delivery_config", {})
+
+    def delivery_node(state: WorkflowState) -> WorkflowState:
+        logger.debug(
+            f"[Workflow] delivery {node_id}: type={delivery_type}, "
+            f"config_keys={list(delivery_config.keys())}"
+        )
+
+        # Record the delivery config in step_outputs for later dispatch
+        step_outputs = dict(state.get("step_outputs", {}))
+        step_outputs[node_id] = {
+            "output": f"Delivery: {delivery_type}",
+            "delivery_type": delivery_type,
+            "delivery_config": delivery_config,
+        }
+
+        variables = dict(state.get("variables", {}))
+        variables[f"@{node_id}"] = f"Delivery ({delivery_type}) configurado"
+
+        return {
+            **state,
+            "variables": variables,
+            "step_outputs": step_outputs,
+            "current_node": node_id,
+            "logs": state.get("logs", []) + [
+                {"node": node_id, "event": "delivery", "delivery_type": delivery_type}
+            ],
+        }
+
+    return delivery_node
+
+
 # ---------------------------------------------------------------------------
 # Node Factory Map
 # ---------------------------------------------------------------------------
@@ -873,6 +1304,9 @@ NODE_FACTORIES = {
     "selection": _create_selection_node,
     "condition": _create_condition_node,
     "prompt": _create_prompt_node,
+    "deep_research": _create_deep_research_node,
+    "claude_agent": _create_claude_agent_node,
+    "parallel_agents": _create_parallel_agents_node,
     "rag_search": _create_rag_search_node,
     "human_review": _create_human_review_node,
     "tool_call": _create_tool_call_node,
@@ -880,6 +1314,8 @@ NODE_FACTORIES = {
     "review_table": _create_review_table_node,
     "output": _create_output_node,
     "user_input": _create_user_input_node,
+    "trigger": _create_trigger_node,
+    "delivery": _create_delivery_node,
 }
 
 VALID_NODE_TYPES = set(NODE_FACTORIES.keys())
@@ -998,11 +1434,55 @@ class WorkflowCompiler:
             tgt = edge["target"]
             adjacency.setdefault(src, []).append(tgt)
 
+        node_type_by_id = {n["id"]: n.get("type") for n in nodes}
+
+        # Normalize simple fan-out to multiple delivery nodes by chaining them.
+        # The visual builder commonly models "send to email + calendar + teams" as
+        # multiple outgoing edges. LangGraph requires all nodes reachable and this
+        # compiler supports only a single next node per step, so we serialize
+        # delivery fan-out deterministically.
+        for src, outs in list(adjacency.items()):
+            if len(outs) <= 1:
+                continue
+            non_condition = [t for t in outs if t not in condition_nodes]
+            if len(non_condition) <= 1:
+                continue
+            if all(node_type_by_id.get(t) == "delivery" for t in non_condition):
+                # Chain: src -> delivery1 -> delivery2 -> ... (only if deliveries have no explicit next)
+                adjacency[src] = [non_condition[0]]
+                for a, b in zip(non_condition, non_condition[1:]):
+                    if adjacency.get(a):
+                        # If a delivery already has an outgoing edge, don't rewrite (leave as-is).
+                        # This keeps behavior predictable for complex graphs.
+                        break
+                    adjacency[a] = [b]
+
         # Find entry point (node with no incoming edges)
         targets = {e["target"] for e in edges}
         entry_nodes = [n["id"] for n in nodes if n["id"] not in targets]
         if not entry_nodes:
             entry_nodes = [nodes[0]["id"]]
+
+        # If there are multiple root nodes (common in templates where several input
+        # nodes feed the same downstream prompt), LangGraph compilation fails due to
+        # unreachable roots. We rewrite the adjacency of root input nodes into a
+        # deterministic chain when it's safe (all roots have the same single target).
+        if len(entry_nodes) > 1:
+            input_like = {"file_upload", "selection", "user_input"}
+            if all(node_type_by_id.get(nid) in input_like for nid in entry_nodes):
+                next_targets = []
+                ok = True
+                for nid in entry_nodes:
+                    outs = adjacency.get(nid, [])
+                    if len(outs) != 1:
+                        ok = False
+                        break
+                    next_targets.append(outs[0])
+                common_target = next_targets[0] if next_targets else None
+                if ok and common_target and all(t == common_target for t in next_targets):
+                    for a, b in zip(entry_nodes, entry_nodes[1:]):
+                        adjacency[a] = [b]
+                    adjacency[entry_nodes[-1]] = [common_target]
 
         # Set entry point
         entry = entry_nodes[0]

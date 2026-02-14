@@ -17,10 +17,12 @@ from app.services.rag.core.kg_builder.legal_schema import (
     LEGAL_PATTERNS,
     build_legal_schema,
 )
+from app.services.rag.core.kg_builder.gliner_extractor import GLiNERExtractor
 
 __all__ = [
     "LEGAL_NODE_TYPES",
     "LEGAL_RELATIONSHIP_TYPES",
     "LEGAL_PATTERNS",
     "build_legal_schema",
+    "GLiNERExtractor",
 ]

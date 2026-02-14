@@ -16,6 +16,7 @@ from typing import List, Optional, Dict, Any, AsyncGenerator, TYPE_CHECKING
 from dataclasses import dataclass
 import logging
 import os
+import time
 
 from app.services.ai.shared.sse_protocol import (
     SSEEvent,
@@ -26,6 +27,10 @@ from app.services.ai.shared.sse_protocol import (
     error_event,
     thinking_event,
 )
+from app.services.ai.shared.feature_flags import FeatureFlagManager
+from app.services.ai.shared.quotas import TenantQuotaManager
+from app.services.ai.observability.metrics import get_observability_metrics
+from app.services.ai.orchestration.graph_tool_policy import build_tool_allowlist
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,8 @@ class RoutingDecision:
     primary_models: List[str]
     secondary_models: List[str]
     reason: str
+    document_route: str = "default"
+    estimated_pages: int = 0
 
 
 @dataclass
@@ -68,6 +75,16 @@ class OrchestrationContext:
     temperature: float = 0.3
     web_search: bool = False
     max_tokens: int = 8192
+    execution_profile: str = "default"  # "default" | "quick"
+    target_pages: int = 0
+    min_pages: int = 0
+    max_pages: int = 0
+    estimated_pages: int = 0
+    document_route: str = "default"
+    skill_matched: bool = False
+    skill_prefer_workflow: bool = False
+    skill_prefer_agent: bool = False
+    skill_name: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "OrchestrationContext":
@@ -87,6 +104,16 @@ class OrchestrationContext:
             temperature=float(data.get("temperature", 0.3)),
             web_search=bool(data.get("web_search", False)),
             max_tokens=int(data.get("max_tokens", 8192)),
+            execution_profile=str(data.get("execution_profile", "default")),
+            target_pages=int(data.get("target_pages", 0) or 0),
+            min_pages=int(data.get("min_pages", 0) or 0),
+            max_pages=int(data.get("max_pages", 0) or 0),
+            estimated_pages=int(data.get("estimated_pages", 0) or 0),
+            document_route=str(data.get("document_route", "default") or "default"),
+            skill_matched=bool(data.get("skill_matched", False)),
+            skill_prefer_workflow=bool(data.get("skill_prefer_workflow", False)),
+            skill_prefer_agent=bool(data.get("skill_prefer_agent", False)),
+            skill_name=(str(data.get("skill_name") or "").strip() or None),
         )
 
 
@@ -122,6 +149,94 @@ class OrchestrationRouter:
         GOOGLE_AGENT_MODEL: ExecutorType.GOOGLE_AGENT,
     }
 
+    def _is_quick_profile(self, context: OrchestrationContext) -> bool:
+        """Whether request asks for the lightweight quick-agent profile."""
+        return (context.execution_profile or "").strip().lower() == "quick"
+
+    def _quick_max_iterations(self, default: int = 6) -> int:
+        """Bounded max iterations used by quick profile executors."""
+        try:
+            value = int(os.getenv("QUICK_AGENT_MAX_ITERATIONS", str(default)) or default)
+        except Exception:
+            value = default
+        return max(2, min(20, value))
+
+    def _estimate_document_pages(self, context: Optional[OrchestrationContext]) -> int:
+        """
+        Estimate document size in pages for routing decisions.
+
+        Priority:
+        1) Explicit values from context (estimated_pages/max_pages/target_pages/min_pages)
+        2) Heuristic by text length (prompt + rag_context, ~4k chars/page)
+        """
+        if not context:
+            return 0
+
+        explicit_candidates = [
+            int(getattr(context, "estimated_pages", 0) or 0),
+            int(getattr(context, "max_pages", 0) or 0),
+            int(getattr(context, "target_pages", 0) or 0),
+            int(getattr(context, "min_pages", 0) or 0),
+        ]
+        explicit_pages = max([p for p in explicit_candidates if p > 0], default=0)
+
+        text_chars = len(context.prompt or "") + len(context.rag_context or "")
+        inferred_pages = text_chars // 4000 if text_chars > 0 else 0
+
+        return max(explicit_pages, inferred_pages)
+
+    def _route_by_document_size(self, pages: int) -> str:
+        """
+        Classify routing strategy based on estimated document pages.
+        """
+        pages = int(pages or 0)
+        if pages <= 0:
+            return "default"
+        if pages <= 100:
+            return "direct"
+        if pages <= 500:
+            return "rag_enhanced"
+        if pages <= 2000:
+            return "chunked_rag"
+        return "multi_pass"
+
+    def _detect_provider_family(self, model_id: str) -> str:
+        """Infer provider family from model identifier."""
+        model = str(model_id or "").strip().lower()
+        if not model:
+            return "unknown"
+        if "claude" in model or "anthropic" in model:
+            return "anthropic"
+        if "gpt" in model or model.startswith("o1") or model.startswith("o3") or "openai" in model:
+            return "openai"
+        if "gemini" in model or "google" in model:
+            return "google"
+        return "unknown"
+
+    def _infer_skill_agent_executor(
+        self,
+        selected_models: List[str],
+    ) -> Optional[tuple[ExecutorType, str]]:
+        """Infer native agent executor when all selected models are same provider family."""
+        non_agent_models = [m for m in selected_models if m not in self.AGENT_MODELS]
+        if not non_agent_models:
+            return None
+
+        families = {self._detect_provider_family(m) for m in non_agent_models}
+        if "unknown" in families:
+            return None
+        if len(families) != 1:
+            return None
+
+        family = next(iter(families))
+        if family == "anthropic" and self._is_agent_enabled(self.CLAUDE_AGENT_MODEL):
+            return ExecutorType.CLAUDE_AGENT, self.CLAUDE_AGENT_MODEL
+        if family == "openai" and self._is_agent_enabled(self.OPENAI_AGENT_MODEL):
+            return ExecutorType.OPENAI_AGENT, self.OPENAI_AGENT_MODEL
+        if family == "google" and self._is_agent_enabled(self.GOOGLE_AGENT_MODEL):
+            return ExecutorType.GOOGLE_AGENT, self.GOOGLE_AGENT_MODEL
+        return None
+
     # Configurações de ambiente
     CLAUDE_AGENT_ENABLED = os.getenv("CLAUDE_AGENT_ENABLED", "true").lower() == "true"
     OPENAI_AGENT_ENABLED = os.getenv("OPENAI_AGENT_ENABLED", "true").lower() == "true"
@@ -131,9 +246,23 @@ class OrchestrationRouter:
 
     def __init__(self):
         """Inicializa o router."""
+        self.feature_flags = FeatureFlagManager()
         self._parallel_executor = None
         self._event_merger = None
         self._executors = {}  # Cache de executores
+        self.tenant_quotas = TenantQuotaManager()
+        self.CLAUDE_AGENT_ENABLED = (
+            self.CLAUDE_AGENT_ENABLED and self.feature_flags.is_executor_enabled("claude_agent")
+        )
+        self.OPENAI_AGENT_ENABLED = (
+            self.OPENAI_AGENT_ENABLED and self.feature_flags.is_executor_enabled("openai_agent")
+        )
+        self.GOOGLE_AGENT_ENABLED = (
+            self.GOOGLE_AGENT_ENABLED and self.feature_flags.is_executor_enabled("google_agent")
+        )
+        self.PARALLEL_EXECUTION_ENABLED = (
+            self.PARALLEL_EXECUTION_ENABLED and self.feature_flags.is_executor_enabled("parallel")
+        )
         logger.info(
             f"OrchestrationRouter inicializado. "
             f"Claude Agent: {self.CLAUDE_AGENT_ENABLED}, "
@@ -145,18 +274,19 @@ class OrchestrationRouter:
     def _is_agent_enabled(self, agent_model: str) -> bool:
         """Verifica se um agente está habilitado."""
         if agent_model == self.CLAUDE_AGENT_MODEL:
-            return self.CLAUDE_AGENT_ENABLED
+            return self.CLAUDE_AGENT_ENABLED and self.feature_flags.is_executor_enabled("claude_agent")
         elif agent_model == self.OPENAI_AGENT_MODEL:
-            return self.OPENAI_AGENT_ENABLED
+            return self.OPENAI_AGENT_ENABLED and self.feature_flags.is_executor_enabled("openai_agent")
         elif agent_model == self.GOOGLE_AGENT_MODEL:
-            return self.GOOGLE_AGENT_ENABLED
+            return self.GOOGLE_AGENT_ENABLED and self.feature_flags.is_executor_enabled("google_agent")
         return False
 
     def determine_executor(
         self,
         selected_models: List[str],
         mode: str = "chat",
-        force_executor: Optional[ExecutorType] = None
+        force_executor: Optional[ExecutorType] = None,
+        context: Optional[OrchestrationContext] = None,
     ) -> RoutingDecision:
         """
         Determina qual executor usar baseado nos modelos selecionados.
@@ -191,6 +321,59 @@ class OrchestrationRouter:
         other_models = [m for m in selected_models if m not in self.AGENT_MODELS]
         has_other_models = len(other_models) > 0
 
+        # Global kill switch + canary rollout para trilhas agentic.
+        if selected_agents and not self.feature_flags.is_global_enabled():
+            return RoutingDecision(
+                executor_type=ExecutorType.LANGGRAPH,
+                primary_models=other_models if other_models else ["gemini-3-flash"],
+                secondary_models=[],
+                reason="Kill switch global agentic ativo; fallback para LangGraph",
+            )
+        if selected_agents:
+            actor_id = context.user_id if context else None
+            if not self.feature_flags.is_canary_enabled(actor_id):
+                return RoutingDecision(
+                    executor_type=ExecutorType.LANGGRAPH,
+                    primary_models=other_models if other_models else ["gemini-3-flash"],
+                    secondary_models=[],
+                    reason="Rollout canário: tenant fora da amostra agentic",
+                )
+
+        estimated_pages = self._estimate_document_pages(context)
+        document_route = self._route_by_document_size(estimated_pages)
+
+        # Large documents should always use LangGraph workflow for chunking/multi-pass.
+        if document_route in ("chunked_rag", "multi_pass"):
+            langgraph_models = [m for m in selected_models if m not in self.AGENT_MODELS]
+            if not langgraph_models:
+                langgraph_models = ["gemini-3-flash"]
+            return RoutingDecision(
+                executor_type=ExecutorType.LANGGRAPH,
+                primary_models=langgraph_models,
+                secondary_models=[],
+                reason=(
+                    f"Documento estimado em ~{estimated_pages} páginas exige "
+                    f"roteamento {document_route} via LangGraph"
+                ),
+                document_route=document_route,
+                estimated_pages=estimated_pages,
+            )
+
+        # Skill can force workflow-first path for complex process requirements.
+        if context and context.skill_matched and context.skill_prefer_workflow:
+            langgraph_models = [m for m in selected_models if m not in self.AGENT_MODELS]
+            if not langgraph_models:
+                langgraph_models = ["gemini-3-flash"]
+            skill_label = f" ({context.skill_name})" if context.skill_name else ""
+            return RoutingDecision(
+                executor_type=ExecutorType.LANGGRAPH,
+                primary_models=langgraph_models,
+                secondary_models=[],
+                reason=f"Skill matched{skill_label} com prefer_workflow=true",
+                document_route=document_route,
+                estimated_pages=estimated_pages,
+            )
+
         # Verificar se algum agente foi selecionado
         if selected_agents:
             # Encontrar o primeiro agente habilitado
@@ -206,7 +389,9 @@ class OrchestrationRouter:
                     executor_type=ExecutorType.LANGGRAPH,
                     primary_models=other_models if other_models else ["gemini-3-flash"],
                     secondary_models=[],
-                    reason="Agentes desabilitados, fallback para LangGraph"
+                    reason="Agentes desabilitados, fallback para LangGraph",
+                    document_route=document_route,
+                    estimated_pages=estimated_pages,
                 )
 
             # Determinar executor baseado no agente
@@ -218,32 +403,55 @@ class OrchestrationRouter:
                     executor_type=executor_type,
                     primary_models=[enabled_agent],
                     secondary_models=[],
-                    reason=f"{enabled_agent} autônomo selecionado"
+                    reason=f"{enabled_agent} autônomo selecionado",
+                    document_route=document_route,
+                    estimated_pages=estimated_pages,
                 )
 
             # Agente + outros modelos = execução paralela
-            if not self.PARALLEL_EXECUTION_ENABLED:
+            if not (self.PARALLEL_EXECUTION_ENABLED and self.feature_flags.is_executor_enabled("parallel")):
                 logger.warning("Execução paralela desabilitada. Usando apenas agente.")
                 return RoutingDecision(
                     executor_type=executor_type,
                     primary_models=[enabled_agent],
                     secondary_models=[],
-                    reason="Execução paralela desabilitada"
+                    reason="Execução paralela desabilitada",
+                    document_route=document_route,
+                    estimated_pages=estimated_pages,
                 )
 
             return RoutingDecision(
                 executor_type=ExecutorType.PARALLEL,
                 primary_models=[enabled_agent],
                 secondary_models=other_models,
-                reason=f"{enabled_agent} + modelos para validação paralela"
+                reason=f"{enabled_agent} + modelos para validação paralela",
+                document_route=document_route,
+                estimated_pages=estimated_pages,
             )
+
+        # Skill-driven native agent routing for single-provider model selections.
+        if context and context.skill_matched and context.skill_prefer_agent:
+            inferred = self._infer_skill_agent_executor(selected_models)
+            if inferred:
+                executor_type, agent_model = inferred
+                skill_label = f" ({context.skill_name})" if context.skill_name else ""
+                return RoutingDecision(
+                    executor_type=executor_type,
+                    primary_models=[agent_model],
+                    secondary_models=[],
+                    reason=f"Skill matched{skill_label} com prefer_agent=true",
+                    document_route=document_route,
+                    estimated_pages=estimated_pages,
+                )
 
         # Apenas modelos normais = LangGraph
         return RoutingDecision(
             executor_type=ExecutorType.LANGGRAPH,
             primary_models=selected_models,
             secondary_models=[],
-            reason="Workflow LangGraph com modelos selecionados"
+            reason="Workflow LangGraph com modelos selecionados",
+            document_route=document_route,
+            estimated_pages=estimated_pages,
         )
 
     def validate_model_selection(self, selected_models: List[str]) -> bool:
@@ -286,18 +494,46 @@ class OrchestrationRouter:
         Yields:
             SSEEvent para cada evento gerado durante a execução
         """
+        started_at = time.monotonic()
+        metrics = get_observability_metrics()
         context = context or {}
         context["job_id"] = job_id
+        tenant_key = str(
+            context.get("tenant_id")
+            or context.get("user_id")
+            or "anonymous"
+        )
+        quota_decision = self.tenant_quotas.check_and_consume(tenant_key, requests_cost=1)
+        if not quota_decision.allowed:
+            metrics.record_request(
+                execution_path="router:quota_blocked",
+                latency_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+                success=False,
+            )
+            yield error_event(
+                job_id=job_id,
+                error=(
+                    "Limite de cota excedido: "
+                    f"{quota_decision.reason}. Tente novamente após o reset da janela."
+                ),
+                error_type="quota_exceeded",
+                recoverable=True,
+            )
+            return
 
         # Criar contexto de orquestração
-        orchestration_ctx = OrchestrationContext(
-            prompt=prompt,
-            job_id=job_id,
-            **{k: v for k, v in context.items() if k != "job_id" and k != "prompt"}
+        orchestration_ctx = OrchestrationContext.from_dict(
+            {
+                "prompt": prompt,
+                "job_id": job_id,
+                **{k: v for k, v in context.items() if k not in {"job_id", "prompt"}},
+            }
         )
 
         # Determinar executor
-        decision = self.determine_executor(selected_models, mode)
+        decision = self.determine_executor(selected_models, mode, context=orchestration_ctx)
+        orchestration_ctx.estimated_pages = int(decision.estimated_pages or orchestration_ctx.estimated_pages or 0)
+        orchestration_ctx.document_route = str(decision.document_route or orchestration_ctx.document_route or "default")
 
         logger.info(
             f"Routing decision: {decision.executor_type.value} "
@@ -312,13 +548,36 @@ class OrchestrationRouter:
                 "executor": decision.executor_type.value,
                 "models": decision.primary_models,
                 "reason": decision.reason,
+                "document_route": decision.document_route,
+                "estimated_pages": decision.estimated_pages,
             },
             job_id=job_id,
             phase="orchestration",
             node="router",
         )
 
+        execution_success = False
+        slot_acquired = False
+        execution_path = f"router:{decision.executor_type.value}"
         try:
+            requires_slot = decision.executor_type in {
+                ExecutorType.CLAUDE_AGENT,
+                ExecutorType.OPENAI_AGENT,
+                ExecutorType.GOOGLE_AGENT,
+                ExecutorType.PARALLEL,
+            }
+            if requires_slot:
+                slot_acquired = self.tenant_quotas.acquire_subagent_slot(tenant_key)
+                if not slot_acquired:
+                    execution_path = "router:subagent_concurrency_blocked"
+                    yield error_event(
+                        job_id=job_id,
+                        error="Limite de concorrência de subagentes atingido para este tenant.",
+                        error_type="quota_subagent_concurrency_exceeded",
+                        recoverable=True,
+                    )
+                    return
+
             # Delegar para o executor apropriado
             if decision.executor_type == ExecutorType.CLAUDE_AGENT:
                 async for event in self._execute_claude_agent(
@@ -353,6 +612,7 @@ class OrchestrationRouter:
                     mode,
                 ):
                     yield event
+            execution_success = True
 
         except Exception as e:
             logger.exception(f"Erro na execução: {e}")
@@ -361,6 +621,15 @@ class OrchestrationRouter:
                 error=str(e),
                 error_type="execution_error",
                 recoverable=False,
+            )
+        finally:
+            if slot_acquired:
+                self.tenant_quotas.release_subagent_slot(tenant_key)
+            metrics.record_request(
+                execution_path=execution_path,
+                latency_ms=max(0.0, (time.monotonic() - started_at) * 1000.0),
+                success=execution_success,
+                cost_usd=float(context.get("estimated_cost_usd", 0.0) or 0.0),
             )
 
         # Emitir evento de conclusão
@@ -401,12 +670,33 @@ class OrchestrationRouter:
             agent="claude",
         )
 
+        executor = None
+        registered = False
         try:
             # Import dinâmico para evitar circular imports
-            from app.services.ai.claude_agent.executor import ClaudeAgentExecutor
+            from app.services.ai.claude_agent.executor import ClaudeAgentExecutor, AgentConfig
+            from app.services.ai.model_registry import get_api_model_name
             from app.services.ai.shared import ToolExecutionContext
+            from app.services.agent_session_registry import agent_session_registry
 
-            executor = ClaudeAgentExecutor()
+            claude_agent_model = get_api_model_name(self.CLAUDE_AGENT_MODEL)
+            if self._is_quick_profile(context):
+                quick_iters = self._quick_max_iterations()
+                quick_effort = (os.getenv("QUICK_AGENT_CLAUDE_EFFORT", "medium") or "medium").strip().lower()
+                if quick_effort not in ("low", "medium", "high", "max"):
+                    quick_effort = "medium"
+                executor = ClaudeAgentExecutor(
+                    config=AgentConfig(
+                        model=claude_agent_model,
+                        max_iterations=quick_iters,
+                        enable_checkpoints=False,
+                        code_execution_effort=quick_effort,
+                    )
+                )
+            else:
+                executor = ClaudeAgentExecutor(
+                    config=AgentConfig(model=claude_agent_model)
+                )
 
             # Load unified tools (search_jurisprudencia, search_rag, etc.)
             db_session = getattr(self, "db", None)
@@ -436,8 +726,25 @@ class OrchestrationRouter:
                 chat_id=context.chat_id,
                 job_id=job_id,
                 db_session=db_session,
+                services={
+                    # Used by tool handlers for policy/guards (e.g., block writes in graph UI mode).
+                    "extra_instructions": context.extra_instructions or "",
+                },
             )
-            executor.load_unified_tools(include_mcp=True, execution_context=tool_context)
+            tool_names = build_tool_allowlist(
+                user_prompt=context.prompt,
+                extra_instructions=context.extra_instructions,
+            )
+            executor.load_unified_tools(
+                include_mcp=True,
+                execution_context=tool_context,
+                tool_names=tool_names,
+            )
+            try:
+                agent_session_registry.register(job_id, executor)
+                registered = True
+            except Exception as e:
+                logger.debug(f"[{job_id}] agent_session_registry.register failed: {e}")
 
             # Build system prompt jurídico
             system_prompt = self._build_legal_system_prompt(context)
@@ -470,24 +777,50 @@ class OrchestrationRouter:
                     if context.case_bundle and hasattr(context.case_bundle, "processo_id")
                     else None
                 ),
+                session_id=context.chat_id,
                 db=getattr(self, 'db', None),
+                security_profile="server",
             ):
                 yield event
 
+            # If the agent finished, cleanup the registered session. If it paused
+            # waiting for approval, keep it registered so /tool-approval can resume.
+            if registered and executor is not None:
+                try:
+                    state = getattr(executor, "_state", None)
+                    status = getattr(state, "status", None) if state is not None else None
+                    status_val = getattr(status, "value", status)
+                    if str(status_val) != "waiting_approval":
+                        agent_session_registry.unregister(job_id)
+                        registered = False
+                except Exception:
+                    try:
+                        agent_session_registry.unregister(job_id)
+                    except Exception:
+                        pass
+
         except ImportError:
             logger.warning("ClaudeAgentExecutor não disponível. Usando fallback.")
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=True)
             # Fallback para execução simples via agent_clients
             async for event in self._execute_claude_fallback(context):
                 yield event
 
         except Exception as e:
             logger.exception(f"Erro no Claude Agent: {e}")
+            if registered:
+                try:
+                    agent_session_registry.unregister(job_id)
+                except Exception:
+                    pass
             yield error_event(
                 job_id=job_id,
                 error=str(e),
                 error_type="claude_agent_error",
                 recoverable=True,
             )
+        else:
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=False)
 
     async def _execute_claude_fallback(
         self,
@@ -529,7 +862,7 @@ class OrchestrationRouter:
             async for chunk in stream_anthropic_async(
                 client=client,
                 prompt=full_prompt,
-                model=get_api_model_name("claude-4.5-sonnet"),
+                model=get_api_model_name(self.CLAUDE_AGENT_MODEL),
                 max_tokens=context.max_tokens,
                 temperature=context.temperature,
                 system_instruction=system_prompt,
@@ -593,6 +926,7 @@ class OrchestrationRouter:
                 OpenAIAgentConfig,
                 OPENAI_AVAILABLE,
             )
+            from app.services.ai.model_registry import get_api_model_name
             from app.services.ai.shared import ToolExecutionContext
 
             if not OPENAI_AVAILABLE:
@@ -622,22 +956,31 @@ class OrchestrationRouter:
                 chat_id=context.chat_id,
                 job_id=job_id,
                 db_session=db_session,
+                services={
+                    "extra_instructions": context.extra_instructions or "",
+                },
             )
 
             # Configurar executor
+            max_iterations = self._quick_max_iterations() if self._is_quick_profile(context) else 30
             config = OpenAIAgentConfig(
-                model="gpt-4o",
+                model=get_api_model_name(self.OPENAI_AGENT_MODEL),
                 temperature=context.temperature,
                 max_tokens=context.max_tokens,
-                max_iterations=30,
+                max_iterations=max_iterations,
                 enable_code_interpreter=True,
             )
             executor = OpenAIAgentExecutor(config=config)
 
             # Carregar tools unificadas
+            tool_names = build_tool_allowlist(
+                user_prompt=context.prompt,
+                extra_instructions=context.extra_instructions,
+            )
             executor.load_unified_tools(
                 execution_context=tool_context,
                 include_mcp=True,
+                tool_names=tool_names,
             )
 
             # Build system prompt jurídico
@@ -649,6 +992,15 @@ class OrchestrationRouter:
                 prompt=full_prompt,
                 system_prompt=system_prompt,
                 job_id=job_id,
+                user_id=context.user_id,
+                session_id=context.chat_id,
+                project_id=(
+                    context.case_bundle.processo_id
+                    if context.case_bundle and hasattr(context.case_bundle, "processo_id")
+                    else None
+                ),
+                db_session=getattr(self, "db", None),
+                security_profile="server",
             ):
                 # Converter eventos do executor para SSE
                 event_type = event.get("type", "")
@@ -698,6 +1050,7 @@ class OrchestrationRouter:
 
         except ImportError:
             logger.warning("OpenAIAgentExecutor não disponível. Usando fallback.")
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=True)
             # Fallback para execução simples
             async for event in self._execute_openai_fallback(context):
                 yield event
@@ -710,6 +1063,8 @@ class OrchestrationRouter:
                 error_type="openai_agent_error",
                 recoverable=True,
             )
+        else:
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=False)
 
     async def _execute_openai_fallback(
         self,
@@ -732,6 +1087,7 @@ class OrchestrationRouter:
                 init_openai_client,
                 stream_openai_async,
             )
+            from app.services.ai.model_registry import get_api_model_name
 
             client = init_openai_client()
             if not client:
@@ -750,7 +1106,7 @@ class OrchestrationRouter:
             async for chunk in stream_openai_async(
                 client=client,
                 prompt=full_prompt,
-                model="gpt-4o",
+                model=get_api_model_name(self.OPENAI_AGENT_MODEL),
                 max_tokens=context.max_tokens,
                 temperature=context.temperature,
                 system_instruction=system_prompt,
@@ -815,6 +1171,7 @@ class OrchestrationRouter:
                 GENAI_AVAILABLE,
                 VERTEX_AVAILABLE,
             )
+            from app.services.ai.model_registry import get_api_model_name
             from app.services.ai.shared import ToolExecutionContext
 
             if not GENAI_AVAILABLE and not VERTEX_AVAILABLE:
@@ -844,14 +1201,18 @@ class OrchestrationRouter:
                 chat_id=context.chat_id,
                 job_id=job_id,
                 db_session=db_session,
+                services={
+                    "extra_instructions": context.extra_instructions or "",
+                },
             )
 
             # Configurar executor
+            max_iterations = self._quick_max_iterations() if self._is_quick_profile(context) else 30
             config = GoogleAgentConfig(
-                model="gemini-2.0-flash-exp",
+                model=get_api_model_name(self.GOOGLE_AGENT_MODEL),
                 temperature=context.temperature,
                 max_tokens=context.max_tokens,
-                max_iterations=30,
+                max_iterations=max_iterations,
                 use_vertex=VERTEX_AVAILABLE,
                 use_adk=True,  # Preferir ADK se disponível
                 enable_code_execution=True,
@@ -859,9 +1220,14 @@ class OrchestrationRouter:
             executor = GoogleAgentExecutor(config=config)
 
             # Carregar tools unificadas
+            tool_names = build_tool_allowlist(
+                user_prompt=context.prompt,
+                extra_instructions=context.extra_instructions,
+            )
             executor.load_unified_tools(
                 execution_context=tool_context,
                 include_mcp=True,
+                tool_names=tool_names,
             )
 
             # Build system prompt jurídico
@@ -873,6 +1239,15 @@ class OrchestrationRouter:
                 prompt=full_prompt,
                 system_prompt=system_prompt,
                 job_id=job_id,
+                user_id=context.user_id,
+                session_id=context.chat_id,
+                project_id=(
+                    context.case_bundle.processo_id
+                    if context.case_bundle and hasattr(context.case_bundle, "processo_id")
+                    else None
+                ),
+                db_session=getattr(self, "db", None),
+                security_profile="server",
             ):
                 # Converter eventos do executor para SSE
                 event_type = event.get("type", "")
@@ -922,6 +1297,7 @@ class OrchestrationRouter:
 
         except ImportError:
             logger.warning("GoogleAgentExecutor não disponível. Usando fallback.")
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=True)
             # Fallback para execução simples
             async for event in self._execute_google_fallback(context):
                 yield event
@@ -934,6 +1310,8 @@ class OrchestrationRouter:
                 error_type="google_agent_error",
                 recoverable=True,
             )
+        else:
+            get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=False)
 
     async def _execute_google_fallback(
         self,
@@ -956,6 +1334,7 @@ class OrchestrationRouter:
                 get_gemini_client,
                 stream_vertex_gemini_async,
             )
+            from app.services.ai.model_registry import get_api_model_name
 
             client = get_gemini_client()
             if not client:
@@ -974,7 +1353,7 @@ class OrchestrationRouter:
             async for chunk in stream_vertex_gemini_async(
                 client=client,
                 prompt=full_prompt,
-                model="gemini-2.0-flash-exp",
+                model=get_api_model_name(self.GOOGLE_AGENT_MODEL),
                 temperature=context.temperature,
                 system_instruction=system_prompt,
             ):
@@ -1050,6 +1429,11 @@ class OrchestrationRouter:
                 "reasoning_level": context.reasoning_level,
                 "selected_models": models,
                 "mode": mode,
+                "target_pages": int(context.target_pages or 0),
+                "min_pages": int(context.min_pages or 0),
+                "max_pages": int(context.max_pages or 0),
+                "estimated_pages": int(context.estimated_pages or 0),
+                "document_route": str(context.document_route or "default"),
             }
 
             # Adicionar contexto adicional se disponível
@@ -1447,6 +1831,27 @@ REGRAS DE CITAÇÃO:
 - Cite jurisprudência: Tribunal, Recurso nº, Relator, Data
 - Use [n] para referenciar fontes da pesquisa web
 - Marque afirmações sem fonte com [VERIFICAR]"""
+
+            base_prompt += """
+
+GRAFO JURÍDICO (ask_graph):
+- Para consultar o grafo, use a tool ask_graph com operações tipadas (sem Cypher arbitrário).
+- Para CRIAR arestas, use ask_graph(operation="link_entities") e NUNCA gere Cypher de escrita.
+- Antes de linkar, resolva IDs com ask_graph(operation="search"). Não invente entity_id.
+- Se search retornar múltiplos candidatos plausíveis, peça confirmação ao usuário antes de criar a aresta."""
+            base_prompt += """
+
+Seleção de operação (intenção -> operation):
+- "vizinhos", "relacionados", "o que conecta a X": neighbors (ou related_entities se pedir relações reais do grafo)
+- "caminho", "como conecta", "cadeia entre X e Y": path (ou audit_graph_chain se pedir auditoria/evidências)
+- "comunidades", "clusters", "grupos": leiden (preferir) / community_detection
+- "centralidade", "artigos mais centrais": degree_centrality (barato) ou eigenvector/pagerank; se pedir "ponte" use betweenness/bridges/articulation_points
+- "similaridade", "parecidos com X": node_similarity (lista) ou knn; "score entre X e Y": adamic_adar
+
+Guardrails de custo:
+- Prefira operações básicas (search/neighbors/path/count) antes de GDS quando possível.
+- Evite rodar mais de 1 algoritmo GDS pesado por turno sem o usuário pedir explicitamente.
+- Se faltarem IDs, sempre comece com ask_graph(search) e confirme ambiguidades."""
 
         # Adicionar instruções de raciocínio
         reasoning = context.reasoning_level.lower()

@@ -41,6 +41,10 @@ type ProcessWatchlistItem = {
   last_datajud_check?: string | null;
   last_mov_datetime?: string | null;
   is_active: boolean;
+  sync_frequency?: string;
+  sync_time?: string;
+  sync_timezone?: string;
+  next_sync_at?: string | null;
 };
 
 type OabWatchlistItem = {
@@ -52,6 +56,10 @@ type OabWatchlistItem = {
   max_pages?: number | null;
   last_sync_date?: string | null;
   is_active: boolean;
+  sync_frequency?: string;
+  sync_time?: string;
+  sync_timezone?: string;
+  next_sync_at?: string | null;
 };
 
 type DjenStoredIntimation = {
@@ -128,6 +136,24 @@ const weekdayLabels = [
   'sexta-feira',
   's\u00e1bado',
 ];
+
+const frequencyLabels: Record<string, string> = {
+  daily: 'Diario',
+  twice_daily: '2x/dia',
+  weekly: 'Semanal',
+  custom: 'Personalizado',
+};
+
+const formatNextSync = (value?: string | null) => {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${day}/${month} ${hours}:${minutes}`;
+};
 
 const htmlEntityMap: Record<string, string> = {
   '&nbsp;': ' ',
@@ -533,6 +559,8 @@ export default function CnjDjenPage() {
   const [trackOabTribunal, setTrackOabTribunal] = useState('');
   const [trackOabMeio, setTrackOabMeio] = useState<'D' | 'E'>('D');
   const [trackOabMaxPages, setTrackOabMaxPages] = useState('3');
+  const [trackSyncFrequency, setTrackSyncFrequency] = useState<string>('daily');
+  const [trackSyncTime, setTrackSyncTime] = useState('06:00');
   const [processWatchlists, setProcessWatchlists] = useState<ProcessWatchlistItem[]>([]);
   const [oabWatchlists, setOabWatchlists] = useState<OabWatchlistItem[]>([]);
   const [trackedIntimations, setTrackedIntimations] = useState<DjenStoredIntimation[]>([]);
@@ -881,6 +909,8 @@ export default function CnjDjenPage() {
         body: JSON.stringify({
           npu: npuDigits,
           tribunal_sigla: trackProcessTribunal.trim().toUpperCase(),
+          sync_frequency: trackSyncFrequency,
+          sync_time: trackSyncTime,
         }),
       });
       const text = await response.text();
@@ -946,6 +976,8 @@ export default function CnjDjenPage() {
           sigla_tribunal: trackOabTribunal.trim().toUpperCase() || null,
           meio: trackOabMeio,
           max_pages: Number.isNaN(maxPagesValue) ? 3 : maxPagesValue,
+          sync_frequency: trackSyncFrequency,
+          sync_time: trackSyncTime,
         }),
       });
       const text = await response.text();
@@ -1258,6 +1290,31 @@ export default function CnjDjenPage() {
                     />
                   </div>
                 </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="track-sync-freq">Frequencia de rastreio</Label>
+                    <Select value={trackSyncFrequency} onValueChange={setTrackSyncFrequency}>
+                      <SelectTrigger id="track-sync-freq">
+                        <SelectValue placeholder="Selecione" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="daily">Diaria (1x por dia)</SelectItem>
+                        <SelectItem value="twice_daily">2x por dia</SelectItem>
+                        <SelectItem value="weekly">Semanal</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="track-sync-time">Horario</Label>
+                    <Input
+                      id="track-sync-time"
+                      type="time"
+                      value={trackSyncTime}
+                      onChange={(e) => setTrackSyncTime(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">Horario de Brasilia</p>
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-3">
                   <Button onClick={handleAddProcessWatchlist} disabled={trackingLoading}>
                     Adicionar rastreamento
@@ -1283,6 +1340,12 @@ export default function CnjDjenPage() {
                           <p className="text-xs text-muted-foreground">
                             {item.tribunal_sigla} • Ultimo movimento{' '}
                             {item.last_mov_datetime ? formatDate(item.last_mov_datetime) : 'Nao identificado'}
+                          </p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {frequencyLabels[item.sync_frequency || 'daily'] || item.sync_frequency} as {item.sync_time || '06:00'}
+                            {item.next_sync_at && (
+                              <span className="ml-2 text-primary">Proximo: {formatNextSync(item.next_sync_at)}</span>
+                            )}
                           </p>
                         </div>
                         <Button
@@ -1351,6 +1414,31 @@ export default function CnjDjenPage() {
                     />
                   </div>
                 </div>
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label htmlFor="track-oab-sync-freq">Frequencia de rastreio</Label>
+                    <Select value={trackSyncFrequency} onValueChange={setTrackSyncFrequency}>
+                      <SelectTrigger id="track-oab-sync-freq">
+                        <SelectValue placeholder="Selecione" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="daily">Diaria (1x por dia)</SelectItem>
+                        <SelectItem value="twice_daily">2x por dia</SelectItem>
+                        <SelectItem value="weekly">Semanal</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="track-oab-sync-time">Horario</Label>
+                    <Input
+                      id="track-oab-sync-time"
+                      type="time"
+                      value={trackSyncTime}
+                      onChange={(e) => setTrackSyncTime(e.target.value)}
+                    />
+                    <p className="text-xs text-muted-foreground">Horario de Brasilia</p>
+                  </div>
+                </div>
                 <div className="flex flex-wrap items-center gap-3">
                   <Button onClick={handleAddOabWatchlist} disabled={trackingLoading}>
                     Adicionar rastreamento
@@ -1376,6 +1464,12 @@ export default function CnjDjenPage() {
                           <p className="text-xs text-muted-foreground">
                             {item.sigla_tribunal || 'Todos os tribunais'} • Ultima sincronizacao{' '}
                             {item.last_sync_date ? formatDate(item.last_sync_date) : 'Nao realizada'}
+                          </p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {frequencyLabels[item.sync_frequency || 'daily'] || item.sync_frequency} as {item.sync_time || '06:00'}
+                            {item.next_sync_at && (
+                              <span className="ml-2 text-primary">Proximo: {formatNextSync(item.next_sync_at)}</span>
+                            )}
                           </p>
                         </div>
                         <Button

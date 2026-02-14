@@ -8,8 +8,8 @@
  *   - Offline fallback : página offline quando sem rede
  */
 
-// Bump this to force clients to drop old cached _next assets when UI changes.
-const CACHE_VERSION = 'iudex-v3';
+// Bump this to force clients to drop old caches when SW behavior changes.
+const CACHE_VERSION = 'iudex-v4';
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 const API_CACHE = `${CACHE_VERSION}-api`;
 const OFFLINE_URL = '/offline.html';
@@ -21,12 +21,15 @@ const PRECACHE_URLS = [OFFLINE_URL];
 
 function isStaticAsset(url) {
   return (
-    url.pathname.startsWith('/_next/static/') ||
     url.pathname.startsWith('/fonts/') ||
     url.pathname.startsWith('/logos/') ||
     url.pathname.startsWith('/images/') ||
     /\.(js|css|woff2?|ttf|otf|png|jpg|jpeg|gif|svg|ico|webp)$/.test(url.pathname)
   );
+}
+
+function isNextAsset(url) {
+  return url.pathname.startsWith('/_next/');
 }
 
 function isApiCall(url) {
@@ -91,6 +94,11 @@ self.addEventListener('fetch', (event) => {
   // Não interferir em ambientes locais (dev/staging local). Um SW “preso” no browser
   // pode quebrar HMR e deixar a UI sem CSS/JS.
   if (url.hostname === 'localhost' || url.hostname === '127.0.0.1') return;
+
+  // Nunca interceptar assets do runtime/chunks do Next.
+  // Esses arquivos mudam com frequência entre builds e cache-first aqui pode
+  // servir combinação incompatível (ex.: webpack runtime antigo + chunks novos).
+  if (isNextAsset(url)) return;
 
   // Ignorar SSE/streaming endpoints
   if (isSSEEndpoint(url)) return;

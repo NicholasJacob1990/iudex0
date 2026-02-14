@@ -220,7 +220,7 @@ export function CanvasContainer({ mode = 'full' }: { mode?: 'full' | 'chat' }) {
     const { reviewData, jobEvents, jobOutline } = useChatStore();
 
     useEffect(() => {
-        if (mode === 'chat' && activeTab !== 'editor') {
+        if (mode === 'chat' && activeTab !== 'editor' && activeTab !== 'code') {
             setActiveTab('editor');
         }
     }, [mode, activeTab, setActiveTab]);

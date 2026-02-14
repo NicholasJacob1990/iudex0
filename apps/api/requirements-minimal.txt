@@ -24,8 +24,13 @@ celery==5.4.0
 openai>=1.55.0
 anthropic>=0.39.0
 google-generativeai>=0.8.0
+faster-whisper==1.2.1
 
 # Processamento de Documentos Básico
+# Docling é opcional neste profile minimal.
+# Para habilitar: pip install docling>=2.0.0
+# rag-document-viewer é opcional neste profile minimal.
+# Para habilitar: pip install rag-document-viewer>=1.1.1
 pypdf==5.1.0
 pdfplumber==0.11.4
 python-docx==1.1.2
@@ -60,6 +65,3 @@ loguru==0.7.2
 # Segurança
 cryptography==43.0.3
 bcrypt==4.2.1
-
-
-

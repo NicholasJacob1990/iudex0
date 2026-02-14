@@ -1,90 +1,44 @@
 'use client';
 
 import * as React from 'react';
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible';
-import {
-  HoverCard,
-  HoverCardContent,
-  HoverCardTrigger,
-} from '@/components/ui/hover-card';
-import {
-  X,
-  ChevronDown,
-  ChevronRight,
-  FileText,
-  Folder,
-  Link as LinkIcon,
-  ExternalLink,
-  Quote,
-  CircleDot,
-  AlertCircle,
-  CheckCircle,
-  MinusCircle,
-  Scale,
-  BookOpen,
-  Mic,
-  BrainCircuit,
-} from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { X, ChevronDown, ChevronRight, FileText, Folder, Link as LinkIcon, CircleDot, BookOpen, Mic, BrainCircuit, FileSearch, ExternalLink } from 'lucide-react';
 import type { ContextItem } from '@/stores/context-store';
 
-interface Citation {
+export interface AskCitationItem {
   id: string;
   title: string;
   source: string;
   snippet?: string;
   signal?: 'positive' | 'negative' | 'caution' | 'neutral';
   url?: string;
+  documentId?: string;
+  chunkUid?: string;
+  chunkIndex?: number;
+  pageNumber?: number;
+  lineStart?: number;
+  lineEnd?: number;
+  sourceFile?: string;
+  viewerKind?: 'pdf_native' | 'office_html' | 'external' | 'unavailable' | string;
+  viewerUrl?: string;
+  downloadUrl?: string;
+  sourceUrl?: string;
+  highlightText?: string;
 }
 
 export interface AskSourcesPanelProps {
-  citations: Citation[];
+  citations: AskCitationItem[];
   contextItems: ContextItem[];
   onRemoveItem: (id: string) => void;
   onClose: () => void;
+  onOpenEvidence?: (citation: AskCitationItem) => void;
 }
 
-// Shepard's signal colors and icons
-const getSignalConfig = (signal?: Citation['signal']) => {
-  switch (signal) {
-    case 'positive':
-      return {
-        color: 'text-green-600 bg-green-50 border-green-200',
-        icon: CheckCircle,
-        label: 'Positivo',
-      };
-    case 'negative':
-      return {
-        color: 'text-red-600 bg-red-50 border-red-200',
-        icon: AlertCircle,
-        label: 'Negativo',
-      };
-    case 'caution':
-      return {
-        color: 'text-yellow-600 bg-yellow-50 border-yellow-200',
-        icon: AlertCircle,
-        label: 'Cautela',
-      };
-    case 'neutral':
-    default:
-      return {
-        color: 'text-gray-600 bg-gray-50 border-gray-200',
-        icon: MinusCircle,
-        label: 'Neutro',
-      };
-  }
-};
-
-// Context item icon
 const getContextIcon = (type: ContextItem['type']) => {
   switch (type) {
     case 'file':
@@ -98,84 +52,13 @@ const getContextIcon = (type: ContextItem['type']) => {
     case 'legislation':
       return BookOpen;
     case 'jurisprudence':
-      return Scale;
+      return FileSearch;
     case 'audio':
       return Mic;
   }
 };
 
-function CitationCard({ citation }: { citation: Citation }) {
-  const signalConfig = getSignalConfig(citation.signal);
-  const SignalIcon = signalConfig.icon;
-
-  const citationContent = (
-    <div className="group rounded-lg border bg-card p-3 hover:bg-accent/50 transition-colors cursor-pointer">
-      <div className="flex items-start gap-2">
-        <SignalIcon className={cn('h-4 w-4 shrink-0 mt-0.5', signalConfig.color.split(' ')[0])} />
-        <div className="flex-1 min-w-0">
-          <div className="flex items-start justify-between gap-2">
-            <h4 className="text-sm font-medium line-clamp-2">{citation.title}</h4>
-            {citation.url && (
-              <ExternalLink className="h-3 w-3 text-muted-foreground shrink-0 opacity-0 group-hover:opacity-100 transition-opacity" />
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground mt-1">{citation.source}</p>
-          {citation.signal && (
-            <Badge
-              variant="outline"
-              className={cn('mt-2 text-xs', signalConfig.color)}
-            >
-              {signalConfig.label}
-            </Badge>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-
-  // If there's a snippet, wrap in HoverCard for preview
-  if (citation.snippet) {
-    return (
-      <HoverCard>
-        <HoverCardTrigger asChild>
-          {citation.url ? (
-            <a
-              href={citation.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="block"
-            >
-              {citationContent}
-            </a>
-          ) : (
-            citationContent
-          )}
-        </HoverCardTrigger>
-        <HoverCardContent className="w-80">
-          <div className="space-y-2">
-            <div className="flex items-start gap-2">
-              <Quote className="h-4 w-4 text-muted-foreground shrink-0 mt-0.5" />
-              <p className="text-xs text-muted-foreground italic line-clamp-6">
-                {citation.snippet}
-              </p>
-            </div>
-          </div>
-        </HoverCardContent>
-      </HoverCard>
-    );
-  }
-
-  // Without snippet, just render clickable if URL exists
-  return citation.url ? (
-    <a href={citation.url} target="_blank" rel="noopener noreferrer" className="block">
-      {citationContent}
-    </a>
-  ) : (
-    citationContent
-  );
-}
-
-function ContextItemCard({
+const ContextItemCard = React.memo(function ContextItemCard({
   item,
   onRemove,
 }: {
@@ -199,20 +82,82 @@ function ContextItemCard({
       </Button>
     </div>
   );
-}
+});
 
 export function AskSourcesPanel({
   citations,
   contextItems,
   onRemoveItem,
   onClose,
+  onOpenEvidence,
 }: AskSourcesPanelProps) {
   const [citationsOpen, setCitationsOpen] = useState(true);
   const [contextOpen, setContextOpen] = useState(true);
+  const [documentsOpen, setDocumentsOpen] = useState<Record<string, boolean>>({});
+
+  const groupedByDocument = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        key: string;
+        title: string;
+        source: string;
+        citations: AskCitationItem[];
+      }
+    >();
+
+    for (const citation of citations) {
+      const docKey =
+        String(citation.documentId || '').trim() ||
+        String(citation.sourceFile || '').trim() ||
+        String(citation.source || '').trim() ||
+        'outros';
+
+      const existing = groups.get(docKey);
+      if (existing) {
+        existing.citations.push(citation);
+        continue;
+      }
+
+      groups.set(docKey, {
+        key: docKey,
+        title:
+          String(citation.sourceFile || '').trim() ||
+          String(citation.title || '').trim() ||
+          `Documento ${groups.size + 1}`,
+        source: String(citation.source || '').trim() || 'Fonte',
+        citations: [citation],
+      });
+    }
+
+    const result = Array.from(groups.values()).map((group) => ({
+      ...group,
+      citations: [...group.citations].sort((a, b) => {
+        const pageA = a.pageNumber || 0;
+        const pageB = b.pageNumber || 0;
+        if (pageA !== pageB) return pageA - pageB;
+        return String(a.id).localeCompare(String(b.id));
+      }),
+    }));
+    return result.sort((a, b) => a.title.localeCompare(b.title, 'pt-BR'));
+  }, [citations]);
+
+  const handleOpenEvidence = (citation: AskCitationItem) => {
+    if (onOpenEvidence) {
+      onOpenEvidence(citation);
+      return;
+    }
+    const fallbackUrl =
+      (citation.viewerUrl && String(citation.viewerUrl).trim()) ||
+      (citation.sourceUrl && String(citation.sourceUrl).trim()) ||
+      (citation.url && String(citation.url).trim()) ||
+      '';
+    if (!fallbackUrl) return;
+    window.open(fallbackUrl, '_blank', 'noopener,noreferrer');
+  };
 
   return (
     <div className="flex flex-col h-full border-l bg-background">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b">
         <h3 className="text-sm font-medium">Fontes e Citações</h3>
         <Button variant="ghost" size="icon" className="h-8 w-8" onClick={onClose}>
@@ -223,15 +168,11 @@ export function AskSourcesPanel({
 
       <ScrollArea className="flex-1">
         <div className="p-4 space-y-4">
-          {/* Citations Section */}
-          {citations.length > 0 && (
+          {groupedByDocument.length > 0 && (
             <Collapsible open={citationsOpen} onOpenChange={setCitationsOpen}>
               <div className="space-y-3">
                 <CollapsibleTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    className="w-full justify-between p-2 h-auto hover:bg-accent/50"
-                  >
+                  <Button variant="ghost" className="w-full justify-between p-2 h-auto hover:bg-accent/50">
                     <div className="flex items-center gap-2">
                       {citationsOpen ? (
                         <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -247,26 +188,105 @@ export function AskSourcesPanel({
                 </CollapsibleTrigger>
 
                 <CollapsibleContent className="space-y-2">
-                  {citations.map((citation) => (
-                    <CitationCard key={citation.id} citation={citation} />
-                  ))}
+                  {groupedByDocument.map((group) => {
+                    const isOpen = documentsOpen[group.key] ?? true;
+                    const firstCitation = group.citations[0];
+                    return (
+                      <div key={group.key} className="rounded-xl border bg-card/40 p-2">
+                        <button
+                          type="button"
+                          className="flex w-full items-start justify-between gap-2 rounded-lg px-2 py-1 text-left hover:bg-accent/40"
+                          onClick={() =>
+                            setDocumentsOpen((prev) => ({
+                              ...prev,
+                              [group.key]: !isOpen,
+                            }))
+                          }
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{group.title}</p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {group.source} • {group.citations.length} evidência(s)
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {firstCitation.viewerKind ? (
+                              <Badge variant="outline" className="rounded-full text-[10px]">
+                                {firstCitation.viewerKind}
+                              </Badge>
+                            ) : null}
+                            {isOpen ? (
+                              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+                            )}
+                          </div>
+                        </button>
+
+                        {isOpen ? (
+                          <div className="mt-2 space-y-2">
+                            {group.citations.map((citation) => {
+                              const pageInfo = citation.pageNumber ? `p. ${citation.pageNumber}` : null;
+                              const lineInfo =
+                                citation.lineStart && citation.lineEnd
+                                  ? citation.lineStart === citation.lineEnd
+                                    ? `linha ${citation.lineStart}`
+                                    : `linhas ${citation.lineStart}-${citation.lineEnd}`
+                                  : null;
+                              const metaLine = [pageInfo, lineInfo].filter(Boolean).join(' • ');
+                              return (
+                                <div key={citation.id} className="rounded-lg border bg-white/80 p-2">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="text-xs font-medium leading-5">
+                                      {citation.title || `Fonte ${citation.id}`}
+                                    </p>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      className="h-7 rounded-full px-2 text-[11px] gap-1"
+                                      onClick={() => handleOpenEvidence(citation)}
+                                    >
+                                      <ExternalLink className="h-3 w-3" />
+                                      Abrir evidência
+                                    </Button>
+                                  </div>
+                                  {citation.snippet ? (
+                                    <p className="mt-1 text-[11px] text-muted-foreground line-clamp-3">
+                                      {citation.snippet}
+                                    </p>
+                                  ) : null}
+                                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                    {metaLine ? (
+                                      <Badge variant="secondary" className="rounded-full text-[10px]">
+                                        {metaLine}
+                                      </Badge>
+                                    ) : null}
+                                    {citation.chunkIndex != null ? (
+                                      <Badge variant="outline" className="rounded-full text-[10px]">
+                                        chunk {citation.chunkIndex}
+                                      </Badge>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
                 </CollapsibleContent>
               </div>
             </Collapsible>
           )}
 
-          {/* Separator between sections */}
-          {citations.length > 0 && contextItems.length > 0 && <Separator />}
+          {groupedByDocument.length > 0 && contextItems.length > 0 && <Separator />}
 
-          {/* Context Items Section */}
           {contextItems.length > 0 && (
             <Collapsible open={contextOpen} onOpenChange={setContextOpen}>
               <div className="space-y-3">
                 <CollapsibleTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    className="w-full justify-between p-2 h-auto hover:bg-accent/50"
-                  >
+                  <Button variant="ghost" className="w-full justify-between p-2 h-auto hover:bg-accent/50">
                     <div className="flex items-center gap-2">
                       {contextOpen ? (
                         <ChevronDown className="h-4 w-4 text-muted-foreground" />
@@ -283,19 +303,14 @@ export function AskSourcesPanel({
 
                 <CollapsibleContent className="space-y-2">
                   {contextItems.map((item) => (
-                    <ContextItemCard
-                      key={item.id}
-                      item={item}
-                      onRemove={onRemoveItem}
-                    />
+                    <ContextItemCard key={item.id} item={item} onRemove={onRemoveItem} />
                   ))}
                 </CollapsibleContent>
               </div>
             </Collapsible>
           )}
 
-          {/* Empty state */}
-          {citations.length === 0 && contextItems.length === 0 && (
+          {groupedByDocument.length === 0 && contextItems.length === 0 && (
             <div className="text-center py-8 text-muted-foreground">
               <CircleDot className="h-8 w-8 mx-auto mb-2 opacity-20" />
               <p className="text-sm">Nenhuma fonte ou citação disponível</p>

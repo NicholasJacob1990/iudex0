@@ -639,7 +639,7 @@ Cite sempre as fontes no formato [TIPO - Doc. X, p. Y].
             result = await call_anthropic_async(
                 client,
                 full_prompt,
-                model="claude-sonnet-4-5",
+                model="claude-opus-4-6",
                 max_tokens=8192,
                 temperature=context.temperature,
             )
@@ -711,7 +711,7 @@ Cite sempre as fontes no formato [TIPO - Doc. X, p. Y].
 
             # Determina modelos a usar
             gpt_model = "gpt-4o"
-            claude_model = "claude-sonnet-4-5"
+            claude_model = "claude-opus-4-6"
             judge_model = "gemini-3-flash"
 
             for m in models:

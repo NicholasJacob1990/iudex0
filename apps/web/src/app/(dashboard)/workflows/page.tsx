@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { Plus, Workflow, Loader2, Trash2, Play } from 'lucide-react';
+import { Plus, Workflow, Loader2, Trash2, Grid3X3 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { apiClient } from '@/lib/api-client';
 import { toast } from 'sonner';
@@ -77,10 +77,20 @@ export default function WorkflowsListPage() {
             Crie e gerencie fluxos visuais com LangGraph
           </p>
         </div>
-        <Button onClick={handleCreate} className="gap-2 bg-indigo-600 hover:bg-indigo-500 text-white">
-          <Plus className="h-4 w-4" />
-          Novo Workflow
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            className="gap-2"
+            onClick={() => router.push('/workflows/catalog')}
+          >
+            <Grid3X3 className="h-4 w-4" />
+            Templates
+          </Button>
+          <Button onClick={handleCreate} className="gap-2 bg-indigo-600 hover:bg-indigo-500 text-white">
+            <Plus className="h-4 w-4" />
+            Novo Workflow
+          </Button>
+        </div>
       </div>
 
       {loading ? (
@@ -91,10 +101,16 @@ export default function WorkflowsListPage() {
         <div className="text-center py-20">
           <Workflow className="h-12 w-12 text-slate-300 mx-auto mb-4" />
           <p className="text-slate-500 dark:text-slate-400 mb-4">Nenhum workflow criado ainda</p>
-          <Button onClick={handleCreate} variant="outline" className="gap-2">
-            <Plus className="h-4 w-4" />
-            Criar primeiro workflow
-          </Button>
+          <div className="flex items-center justify-center gap-2">
+            <Button onClick={() => router.push('/workflows/catalog')} variant="outline" className="gap-2">
+              <Grid3X3 className="h-4 w-4" />
+              Ver templates
+            </Button>
+            <Button onClick={handleCreate} variant="outline" className="gap-2">
+              <Plus className="h-4 w-4" />
+              Criar primeiro workflow
+            </Button>
+          </div>
         </div>
       ) : (
         <div className="grid gap-4">

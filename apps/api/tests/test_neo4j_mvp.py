@@ -102,6 +102,22 @@ class TestLegalEntityExtractor:
         assert tema is not None
         assert "1234" in tema["entity_id"]
 
+    def test_extract_decisao(self, extractor):
+        """Test extraction of decisão judicial (REsp/RE/ADI/etc)."""
+        entities = extractor.extract("Conforme REsp 1.134.186 e RE 603.191.")
+        decisoes = [e for e in entities if e["entity_type"] == "decisao"]
+        assert len(decisoes) >= 2
+        ids = {d["entity_id"] for d in decisoes}
+        assert any("resp_1134186" in i for i in ids)
+        assert any("re_603191" in i for i in ids)
+
+    def test_extract_tese(self, extractor):
+        """Test extraction of tese jurídica numerada."""
+        entities = extractor.extract("Foi firmada a Tese 390 do STJ.")
+        tese = next((e for e in entities if e["entity_type"] == "tese"), None)
+        assert tese is not None
+        assert "390" in tese["entity_id"]
+
     def test_extract_oab(self, extractor):
         """Test extraction of OAB number."""
         entities = extractor.extract("OAB/SP 123.456")
@@ -143,7 +159,7 @@ class TestNeo4jMVPConfig:
     def test_default_config(self):
         from app.services.rag.core.neo4j_mvp import Neo4jMVPConfig
         config = Neo4jMVPConfig()
-        assert config.uri == "bolt://localhost:7687"
+        assert config.uri == "bolt://localhost:8687"
         assert config.user == "neo4j"
         assert config.max_hops == 2
 
@@ -161,6 +177,7 @@ class TestNeo4jMVPConfig:
         monkeypatch.setenv("NEO4J_VECTOR_SIMILARITY", "cosine")
         monkeypatch.setenv("NEO4J_VECTOR_PROPERTY", "embedding")
         monkeypatch.setenv("NEO4J_MAX_FACTS_PER_CHUNK", "5")
+        monkeypatch.setenv("NEO4J_BATCH_SIZE", "200")
 
         config = Neo4jMVPConfig.from_env()
         assert config.uri == "bolt://custom:7687"
@@ -175,6 +192,35 @@ class TestNeo4jMVPConfig:
         assert config.vector_similarity == "cosine"
         assert config.vector_property == "embedding"
         assert config.max_facts_per_chunk == 5
+        assert config.batch_size == 200
+
+    def test_config_uses_username_alias(self, monkeypatch):
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPConfig
+        monkeypatch.delenv("NEO4J_USER", raising=False)
+        monkeypatch.setenv("NEO4J_USERNAME", "alias_user")
+
+        config = Neo4jMVPConfig.from_env()
+        assert config.user == "alias_user"
+
+    def test_config_infers_aura_uri_from_instance_id(self, monkeypatch):
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPConfig
+        monkeypatch.delenv("NEO4J_URI", raising=False)
+        monkeypatch.delenv("NEO4J_URL", raising=False)
+        monkeypatch.delenv("NEO4J_BOLT_URL", raising=False)
+        monkeypatch.setenv("AURA_INSTANCEID", "24df7574")
+        monkeypatch.delenv("NEO4J_DATABASE", raising=False)
+
+        config = Neo4jMVPConfig.from_env()
+        assert config.uri == "neo4j+s://24df7574.databases.neo4j.io"
+        assert config.database == "neo4j"
+
+    def test_config_prefers_aura_when_uri_is_localhost(self, monkeypatch):
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPConfig
+        monkeypatch.setenv("NEO4J_URI", "bolt://localhost:7687")
+        monkeypatch.setenv("AURA_INSTANCEID", "24df7574")
+
+        config = Neo4jMVPConfig.from_env()
+        assert config.uri == "neo4j+s://24df7574.databases.neo4j.io"
 
 
 class TestFactExtractor:
@@ -236,6 +282,7 @@ class TestCypherQueries:
             CypherQueries.FIND_CHUNKS_BY_ENTITIES,
             CypherQueries.EXPAND_NEIGHBORS,
             CypherQueries.FIND_PATHS,
+            CypherQueries.FIND_PATHS_WITH_ARGUMENTS,
             CypherQueries.FIND_COOCCURRENCE,
         ]
 
@@ -248,9 +295,33 @@ class TestCypherQueries:
         # Sanity checks for explainable-path query
         assert "path_nodes" in CypherQueries.FIND_PATHS
         assert "path_edges" in CypherQueries.FIND_PATHS
+        assert "$include_candidates" in CypherQueries.FIND_PATHS
+        assert "$include_candidates" in CypherQueries.FIND_PATHS_WITH_ARGUMENTS
 
         # Document nodes should expose the original app-level id for filtering/export.
         assert "doc_id" in CypherQueries.MERGE_DOCUMENT
+
+
+def test_find_paths_always_passes_include_candidates_param():
+    from app.services.rag.core.neo4j_mvp import Neo4jMVPService
+
+    svc = Neo4jMVPService.__new__(Neo4jMVPService)
+    captured = {}
+
+    def _fake_execute_read(_query, params):
+        captured["params"] = params
+        return []
+
+    svc._execute_read = _fake_execute_read  # type: ignore[attr-defined]
+
+    svc.find_paths(
+        entity_ids=["E:1"],
+        tenant_id="t1",
+        allowed_scopes=["global"],
+        include_arguments=False,
+    )
+
+    assert captured["params"]["include_candidates"] is False
 
 
 class TestBuildGraphContext:
@@ -476,32 +547,27 @@ class TestNeo4jIntegration:
 class TestPhase0BugFixes:
     """Tests verifying Phase 0 bug fixes for GraphRAG maturity plan."""
 
-    def test_link_related_entities_method_exists(self):
-        """Verify that link_related_entities exists on Neo4jMVPService.
-
-        Bug: neo4j_mvp.py:1399 called self.link_entities() which didn't exist.
-        Fix: Changed to self.link_related_entities().
-        """
+    def test_link_methods_exist(self):
+        """Verify that both generic and compatibility link methods exist."""
         from app.services.rag.core.neo4j_mvp import Neo4jMVPService
 
+        assert hasattr(Neo4jMVPService, "link_entities"), (
+            "Neo4jMVPService must expose link_entities(relation_type=...)"
+        )
         assert hasattr(Neo4jMVPService, "link_related_entities"), (
             "Neo4jMVPService must have link_related_entities method"
         )
 
-    def test_ingest_document_calls_link_related_entities(self):
-        """Verify ingest_document no longer calls non-existent link_entities.
-
-        The method at line ~1399 should call link_related_entities, not link_entities.
-        """
+    def test_ingest_document_calls_a_valid_link_method(self):
+        """Verify ingest_document uses a valid link method."""
         import inspect
         from app.services.rag.core.neo4j_mvp import Neo4jMVPService
 
         source = inspect.getsource(Neo4jMVPService.ingest_document)
-        assert "self.link_entities(" not in source, (
-            "ingest_document still calls non-existent self.link_entities()"
-        )
-        assert "self.link_related_entities(" in source, (
-            "ingest_document should call self.link_related_entities()"
+        assert (
+            "self.link_related_entities(" in source or "self.link_entities(" in source
+        ), (
+            "ingest_document should call link_related_entities() or link_entities()"
         )
 
     def test_find_paths_includes_asserts_refers_to(self):

@@ -9,11 +9,17 @@ import { LegalWorkflowNode } from './legal-workflow-node';
 import { OutputNode } from './output-node';
 import { UserInputNode } from './user-input-node';
 import { ReviewTableNode } from './review-table-node';
+import { ClaudeAgentNode } from './claude-agent-node';
+import { ParallelAgentsNode } from './parallel-agents-node';
+import { TriggerNode } from './trigger-node';
+import { DeliveryNode } from './delivery-node';
+import { DeepResearchNode } from './deep-research-node';
 
-export { PromptNode, RagSearchNode, FileUploadNode, SelectionNode, ConditionNode, HumanReviewNode, ToolCallNode, LegalWorkflowNode, OutputNode, UserInputNode, ReviewTableNode };
+export { PromptNode, RagSearchNode, FileUploadNode, SelectionNode, ConditionNode, HumanReviewNode, ToolCallNode, LegalWorkflowNode, OutputNode, UserInputNode, ReviewTableNode, ClaudeAgentNode, ParallelAgentsNode, TriggerNode, DeliveryNode, DeepResearchNode };
 
 export const nodeTypes: Record<string, any> = {
   prompt: PromptNode,
+  deep_research: DeepResearchNode,
   rag_search: RagSearchNode,
   file_upload: FileUploadNode,
   selection: SelectionNode,
@@ -24,4 +30,8 @@ export const nodeTypes: Record<string, any> = {
   output: OutputNode,
   user_input: UserInputNode,
   review_table: ReviewTableNode,
+  claude_agent: ClaudeAgentNode,
+  parallel_agents: ParallelAgentsNode,
+  trigger: TriggerNode,
+  delivery: DeliveryNode,
 };

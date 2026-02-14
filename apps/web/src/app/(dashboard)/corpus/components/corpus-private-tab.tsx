@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   FileText,
   Upload,
@@ -518,6 +519,7 @@ function FolderBreadcrumb({
 // =============================================================================
 
 export function CorpusPrivateTab() {
+  const router = useRouter();
   const { user } = useAuthStore();
   const [filters, setFilters] = useState<CorpusDocumentFilters>({
     scope: 'private',
@@ -651,6 +653,11 @@ export function CorpusPrivateTab() {
   const handleReindex = (id: string, name: string) => {
     toast.info(`Reindexando "${name}"...`);
     // TODO: Implementar chamada de reindexacao
+  };
+
+  const handleViewSource = (id: string) => {
+    const route = apiClient.getCorpusViewerRouteUrl(id);
+    router.push(route);
   };
 
   const handleSelectProject = (projectId: string) => {
@@ -927,6 +934,7 @@ export function CorpusPrivateTab() {
         documents={sortedDocuments}
         viewMode={viewMode}
         isLoading={isLoading}
+        onView={handleViewSource}
         onDelete={handleDelete}
         onReindex={handleReindex}
         onMove={selectedProjectId ? handleMoveDocument : undefined}

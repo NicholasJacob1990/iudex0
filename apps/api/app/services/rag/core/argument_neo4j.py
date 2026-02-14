@@ -371,16 +371,24 @@ class ArgumentNeo4jService:
         """Execute a write query."""
         driver = self._get_driver()
         self._ensure_schema()
-        with driver.session(database=self._database) as session:
-            result = session.run(query, **params)
+
+        def _run_write(tx, q: str, p: Dict[str, Any]):
+            result = tx.run(q, **p)
             return result.single()
+
+        with driver.session(database=self._database) as session:
+            return session.execute_write(_run_write, query, params)
 
     def _execute_read(self, query: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Execute a read query and return list of records as dicts."""
         driver = self._get_driver()
-        with driver.session(database=self._database) as session:
-            result = session.run(query, **params)
+
+        def _run_read(tx, q: str, p: Dict[str, Any]) -> List[Dict[str, Any]]:
+            result = tx.run(q, **p)
             return [dict(record) for record in result]
+
+        with driver.session(database=self._database) as session:
+            return session.execute_read(_run_read, query, params)
 
     # -----------------------------------------------------------------
     # Ingest

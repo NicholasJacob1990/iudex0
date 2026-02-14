@@ -10,6 +10,14 @@ import { toast } from 'sonner';
 const SW_URL = '/sw.js';
 const SW_SCOPE = '/';
 
+function shouldDeleteCacheKey(cacheKey: string): boolean {
+  return (
+    /^iudex-/i.test(cacheKey) ||
+    /workbox/i.test(cacheKey) ||
+    /next-static/i.test(cacheKey)
+  );
+}
+
 async function cleanupServiceWorkersAndCaches(): Promise<void> {
   if (!('serviceWorker' in navigator)) return;
 
@@ -24,7 +32,7 @@ async function cleanupServiceWorkersAndCaches(): Promise<void> {
   try {
     if ('caches' in window) {
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k.startsWith('iudex-')).map((k) => caches.delete(k)));
+      await Promise.all(keys.filter(shouldDeleteCacheKey).map((k) => caches.delete(k)));
     }
   } catch (err) {
     console.warn('[SW] Falha ao limpar caches:', err);
@@ -41,12 +49,21 @@ export async function registerServiceWorker(): Promise<void> {
   // Só registrar em produção, a menos que explicitamente habilitado
   const isDev = process.env.NODE_ENV === 'development';
   const forceInDev = process.env.NEXT_PUBLIC_SW_DEV === 'true';
+  const devResetKey = '__iudex_dev_sw_reset_once__';
   const isLocalhost =
     typeof window !== 'undefined' &&
     /^(localhost|127\\.0\\.0\\.1)$/i.test(window.location.hostname);
   if (isDev && !forceInDev) {
+    const shouldForceReload =
+      typeof window !== 'undefined' &&
+      !!navigator.serviceWorker.controller &&
+      !sessionStorage.getItem(devResetKey);
     // Em dev, SW antigo pode ficar “preso” no browser e quebrar CSS/JS (cache-first).
     await cleanupServiceWorkersAndCaches();
+    if (shouldForceReload) {
+      sessionStorage.setItem(devResetKey, '1');
+      window.location.reload();
+    }
     return;
   }
   // Mesmo em produção, nunca registrar SW em localhost (evita cache preso durante testes com `next start`).

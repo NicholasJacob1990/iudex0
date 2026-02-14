@@ -813,6 +813,107 @@ Primeiro, indique em uma linha: `[TIPO: SIMULADO/EXPOSITIVA/REVISÃO/CORREÇÃO]
 Depois, retorne APENAS a estrutura hierárquica (máx 3 níveis).
 """
 
+# ---------------------------------------------------------------------------
+# Sanitização de títulos na estrutura mapeada (v2.47)
+# ---------------------------------------------------------------------------
+
+_CONVERSATIONAL_TITLE_PREFIXES = (
+    "já ", "na prova", "para quem", "minha proposta",
+    "bom dia", "gente ", "pessoal ", "vamos ", "então ",
+    "logo ", "eu ", "nós ", "aqui ", "olha ", "vejam ",
+    "como eu ", "antes de ", "boa tarde", "boa noite",
+    "obrigado", "obrigada", "com licença",
+)
+
+_GREETING_PREFIXES = (
+    "bom dia", "boa tarde", "boa noite", "já ", "pessoal ",
+    "gente ", "olha ", "obrigado", "obrigada",
+)
+
+# Rótulos canônicos por nível
+_CANONICAL_LABEL_L1 = "Introdução e Contextualização"
+_CANONICAL_LABEL_SUB = "Abertura"
+
+_MAX_TITLE_WORDS = 8
+_MAX_TITLE_CHARS = 70
+
+
+def _sanitize_structure_titles(estrutura: str) -> str:
+    """Valida e corrige títulos de estrutura que são trechos literais de fala.
+
+    Regras (alinhadas com PROMPT_MAPEAMENTO regra 8):
+    - Títulos > 8 palavras ou > 70 chars → mapear para rótulo canônico
+    - Prefixos conversacionais (saudações, logística) → rótulo canônico
+    - Preserva âncoras ABRE/FECHA intactas (incluindo aspas)
+
+    Função pura, sem dependências externas (logger opcional).
+    """
+    if not estrutura:
+        return estrutura
+
+    lines = estrutura.split('\n')
+    fixed_lines: list[str] = []
+    sanitized_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        # Detecta linhas numeradas: "1. Título", "   1.1. Subtítulo"
+        m = re.match(r'^(\s*\d+(?:\.\d+)*\.?\s+)(.*)', stripped)
+        if not m:
+            fixed_lines.append(line)
+            continue
+
+        prefix_num = m.group(1)
+        rest = m.group(2).strip()
+
+        # Separa âncoras ABRE/FECHA se existirem (preserva literalmente)
+        anchor_part = ""
+        title = rest
+        anchor_idx = rest.find("| ABRE:")
+        if anchor_idx >= 0:
+            title = rest[:anchor_idx].strip()
+            anchor_part = " " + rest[anchor_idx:]
+
+        title_lower = title.lower()
+        words = re.findall(r'[A-Za-zÀ-ÿ0-9]+', title)
+
+        needs_fix = False
+        if len(title) > _MAX_TITLE_CHARS:
+            needs_fix = True
+        elif len(words) > _MAX_TITLE_WORDS:
+            needs_fix = True
+        elif any(title_lower.startswith(pfx) for pfx in _CONVERSATIONAL_TITLE_PREFIXES):
+            needs_fix = True
+
+        if needs_fix:
+            # Determinar nível: "1." → nível 1, "1.1." → nível 2+
+            is_level1 = re.match(r'^\s*\d+\.\s', stripped) and not re.match(r'^\s*\d+\.\d+', stripped)
+
+            if any(title_lower.startswith(pfx) for pfx in _GREETING_PREFIXES):
+                canonical = _CANONICAL_LABEL_L1 if is_level1 else _CANONICAL_LABEL_SUB
+            elif is_level1:
+                canonical = _CANONICAL_LABEL_L1
+            else:
+                canonical = _CANONICAL_LABEL_SUB
+
+            sanitized_count += 1
+            try:
+                logger.warning(f"⚠️  Título sanitizado: '{title[:60]}' → '{canonical}'")
+            except Exception:
+                pass  # logger pode não existir em contexto de teste
+            fixed_lines.append(f"{prefix_num}{canonical}{anchor_part}")
+        else:
+            fixed_lines.append(line)
+
+    if sanitized_count:
+        try:
+            logger.info(f"🔧 {sanitized_count} título(s) de estrutura sanitizado(s)")
+        except Exception:
+            pass
+
+    return '\n'.join(fixed_lines)
+
+
 def mapear_estrutura(client, transcricao_completa):
     """Analisa o documento completo e extrai a estrutura de tópicos"""
     logger.info("🗺️  Mapeando estrutura do documento...")
@@ -886,7 +987,10 @@ def mapear_estrutura(client, transcricao_completa):
             logger.info(f"   {linha}")
         if len(linhas) > 10:
             logger.info(f"   ... e mais {len(linhas) - 10} tópicos")
-        
+
+        # v2.47: Sanitiza títulos que são frases literais de fala
+        estrutura = _sanitize_structure_titles(estrutura)
+
         return estrutura
         
     except Exception as e:
@@ -2002,6 +2106,14 @@ Exemplos de marcos: "Súmula X", "Artigo Y do CC", "Tese de Repercussão Geral Z
 3. **Mantenha a ORDEM** cronológica da transcrição
 4. **Mapeie do INÍCIO ao FIM** — não omita partes
 5. **Identifique a ÁREA DO DIREITO** de cada bloco quando possível
+6. **PREFIRA SUBTÓPICOS (1.1.) a novos tópicos (2.)**: Abra novo tópico de nível 1 SOMENTE quando o macroassunto mudar de verdade (ex.: de Direito Administrativo para Direito Civil). Aspectos, institutos e marcos legais DENTRO do mesmo macroassunto devem ser subtópicos (1.1., 1.2., etc.), NUNCA tópicos de nível 1 separados.
+7. **ANTI-FRAGMENTAÇÃO**: Se o professor trata 4+ aspectos de um tema, todos devem ser subtópicos de um único tema-mãe. Exemplo correto: `2. Execução Fiscal` com `2.1. Procedimento`, `2.2. Citação`, `2.3. Exceção de Pré-Executividade`. Exemplo ERRADO: `2. Execução Fiscal`, `3. Procedimento`, `4. Citação`.
+8. **TÍTULOS SÃO RÓTULOS, NÃO FALAS**: Os títulos devem ser rótulos descritivos curtos (máx 8 palavras), NUNCA trechos literais da fala do professor.
+   - ERRADO: "1. Já estávamos conversando aqui antes de começar a transmissão"
+   - CORRETO: "1. Introdução e Apresentação"
+   - ERRADO: "2.1. Bom dia pessoal vamos começar a aula de hoje sobre licitações"
+   - CORRETO: "2.1. Abertura — Licitações e Contratos"
+9. **SAUDAÇÕES E LOGÍSTICA → "Introdução"**: Trechos de boas-vindas, ajustes técnicos, apresentação pessoal ou logística devem ser agrupados sob "1. Introdução" ou "1. Apresentação e Contextualização", nunca com a fala literal como título.
 
 ## TRANSCRIÇÃO:
 {transcricao}
@@ -2094,6 +2206,7 @@ def map_structure(client, full_text):
             )
         )
         content = response.text.replace('```markdown', '').replace('```', '')
+        content = _sanitize_structure_titles(content)
         logger.info("   ✅ Estrutura mapeada com sucesso.")
         return content
 

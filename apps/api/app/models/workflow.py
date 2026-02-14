@@ -144,7 +144,10 @@ class Workflow(Base):
     # Relationships
     user = relationship("User", backref="workflows")
     runs = relationship(
-        "WorkflowRun", back_populates="workflow", cascade="all, delete-orphan"
+        "WorkflowRun",
+        back_populates="workflow",
+        primaryjoin="Workflow.id == foreign(WorkflowRun.workflow_id)",
+        viewonly=True,
     )
 
     def to_dict(self) -> dict:
@@ -193,7 +196,7 @@ class WorkflowRun(Base):
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     workflow_id: Mapped[str] = mapped_column(
-        String, ForeignKey("workflows.id"), nullable=False, index=True
+        String, nullable=False, index=True
     )
     user_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.id"), nullable=False, index=True
@@ -229,8 +232,13 @@ class WorkflowRun(Base):
         DateTime, default=utcnow, nullable=False
     )
 
-    # Relationships
-    workflow = relationship("Workflow", back_populates="runs")
+    # Relationships (no FK constraint — workflow_id can be a builtin slug or a real UUID)
+    workflow = relationship(
+        "Workflow",
+        back_populates="runs",
+        primaryjoin="foreign(WorkflowRun.workflow_id) == Workflow.id",
+        viewonly=True,
+    )
     user = relationship("User", backref="workflow_runs")
 
     __table_args__ = (

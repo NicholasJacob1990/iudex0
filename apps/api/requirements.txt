@@ -24,6 +24,7 @@ openai>=1.66.0
 anthropic>=0.50.0
 google-generativeai==0.8.3
 google-genai==1.20.0
+cohere>=5.13.0
 Jinja2==3.1.4
 
 # LangChain
@@ -55,9 +56,16 @@ nltk==3.9.1
 networkx==3.4.2
 neo4j>=5.20.0
 neo4j-graphrag>=1.0.0
+langchain-neo4j>=0.8.0
 rapidfuzz>=3.6.0
+gliner>=0.2.0
+graphdatascience>=1.6.0
+ragas>=0.2.0
+datasets>=2.14.0
 
 # Processamento de Documentos
+docling>=2.0.0
+rag-document-viewer>=1.1.1
 pypdf==5.1.0
 pdfplumber==0.11.4
 python-docx==1.1.2
@@ -76,6 +84,7 @@ pdf2image==1.17.0
 # Processamento de Áudio/Vídeo
 openai-whisper==20240930
 mlx-whisper==0.4.3
+faster-whisper==1.2.1
 pydub==0.25.1
 soundfile==0.12.1
 librosa==0.10.2.post1
@@ -130,6 +139,14 @@ pre-commit==4.0.1
 # Segurança
 cryptography==43.0.3
 bcrypt==4.2.1
+
+# Microsoft SSO / Azure AD
+PyJWT[crypto]>=2.8.0
+msal>=1.28.0
+
+# Teams Bot Framework
+botbuilder-core>=4.14.0
+botbuilder-schema>=4.14.0
 openai-agents>=0.7.0
 google-adk>=1.23.0
 claude-agent-sdk>=0.1.26

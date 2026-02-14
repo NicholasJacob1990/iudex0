@@ -1,5 +1,4 @@
 import React, { useEffect, useRef } from 'react';
-import mermaid from 'mermaid';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Download, ZoomIn, ZoomOut } from 'lucide-react';
@@ -18,20 +17,18 @@ export function DiagramViewer({ code, title = 'Diagrama', type = 'mermaid', comp
     const [error, setError] = React.useState<string | null>(null);
 
     useEffect(() => {
-        mermaid.initialize({
-            startOnLoad: true,
-            theme: 'default',
-            securityLevel: 'loose',
-            fontFamily: 'inherit',
-        });
-    }, []);
-
-    useEffect(() => {
         const renderDiagram = async () => {
             if (!elementRef.current || !code) return;
 
             try {
                 setError(null);
+                const mermaid = (await import('mermaid')).default;
+                mermaid.initialize({
+                    startOnLoad: false,
+                    theme: 'default',
+                    securityLevel: 'loose',
+                    fontFamily: 'inherit',
+                });
                 const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
                 const { svg } = await mermaid.render(id, code);
                 elementRef.current.innerHTML = svg;

@@ -55,6 +55,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -67,6 +68,7 @@ from enum import Enum
 from typing import (
     Any,
     Dict,
+    Iterable,
     List,
     Optional,
     Set,
@@ -75,6 +77,29 @@ from typing import (
 )
 
 logger = logging.getLogger(__name__)
+
+_RELATION_LABEL_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,40}$")
+_DEFAULT_ALLOWED_RELATIONS: Set[str] = {
+    "RELATED_TO",
+    "CITA",
+    "CITES",
+    "APLICA",
+    "REVOGA",
+    "ALTERA",
+    "FUNDAMENTA",
+    "INTERPRETA",
+    "PERTENCE_A",
+    "REMETE_A",
+    "CO_MENCIONA",
+    "EXCEPCIONA",
+    "REGULAMENTA",
+    "PROFERIDA_POR",
+    "FIXA_TESE",
+    "JULGA_TEMA",
+    "VINCULA",
+    "MENTIONS",
+    "BELONGS_TO",
+}
 
 
 # =============================================================================
@@ -129,6 +154,42 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.lower() in ("1", "true", "yes", "on")
 
 
+def _env_first(*names: str) -> Optional[str]:
+    """Return first non-empty environment value among aliases."""
+    for name in names:
+        value = os.getenv(name)
+        if value is not None:
+            value = value.strip()
+            if value:
+                return value
+    return None
+
+
+def _infer_neo4j_uri() -> str:
+    """
+    Resolve Neo4j URI with Aura-aware fallbacks.
+
+    Priority:
+    1. Explicit URI aliases (NEO4J_URI, NEO4J_URL, NEO4J_BOLT_URL)
+    2. Aura instance id -> neo4j+s://<instance>.databases.neo4j.io
+    3. Local development default.
+    """
+    aura_instance_id = _env_first("AURA_INSTANCEID")
+    explicit_uri = _env_first("NEO4J_URI", "NEO4J_URL", "NEO4J_BOLT_URL")
+    if explicit_uri:
+        # If URI is still localhost but Aura instance id is present, prefer Aura.
+        # This avoids accidental localhost fallback when migrating envs.
+        if aura_instance_id and re.search(r"://(localhost|127\.0\.0\.1)(:\d+)?$", explicit_uri):
+            return f"neo4j+s://{aura_instance_id}.databases.neo4j.io"
+        return explicit_uri
+
+    if aura_instance_id:
+        return f"neo4j+s://{aura_instance_id}.databases.neo4j.io"
+
+    # Local dev default: Iudex Docker maps Bolt to 8687 to avoid conflicting with Neo4j Desktop (7687).
+    return "bolt://localhost:8687"
+
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -139,7 +200,8 @@ class Neo4jMVPConfig:
     """Configuration for Neo4j MVP service."""
 
     # Connection
-    uri: str = "bolt://localhost:7687"
+    # Local dev default: Iudex Docker maps Bolt to 8687 to avoid conflicting with Neo4j Desktop (7687).
+    uri: str = "bolt://localhost:8687"
     user: str = "neo4j"
     password: str = "password"
     database: str = "iudex"
@@ -147,6 +209,7 @@ class Neo4jMVPConfig:
     # Pool settings
     max_connection_pool_size: int = 50
     connection_timeout: int = 30
+    liveness_check_timeout: Optional[float] = None
 
     # Query settings
     max_hops: int = 2
@@ -154,7 +217,7 @@ class Neo4jMVPConfig:
     max_entities_per_chunk: int = 20
 
     # Ingest settings
-    batch_size: int = 100
+    batch_size: int = 200
     create_indexes: bool = True
     graph_hybrid_mode: bool = False
     graph_hybrid_auto_schema: bool = True
@@ -164,28 +227,39 @@ class Neo4jMVPConfig:
     # Phase 2 (optional): Neo4j-based retrieval helpers (no training required)
     enable_fulltext_indexes: bool = False
     enable_vector_index: bool = False
-    vector_dimensions: int = 768
+    vector_dimensions: int = 1024  # voyage-4-large default
     vector_similarity: str = "cosine"
     vector_property: str = "embedding"
 
     @classmethod
     def from_env(cls) -> "Neo4jMVPConfig":
         """Load from environment variables."""
-        # Prefer a shared dimension var if present to keep behavior consistent across components.
-        dim_raw = os.getenv("NEO4J_VECTOR_DIM") or os.getenv("NEO4J_EMBEDDING_DIM") or "768"
+        # NEO4J_VECTOR_DIM = chunk vector dimensions (voyage-4-large = 1024d).
+        # NOTE: NEO4J_EMBEDDING_DIM was removed as fallback to avoid conflict with
+        # graph_neo4j.py which uses it for KG embeddings (TransE/RotatE, 128d).
+        dim_raw = os.getenv("NEO4J_VECTOR_DIM") or "1024"
         try:
             dim = int(dim_raw)
         except (TypeError, ValueError):
-            dim = 768
+            dim = 1024
+        uri = _infer_neo4j_uri()
+        default_database = "neo4j" if uri.startswith(("neo4j+s://", "neo4j+ssc://")) else "iudex"
+        liveness_raw = _env_first("NEO4J_LIVENESS_CHECK_TIMEOUT")
+        try:
+            liveness_timeout = float(liveness_raw) if liveness_raw is not None else None
+        except (TypeError, ValueError):
+            liveness_timeout = None
         return cls(
-            uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-            user=os.getenv("NEO4J_USER", "neo4j"),
-            password=os.getenv("NEO4J_PASSWORD", "password"),
-            database=os.getenv("NEO4J_DATABASE", "iudex"),
+            uri=uri,
+            user=_env_first("NEO4J_USER", "NEO4J_USERNAME") or "neo4j",
+            password=_env_first("NEO4J_PASSWORD", "NEO4J_PASS") or "password",
+            database=_env_first("NEO4J_DATABASE") or default_database,
             max_connection_pool_size=int(os.getenv("NEO4J_MAX_POOL_SIZE", "50")),
             connection_timeout=int(os.getenv("NEO4J_CONNECTION_TIMEOUT", "30")),
+            liveness_check_timeout=liveness_timeout,
             max_hops=int(os.getenv("NEO4J_MAX_HOPS", "2")),
             max_chunks_per_query=int(os.getenv("NEO4J_MAX_CHUNKS", "50")),
+            batch_size=int(os.getenv("NEO4J_BATCH_SIZE", "200")),
             create_indexes=_env_bool("NEO4J_CREATE_INDEXES", True),
             graph_hybrid_mode=_env_bool("RAG_GRAPH_HYBRID_MODE", False),
             graph_hybrid_auto_schema=_env_bool("RAG_GRAPH_HYBRID_AUTO_SCHEMA", True),
@@ -209,11 +283,18 @@ class EntityType(str, Enum):
     ARTIGO = "artigo"      # Art. 5, § 1º, inciso II
     LEI = "lei"            # Lei 8.666/93
     SUMULA = "sumula"      # Súmula 331 TST
+    DECISAO = "decisao"    # REsp, RE, ADI, ADPF, HC, MS...
+    TESE = "tese"          # Tese 390
     PROCESSO = "processo"  # Número CNJ
     TRIBUNAL = "tribunal"  # STF, STJ, TRF
     TEMA = "tema"          # Tema 1234 STF
     PARTE = "parte"        # Nome de parte
     OAB = "oab"            # Número OAB
+    # Factual entity types
+    CPF = "cpf"                        # CPF (XXX.XXX.XXX-XX)
+    CNPJ = "cnpj"                      # CNPJ (XX.XXX.XXX/XXXX-XX)
+    DATA_JURIDICA = "data_juridica"    # Datas (DD/MM/YYYY)
+    VALOR_MONETARIO = "valor_monetario"  # R$ X.XXX,XX
 
 
 class Scope(str, Enum):
@@ -222,6 +303,40 @@ class Scope(str, Enum):
     PRIVATE = "private"
     GROUP = "group"
     LOCAL = "local"
+
+
+# =============================================================================
+# FACTUAL VALIDATORS
+# =============================================================================
+
+
+def _validate_cpf(cpf: str) -> bool:
+    """Validate CPF check digits (algoritmo Receita Federal)."""
+    digits = re.sub(r"\D", "", cpf)
+    if len(digits) != 11 or digits == digits[0] * 11:
+        return False
+    for i in (9, 10):
+        val = sum(int(digits[j]) * ((i + 1) - j) for j in range(i))
+        check = (val * 10 % 11) % 10
+        if int(digits[i]) != check:
+            return False
+    return True
+
+
+def _validate_cnpj(cnpj: str) -> bool:
+    """Validate CNPJ check digits."""
+    digits = re.sub(r"\D", "", cnpj)
+    if len(digits) != 14 or digits == digits[0] * 14:
+        return False
+    weights1 = [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    weights2 = [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]
+    for w, i in [(weights1, 12), (weights2, 13)]:
+        val = sum(int(digits[j]) * w[j] for j in range(i))
+        check = 11 - (val % 11)
+        check = 0 if check >= 10 else check
+        if int(digits[i]) != check:
+            return False
+    return True
 
 
 # =============================================================================
@@ -251,6 +366,14 @@ class LegalEntityExtractor:
             r"S[úu]mula\s+(?:Vinculante\s+)?n?[oº]?\s*(\d+)\s*(?:do\s+)?(STF|STJ|TST|TSE)?",
             re.IGNORECASE,
         ),
+        EntityType.DECISAO: re.compile(
+            r"\b(REsp|RE|ADI|ADPF|AgRg|RMS|HC|MS)\s*(?:n?[oº]\s*)?([\d./-]{3,})",
+            re.IGNORECASE,
+        ),
+        EntityType.TESE: re.compile(
+            r"\bTese\s+(?:n?[oº]\s*)?(\d{1,6})\b",
+            re.IGNORECASE,
+        ),
         EntityType.PROCESSO: re.compile(
             r"(\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4})",
         ),
@@ -266,12 +389,29 @@ class LegalEntityExtractor:
             r"OAB[/-]?\s*([A-Z]{2})\s*n?[oº]?\s*([\d.]+)",
             re.IGNORECASE,
         ),
+        # Factual patterns (used when include_factual=True)
+        EntityType.CPF: re.compile(
+            r"\b(\d{3}\.\d{3}\.\d{3}-\d{2})\b",
+        ),
+        EntityType.CNPJ: re.compile(
+            r"\b(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})\b",
+        ),
+        EntityType.DATA_JURIDICA: re.compile(
+            r"\b(\d{1,2})[/.-](\d{1,2})[/.-](\d{4})\b",
+        ),
+        EntityType.VALOR_MONETARIO: re.compile(
+            r"R\$\s*([\d.]+,\d{2})\b",
+        ),
     }
 
     @classmethod
-    def extract(cls, text: str) -> List[Dict[str, Any]]:
+    def extract(cls, text: str, *, include_factual: bool = False) -> List[Dict[str, Any]]:
         """
         Extract all entities from text.
+
+        Args:
+            text: Input text to extract entities from.
+            include_factual: If True, also extract factual entities (CPF, CNPJ, dates, values).
 
         Returns:
             List of entity dicts with: entity_type, entity_id, name, metadata
@@ -342,6 +482,36 @@ class LegalEntityExtractor:
                     "metadata": {"numero": numero, "tribunal": tribunal},
                 })
 
+        # Decisão
+        for match in cls.PATTERNS[EntityType.DECISAO].finditer(text):
+            tipo = (match.group(1) or "").upper()
+            numero_raw = match.group(2) or ""
+            numero = re.sub(r"[^\d]", "", numero_raw) or numero_raw.replace("/", "_").replace("-", "_")
+            entity_id = f"decisao_{tipo.lower()}_{numero}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.DECISAO.value,
+                    "entity_id": entity_id,
+                    "name": f"{tipo} {numero_raw}",
+                    "normalized": f"decisao:{tipo}:{numero}",
+                    "metadata": {"tipo": tipo, "numero": numero_raw},
+                })
+
+        # Tese
+        for match in cls.PATTERNS[EntityType.TESE].finditer(text):
+            numero = match.group(1)
+            entity_id = f"tese_{numero}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.TESE.value,
+                    "entity_id": entity_id,
+                    "name": f"Tese {numero}",
+                    "normalized": f"tese:{numero}",
+                    "metadata": {"numero": numero},
+                })
+
         # Processo (CNJ)
         for match in cls.PATTERNS[EntityType.PROCESSO].finditer(text):
             numero_cnj = match.group(1)
@@ -400,7 +570,85 @@ class LegalEntityExtractor:
                     "metadata": {"uf": uf, "numero": numero},
                 })
 
+        if include_factual:
+            cls._extract_factual(text, entities, seen)
+
         return entities
+
+    @classmethod
+    def _extract_factual(
+        cls, text: str, entities: List[Dict[str, Any]], seen: Set[str],
+    ) -> None:
+        """Extract factual entities (CPF, CNPJ, dates, monetary values)."""
+        # CPF (with check-digit validation)
+        for match in cls.PATTERNS[EntityType.CPF].finditer(text):
+            cpf = match.group(1)
+            if not _validate_cpf(cpf):
+                continue
+            digits = re.sub(r"\D", "", cpf)
+            entity_id = f"cpf_{digits}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.CPF.value,
+                    "entity_id": entity_id,
+                    "name": cpf,
+                    "normalized": f"cpf:{digits}",
+                    "metadata": {"cpf": cpf},
+                })
+
+        # CNPJ (with check-digit validation)
+        for match in cls.PATTERNS[EntityType.CNPJ].finditer(text):
+            cnpj = match.group(1)
+            if not _validate_cnpj(cnpj):
+                continue
+            digits = re.sub(r"\D", "", cnpj)
+            entity_id = f"cnpj_{digits}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.CNPJ.value,
+                    "entity_id": entity_id,
+                    "name": cnpj,
+                    "normalized": f"cnpj:{digits}",
+                    "metadata": {"cnpj": cnpj},
+                })
+
+        # Datas (DD/MM/YYYY)
+        for match in cls.PATTERNS[EntityType.DATA_JURIDICA].finditer(text):
+            dia = match.group(1).zfill(2)
+            mes = match.group(2).zfill(2)
+            ano = match.group(3)
+            # Basic validation
+            if not (1 <= int(dia) <= 31 and 1 <= int(mes) <= 12 and 1900 <= int(ano) <= 2100):
+                continue
+            date_str = f"{dia}/{mes}/{ano}"
+            entity_id = f"data_{ano}{mes}{dia}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.DATA_JURIDICA.value,
+                    "entity_id": entity_id,
+                    "name": date_str,
+                    "normalized": f"data:{ano}-{mes}-{dia}",
+                    "metadata": {"dia": dia, "mes": mes, "ano": ano},
+                })
+
+        # Valores monetários (R$ X.XXX,XX)
+        for match in cls.PATTERNS[EntityType.VALOR_MONETARIO].finditer(text):
+            valor_raw = match.group(1)
+            # Normalize: remove dots, replace comma with dot for numeric form
+            valor_norm = valor_raw.replace(".", "").replace(",", ".")
+            entity_id = f"valor_{valor_norm}"
+            if entity_id not in seen:
+                seen.add(entity_id)
+                entities.append({
+                    "entity_type": EntityType.VALOR_MONETARIO.value,
+                    "entity_id": entity_id,
+                    "name": f"R$ {valor_raw}",
+                    "normalized": f"valor:{valor_norm}",
+                    "metadata": {"valor": valor_raw, "valor_numerico": valor_norm},
+                })
 
     # Patterns for detecting cross-references (remissões) between legal provisions
     REMISSION_PATTERNS = [
@@ -813,17 +1061,21 @@ class LegalEntityExtractor:
         return citations
 
     @classmethod
-    def extract_all(cls, text: str) -> Dict[str, Any]:
+    def extract_all(cls, text: str, *, include_factual: bool = False) -> Dict[str, Any]:
         """
         Extrai entidades simples, citações compostas e remissões do texto.
 
         Método unificado que retorna todos os tipos de extração.
 
+        Args:
+            text: Input text.
+            include_factual: If True, also extract CPF, CNPJ, dates, values.
+
         Returns:
             Dict com 'entities', 'compound_citations' e 'remissions'.
         """
         return {
-            "entities": cls.extract(text),
+            "entities": cls.extract(text, include_factual=include_factual),
             "compound_citations": cls.extract_compound_citations(text),
             "remissions": cls.extract_remissions(text),
         }
@@ -947,6 +1199,9 @@ class CypherQueries:
 
     CREATE CONSTRAINT arg_issue_id IF NOT EXISTS
     FOR (i:Issue) REQUIRE i.issue_id IS UNIQUE;
+
+    CREATE CONSTRAINT tenant_metric_key IF NOT EXISTS
+    FOR (m:TenantEntityMetric) REQUIRE (m.tenant_id, m.entity_id) IS UNIQUE;
     """
 
     CREATE_INDEXES = """
@@ -968,6 +1223,7 @@ class CypherQueries:
     CREATE INDEX arg_evidence_doc IF NOT EXISTS FOR (ev:Evidence) ON (ev.doc_id);
     CREATE INDEX arg_actor_tenant IF NOT EXISTS FOR (a:Actor) ON (a.tenant_id);
     CREATE INDEX arg_issue_case IF NOT EXISTS FOR (i:Issue) ON (i.case_id);
+    CREATE INDEX tenant_metric_tenant_score IF NOT EXISTS FOR (m:TenantEntityMetric) ON (m.tenant_id, m.pagerank_score);
 
     # CogRAG meta-cognition / memory (PLANO_COGRAG.md)
     CREATE INDEX tema_nome IF NOT EXISTS FOR (t:Tema) ON (t.nome);
@@ -1076,6 +1332,77 @@ class CypherQueries:
     MERGE (f)-[:REFERS_TO]->(e)
     """
 
+    # Batched ingest (UNWIND) to reduce round-trips on large documents
+    MERGE_CHUNKS_BATCH = """
+    UNWIND $rows AS row
+    MERGE (c:Chunk {chunk_uid: row.chunk_uid})
+    ON CREATE SET
+        c.doc_hash = row.doc_hash,
+        c.chunk_index = row.chunk_index,
+        c.text_preview = row.text_preview,
+        c.token_count = row.token_count,
+        c.created_at = datetime()
+    RETURN count(c) AS merged_chunks
+    """
+
+    LINK_DOC_CHUNKS_BATCH = """
+    MATCH (d:Document {doc_hash: $doc_hash})
+    UNWIND $rows AS row
+    MATCH (c:Chunk {chunk_uid: row.chunk_uid})
+    MERGE (d)-[:HAS_CHUNK]->(c)
+    RETURN count(*) AS linked_doc_chunks
+    """
+
+    LINK_CHUNK_NEXT_BATCH = """
+    UNWIND $rows AS row
+    MATCH (c1:Chunk {chunk_uid: row.prev_chunk_uid})
+    MATCH (c2:Chunk {chunk_uid: row.chunk_uid})
+    MERGE (c1)-[:NEXT]->(c2)
+    RETURN count(*) AS linked_next
+    """
+
+    LINK_CHUNK_ENTITIES_BATCH = """
+    UNWIND $rows AS row
+    MATCH (c:Chunk {chunk_uid: row.chunk_uid})
+    MATCH (e:Entity {entity_id: row.entity_id})
+    MERGE (c)-[:MENTIONS]->(e)
+    RETURN count(*) AS linked_mentions
+    """
+
+    MERGE_FACTS_BATCH = """
+    UNWIND $rows AS row
+    MERGE (f:Fact {fact_id: row.fact_id})
+    ON CREATE SET
+        f.text = row.text,
+        f.text_preview = row.text_preview,
+        f.doc_hash = row.doc_hash,
+        f.doc_id = row.doc_id,
+        f.tenant_id = row.tenant_id,
+        f.scope = row.scope,
+        f.case_id = row.case_id,
+        f.metadata = row.metadata,
+        f.created_at = datetime()
+    ON MATCH SET
+        f.updated_at = datetime()
+    RETURN count(f) AS merged_facts
+    """
+
+    LINK_CHUNK_FACTS_BATCH = """
+    UNWIND $rows AS row
+    MATCH (c:Chunk {chunk_uid: row.chunk_uid})
+    MATCH (f:Fact {fact_id: row.fact_id})
+    MERGE (c)-[:ASSERTS]->(f)
+    RETURN count(*) AS linked_asserts
+    """
+
+    LINK_FACT_ENTITIES_BATCH = """
+    UNWIND $rows AS row
+    MATCH (f:Fact {fact_id: row.fact_id})
+    MATCH (e:Entity {entity_id: row.entity_id})
+    MERGE (f)-[:REFERS_TO]->(e)
+    RETURN count(*) AS linked_fact_refs
+    """
+
     # -------------------------------------------------------------------------
     # Query: Find chunks by entities
     # -------------------------------------------------------------------------
@@ -1150,6 +1477,10 @@ class CypherQueries:
     MATCH path = (e)-[:RELATED_TO|MENTIONS|ASSERTS|REFERS_TO*1..__MAX_HOPS__]-(target)
     WHERE (target:Chunk OR target:Entity)
       AND NOT (target:Claim OR target:Evidence OR target:Actor OR target:Issue)
+      AND (
+            $include_candidates = true
+            OR all(r IN relationships(path) WHERE coalesce(r.layer, 'verified') <> 'candidate')
+          )
 
     // Security trimming: all Chunk nodes in the path must be visible to the caller.
     AND all(n IN nodes(path) WHERE NOT (n:Chunk) OR exists {
@@ -1219,6 +1550,10 @@ class CypherQueries:
     // Traverse all relationship types including argument edges
     MATCH path = (e)-[:RELATED_TO|MENTIONS|ASSERTS|REFERS_TO|SUPPORTS|OPPOSES|EVIDENCES|ARGUES|RAISES|CITES|CONTAINS_CLAIM*1..__MAX_HOPS__]-(target)
     WHERE (target:Chunk OR target:Entity OR target:Claim OR target:Evidence)
+      AND (
+            $include_candidates = true
+            OR all(r IN relationships(path) WHERE coalesce(r.layer, 'verified') <> 'candidate')
+          )
 
     // Security trimming for Chunk nodes (document-level access control)
     AND all(n IN nodes(path) WHERE NOT (n:Chunk) OR exists {
@@ -1359,8 +1694,11 @@ class Neo4jMVPService:
     def __init__(self, config: Optional[Neo4jMVPConfig] = None):
         self.config = config or Neo4jMVPConfig.from_env()
         self._driver = None
+        self._async_driver = None
         self._driver_lock = threading.Lock()
+        self._async_driver_lock: Optional[asyncio.Lock] = None
         self._initialized = False
+        self._async_schema_building = False
 
         logger.info(f"Neo4jMVPService configured for {self.config.uri}")
 
@@ -1390,19 +1728,36 @@ class Neo4jMVPService:
                     _host = _m.group(1) if _m else 'localhost'
                     _port = int(_m.group(2)) if _m and _m.group(2) else 7687
                     if not self._port_reachable(_host, _port, timeout=1.0):
-                        raise ConnectionError(f"Neo4j port {_host}:{_port} not reachable")
+                        hint = ""
+                        if _host in {"localhost", "127.0.0.1"}:
+                            hint = (
+                                " Configure NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD "
+                                "(Aura: neo4j+s://<instance>.databases.neo4j.io) "
+                                "ou inicie o Neo4j local."
+                            )
+                        raise ConnectionError(f"Neo4j port {_host}:{_port} not reachable.{hint}")
 
                     try:
-                        from neo4j import GraphDatabase
+                        from neo4j_rust_ext import GraphDatabase  # type: ignore
+                        logger.info("Using neo4j-rust-ext driver")
                     except ImportError:
-                        raise ImportError("Neo4j driver required: pip install neo4j")
+                        try:
+                            from neo4j import GraphDatabase
+                        except ImportError:
+                            raise ImportError("Neo4j driver required: pip install neo4j")
+
+                    driver_kwargs: Dict[str, Any] = {
+                        "max_connection_pool_size": self.config.max_connection_pool_size,
+                        "connection_timeout": self.config.connection_timeout,
+                        "max_transaction_retry_time": 2,
+                    }
+                    if self.config.liveness_check_timeout is not None:
+                        driver_kwargs["liveness_check_timeout"] = self.config.liveness_check_timeout
 
                     self._driver = GraphDatabase.driver(
                         self.config.uri,
                         auth=(self.config.user, self.config.password),
-                        max_connection_pool_size=self.config.max_connection_pool_size,
-                        connection_timeout=self.config.connection_timeout,
-                        max_transaction_retry_time=2,
+                        **driver_kwargs,
                     )
                     logger.info(f"Neo4j connected: {self.config.uri}")
 
@@ -1412,12 +1767,88 @@ class Neo4jMVPService:
 
         return self._driver
 
+    async def _get_async_driver_lock(self) -> asyncio.Lock:
+        """Lazy async lock initialization bound to current event loop."""
+        if self._async_driver_lock is None:
+            self._async_driver_lock = asyncio.Lock()
+        return self._async_driver_lock
+
+    async def _get_async_driver(self):
+        """Lazy async driver initialization."""
+        if self._async_driver is None:
+            lock = await self._get_async_driver_lock()
+            async with lock:
+                if self._async_driver is None:
+                    import re as _re
+                    _m = _re.search(r'://([^:/]+):?(\d+)?', self.config.uri)
+                    _host = _m.group(1) if _m else "localhost"
+                    _port = int(_m.group(2)) if _m and _m.group(2) else 7687
+                    if not self._port_reachable(_host, _port, timeout=1.0):
+                        hint = ""
+                        if _host in {"localhost", "127.0.0.1"}:
+                            hint = (
+                                " Configure NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD "
+                                "(Aura: neo4j+s://<instance>.databases.neo4j.io) "
+                                "ou inicie o Neo4j local."
+                            )
+                        raise ConnectionError(f"Neo4j port {_host}:{_port} not reachable.{hint}")
+
+                    try:
+                        from neo4j import AsyncGraphDatabase
+                    except ImportError:
+                        raise ImportError("Neo4j async driver required: pip install neo4j")
+
+                    driver_kwargs: Dict[str, Any] = {
+                        "max_connection_pool_size": self.config.max_connection_pool_size,
+                        "connection_timeout": self.config.connection_timeout,
+                        "max_transaction_retry_time": 2,
+                    }
+                    if self.config.liveness_check_timeout is not None:
+                        driver_kwargs["liveness_check_timeout"] = self.config.liveness_check_timeout
+
+                    self._async_driver = AsyncGraphDatabase.driver(
+                        self.config.uri,
+                        auth=(self.config.user, self.config.password),
+                        **driver_kwargs,
+                    )
+                    logger.info(f"Neo4j async connected: {self.config.uri}")
+
+                    if self.config.create_indexes and not self._initialized and not self._async_schema_building:
+                        self._async_schema_building = True
+                        try:
+                            await self._create_schema_async()
+                            self._initialized = True
+                        finally:
+                            self._async_schema_building = False
+
+        return self._async_driver
+
+    async def close_async(self) -> None:
+        """Close async and sync Neo4j drivers."""
+        if self._async_driver is not None:
+            await self._async_driver.close()
+            self._async_driver = None
+            logger.info("Neo4j async connection closed")
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
+            logger.info("Neo4j sync connection closed")
+
     def close(self) -> None:
         """Close driver connection."""
         if self._driver:
             self._driver.close()
             self._driver = None
             logger.info("Neo4j connection closed")
+        if self._async_driver:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._async_driver.close())
+            except RuntimeError:
+                asyncio.run(self._async_driver.close())
+            finally:
+                self._async_driver = None
+                logger.info("Neo4j async connection close scheduled")
 
     @staticmethod
     def _serialize_metadata(value: Any) -> str:
@@ -1479,7 +1910,9 @@ class Neo4jMVPService:
             for attempt in (1, 2):
                 try:
                     with self.driver.session(database=db) as session:
-                        result = session.run(query, params or {})
+                        result = session.execute_read(
+                            lambda tx: list(tx.run(query, params or {}))
+                        )
                         return [record.data() for record in result]
                 except ClientError as e:  # type: ignore
                     code = getattr(e, "code", "")
@@ -1557,6 +1990,161 @@ class Neo4jMVPService:
         if last_db_not_found:
             raise last_db_not_found
         raise RuntimeError("Failed to open Neo4j session for any candidate database")
+
+    async def _execute_read_async(
+        self,
+        query: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Execute read query using AsyncSession/managed transaction."""
+        try:
+            from neo4j.exceptions import ClientError
+        except Exception:
+            ClientError = Exception  # type: ignore
+
+        try:
+            from neo4j.exceptions import ServiceUnavailable, SessionExpired
+        except Exception:
+            ServiceUnavailable = Exception  # type: ignore
+            SessionExpired = Exception  # type: ignore
+
+        def _should_reset_driver(exc: Exception) -> bool:
+            if isinstance(exc, (ServiceUnavailable, SessionExpired)):  # type: ignore[arg-type]
+                return True
+            msg = str(exc).lower()
+            return (
+                "defunct connection" in msg
+                or "bolt handshake" in msg
+                or "connection reset" in msg
+                or "couldn't connect to" in msg
+            )
+
+        async def _run_read(tx):
+            result = await tx.run(query, params or {})
+            return [record.data() async for record in result]
+
+        last_db_not_found: Optional[Exception] = None
+        for db in self._database_candidates():
+            for attempt in (1, 2):
+                try:
+                    driver = await self._get_async_driver()
+                    async with driver.session(database=db) as session:
+                        return await session.execute_read(_run_read)
+                except ClientError as e:  # type: ignore
+                    code = getattr(e, "code", "")
+                    if code == "Neo.ClientError.Database.DatabaseNotFound" and db != "neo4j":
+                        last_db_not_found = e
+                        break
+                    raise
+                except Exception as e:
+                    if attempt == 1 and _should_reset_driver(e):
+                        logger.warning(f"Neo4j async transient read error, resetting driver and retrying: {e}")
+                        try:
+                            await self.close_async()
+                        except Exception:
+                            pass
+                        continue
+                    raise
+
+        if last_db_not_found:
+            raise last_db_not_found
+        raise RuntimeError("Failed to open Neo4j async read session for any candidate database")
+
+    async def _execute_write_async(
+        self,
+        query: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Execute write query using AsyncSession/managed transaction."""
+        try:
+            from neo4j.exceptions import ClientError
+        except Exception:
+            ClientError = Exception  # type: ignore
+
+        try:
+            from neo4j.exceptions import ServiceUnavailable, SessionExpired
+        except Exception:
+            ServiceUnavailable = Exception  # type: ignore
+            SessionExpired = Exception  # type: ignore
+
+        def _should_reset_driver(exc: Exception) -> bool:
+            if isinstance(exc, (ServiceUnavailable, SessionExpired)):  # type: ignore[arg-type]
+                return True
+            msg = str(exc).lower()
+            return (
+                "defunct connection" in msg
+                or "bolt handshake" in msg
+                or "connection reset" in msg
+                or "couldn't connect to" in msg
+            )
+
+        async def _run_write(tx):
+            result = await tx.run(query, params or {})
+            return [record.data() async for record in result]
+
+        last_db_not_found: Optional[Exception] = None
+        for db in self._database_candidates():
+            for attempt in (1, 2):
+                try:
+                    driver = await self._get_async_driver()
+                    async with driver.session(database=db) as session:
+                        return await session.execute_write(_run_write)
+                except ClientError as e:  # type: ignore
+                    code = getattr(e, "code", "")
+                    if code == "Neo.ClientError.Database.DatabaseNotFound" and db != "neo4j":
+                        last_db_not_found = e
+                        break
+                    raise
+                except Exception as e:
+                    if attempt == 1 and _should_reset_driver(e):
+                        logger.warning(f"Neo4j async transient write error, resetting driver and retrying: {e}")
+                        try:
+                            await self.close_async()
+                        except Exception:
+                            pass
+                        continue
+                    raise
+
+        if last_db_not_found:
+            raise last_db_not_found
+        raise RuntimeError("Failed to open Neo4j async write session for any candidate database")
+
+    @staticmethod
+    def _iter_batches(rows: List[Dict[str, Any]], batch_size: int) -> Iterable[List[Dict[str, Any]]]:
+        """Yield rows in fixed-size batches."""
+        size = max(1, int(batch_size or 1))
+        for i in range(0, len(rows), size):
+            yield rows[i:i + size]
+
+    def _execute_write_rows(
+        self,
+        query: str,
+        rows: List[Dict[str, Any]],
+        extra_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Execute a write query using batched UNWIND rows."""
+        if not rows:
+            return
+        for batch in self._iter_batches(rows, self.config.batch_size):
+            params: Dict[str, Any] = {"rows": batch}
+            if extra_params:
+                params.update(extra_params)
+            self._execute_write(query, params)
+
+    async def _execute_write_rows_async(
+        self,
+        query: str,
+        rows: List[Dict[str, Any]],
+        extra_params: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Execute batched UNWIND write query with AsyncSession."""
+        if not rows:
+            return
+        for batch in self._iter_batches(rows, self.config.batch_size):
+            params: Dict[str, Any] = {"rows": batch}
+            if extra_params:
+                params.update(extra_params)
+            await self._execute_write_async(query, params)
 
     def _create_schema(self) -> None:
         """Create constraints and indexes."""
@@ -1647,6 +2235,134 @@ class Neo4jMVPService:
             logger.info("Neo4j schema created/verified")
         except Exception as e:
             logger.warning(f"Schema creation warning: {e}")
+
+    async def _create_schema_async(self) -> None:
+        """Create constraints and indexes using async Neo4j sessions."""
+        try:
+            for stmt in CypherQueries.CREATE_CONSTRAINTS.strip().split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    try:
+                        await self._execute_write_async(stmt)
+                    except Exception as e:
+                        logger.debug(f"Async constraint may exist: {e}")
+
+            for stmt in CypherQueries.CREATE_INDEXES.strip().split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    try:
+                        await self._execute_write_async(stmt)
+                    except Exception as e:
+                        logger.debug(f"Async index may exist: {e}")
+
+            if self.config.graph_hybrid_mode and self.config.graph_hybrid_auto_schema:
+                from app.services.rag.core.graph_hybrid import (
+                    HYBRID_LABELS_BY_ENTITY_TYPE,
+                    hybrid_schema_statements,
+                )
+
+                labels = sorted(set(HYBRID_LABELS_BY_ENTITY_TYPE.values()))
+                for stmt in hybrid_schema_statements(labels):
+                    try:
+                        await self._execute_write_async(stmt)
+                    except Exception as e:
+                        logger.debug(f"Async hybrid schema statement skipped: {e}")
+
+                if self.config.graph_hybrid_migrate_on_startup:
+                    for entity_type, label in HYBRID_LABELS_BY_ENTITY_TYPE.items():
+                        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", label):
+                            continue
+                        migrate_query = f"""
+                        MATCH (e:Entity)
+                        WHERE e.entity_type = $entity_type AND NOT (e:{label})
+                        SET e:{label}
+                        RETURN count(e) AS updated
+                        """
+                        try:
+                            await self._execute_write_async(
+                                migrate_query, {"entity_type": entity_type}
+                            )
+                        except Exception as e:
+                            logger.debug(f"Async hybrid migration skipped for label={label}: {e}")
+
+            if self.config.enable_fulltext_indexes:
+                fulltext_stmts = [
+                    "CREATE FULLTEXT INDEX rag_entity_fulltext IF NOT EXISTS "
+                    "FOR (e:Entity) ON EACH [e.name, e.entity_id, e.normalized]",
+                    "CREATE FULLTEXT INDEX rag_chunk_fulltext IF NOT EXISTS "
+                    "FOR (c:Chunk) ON EACH [c.text_preview]",
+                    "CREATE FULLTEXT INDEX rag_doc_fulltext IF NOT EXISTS "
+                    "FOR (d:Document) ON EACH [d.title]",
+                ]
+                for stmt in fulltext_stmts:
+                    try:
+                        await self._execute_write_async(stmt)
+                    except Exception as e:
+                        logger.debug(f"Async fulltext index statement skipped: {e}")
+
+            if self.config.enable_vector_index:
+                prop = (self.config.vector_property or "embedding").strip()
+                if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", prop):
+                    logger.warning("Invalid Neo4j vector property name: %r; falling back to 'embedding'", prop)
+                    prop = "embedding"
+                sim = (self.config.vector_similarity or "cosine").strip().lower()
+                if sim not in ("cosine", "euclidean"):
+                    logger.warning("Unsupported Neo4j vector similarity %r; falling back to 'cosine'", sim)
+                    sim = "cosine"
+
+                vector_stmt = (
+                    "CREATE VECTOR INDEX rag_chunk_vector IF NOT EXISTS "
+                    f"FOR (c:Chunk) ON (c.{prop}) "
+                    "OPTIONS {indexConfig: {"
+                    "`vector.dimensions`: $dim, "
+                    f"`vector.similarity_function`: '{sim}'"
+                    "}}"
+                )
+                try:
+                    await self._execute_write_async(
+                        vector_stmt, {"dim": int(self.config.vector_dimensions)}
+                    )
+                except Exception as e:
+                    logger.debug(f"Async vector index statement skipped: {e}")
+
+            logger.info("Neo4j async schema created/verified")
+        except Exception as e:
+            logger.warning(f"Async schema creation warning: {e}")
+
+    async def _merge_entity_async(self, ent: Dict[str, Any]) -> None:
+        """Async variant of _merge_entity."""
+        from app.services.rag.core.graph_hybrid import label_for_entity_type
+
+        label = label_for_entity_type(ent.get("entity_type")) if self.config.graph_hybrid_mode else None
+        label_clause = f":{label}" if label else ""
+
+        query = f"""
+        MERGE (e:Entity{label_clause} {{entity_id: $entity_id}})
+        ON CREATE SET
+            e.entity_type = $entity_type,
+            e.name = $name,
+            e.normalized = $normalized,
+            e.metadata = $metadata,
+            e.created_at = datetime()
+        ON MATCH SET
+            e.entity_type = $entity_type,
+            e.name = $name,
+            e.normalized = $normalized,
+            e.metadata = $metadata,
+            e.updated_at = datetime()
+        RETURN e
+        """
+
+        await self._execute_write_async(
+            query,
+            {
+                "entity_id": ent["entity_id"],
+                "entity_type": ent["entity_type"],
+                "name": ent["name"],
+                "normalized": ent["normalized"],
+                "metadata": self._serialize_metadata(ent.get("metadata", {})),
+            },
+        )
 
     def _merge_entity(self, ent: Dict[str, Any]) -> None:
         """Merge an Entity node, optionally applying a hybrid label."""
@@ -1756,47 +2472,67 @@ class Neo4jMVPService:
         )
         stats["document"] = 1
 
-        prev_chunk_uid = None
-        all_entities: Dict[str, Dict[str, Any]] = {}
-
-        for chunk in chunks:
+        prepared_chunks: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks):
             chunk_uid = chunk.get("chunk_uid")
             chunk_text = chunk.get("text", "")
-            chunk_index = chunk.get("chunk_index", 0)
+            chunk_index = int(chunk.get("chunk_index", idx))
 
             if not chunk_uid:
                 chunk_uid = hashlib.md5(
                     f"{doc_hash}:{chunk_index}".encode()
                 ).hexdigest()
 
-            # Create chunk node
-            self._execute_write(
-                CypherQueries.MERGE_CHUNK,
+            prepared_chunks.append(
                 {
                     "chunk_uid": chunk_uid,
-                    "doc_hash": doc_hash,
+                    "text": chunk_text,
                     "chunk_index": chunk_index,
-                    "text_preview": chunk_text[:500] if chunk_text else "",
-                    "token_count": chunk.get("token_count", len(chunk_text) // 4),
+                    "token_count": int(chunk.get("token_count", max(1, len(chunk_text) // 4))),
                 }
             )
-            stats["chunks"] += 1
 
-            # Link document → chunk
-            self._execute_write(
-                CypherQueries.LINK_DOC_CHUNK,
-                {"doc_hash": doc_hash, "chunk_uid": chunk_uid}
+        chunk_rows = [
+            {
+                "chunk_uid": chunk["chunk_uid"],
+                "doc_hash": doc_hash,
+                "chunk_index": chunk["chunk_index"],
+                "text_preview": (chunk["text"] or "")[:500],
+                "token_count": chunk["token_count"],
+            }
+            for chunk in prepared_chunks
+        ]
+        self._execute_write_rows(CypherQueries.MERGE_CHUNKS_BATCH, chunk_rows)
+        stats["chunks"] = len(chunk_rows)
+
+        doc_chunk_rows = [{"chunk_uid": chunk["chunk_uid"]} for chunk in prepared_chunks]
+        self._execute_write_rows(
+            CypherQueries.LINK_DOC_CHUNKS_BATCH,
+            doc_chunk_rows,
+            {"doc_hash": doc_hash},
+        )
+
+        next_rows: List[Dict[str, str]] = []
+        for i in range(1, len(prepared_chunks)):
+            next_rows.append(
+                {
+                    "prev_chunk_uid": prepared_chunks[i - 1]["chunk_uid"],
+                    "chunk_uid": prepared_chunks[i]["chunk_uid"],
+                }
             )
+        self._execute_write_rows(CypherQueries.LINK_CHUNK_NEXT_BATCH, next_rows)
+        stats["next_rels"] = len(next_rows)
 
-            # Link previous → current (NEXT)
-            if prev_chunk_uid:
-                self._execute_write(
-                    CypherQueries.LINK_CHUNK_NEXT,
-                    {"prev_chunk_uid": prev_chunk_uid, "chunk_uid": chunk_uid}
-                )
-                stats["next_rels"] += 1
+        all_entities: Dict[str, Dict[str, Any]] = {}
+        mention_rows: List[Dict[str, str]] = []
+        fact_rows: List[Dict[str, Any]] = []
+        chunk_fact_rows: List[Dict[str, str]] = []
+        fact_entity_rows: List[Dict[str, str]] = []
 
-            prev_chunk_uid = chunk_uid
+        for chunk in prepared_chunks:
+            chunk_uid = chunk["chunk_uid"]
+            chunk_text = chunk.get("text", "")
+            chunk_index = chunk.get("chunk_index", 0)
 
             # Extract and link entities
             chunk_entity_ids: List[str] = []
@@ -1813,11 +2549,7 @@ class Neo4jMVPService:
                         stats["entities"] += 1
 
                     # Link chunk → entity
-                    self._execute_write(
-                        CypherQueries.LINK_CHUNK_ENTITY,
-                        {"chunk_uid": chunk_uid, "entity_id": entity_id}
-                    )
-                    stats["mentions"] += 1
+                    mention_rows.append({"chunk_uid": chunk_uid, "entity_id": entity_id})
                     chunk_entity_ids.append(entity_id)
 
             # Extract and link facts (local narrative -> connect to entities)
@@ -1830,8 +2562,7 @@ class Neo4jMVPService:
                     ).hexdigest()[:24]
                     fact_id = f"fact_{fact_hash}"
 
-                    self._execute_write(
-                        CypherQueries.MERGE_FACT,
+                    fact_rows.append(
                         {
                             "fact_id": fact_id,
                             "text": fact_text[:2000],
@@ -1844,24 +2575,27 @@ class Neo4jMVPService:
                             "metadata": self._serialize_metadata(
                                 {"chunk_uid": chunk_uid, "chunk_index": chunk_index}
                             ),
-                        },
+                        }
                     )
-                    stats["facts"] += 1
 
-                    self._execute_write(
-                        CypherQueries.LINK_CHUNK_FACT,
-                        {"chunk_uid": chunk_uid, "fact_id": fact_id},
-                    )
+                    chunk_fact_rows.append({"chunk_uid": chunk_uid, "fact_id": fact_id})
 
                     for entity_id in chunk_entity_ids:
-                        self._execute_write(
-                            CypherQueries.LINK_FACT_ENTITY,
-                            {"fact_id": fact_id, "entity_id": entity_id},
-                        )
-                        stats["fact_refs"] += 1
+                        fact_entity_rows.append({"fact_id": fact_id, "entity_id": entity_id})
+
+        self._execute_write_rows(CypherQueries.LINK_CHUNK_ENTITIES_BATCH, mention_rows)
+        stats["mentions"] = len(mention_rows)
+
+        self._execute_write_rows(CypherQueries.MERGE_FACTS_BATCH, fact_rows)
+        stats["facts"] = len(fact_rows)
+
+        self._execute_write_rows(CypherQueries.LINK_CHUNK_FACTS_BATCH, chunk_fact_rows)
+
+        self._execute_write_rows(CypherQueries.LINK_FACT_ENTITIES_BATCH, fact_entity_rows)
+        stats["fact_refs"] = len(fact_entity_rows)
 
         # Semantic extraction (LLM-based) for teses, conceitos, princípios
-        if semantic_extraction and chunks:
+        if semantic_extraction and prepared_chunks:
             try:
                 from app.services.rag.core.semantic_extractor import get_semantic_extractor
 
@@ -1869,7 +2603,7 @@ class Neo4jMVPService:
 
                 # Combine all chunk texts for semantic analysis
                 full_text = "\n\n".join(
-                    c.get("text", "")[:2000] for c in chunks[:10]  # Limit to avoid token overflow
+                    c.get("text", "")[:2000] for c in prepared_chunks[:10]  # Limit to avoid token overflow
                 )
 
                 # Get already extracted entities for relationship building
@@ -1887,12 +2621,8 @@ class Neo4jMVPService:
                         stats["semantic_entities"] += 1
 
                         # Link to first chunk that likely contains it
-                        if chunks:
-                            first_chunk_uid = chunks[0].get("chunk_uid")
-                            if not first_chunk_uid:
-                                first_chunk_uid = hashlib.md5(
-                                    f"{doc_hash}:0".encode()
-                                ).hexdigest()
+                        if prepared_chunks:
+                            first_chunk_uid = prepared_chunks[0]["chunk_uid"]
                             self._execute_write(
                                 CypherQueries.LINK_CHUNK_ENTITY,
                                 {"chunk_uid": first_chunk_uid, "entity_id": entity_id}
@@ -1919,8 +2649,26 @@ class Neo4jMVPService:
                             break
 
                     if source_id and target_id and source_id != target_id:
-                        self.link_related_entities(source_id, target_id)
-                        stats["semantic_relations"] += 1
+                        weight = rel.get("weight")
+                        props: Dict[str, Any] = {
+                            "source": "semantic_extractor",
+                            "layer": "candidate",
+                            "verified": False,
+                            "candidate_type": "semantic:vector_similarity",
+                            "tenant_id": tenant_id,
+                            "doc_hash": doc_hash,
+                        }
+                        if isinstance(weight, (int, float)):
+                            props["confidence"] = float(weight)
+                            props["weight"] = float(weight)
+                        ok = self.link_entities(
+                            source_id,
+                            target_id,
+                            relation_type="RELATED_TO",
+                            properties=props,
+                        )
+                        if ok:
+                            stats["semantic_relations"] += 1
 
             except Exception as e:
                 logger.warning(f"Semantic extraction failed for doc {doc_hash}: {e}")
@@ -1931,6 +2679,249 @@ class Neo4jMVPService:
             f"{stats['semantic_entities']} semantic entities, {stats['semantic_relations']} relations"
         )
 
+        return stats
+
+    async def ingest_document_async(
+        self,
+        doc_hash: str,
+        chunks: List[Dict[str, Any]],
+        metadata: Dict[str, Any],
+        tenant_id: str,
+        scope: str = "global",
+        case_id: Optional[str] = None,
+        extract_entities: bool = True,
+        semantic_extraction: bool = False,
+        extract_facts: bool = False,
+    ) -> Dict[str, Any]:
+        """Async ingest using AsyncNeo4j driver (no thread offload)."""
+        stats = {
+            "document": 0,
+            "chunks": 0,
+            "entities": 0,
+            "mentions": 0,
+            "next_rels": 0,
+            "semantic_entities": 0,
+            "semantic_relations": 0,
+            "facts": 0,
+            "fact_refs": 0,
+        }
+
+        doc_id_value = (
+            (metadata or {}).get("doc_id")
+            or (metadata or {}).get("document_id")
+            or (metadata or {}).get("id")
+        )
+        if not doc_id_value and isinstance(doc_hash, str):
+            if re.match(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", doc_hash):
+                doc_id_value = doc_hash
+
+        await self._execute_write_async(
+            CypherQueries.MERGE_DOCUMENT,
+            {
+                "doc_hash": doc_hash,
+                "tenant_id": tenant_id,
+                "scope": scope,
+                "case_id": case_id,
+                "doc_id": doc_id_value,
+                "group_ids": metadata.get("group_ids", []),
+                "title": metadata.get("title", ""),
+                "source_type": metadata.get("source_type", ""),
+                "sigilo": metadata.get("sigilo", False),
+                "allowed_users": metadata.get("allowed_users", []),
+            },
+        )
+        stats["document"] = 1
+
+        prepared_chunks: List[Dict[str, Any]] = []
+        for idx, chunk in enumerate(chunks):
+            chunk_uid = chunk.get("chunk_uid")
+            chunk_text = chunk.get("text", "")
+            chunk_index = int(chunk.get("chunk_index", idx))
+
+            if not chunk_uid:
+                chunk_uid = hashlib.md5(
+                    f"{doc_hash}:{chunk_index}".encode()
+                ).hexdigest()
+
+            prepared_chunks.append(
+                {
+                    "chunk_uid": chunk_uid,
+                    "text": chunk_text,
+                    "chunk_index": chunk_index,
+                    "token_count": int(chunk.get("token_count", max(1, len(chunk_text) // 4))),
+                }
+            )
+
+        chunk_rows = [
+            {
+                "chunk_uid": chunk["chunk_uid"],
+                "doc_hash": doc_hash,
+                "chunk_index": chunk["chunk_index"],
+                "text_preview": (chunk["text"] or "")[:500],
+                "token_count": chunk["token_count"],
+            }
+            for chunk in prepared_chunks
+        ]
+        await self._execute_write_rows_async(CypherQueries.MERGE_CHUNKS_BATCH, chunk_rows)
+        stats["chunks"] = len(chunk_rows)
+
+        doc_chunk_rows = [{"chunk_uid": chunk["chunk_uid"]} for chunk in prepared_chunks]
+        await self._execute_write_rows_async(
+            CypherQueries.LINK_DOC_CHUNKS_BATCH,
+            doc_chunk_rows,
+            {"doc_hash": doc_hash},
+        )
+
+        next_rows: List[Dict[str, str]] = []
+        for i in range(1, len(prepared_chunks)):
+            next_rows.append(
+                {
+                    "prev_chunk_uid": prepared_chunks[i - 1]["chunk_uid"],
+                    "chunk_uid": prepared_chunks[i]["chunk_uid"],
+                }
+            )
+        await self._execute_write_rows_async(CypherQueries.LINK_CHUNK_NEXT_BATCH, next_rows)
+        stats["next_rels"] = len(next_rows)
+
+        all_entities: Dict[str, Dict[str, Any]] = {}
+        mention_rows: List[Dict[str, str]] = []
+        fact_rows: List[Dict[str, Any]] = []
+        chunk_fact_rows: List[Dict[str, str]] = []
+        fact_entity_rows: List[Dict[str, str]] = []
+
+        for chunk in prepared_chunks:
+            chunk_uid = chunk["chunk_uid"]
+            chunk_text = chunk.get("text", "")
+            chunk_index = chunk.get("chunk_index", 0)
+
+            chunk_entity_ids: List[str] = []
+            if extract_entities and chunk_text:
+                entities = LegalEntityExtractor.extract(chunk_text)
+
+                for ent in entities[:self.config.max_entities_per_chunk]:
+                    entity_id = ent["entity_id"]
+
+                    if entity_id not in all_entities:
+                        await self._merge_entity_async(ent)
+                        all_entities[entity_id] = ent
+                        stats["entities"] += 1
+
+                    mention_rows.append({"chunk_uid": chunk_uid, "entity_id": entity_id})
+                    chunk_entity_ids.append(entity_id)
+
+            if extract_facts and chunk_text:
+                max_facts = max(1, int(self.config.max_facts_per_chunk or 1))
+                for fact_text in FactExtractor.extract(chunk_text, max_facts=max_facts):
+                    fact_norm = re.sub(r"\s+", " ", fact_text.strip().lower())
+                    fact_hash = hashlib.sha256(
+                        f"{doc_hash}:{chunk_uid}:{fact_norm}".encode()
+                    ).hexdigest()[:24]
+                    fact_id = f"fact_{fact_hash}"
+
+                    fact_rows.append(
+                        {
+                            "fact_id": fact_id,
+                            "text": fact_text[:2000],
+                            "text_preview": fact_text[:320],
+                            "doc_hash": doc_hash,
+                            "doc_id": doc_id_value,
+                            "tenant_id": tenant_id,
+                            "scope": scope,
+                            "case_id": case_id,
+                            "metadata": self._serialize_metadata(
+                                {"chunk_uid": chunk_uid, "chunk_index": chunk_index}
+                            ),
+                        }
+                    )
+                    chunk_fact_rows.append({"chunk_uid": chunk_uid, "fact_id": fact_id})
+                    for entity_id in chunk_entity_ids:
+                        fact_entity_rows.append({"fact_id": fact_id, "entity_id": entity_id})
+
+        await self._execute_write_rows_async(CypherQueries.LINK_CHUNK_ENTITIES_BATCH, mention_rows)
+        stats["mentions"] = len(mention_rows)
+
+        await self._execute_write_rows_async(CypherQueries.MERGE_FACTS_BATCH, fact_rows)
+        stats["facts"] = len(fact_rows)
+
+        await self._execute_write_rows_async(CypherQueries.LINK_CHUNK_FACTS_BATCH, chunk_fact_rows)
+        await self._execute_write_rows_async(CypherQueries.LINK_FACT_ENTITIES_BATCH, fact_entity_rows)
+        stats["fact_refs"] = len(fact_entity_rows)
+
+        if semantic_extraction and prepared_chunks:
+            try:
+                from app.services.rag.core.semantic_extractor import get_semantic_extractor
+
+                extractor = get_semantic_extractor()
+                full_text = "\n\n".join(
+                    c.get("text", "")[:2000] for c in prepared_chunks[:10]
+                )
+                existing_entities_list = list(all_entities.values())
+
+                semantic_result = await asyncio.to_thread(
+                    extractor.extract, full_text, existing_entities_list
+                )
+
+                for sem_ent in semantic_result.get("entities", []):
+                    entity_id = sem_ent["entity_id"]
+                    if entity_id not in all_entities:
+                        await self._merge_entity_async(sem_ent)
+                        all_entities[entity_id] = sem_ent
+                        stats["semantic_entities"] += 1
+
+                        if prepared_chunks:
+                            first_chunk_uid = prepared_chunks[0]["chunk_uid"]
+                            await self._execute_write_async(
+                                CypherQueries.LINK_CHUNK_ENTITY,
+                                {"chunk_uid": first_chunk_uid, "entity_id": entity_id},
+                            )
+                            stats["mentions"] += 1
+
+                for rel in semantic_result.get("relations", []):
+                    source = rel.get("source", "")
+                    target = rel.get("target", "")
+
+                    source_id = None
+                    for ent in all_entities.values():
+                        if ent.get("normalized") == source or ent.get("entity_id") == source:
+                            source_id = ent["entity_id"]
+                            break
+
+                    target_id = None
+                    for ent in all_entities.values():
+                        if ent.get("normalized") == target or ent.get("entity_id") == target:
+                            target_id = ent["entity_id"]
+                            break
+
+                    if source_id and target_id and source_id != target_id:
+                        weight = rel.get("weight")
+                        props: Dict[str, Any] = {
+                            "source": "semantic_extractor",
+                            "layer": "candidate",
+                            "verified": False,
+                            "candidate_type": "semantic:vector_similarity",
+                            "tenant_id": tenant_id,
+                            "doc_hash": doc_hash,
+                        }
+                        if isinstance(weight, (int, float)):
+                            props["confidence"] = float(weight)
+                            props["weight"] = float(weight)
+                        ok = await self.link_entities_async(
+                            source_id,
+                            target_id,
+                            relation_type="RELATED_TO",
+                            properties=props,
+                        )
+                        if ok:
+                            stats["semantic_relations"] += 1
+
+            except Exception as e:
+                logger.warning(f"Semantic extraction failed for doc {doc_hash}: {e}")
+
+        logger.info(
+            f"Ingested doc {doc_hash} (async): {stats['chunks']} chunks, "
+            f"{stats['entities']} entities, {stats['mentions']} mentions, "
+            f"{stats['semantic_entities']} semantic entities, {stats['semantic_relations']} relations"
+        )
         return stats
 
     # -------------------------------------------------------------------------
@@ -1983,6 +2974,35 @@ class Neo4jMVPService:
 
         return results
 
+    async def query_chunks_by_entities_async(
+        self,
+        entity_ids: List[str],
+        tenant_id: str,
+        scope: str = "global",
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Async variant of query_chunks_by_entities."""
+        normalized_list = [eid.replace("_", ":") for eid in entity_ids]
+
+        allowed_scopes = ["global"]
+        if scope in ["private", "group", "local"]:
+            allowed_scopes.append(scope)
+
+        return await self._execute_read_async(
+            CypherQueries.FIND_CHUNKS_BY_ENTITIES,
+            {
+                "entity_ids": entity_ids,
+                "normalized_list": normalized_list,
+                "tenant_id": tenant_id,
+                "allowed_scopes": allowed_scopes,
+                "case_id": case_id,
+                "user_id": user_id,
+                "limit": limit,
+            },
+        )
+
     def query_chunks_by_text(
         self,
         query_text: str,
@@ -2005,6 +3025,31 @@ class Neo4jMVPService:
             return []
 
         return self.query_chunks_by_entities(
+            entity_ids=entity_ids,
+            tenant_id=tenant_id,
+            scope=scope,
+            case_id=case_id,
+            user_id=user_id,
+            limit=limit,
+        )
+
+    async def query_chunks_by_text_async(
+        self,
+        query_text: str,
+        tenant_id: str,
+        scope: str = "global",
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Async variant of query_chunks_by_text."""
+        entities = LegalEntityExtractor.extract(query_text)
+        entity_ids = [e["entity_id"] for e in entities]
+
+        if not entity_ids:
+            return []
+
+        return await self.query_chunks_by_entities_async(
             entity_ids=entity_ids,
             tenant_id=tenant_id,
             scope=scope,
@@ -2088,6 +3133,70 @@ class Neo4jMVPService:
             },
         )
 
+    async def search_chunks_fulltext_async(
+        self,
+        query_text: str,
+        tenant_id: str,
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        limit: int = 20,
+        index_name: str = "rag_chunk_fulltext",
+    ) -> List[Dict[str, Any]]:
+        """Async variant of search_chunks_fulltext."""
+        if allowed_scopes is None:
+            allowed_scopes = ["global", "private"]
+
+        query = """
+        CALL db.index.fulltext.queryNodes($index_name, $query_text) YIELD node, score
+        WITH node AS c, score
+        WHERE c:Chunk
+        MATCH (d:Document)-[:HAS_CHUNK]->(c)
+        WHERE d.scope IN $allowed_scopes
+          AND (
+                d.scope = 'global'
+                OR d.tenant_id = $tenant_id
+                OR (
+                    d.scope = 'group'
+                    AND coalesce(size($group_ids), 0) > 0
+                    AND any(g IN $group_ids WHERE g IN coalesce(d.group_ids, []))
+                )
+            )
+          AND ($case_id IS NULL OR d.case_id = $case_id)
+          AND (
+                d.sigilo IS NULL
+                OR d.sigilo = false
+                OR $user_id IS NULL
+                OR $user_id IN coalesce(d.allowed_users, [])
+            )
+        RETURN
+            c.chunk_uid AS chunk_uid,
+            c.text_preview AS text,
+            c.chunk_index AS chunk_index,
+            d.doc_hash AS doc_hash,
+            d.title AS doc_title,
+            d.source_type AS source_type,
+            score AS score
+        ORDER BY score DESC
+        LIMIT $limit
+        """
+
+        return await self._execute_read_async(
+            query,
+            {
+                "index_name": index_name,
+                "query_text": query_text,
+                "tenant_id": tenant_id,
+                "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
+                "limit": limit,
+            },
+        )
+
     def expand_with_neighbors(
         self,
         chunk_uid: str,
@@ -2129,6 +3238,7 @@ class Neo4jMVPService:
         max_hops: int = 2,
         limit: int = 20,
         include_arguments: bool = False,
+        include_candidates: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Find paths from entities to other entities/chunks.
@@ -2163,7 +3273,50 @@ class Neo4jMVPService:
                 "case_id": case_id,
                 "user_id": user_id,
                 "limit": limit,
+                "include_candidates": bool(include_candidates),
             }
+        )
+
+    async def find_paths_async(
+        self,
+        entity_ids: List[str],
+        tenant_id: str,
+        scope: str = "global",
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        max_hops: int = 2,
+        limit: int = 20,
+        include_arguments: bool = False,
+        include_candidates: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Async variant of find_paths."""
+        if allowed_scopes is None:
+            allowed_scopes = ["global"]
+            if scope in ["private", "group", "local"]:
+                allowed_scopes.append(scope)
+
+        hops = max(1, min(int(max_hops or 1), 5))
+        base_query = (
+            CypherQueries.FIND_PATHS_WITH_ARGUMENTS if include_arguments
+            else CypherQueries.FIND_PATHS
+        )
+        query = base_query.replace(CypherQueries._MAX_HOPS_TOKEN, str(hops))
+
+        return await self._execute_read_async(
+            query,
+            {
+                "entity_ids": entity_ids,
+                "tenant_id": tenant_id,
+                "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
+                "limit": limit,
+                "include_candidates": bool(include_candidates),
+            },
         )
 
     def find_cooccurrence(
@@ -2203,9 +3356,189 @@ class Neo4jMVPService:
             }
         )
 
+    async def find_cooccurrence_async(
+        self,
+        entity_ids: List[str],
+        tenant_id: str,
+        scope: str = "global",
+        *,
+        allowed_scopes: Optional[List[str]] = None,
+        group_ids: Optional[List[str]] = None,
+        case_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        min_matches: int = 2,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Async variant of find_cooccurrence."""
+        if allowed_scopes is None:
+            allowed_scopes = ["global"]
+            if scope in ["private", "group", "local"]:
+                allowed_scopes.append(scope)
+
+        return await self._execute_read_async(
+            CypherQueries.FIND_COOCCURRENCE,
+            {
+                "entity_ids": entity_ids,
+                "tenant_id": tenant_id,
+                "allowed_scopes": allowed_scopes,
+                "group_ids": group_ids or [],
+                "case_id": case_id,
+                "user_id": user_id,
+                "min_matches": min_matches,
+                "limit": limit,
+            },
+        )
+
     # -------------------------------------------------------------------------
     # Entity Management
     # -------------------------------------------------------------------------
+
+    def _sanitize_relation_type(self, relation_type: str) -> str:
+        """
+        Validate relation label for dynamic Cypher relationship creation.
+
+        Any invalid/unknown type falls back to RELATED_TO.
+        """
+        rel = (relation_type or "").strip().upper()
+        if not rel or not _RELATION_LABEL_RE.fullmatch(rel):
+            return "RELATED_TO"
+
+        allowed = set(_DEFAULT_ALLOWED_RELATIONS)
+        try:
+            from app.services.rag.core.kg_builder.legal_schema import LEGAL_RELATIONSHIP_TYPES
+
+            for item in LEGAL_RELATIONSHIP_TYPES:
+                label = str(item.get("label", "")).strip().upper()
+                if label and _RELATION_LABEL_RE.fullmatch(label):
+                    allowed.add(label)
+        except Exception:
+            pass
+
+        return rel if rel in allowed else "RELATED_TO"
+
+    def link_entities(
+        self,
+        entity1_id: str,
+        entity2_id: str,
+        relation_type: str = "RELATED_TO",
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Create a typed relationship between entities (validated whitelist)."""
+        rel = self._sanitize_relation_type(relation_type)
+        props: Dict[str, Any] = dict(properties or {})
+
+        # ------------------------------------------------------------------
+        # Transparency-first candidate workflow (3 states)
+        #
+        # - Verified/core edges: typed relationships used for traversal/querying.
+        # - Candidate edges: exploratory/inferred; ignored by default in Ask/Minutas.
+        # - Promotion: admin/offline can flip flags (and optionally migrate type).
+        #
+        # Contract:
+        # - Any edge with layer='candidate' OR verified=false OR candidate_type set
+        #   must be persisted as candidate (layer=candidate, verified=false).
+        # - Catch-all RELATED_TO is candidate by default (unless explicitly verified).
+        # - CO_MENCIONA is always candidate.
+        # ------------------------------------------------------------------
+
+        layer = str(props.get("layer") or "").strip().lower() or None
+        verified_val = props.get("verified", None)
+        has_candidate_type = bool(props.get("candidate_type"))
+
+        # Default: RELATED_TO is exploratory/candidate unless explicitly verified.
+        if rel == "RELATED_TO" and layer is None and verified_val is None and not has_candidate_type:
+            layer = "candidate"
+            verified_val = False
+
+        if layer == "candidate" or verified_val is False or has_candidate_type:
+            props["layer"] = "candidate"
+            props["verified"] = False
+            props.setdefault("candidate_type", f"rel:{rel.lower()}")
+        elif layer == "verified" or verified_val is True:
+            props["layer"] = "verified"
+            props["verified"] = True
+
+        # CO_MENCIONA is always candidate (article co-occurrence exploration).
+        if rel == "CO_MENCIONA":
+            props["layer"] = "candidate"
+            props["verified"] = False
+            props.setdefault("candidate_type", "graph:co_menciona")
+            props.setdefault("dimension", "horizontal")
+        query = f"""
+        MATCH (e1:Entity {{entity_id: $entity1_id}})
+        MATCH (e2:Entity {{entity_id: $entity2_id}})
+        MERGE (e1)-[r:{rel}]->(e2)
+        ON CREATE SET r.created_at = datetime()
+        SET r.updated_at = datetime()
+        SET r += $properties
+        """
+        try:
+            self._execute_write(
+                query,
+                {
+                    "entity1_id": entity1_id,
+                    "entity2_id": entity2_id,
+                    "properties": props,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to link entities with type {rel}: {e}")
+            return False
+
+    async def link_entities_async(
+        self,
+        entity1_id: str,
+        entity2_id: str,
+        relation_type: str = "RELATED_TO",
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Async variant of link_entities."""
+        rel = self._sanitize_relation_type(relation_type)
+        props: Dict[str, Any] = dict(properties or {})
+
+        layer = str(props.get("layer") or "").strip().lower() or None
+        verified_val = props.get("verified", None)
+        has_candidate_type = bool(props.get("candidate_type"))
+
+        if rel == "RELATED_TO" and layer is None and verified_val is None and not has_candidate_type:
+            layer = "candidate"
+            verified_val = False
+
+        if layer == "candidate" or verified_val is False or has_candidate_type:
+            props["layer"] = "candidate"
+            props["verified"] = False
+            props.setdefault("candidate_type", f"rel:{rel.lower()}")
+        elif layer == "verified" or verified_val is True:
+            props["layer"] = "verified"
+            props["verified"] = True
+
+        if rel == "CO_MENCIONA":
+            props["layer"] = "candidate"
+            props["verified"] = False
+            props.setdefault("candidate_type", "graph:co_menciona")
+            props.setdefault("dimension", "horizontal")
+        query = f"""
+        MATCH (e1:Entity {{entity_id: $entity1_id}})
+        MATCH (e2:Entity {{entity_id: $entity2_id}})
+        MERGE (e1)-[r:{rel}]->(e2)
+        ON CREATE SET r.created_at = datetime()
+        SET r.updated_at = datetime()
+        SET r += $properties
+        """
+        try:
+            await self._execute_write_async(
+                query,
+                {
+                    "entity1_id": entity1_id,
+                    "entity2_id": entity2_id,
+                    "properties": props,
+                },
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Failed to link entities with type {rel} (async): {e}")
+            return False
 
     def link_related_entities(
         self,
@@ -2213,15 +3546,249 @@ class Neo4jMVPService:
         entity2_id: str,
     ) -> bool:
         """Create RELATED_TO relationship between entities."""
+        return self.link_entities(entity1_id, entity2_id, relation_type="RELATED_TO")
+
+    async def link_related_entities_async(
+        self,
+        entity1_id: str,
+        entity2_id: str,
+    ) -> bool:
+        """Async variant of link_related_entities."""
+        return await self.link_entities_async(entity1_id, entity2_id, relation_type="RELATED_TO")
+
+    # -------------------------------------------------------------------------
+    # Candidate Graph (Transparency-First Hybrid)
+    # -------------------------------------------------------------------------
+
+    def recompute_candidate_comentions(
+        self,
+        *,
+        tenant_id: str,
+        include_global: bool = False,
+        min_cooccurrences: int = 2,
+        max_pairs: int = 20000,
+    ) -> Dict[str, Any]:
+        """
+        Build/update candidate Artigo–Artigo co-mention edges.
+
+        These edges are intended for exploration only and must be ignored by default
+        in Ask/Minutas/GraphRAG unless explicitly requested.
+
+        Stored as:
+          (:Entity:Artigo)-[:CO_MENCIONA {layer:'candidate', verified:false, tenant_id, co_occurrences, weight, samples}]->(:Entity:Artigo)
+
+        Notes:
+        - Does NOT create official REMETE_A (only explicit remissions are allowed there).
+        - Skips pairs that already have an official REMETE_A in either direction.
+        """
+        min_co = max(1, int(min_cooccurrences or 2))
+        max_pairs = max(1, min(int(max_pairs or 20000), 200000))
+
+        delete_query = """
+        MATCH ()-[r:CO_MENCIONA]->()
+        WHERE r.layer = 'candidate' AND r.tenant_id = $tenant_id
+        DELETE r
+        """
+
+        build_query = """
+        // Candidate co-mentions between Artigos via chunk co-occurrence
+        MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)-[:MENTIONS]->(a1:Entity:Artigo)
+        MATCH (c)-[:MENTIONS]->(a2:Entity:Artigo)
+        WHERE a1.entity_id < a2.entity_id
+          AND (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
+          AND (d.sigilo IS NULL OR d.sigilo = false)
+          AND NOT (a1)-[:REMETE_A]->(a2)
+          AND NOT (a2)-[:REMETE_A]->(a1)
+        WITH a1, a2, count(DISTINCT c) AS co,
+             collect(DISTINCT c.text_preview)[0..3] AS samples
+        WHERE co >= $min_cooccurrences
+        ORDER BY co DESC
+        LIMIT $max_pairs
+        MERGE (a1)-[r:CO_MENCIONA]->(a2)
+        ON CREATE SET r.created_at = datetime()
+        SET r.updated_at = datetime(),
+            r.layer = 'candidate',
+            r.verified = false,
+            r.candidate_type = 'graph:co_menciona',
+            r.dimension = 'horizontal',
+            r.tenant_id = $tenant_id,
+            r.co_occurrences = co,
+            r.weight = toFloat(co),
+            r.samples = samples
+        RETURN count(r) AS edges
+        """
+
         try:
-            self._execute_write(
-                CypherQueries.LINK_ENTITY_RELATED,
-                {"entity1_id": entity1_id, "entity2_id": entity2_id}
+            self._execute_write(delete_query, {"tenant_id": tenant_id})
+            rows = self._execute_write(
+                build_query,
+                {
+                    "tenant_id": tenant_id,
+                    "include_global": bool(include_global),
+                    "min_cooccurrences": min_co,
+                    "max_pairs": max_pairs,
+                },
             )
-            return True
+            edges = int(rows[0]["edges"]) if rows else 0
+            return {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "include_global": bool(include_global),
+                "min_cooccurrences": min_co,
+                "max_pairs": max_pairs,
+                "edges": edges,
+            }
         except Exception as e:
-            logger.error(f"Failed to link entities: {e}")
-            return False
+            logger.error("Failed to recompute candidate co-mentions: %s", e)
+            return {"ok": False, "error": str(e)}
+
+    def get_candidate_edge_stats(
+        self,
+        *,
+        tenant_id: str,
+        limit: int = 50,
+        candidate_type_prefix: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Aggregate candidate edges by candidate_type.
+
+        Intended for offline/admin workflows to decide what should be promoted.
+        """
+        limit = max(1, min(int(limit or 50), 500))
+        prefix = (candidate_type_prefix or "").strip()
+
+        query = """
+        MATCH ()-[r]->()
+        WHERE coalesce(r.layer, 'verified') = 'candidate'
+          AND r.tenant_id = $tenant_id
+          AND ($prefix = '' OR coalesce(r.candidate_type, '') STARTS WITH $prefix)
+        WITH
+            coalesce(r.candidate_type, 'unknown') AS candidate_type,
+            type(r) AS rel_type,
+            count(*) AS edges,
+            round(avg(toFloat(coalesce(r.confidence, r.weight, 0.0))), 4) AS avg_confidence,
+            sum(CASE WHEN coalesce(r.evidence, '') <> '' THEN 1 ELSE 0 END) AS with_evidence,
+            count(DISTINCT coalesce(r.doc_hash, '')) AS distinct_docs
+        RETURN candidate_type, rel_type, edges, avg_confidence, with_evidence, distinct_docs
+        ORDER BY edges DESC
+        LIMIT $limit
+        """
+        return self._execute_read(
+            query,
+            {"tenant_id": tenant_id, "limit": limit, "prefix": prefix},
+        )
+
+    def promote_candidate_edges(
+        self,
+        *,
+        tenant_id: str,
+        candidate_type: str,
+        min_confidence: float = 0.0,
+        require_evidence: bool = False,
+        max_edges: int = 5000,
+        promote_to_typed: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Promote candidate edges to verified (and optionally migrate RELATED_TO -> typed relationship).
+
+        Safety rails:
+        - Always scoped by tenant_id and candidate_type.
+        - Optional confidence/evidence filters.
+        """
+        cand = (candidate_type or "").strip()
+        if not cand:
+            return {"ok": False, "error": "candidate_type_required"}
+
+        max_edges = max(1, min(int(max_edges or 5000), 50000))
+        min_conf = max(0.0, min(float(min_confidence or 0.0), 1.0))
+        req_ev = bool(require_evidence)
+
+        if not promote_to_typed:
+            query = """
+            MATCH ()-[r]->()
+            WHERE coalesce(r.layer, 'verified') = 'candidate'
+              AND r.tenant_id = $tenant_id
+              AND r.candidate_type = $candidate_type
+              AND toFloat(coalesce(r.confidence, r.weight, 0.0)) >= $min_conf
+              AND (NOT $require_evidence OR coalesce(r.evidence, '') <> '')
+            WITH r LIMIT $max_edges
+            SET r.layer = 'verified',
+                r.verified = true,
+                r.promoted_at = datetime()
+            RETURN count(r) AS promoted
+            """
+            try:
+                rows = self._execute_write(
+                    query,
+                    {
+                        "tenant_id": tenant_id,
+                        "candidate_type": cand,
+                        "min_conf": min_conf,
+                        "require_evidence": req_ev,
+                        "max_edges": max_edges,
+                    },
+                )
+                promoted = int(rows[0]["promoted"]) if rows else 0
+                return {
+                    "ok": True,
+                    "tenant_id": tenant_id,
+                    "candidate_type": cand,
+                    "promote_to_typed": False,
+                    "promoted": promoted,
+                }
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+
+        # Typed migration: only supports RELATED_TO -> <typed> promotion.
+        # We infer intended relationship label from candidate_type suffix (after last ":").
+        intended_raw = cand.split(":")[-1].strip().upper()
+        intended = self._sanitize_relation_type(intended_raw)
+        if intended in ("RELATED_TO", "CO_MENCIONA"):
+            return {"ok": False, "error": f"cannot_promote_to_typed:{intended_raw}"}
+
+        query = f"""
+        MATCH (a:Entity)-[r:RELATED_TO]->(b:Entity)
+        WHERE coalesce(r.layer, 'verified') = 'candidate'
+          AND r.tenant_id = $tenant_id
+          AND r.candidate_type = $candidate_type
+          AND toFloat(coalesce(r.confidence, r.weight, 0.0)) >= $min_conf
+          AND (NOT $require_evidence OR coalesce(r.evidence, '') <> '')
+        WITH a, b, r LIMIT $max_edges
+        MERGE (a)-[rv:{intended}]->(b)
+        ON CREATE SET rv.created_at = datetime()
+        SET rv.updated_at = datetime(),
+            rv.layer = 'verified',
+            rv.verified = true,
+            rv.promoted_at = datetime(),
+            rv.dimension = coalesce(r.dimension, rv.dimension),
+            rv.evidence = coalesce(r.evidence, rv.evidence),
+            rv.confidence = coalesce(r.confidence, r.weight, rv.confidence),
+            rv.candidate_type = r.candidate_type
+        DELETE r
+        RETURN count(rv) AS promoted
+        """
+        try:
+            rows = self._execute_write(
+                query,
+                {
+                    "tenant_id": tenant_id,
+                    "candidate_type": cand,
+                    "min_conf": min_conf,
+                    "require_evidence": req_ev,
+                    "max_edges": max_edges,
+                },
+            )
+            promoted = int(rows[0]["promoted"]) if rows else 0
+            return {
+                "ok": True,
+                "tenant_id": tenant_id,
+                "candidate_type": cand,
+                "promote_to_typed": True,
+                "relationship_type": intended,
+                "promoted": promoted,
+            }
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # -------------------------------------------------------------------------
     # Stats

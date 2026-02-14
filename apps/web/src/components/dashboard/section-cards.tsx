@@ -58,7 +58,7 @@ const stageMeta = (stage?: string) => {
 export function SectionCards({ sections }: { sections: SectionCardItem[] }) {
     if (!sections.length) {
         return (
-            <div className="rounded-2xl border border-outline/20 bg-white p-4 text-xs text-muted-foreground">
+            <div className="rounded-2xl border border-black/[0.06] bg-white/80 p-4 text-xs text-muted-foreground backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.04]">
                 Nenhuma secao processada ainda.
             </div>
         );
@@ -82,7 +82,7 @@ export function SectionCards({ sections }: { sections: SectionCardItem[] }) {
                     || (review?.mergeRationale || '')
                 );
                 return (
-                    <div key={section.title} className="rounded-2xl border border-outline/20 bg-white p-4 shadow-sm">
+                    <div key={section.title} className="rounded-2xl border border-black/[0.06] bg-white/80 p-4 shadow-sm backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.04]">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                             <div className="text-sm font-semibold text-foreground/90">{section.title}</div>
                             <div className="flex items-center gap-2 text-[10px] text-muted-foreground">

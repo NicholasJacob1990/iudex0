@@ -2,8 +2,12 @@
   "name": "@iudex/web",
   "version": "1.0.0",
   "private": true,
+  "engines": {
+    "node": ">=20 <23"
+  },
   "scripts": {
-    "dev": "next dev",
+    "predev": "node scripts/check-node-version.cjs",
+    "dev": "node scripts/clean-next.cjs && next dev",
     "dev:clean": "node scripts/clean-next.cjs && next dev",
     "dev:3010": "next dev -H 127.0.0.1 -p 3010",
     "build": "next build",
@@ -68,12 +72,14 @@
     "nanoid": "^3.3.11",
     "next": "^14.1.0",
     "next-themes": "^0.2.1",
+    "pdfjs-dist": "^4.8.69",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.2.3",
     "react-force-graph-2d": "^1.29.0",
     "react-hook-form": "^7.49.3",
     "react-markdown": "^10.1.0",
+    "react-pdf": "^9.2.1",
     "react-resizable-panels": "^4.3.2",
     "remark-gfm": "^4.0.1",
     "shiki": "^3.22.0",
@@ -97,6 +103,7 @@
     "eslint": "^9.39.0",
     "eslint-config-next": "^16.1.1",
     "postcss": "^8.4.33",
+    "react-grab": "^0.1.13",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.3.3"
   }

@@ -30,6 +30,14 @@
 
   <Permissions>ReadWriteDocument</Permissions>
 
+  <WebApplicationInfo>
+    <Id>c256c4ab-8325-442b-bd9c-36c112e14eb7</Id>
+    <Resource>api://c256c4ab-8325-442b-bd9c-36c112e14eb7</Resource>
+    <Scopes>
+      <Scope>User.Read</Scope>
+    </Scopes>
+  </WebApplicationInfo>
+
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
     <Hosts>
       <Host xsi:type="Document">

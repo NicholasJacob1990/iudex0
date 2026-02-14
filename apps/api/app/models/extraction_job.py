@@ -108,7 +108,7 @@ class ExtractionJob(Base):
     status: Mapped[str] = mapped_column(
         SQLEnum(ExtractionJobStatus),
         default=ExtractionJobStatus.PENDING.value,
-        nullable=False, index=True,
+        nullable=False,
         doc="Job status: pending, running, paused, completed, failed, cancelled"
     )
 
@@ -302,7 +302,7 @@ class ExtractionJobDocument(Base):
     status: Mapped[str] = mapped_column(
         SQLEnum(DocumentExtractionStatus),
         default=DocumentExtractionStatus.PENDING.value,
-        nullable=False, index=True
+        nullable=False
     )
 
     # Error tracking

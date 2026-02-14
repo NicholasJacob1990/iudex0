@@ -30,10 +30,17 @@ class ProcessWatchlist(Base):
     # Controle de sincronização
     last_datajud_check = Column(DateTime, nullable=True)
     last_mov_datetime = Column(String, nullable=True)  # Último movimento visto
-    
+
+    # Agendamento configurável pelo usuário
+    sync_frequency = Column(String, nullable=False, default="daily")  # daily, twice_daily, weekly, custom
+    sync_time = Column(String, nullable=False, default="06:00")  # HH:MM (horário local)
+    sync_cron = Column(String, nullable=True)  # Cron customizado (usado quando sync_frequency='custom')
+    sync_timezone = Column(String, nullable=False, default="America/Sao_Paulo")
+    next_sync_at = Column(DateTime, nullable=True)  # Próximo sync agendado (UTC)
+
     # Status
     is_active = Column(Boolean, default=True)
-    
+
     # Timestamps
     created_at = Column(DateTime, default=utcnow)
     updated_at = Column(DateTime, default=utcnow, onupdate=utcnow)
@@ -63,6 +70,13 @@ class DjenOabWatchlist(Base):
 
     # Controle de sincronização
     last_sync_date = Column(Date, nullable=True)
+
+    # Agendamento configurável pelo usuário
+    sync_frequency = Column(String, nullable=False, default="daily")
+    sync_time = Column(String, nullable=False, default="06:00")
+    sync_cron = Column(String, nullable=True)
+    sync_timezone = Column(String, nullable=False, default="America/Sao_Paulo")
+    next_sync_at = Column(DateTime, nullable=True)
 
     # Status
     is_active = Column(Boolean, default=True)

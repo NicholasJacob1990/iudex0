@@ -53,6 +53,11 @@ MODEL_REGISTRY = {
         "max_output": 128_000,
         "provider": "openai"
     },
+    "gpt-5.3-codex": {
+        "context_window": 400_000,
+        "max_output": 128_000,
+        "provider": "openai"
+    },
     "gpt-5.2-instant": {
         "context_window": 400_000,
         "max_output": 128_000,

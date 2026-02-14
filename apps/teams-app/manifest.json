@@ -1,0 +1,70 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.19/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.19",
+  "version": "1.0.0",
+  "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+  "developer": {
+    "name": "Vorbium",
+    "websiteUrl": "https://vorbium.com.br",
+    "privacyUrl": "https://vorbium.com.br/privacidade",
+    "termsOfUseUrl": "https://vorbium.com.br/termos"
+  },
+  "name": { "short": "Vorbium", "full": "Vorbium - Assistente Juridico com IA" },
+  "description": {
+    "short": "IA juridica para Teams: pesquisa, analise e workflows.",
+    "full": "Assistente juridico com inteligencia artificial integrado ao Microsoft Teams. Pesquise jurisprudencia, analise documentos, inicie workflows e receba notificacoes — tudo sem sair do Teams."
+  },
+  "icons": { "color": "color.png", "outline": "outline.png" },
+  "accentColor": "#4F46E5",
+  "bots": [
+    {
+      "botId": "c256c4ab-8325-442b-bd9c-36c112e14eb7",
+      "scopes": ["personal", "team", "groupChat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false,
+      "commandLists": [
+        {
+          "scopes": ["personal", "team", "groupChat"],
+          "commands": [
+            { "title": "pesquisar", "description": "Pesquisar no corpus juridico" },
+            { "title": "analisar", "description": "Analisar texto com IA juridica" },
+            { "title": "workflow", "description": "Iniciar um workflow juridico" },
+            { "title": "status", "description": "Ver status de um workflow" },
+            { "title": "ajuda", "description": "Ver comandos disponiveis" }
+          ]
+        }
+      ]
+    }
+  ],
+  "staticTabs": [
+    {
+      "entityId": "dashboard",
+      "name": "Dashboard",
+      "contentUrl": "https://teams.vorbium.com.br/?tab=dashboard",
+      "scopes": ["personal"]
+    }
+  ],
+  "configurableTabs": [
+    {
+      "configurationUrl": "https://teams.vorbium.com.br/config",
+      "canUpdateConfiguration": true,
+      "scopes": ["team", "groupChat"],
+      "context": ["channelTab", "privateChatTab"]
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": ["teams.vorbium.com.br", "api.vorbium.com.br"],
+  "webApplicationInfo": {
+    "id": "c256c4ab-8325-442b-bd9c-36c112e14eb7",
+    "resource": "api://c256c4ab-8325-442b-bd9c-36c112e14eb7"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": [
+        { "name": "ChatMessage.Read.Chat", "type": "Application" },
+        { "name": "TeamSettings.Read.Group", "type": "Application" },
+        { "name": "ChannelMessage.Read.Group", "type": "Application" }
+      ]
+    }
+  }
+}

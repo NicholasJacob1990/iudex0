@@ -302,7 +302,7 @@ class SemanticCypherQueries:
     CREATE_SEMANTIC_VECTOR_INDEX = """
     CREATE VECTOR INDEX semantic_entity_embedding IF NOT EXISTS
     FOR (n:SemanticEntity)
-    ON n.embedding
+    ON (n.embedding)
     OPTIONS {indexConfig: {
         `vector.dimensions`: $dimension,
         `vector.similarity_function`: 'cosine'
@@ -361,6 +361,11 @@ class SemanticCypherQueries:
     ON CREATE SET
         r.weight = $weight,
         r.relation_subtype = 'semantic',
+        r.layer = 'candidate',
+        r.verified = false,
+        r.candidate_type = 'semantic:vector_similarity',
+        r.confidence = $weight,
+        r.source = 'neo4j_semantic_relation',
         r.created_at = datetime()
     ON MATCH SET
         r.weight = $weight,
@@ -410,6 +415,7 @@ class SemanticEntityExtractor:
         self.embedding_dim = embedding_dim
 
         self._neo4j_driver = None
+        self._neo4j_database = "neo4j"
         self._embeddings_service = None
         self._initialized = False
         self._init_lock = threading.Lock()
@@ -424,10 +430,13 @@ class SemanticEntityExtractor:
             try:
                 from neo4j import GraphDatabase
                 import os
+                from app.services.rag.config import get_rag_config
 
-                uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
-                user = os.getenv("NEO4J_USER", "neo4j")
-                password = os.getenv("NEO4J_PASSWORD", "password")
+                cfg = get_rag_config()
+                uri = os.getenv("NEO4J_URI", cfg.neo4j_uri)
+                user = os.getenv("NEO4J_USER") or os.getenv("NEO4J_USERNAME") or cfg.neo4j_user
+                password = os.getenv("NEO4J_PASSWORD", cfg.neo4j_password)
+                self._neo4j_database = os.getenv("NEO4J_DATABASE", cfg.neo4j_database or "neo4j")
 
                 self._neo4j_driver = GraphDatabase.driver(
                     uri, auth=(user, password)
@@ -505,7 +514,7 @@ class SemanticEntityExtractor:
         if driver is None:
             return []
 
-        database = "neo4j"  # Default database
+        database = self._neo4j_database or "neo4j"
 
         with driver.session(database=database) as session:
             result = session.run(query, parameters or {})
@@ -521,7 +530,7 @@ class SemanticEntityExtractor:
         if driver is None:
             return []
 
-        database = "neo4j"
+        database = self._neo4j_database or "neo4j"
 
         with driver.session(database=database) as session:
             result = session.execute_write(
@@ -559,7 +568,7 @@ class SemanticEntityExtractor:
                     create_query = f"""
                     CREATE VECTOR INDEX semantic_entity_embedding IF NOT EXISTS
                     FOR (n:SemanticEntity)
-                    ON n.embedding
+                    ON (n.embedding)
                     OPTIONS {{indexConfig: {{
                         `vector.dimensions`: {self.embedding_dim},
                         `vector.similarity_function`: 'cosine'

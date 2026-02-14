@@ -22,7 +22,7 @@ import {
   Save, Play, Plus, ArrowLeft, Loader2, Globe,
   Upload, ListChecks, GitBranch, BrainCircuit, Search, Eye, Wrench, Scale,
   FormInput, FileOutput, FlaskConical, Sparkles, Table2, MessageSquare,
-  Undo2, Redo2,
+  Undo2, Redo2, Bot, GitMerge, Zap, Send, BookOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,7 +33,7 @@ import { PropertiesPanel } from './properties-panel';
 import { RunViewer } from './run-viewer';
 import { VersionHistory } from './version-history';
 import { AuditTrail } from './audit-trail';
-import { useWorkflowStore } from '@/stores/workflow-store';
+import { useWorkflowStore, type WorkflowNode, type WorkflowEdge } from '@/stores/workflow-store';
 import { apiClient } from '@/lib/api-client';
 import { EmbeddedFilesPanel } from './embedded-files-panel';
 import { NLInputDialog } from './nl-input-dialog';
@@ -43,25 +43,57 @@ import { AssistantPanel } from '@/components/assistant';
 
 // ── Toolbar items ────────────────────────────────────────────────
 const NODE_PALETTE = [
+  { type: 'trigger', label: 'Trigger', icon: Zap, color: 'amber' },
   { type: 'user_input', label: 'Input', icon: FormInput, color: 'teal' },
   { type: 'file_upload', label: 'Upload', icon: Upload, color: 'emerald' },
   { type: 'selection', label: 'Seleção', icon: ListChecks, color: 'amber' },
   { type: 'condition', label: 'Condição', icon: GitBranch, color: 'orange' },
   { type: 'prompt', label: 'Prompt', icon: BrainCircuit, color: 'violet' },
+  { type: 'deep_research', label: 'Research', icon: BookOpen, color: 'emerald' },
+  { type: 'claude_agent', label: 'Agente', icon: Bot, color: 'indigo' },
+  { type: 'parallel_agents', label: 'Paralelo', icon: GitMerge, color: 'fuchsia' },
   { type: 'rag_search', label: 'RAG', icon: Search, color: 'blue' },
   { type: 'human_review', label: 'Revisão', icon: Eye, color: 'rose' },
   { type: 'tool_call', label: 'Tool', icon: Wrench, color: 'cyan' },
   { type: 'legal_workflow', label: 'Minuta', icon: Scale, color: 'indigo' },
   { type: 'review_table', label: 'Tabela', icon: Table2, color: 'teal' },
   { type: 'output', label: 'Resposta', icon: FileOutput, color: 'emerald' },
+  { type: 'delivery', label: 'Entrega', icon: Send, color: 'green' },
 ] as const;
 
 interface WorkflowBuilderProps {
   workflowId?: string;
 }
 
+const normalizeWorkflowGraph = (rawGraph: unknown): { nodes: any[]; edges: any[] } => {
+  let parsed: any = rawGraph;
+
+  if (typeof parsed === 'string') {
+    try {
+      parsed = JSON.parse(parsed);
+    } catch {
+      parsed = {};
+    }
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { nodes: [], edges: [] };
+  }
+
+  return {
+    nodes: Array.isArray((parsed as any).nodes) ? (parsed as any).nodes : [],
+    edges: Array.isArray((parsed as any).edges) ? (parsed as any).edges : [],
+  };
+};
+
 export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
   const store = useWorkflowStore();
+  // Pull stable action refs for effects so dependency arrays don't include `store` (which changes on any update).
+  const setMetadata = useWorkflowStore((s) => s.setMetadata);
+  const setNodesInStore = useWorkflowStore((s) => s.setNodes);
+  const setEdgesInStore = useWorkflowStore((s) => s.setEdges);
+  const setDirty = useWorkflowStore((s) => s.setDirty);
+  const resetAll = useWorkflowStore((s) => s.resetAll);
   const reactFlowWrapper = useRef<HTMLDivElement>(null);
   const [isLoading, setIsLoading] = useState(!!workflowId);
   const [nlDialogOpen, setNlDialogOpen] = useState(false);
@@ -70,15 +102,22 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
   const [publishedSlug, setPublishedSlug] = useState<string | null>(null);
   const [assistantOpen, setAssistantOpen] = useState(false);
 
+  // Refs to track the last array pushed from local → store,
+  // so the store→local useEffect can skip when the store update originated locally.
+  const lastLocalNodes = useRef<WorkflowNode[] | null>(null);
+  const lastLocalEdges = useRef<WorkflowEdge[] | null>(null);
+
   // Sync React Flow states with store
   const [nodes, setNodes, onNodesChange] = useNodesState(store.nodes as Node[]);
   const [edges, setEdges, onEdgesChange] = useEdgesState(store.edges as Edge[]);
 
-  // Sync from store → local
+  // Sync from store → local (skip when the change originated from local → store)
   useEffect(() => {
+    if (store.nodes === lastLocalNodes.current) return;
     setNodes(store.nodes as Node[]);
   }, [store.nodes, setNodes]);
   useEffect(() => {
+    if (store.edges === lastLocalEdges.current) return;
     setEdges(store.edges as Edge[]);
   }, [store.edges, setEdges]);
 
@@ -90,6 +129,7 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
       if (meaningful) {
         setTimeout(() => {
           setNodes((prev: any) => {
+            lastLocalNodes.current = prev;
             store.setNodes(prev);
             return prev;
           });
@@ -104,6 +144,7 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
       onEdgesChange(changes);
       setTimeout(() => {
         setEdges((prev: any) => {
+          lastLocalEdges.current = prev;
           store.setEdges(prev);
           return prev;
         });
@@ -117,6 +158,7 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
       store.pushHistory();
       setEdges((eds: any) => {
         const next = addEdge({ ...params, animated: true }, eds);
+        lastLocalEdges.current = next;
         store.setEdges(next);
         return next;
       });
@@ -144,21 +186,41 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
     (async () => {
       try {
         const wf = await apiClient.getWorkflow(workflowId);
-        store.setMetadata({ id: wf.id, name: wf.name, description: wf.description || '', tags: wf.tags });
-        store.setNodes(wf.graph_json.nodes || []);
-        store.setEdges(wf.graph_json.edges || []);
-        store.setDirty(false);
+        const graph = normalizeWorkflowGraph((wf as any).graph_json);
+        const tags = Array.isArray((wf as any).tags) ? (wf as any).tags : [];
+
+        setMetadata({ id: wf.id, name: wf.name, description: wf.description || '', tags });
+        setNodesInStore(graph.nodes);
+        setEdgesInStore(graph.edges);
+        setDirty(false);
         setPublishedSlug(wf.published_slug || null);
-      } catch {
-        toast.error('Erro ao carregar workflow');
+      } catch (err: any) {
+        const status = err?.response?.status;
+        const detail = err?.response?.data?.detail;
+        if (status === 403) {
+          toast.error('Sem permissão para acessar este workflow.');
+        } else if (status === 404) {
+          toast.error('Workflow não encontrado.');
+        } else {
+          toast.error('Erro ao carregar workflow');
+        }
+        // Keep a breadcrumb for debugging (API base, status, etc.)
+        console.error('[WorkflowBuilder] getWorkflow failed', { status, detail, err });
       } finally {
         setIsLoading(false);
       }
     })();
     return () => {
-      store.resetAll();
+      resetAll();
     };
-  }, [workflowId, store]);
+  }, [
+    workflowId,
+    resetAll,
+    setDirty,
+    setEdgesInStore,
+    setMetadata,
+    setNodesInStore,
+  ]);
 
   // ── Performance warning ───────────────────────────────────────
   useEffect(() => {
@@ -172,17 +234,22 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
     (type: string) => {
       const id = `${type}_${Date.now()}`;
       const defaultLabels: Record<string, string> = {
+        trigger: 'Trigger',
         user_input: 'Input do Usuário',
         file_upload: 'Upload de Arquivo',
         selection: 'Seleção',
         condition: 'Condição',
         prompt: 'Prompt LLM',
+        deep_research: 'Deep Research',
+        claude_agent: 'Agente IA',
+        parallel_agents: 'Agentes Paralelos',
         rag_search: 'Pesquisa RAG',
         human_review: 'Revisão Humana',
         tool_call: 'Chamada de Tool',
         legal_workflow: 'Gerar Minuta',
         review_table: 'Tabela de Revisão',
         output: 'Resposta Final',
+        delivery: 'Entrega',
       };
 
       const newNode = {
@@ -192,14 +259,19 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
         data: {
           label: defaultLabels[type] || type,
           ...(type === 'prompt' ? { model: 'claude-4.5-sonnet', prompt: '' } : {}),
+          ...(type === 'deep_research' ? { mode: 'hard', effort: 'medium', provider: undefined, providers: ['gemini', 'perplexity', 'openai', 'rag_global', 'rag_local'], timeout_per_provider: 120, total_timeout: 300, search_focus: undefined, domain_filter: undefined, include_sources: true, query: '' } : {}),
           ...(type === 'rag_search' ? { limit: 10, sources: [] } : {}),
           ...(type === 'selection' ? { collects: 'selection', options: [] } : {}),
           ...(type === 'condition' ? { condition_field: 'selection', branches: {} } : {}),
           ...(type === 'human_review' ? { instructions: 'Revise o conteúdo e aprove.' } : {}),
+          ...(type === 'claude_agent' ? { agent_type: 'claude-agent', model: 'claude-4.5-sonnet', system_prompt: '', tool_names: [], max_iterations: 10, max_tokens: 4096, include_mcp: false, use_sdk: true, enable_web_search: false, enable_deep_research: false, enable_code_execution: false } : {}),
+          ...(type === 'parallel_agents' ? { prompts: [''], models: ['claude-4.5-sonnet'], tool_names: [], max_parallel: 3, aggregation_strategy: 'merge' } : {}),
           ...(type === 'tool_call' ? { tool_name: '' } : {}),
           ...(type === 'legal_workflow' ? { mode: 'minuta', models: ['claude-4.5-sonnet'], citation_style: 'abnt', auto_approve: false, thinking_level: 'medium' } : {}),
           ...(type === 'user_input' ? { input_type: 'text', collects: 'input', optional: false } : {}),
           ...(type === 'review_table' ? { columns: [], model: 'claude-sonnet-4-20250514', prompt_prefix: 'Extraia as seguintes informações de cada documento:' } : {}),
+          ...(type === 'trigger' ? { trigger_type: 'webhook', trigger_config: {} } : {}),
+          ...(type === 'delivery' ? { delivery_type: 'email', delivery_config: {} } : {}),
           ...(type === 'output' ? { sections: [], show_all: true } : {}),
         },
       };
@@ -211,14 +283,16 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
   // ── Save ───────────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
     if (!store.name.trim()) {
-      toast.error('Defina um nome para o workflow');
+      toast.error(`Defina um nome para o workflow`);
       return;
     }
     store.setSaving(true);
     try {
       const graphJson = { nodes: store.nodes, edges: store.edges };
-      if (store.id) {
-        await apiClient.updateWorkflow(store.id, {
+      let savedWorkflowId = store.id;
+
+      if (savedWorkflowId) {
+        await apiClient.updateWorkflow(savedWorkflowId, {
           name: store.name,
           description: store.description || undefined,
           graph_json: graphJson,
@@ -231,12 +305,57 @@ export function WorkflowBuilder({ workflowId }: WorkflowBuilderProps) {
           graph_json: graphJson,
           tags: store.tags,
         });
+        savedWorkflowId = created.id;
         store.setMetadata({ id: created.id });
       }
+
+      let triggerSyncFailed = false;
+      if (savedWorkflowId) {
+        const triggerNodes = graphJson.nodes.filter((node: any) => node?.type === `trigger` && node?.data);
+        const scheduleTrigger = triggerNodes.find((node: any) => node.data?.trigger_type === `schedule`);
+        const webhookTrigger = triggerNodes.find((node: any) => node.data?.trigger_type === `webhook`);
+
+        try {
+          if (scheduleTrigger) {
+            const triggerConfig = scheduleTrigger.data?.trigger_config || {};
+            const cronRaw = typeof triggerConfig.cron === `string` ? triggerConfig.cron.trim() : ``;
+            const timezone =
+              typeof triggerConfig.timezone === `string` && triggerConfig.timezone.trim()
+                ? triggerConfig.timezone
+                : `America/Sao_Paulo`;
+
+            await apiClient.updateWorkflowSchedule(savedWorkflowId, {
+              cron: cronRaw || null,
+              enabled: Boolean(cronRaw),
+              timezone,
+            });
+          } else {
+            await apiClient.updateWorkflowSchedule(savedWorkflowId, {
+              cron: null,
+              enabled: false,
+              timezone: `America/Sao_Paulo`,
+            });
+          }
+
+          if (webhookTrigger) {
+            await apiClient.ensureWorkflowWebhookSecret(savedWorkflowId);
+          } else {
+            await apiClient.disableWorkflowWebhook(savedWorkflowId);
+          }
+        } catch (triggerSyncError) {
+          triggerSyncFailed = true;
+          console.error(`[WorkflowBuilder] trigger sync failed`, triggerSyncError);
+        }
+      }
+
       store.setDirty(false);
-      toast.success('Workflow salvo');
+      if (triggerSyncFailed) {
+        toast.success(`Workflow salvo com pendencias na ativacao de triggers`);
+      } else {
+        toast.success(`Workflow salvo`);
+      }
     } catch {
-      toast.error('Erro ao salvar');
+      toast.error(`Erro ao salvar`);
     } finally {
       store.setSaving(false);
     }

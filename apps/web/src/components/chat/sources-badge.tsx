@@ -76,6 +76,7 @@ interface McpConnector {
   label: string;
   url: string;
   enabled: boolean;
+  status?: string | null;
 }
 
 interface RegionalSourceItem {
@@ -190,6 +191,22 @@ const ragSourceToCorpusId = (rag: string): CorpusSourceId | null => {
   return (entry?.[0] as CorpusSourceId) || null;
 };
 
+const getConnectorStatusColor = (status?: string | null): string => {
+  const value = String(status || '').trim().toLowerCase();
+  if (!value) return 'bg-slate-300';
+  if (['ok', 'healthy', 'online', 'ready', 'up'].includes(value)) return 'bg-emerald-500';
+  if (['warn', 'warning', 'degraded'].includes(value)) return 'bg-amber-500';
+  return 'bg-rose-500';
+};
+
+const getConnectorStatusTextColor = (status?: string | null): string => {
+  const value = String(status || '').trim().toLowerCase();
+  if (!value) return 'text-slate-400';
+  if (['ok', 'healthy', 'online', 'ready', 'up'].includes(value)) return 'text-emerald-600';
+  if (['warn', 'warning', 'degraded'].includes(value)) return 'text-amber-600';
+  return 'text-rose-600';
+};
+
 export function SourcesBadge() {
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabId>('sources');
@@ -274,6 +291,7 @@ export function SourcesBadge() {
             label: String(s?.label || '').trim(),
             url: String(s?.url || '').trim(),
             enabled: mcpUseAllServers || mcpServerLabels.includes(String(s?.label || '').trim()),
+            status: s?.status ?? null,
           }))
           .filter((s: McpConnector) => s.label && s.url);
         setMcpServers(servers);
@@ -1063,9 +1081,19 @@ export function SourcesBadge() {
                                   className="h-3.5 w-3.5"
                                 />
                                 <span className={cn(
-                                  'text-xs truncate',
+                                  'text-xs truncate inline-flex items-center gap-1.5',
                                   server.enabled ? 'text-purple-700 font-medium' : 'text-slate-600'
                                 )}>
+                                  <span
+                                    className={cn('text-[11px] leading-none', getConnectorStatusTextColor(server.status))}
+                                    title={server.status ? `Status: ${server.status}` : 'Status indisponivel'}
+                                  >
+                                    {server.status ? '●' : '○'}
+                                  </span>
+                                  <span
+                                    className={cn('h-1.5 w-1.5 rounded-full', getConnectorStatusColor(server.status))}
+                                    title={server.status ? `Status: ${server.status}` : 'Status indisponivel'}
+                                  />
                                   {server.label}
                                 </span>
                               </label>

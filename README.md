@@ -194,6 +194,7 @@ Em desenvolvimento/local, o backend também habilita por padrão (para “destra
 - [API Reference](./docs/api-reference.md)
 - [Sistema de Agentes IA](./docs/ai-agents.md)
 - [Processamento de Documentos](./docs/document-processing.md)
+- [RunPod em ambiente local e deploy](./docs/RUNPOD_LOCAL_TESTE.md)
 - [Guia de Contribuição](./docs/contributing.md)
 
 ## 🔒 Segurança

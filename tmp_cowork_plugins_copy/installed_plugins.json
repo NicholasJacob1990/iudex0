@@ -1,0 +1,55 @@
+{
+  "version": 2,
+  "plugins": {
+    "cowork-plugin-management@knowledge-work-plugins": [
+      {
+        "scope": "user",
+        "installPath": "mnt/.claude/cowork_plugins/cache/knowledge-work-plugins/cowork-plugin-management/0.2.1",
+        "version": "0.2.1",
+        "installedAt": "2026-02-11T18:34:40.249Z",
+        "lastUpdated": "2026-02-11T18:34:40.249Z",
+        "gitCommitSha": "e6a84dbc5adc5de94d45853ff00b4afbc4338705"
+      }
+    ],
+    "data@knowledge-work-plugins": [
+      {
+        "scope": "user",
+        "installPath": "mnt/.claude/cowork_plugins/cache/knowledge-work-plugins/data/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-02-11T18:34:51.460Z",
+        "lastUpdated": "2026-02-11T18:34:51.460Z",
+        "gitCommitSha": "e6a84dbc5adc5de94d45853ff00b4afbc4338705"
+      }
+    ],
+    "finance@knowledge-work-plugins": [
+      {
+        "scope": "user",
+        "installPath": "mnt/.claude/cowork_plugins/cache/knowledge-work-plugins/finance/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-02-11T18:35:00.621Z",
+        "lastUpdated": "2026-02-11T18:35:00.621Z",
+        "gitCommitSha": "e6a84dbc5adc5de94d45853ff00b4afbc4338705"
+      }
+    ],
+    "legal@knowledge-work-plugins": [
+      {
+        "scope": "user",
+        "installPath": "mnt/.claude/cowork_plugins/cache/knowledge-work-plugins/legal/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-02-11T18:35:13.197Z",
+        "lastUpdated": "2026-02-11T18:35:13.197Z",
+        "gitCommitSha": "e6a84dbc5adc5de94d45853ff00b4afbc4338705"
+      }
+    ],
+    "productivity@knowledge-work-plugins": [
+      {
+        "scope": "user",
+        "installPath": "mnt/.claude/cowork_plugins/cache/knowledge-work-plugins/productivity/1.0.0",
+        "version": "1.0.0",
+        "installedAt": "2026-02-11T18:35:27.423Z",
+        "lastUpdated": "2026-02-11T18:35:27.423Z",
+        "gitCommitSha": "e6a84dbc5adc5de94d45853ff00b4afbc4338705"
+      }
+    ]
+  }
+}

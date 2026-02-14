@@ -56,7 +56,13 @@ from app.services.ai.perplexity_config import (
     parse_csv_list,
     normalize_float,
 )
-from app.services.ai.citations.base import render_perplexity, stable_numbering, sources_to_citations
+from app.services.ai.citations.base import (
+    render_perplexity,
+    stable_numbering,
+    sources_to_citations,
+    normalize_citation_item,
+    citation_merge_key,
+)
 from app.services.ai.research_policy import decide_research_flags
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.web_rag_service import web_rag_service
@@ -355,6 +361,88 @@ def _judge_model_priority(user_message: str, candidates: List[Dict[str, Any]]) -
         if model_id not in order:
             order.append(model_id)
     return order
+
+def _format_local_results(results: List[Dict[str, Any]], max_chars: int = 8000) -> str:
+    """Format local RAG results as context string."""
+    if not results:
+        return ""
+    parts = ["### ANEXOS (RAG Local)\n<local_chunks>"]
+    used = len(parts[0])
+    for r in results:
+        text = r.get("text", "") or r.get("content", "") or ""
+        source = r.get("metadata", {}).get("filename", "documento")
+        score = r.get("score", 0)
+        chunk = f"\n[{source} | score={score:.2f}]\n{text}"
+        if used + len(chunk) > max_chars:
+            break
+        parts.append(chunk)
+        used += len(chunk)
+    parts.append("\n</local_chunks>")
+    return "\n".join(parts)
+
+
+async def _vectorize_and_search_local(
+    docs: List[Any],
+    query: str,
+    tenant_id: str,
+    case_id: str,
+    top_k: int = 5,
+) -> str:
+    """Vectorize chat attachments via ingest_local, then search_fast."""
+    try:
+        from app.services.rag.pipeline.rag_pipeline import get_rag_pipeline
+        from app.services.rag.config import get_rag_config
+    except ImportError as exc:
+        logger.warning(f"RAG pipeline not available for local vectorize: {exc}")
+        return ""
+
+    cfg = get_rag_config()
+    # Respect env overrides (OPENSEARCH_INDEX_LOCAL / QDRANT_COLLECTION_LOCAL).
+    local_index = getattr(cfg, "opensearch_index_local", None) or "rag-local"
+    local_collection = getattr(cfg, "qdrant_collection_local", None) or "local_chunks"
+
+    pipeline = get_rag_pipeline()
+    ingested = 0
+    for doc in docs:
+        text = (getattr(doc, "extracted_text", None) or getattr(doc, "content", None) or "").strip()
+        if not text:
+            continue
+        meta = {
+            "doc_id": getattr(doc, "id", None) or str(uuid.uuid4()),
+            "filename": getattr(doc, "name", None) or getattr(doc, "original_name", None) or "attachment",
+            "source": "chat_attachment",
+        }
+        try:
+            await pipeline.ingest_local(
+                text=text,
+                metadata=meta,
+                tenant_id=tenant_id,
+                case_id=case_id,
+            )
+            ingested += 1
+        except Exception as exc:
+            logger.warning(f"Failed to ingest attachment locally: {exc}")
+
+    if ingested == 0:
+        return ""
+
+    try:
+        result = await pipeline.search_fast(
+            query=query,
+            collections=[local_collection],
+            indices=[local_index],
+            top_k=top_k,
+            tenant_id=tenant_id,
+            scope="local",
+            filters={"case_id": case_id, "tenant_id": tenant_id},
+        )
+        if not result.results:
+            return ""
+        return _format_local_results(result.results)
+    except Exception as exc:
+        logger.warning(f"Local vectorized search failed: {exc}")
+        return ""
+
 
 # --- DATA MODELS ---
 
@@ -1484,54 +1572,65 @@ Retorne APENAS o texto final, sem explicações.
         # Build local RAG context (case attachments) - skip if global_only
         local_rag_context = ""
         if rag_scope != "global_only" and attachment_mode == "rag_local" and attachment_docs:
-            local_query_override: Optional[str] = None
-            local_queries: Optional[List[str]] = None
-            try:
-                from app.services.ai.rag_helpers import (
-                    generate_hypothetical_document,
-                    generate_multi_queries,
+            _local_vectorized = os.getenv("CHAT_LOCAL_RAG_VECTORIZED", "true").lower() in ("1", "true", "yes", "on")
+            if _local_vectorized:
+                local_rag_context = await _vectorize_and_search_local(
+                    docs=attachment_docs,
+                    query=user_message,
+                    tenant_id=tenant_id,
+                    case_id=thread_id,
+                    top_k=rag_top_k or 5,
                 )
-            except Exception:
-                generate_hypothetical_document = None
-                generate_multi_queries = None
-
-            if hyde_enabled and generate_hypothetical_document:
+            else:
+                # Legacy: in-memory LocalProcessIndex
+                local_query_override: Optional[str] = None
+                local_queries: Optional[List[str]] = None
                 try:
-                    local_query_override = await generate_hypothetical_document(
-                        query=user_message,
-                        history=history,
-                        summary_text=None,
+                    from app.services.ai.rag_helpers import (
+                        generate_hypothetical_document,
+                        generate_multi_queries,
                     )
-                except Exception as exc:
-                    logger.warning(f"HyDE local falhou: {exc}")
-
-            if multi_query and generate_multi_queries:
-                try:
-                    max_q = int(os.getenv("RAG_MULTI_QUERY_MAX", "3") or 3)
                 except Exception:
-                    max_q = 3
-                try:
-                    local_queries = await generate_multi_queries(
-                        user_message,
-                        history=history,
-                        summary_text=None,
-                        max_queries=max(2, max_q),
-                    )
-                except Exception as exc:
-                    logger.warning(f"Multi-query local falhou: {exc}")
+                    generate_hypothetical_document = None
+                    generate_multi_queries = None
 
-            local_rag_context = get_document_generator()._build_local_rag_context(
-                attachment_docs,
-                user_message,
-                tenant_id=tenant_id,
-                queries=local_queries,
-                query_override=local_query_override,
-                multi_query=bool(multi_query),
-                crag_gate=bool(crag_gate),
-                graph_rag_enabled=bool(graph_rag_enabled),
-                argument_graph_enabled=bool(argument_graph_enabled),
-                graph_hops=int(graph_hops or 2),
-            )
+                if hyde_enabled and generate_hypothetical_document:
+                    try:
+                        local_query_override = await generate_hypothetical_document(
+                            query=user_message,
+                            history=history,
+                            summary_text=None,
+                        )
+                    except Exception as exc:
+                        logger.warning(f"HyDE local falhou: {exc}")
+
+                if multi_query and generate_multi_queries:
+                    try:
+                        max_q = int(os.getenv("RAG_MULTI_QUERY_MAX", "3") or 3)
+                    except Exception:
+                        max_q = 3
+                    try:
+                        local_queries = await generate_multi_queries(
+                            user_message,
+                            history=history,
+                            summary_text=None,
+                            max_queries=max(2, max_q),
+                        )
+                    except Exception as exc:
+                        logger.warning(f"Multi-query local falhou: {exc}")
+
+                local_rag_context = get_document_generator()._build_local_rag_context(
+                    attachment_docs,
+                    user_message,
+                    tenant_id=tenant_id,
+                    queries=local_queries,
+                    query_override=local_query_override,
+                    multi_query=bool(multi_query),
+                    crag_gate=bool(crag_gate),
+                    graph_rag_enabled=bool(graph_rag_enabled),
+                    argument_graph_enabled=bool(argument_graph_enabled),
+                    graph_hops=int(graph_hops or 2),
+                )
 
         effective_sources = rag_sources if rag_sources is not None else ["lei", "juris", "pecas_modelo"]
         research_decision = decide_research_flags(
@@ -1607,33 +1706,54 @@ Retorne APENAS o texto final, sem explicações.
             resolved_allow_group_scope = allow_group_scope
             if resolved_allow_group_scope is None:
                 resolved_allow_group_scope = True if resolved_scope_groups else False
-            rag_context, graph_context, _ = await build_rag_context(
-                query=user_message,
-                rag_sources=effective_sources,
-                rag_top_k=rag_top_k,
-                attachment_mode="prompt_injection",
-                adaptive_routing=adaptive_routing,
-                crag_gate=crag_gate,
-                crag_min_best_score=crag_min_best_score,
-                crag_min_avg_score=crag_min_avg_score,
-                hyde_enabled=hyde_enabled,
-                multi_query=bool(multi_query),
-                graph_rag_enabled=graph_rag_enabled,
-                graph_hops=graph_hops,
-                argument_graph_enabled=argument_graph_enabled,
-                dense_research=effective_dense_research,
-                tenant_id=tenant_id,
-                user_id=None,
-                scope_groups=resolved_scope_groups,
-                allow_global_scope=bool(resolved_allow_global_scope),
-                allow_private_scope=bool(resolved_allow_private_scope),
-                allow_group_scope=bool(resolved_allow_group_scope),
-                history=history,
-                summary_text=None,
-                rewrite_query=len(history) > 1,
-                request_id=request_id,
-                filters=rag_filters or None,
-            )
+            _chat_fast = os.getenv("CHAT_RAG_FAST_PATH", "true").lower() in ("1", "true", "yes", "on")
+            if _chat_fast:
+                from app.services.rag.pipeline_adapter import build_rag_context_fast
+                rag_context, graph_context, _ = await build_rag_context_fast(
+                    query=user_message,
+                    rag_sources=effective_sources,
+                    rag_top_k=rag_top_k,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    scope_groups=resolved_scope_groups,
+                    allow_global_scope=bool(resolved_allow_global_scope),
+                    allow_private_scope=bool(resolved_allow_private_scope),
+                    allow_group_scope=bool(resolved_allow_group_scope),
+                    history=history,
+                    rewrite_query=len(history) > 1,
+                    filters=rag_filters or None,
+                    graph_rag_enabled=graph_rag_enabled,
+                    graph_hops=graph_hops,
+                    argument_graph_enabled=argument_graph_enabled,
+                )
+            else:
+                rag_context, graph_context, _ = await build_rag_context(
+                    query=user_message,
+                    rag_sources=effective_sources,
+                    rag_top_k=rag_top_k,
+                    attachment_mode="prompt_injection",
+                    adaptive_routing=adaptive_routing,
+                    crag_gate=crag_gate,
+                    crag_min_best_score=crag_min_best_score,
+                    crag_min_avg_score=crag_min_avg_score,
+                    hyde_enabled=hyde_enabled,
+                    multi_query=bool(multi_query),
+                    graph_rag_enabled=graph_rag_enabled,
+                    graph_hops=graph_hops,
+                    argument_graph_enabled=argument_graph_enabled,
+                    dense_research=effective_dense_research,
+                    tenant_id=tenant_id,
+                    user_id=None,
+                    scope_groups=resolved_scope_groups,
+                    allow_global_scope=bool(resolved_allow_global_scope),
+                    allow_private_scope=bool(resolved_allow_private_scope),
+                    allow_group_scope=bool(resolved_allow_group_scope),
+                    history=history,
+                    summary_text=None,
+                    rewrite_query=len(history) > 1,
+                    request_id=request_id,
+                    filters=rag_filters or None,
+                )
 
         # Combine contexts based on rag_scope
         if rag_context:
@@ -1667,17 +1787,27 @@ Retorne APENAS o texto final, sem explicações.
 
         def _merge_citations(items: List[Dict[str, Any]]):
             for item in items or []:
-                url = str(item.get("url") or "").strip()
-                # Use URL as the primary key. Source numbers are not globally unique across providers,
-                # so keying by "number" can silently drop citations when merging streams.
-                key = url
-                if not key:
-                    number = item.get("number")
-                    key = str(number).strip() if number is not None else ""
+                normalized = normalize_citation_item(
+                    item if isinstance(item, dict) else {},
+                    default_number=len(citations_by_url) + 1,
+                )
+                key = citation_merge_key(normalized)
                 if not key:
                     continue
                 if key not in citations_by_url:
-                    citations_by_url[key] = item
+                    citations_by_url[key] = normalized
+                else:
+                    current = citations_by_url[key]
+                    merged = dict(current)
+                    for field, value in normalized.items():
+                        if value in (None, "", {}):
+                            continue
+                        if field in {"provenance", "viewer"} and isinstance(value, dict):
+                            base = merged.get(field) if isinstance(merged.get(field), dict) else {}
+                            merged[field] = {**base, **value}
+                        else:
+                            merged[field] = value
+                    citations_by_url[key] = merged
 
         if effective_dense_research:
             deep_report = ""
@@ -2168,6 +2298,8 @@ Retorne APENAS o texto final, sem explicações.
                                     max_tokens=tokens,
                                     temperature=temperature,
                                     allowed_server_labels=allowed_server_labels,
+                                    tenant_id=tenant_id,
+                                    session_id=thread_id,
                                 )
                                 return text
                         except Exception as e:
@@ -2202,6 +2334,8 @@ Retorne APENAS o texto final, sem explicações.
                                 max_tokens=tokens,
                                 temperature=temperature,
                                 allowed_server_labels=allowed_server_labels,
+                                tenant_id=tenant_id,
+                                session_id=thread_id,
                             )
                             return text
                         except Exception as e:
@@ -2802,6 +2936,8 @@ Retorne APENAS o texto final, sem explicações.
                                         max_tokens=4096,
                                         temperature=temperature,
                                         allowed_server_labels=allowed_server_labels,
+                                        tenant_id=tenant_id,
+                                        session_id=thread_id,
                                     )
                                     for item in tool_trace:
                                         yield {
@@ -3026,6 +3162,8 @@ Retorne APENAS o texto final, sem explicações.
                                         max_tokens=4096,
                                         temperature=temperature,
                                         allowed_server_labels=allowed_server_labels,
+                                        tenant_id=tenant_id,
+                                        session_id=thread_id,
                                     )
                                     for item in tool_trace:
                                         yield {
@@ -3163,6 +3301,8 @@ Retorne APENAS o texto final, sem explicações.
                                     max_tokens=4096,
                                     temperature=temperature,
                                     allowed_server_labels=allowed_server_labels,
+                                    tenant_id=tenant_id,
+                                    session_id=thread_id,
                                 )
                                 for item in tool_trace:
                                     yield {

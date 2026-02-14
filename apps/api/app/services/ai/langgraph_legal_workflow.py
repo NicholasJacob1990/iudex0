@@ -18,6 +18,8 @@ Feature Flag:
   USE_GRANULAR_DEBATE=false → Uses hybrid node
 """
 
+import inspect
+import os
 from typing import TypedDict, Literal, Optional, List, Dict, Any, Tuple, Mapping
 from langgraph.graph import StateGraph, END
 try:
@@ -26,6 +28,14 @@ try:
 except Exception:  # pragma: no cover
     SqliteSaver = None  # type: ignore
     from langgraph.checkpoint.memory import MemorySaver  # type: ignore
+
+# Neo4j checkpointer (optional — activated via LANGGRAPH_CHECKPOINTER=neo4j)
+_Neo4jSaver = None
+try:
+    if os.environ.get("LANGGRAPH_CHECKPOINTER", "").strip().lower() == "neo4j":
+        from langchain_neo4j import Neo4jSaver as _Neo4jSaver  # type: ignore
+except Exception:  # pragma: no cover
+    pass
 try:
     from langgraph.types import interrupt
 except ImportError:
@@ -43,7 +53,6 @@ else:
 from loguru import logger
 import asyncio
 import sqlite3
-import os
 import re
 import json
 import time
@@ -7705,14 +7714,40 @@ def finalize_hil_router(state: DocumentState) -> Literal["proposal_debate", "__e
 workflow.add_conditional_edges("finalize_hil", finalize_hil_router)
 workflow.add_edge("proposal_debate", "finalize_hil")  # Loop back to HIL after proposal debate
 
-# Checkpointer
-if SqliteSaver is not None:
+# Checkpointer — priority: Neo4j > SQLite > Memory
+if _Neo4jSaver is not None:
+    try:
+        from app.services.rag.core.neo4j_mvp import Neo4jMVPConfig
+        _neo4j_cfg = Neo4jMVPConfig.from_env()
+        try:
+            checkpointer = _Neo4jSaver.from_conn_string(
+                _neo4j_cfg.uri,
+                auth=(_neo4j_cfg.user, _neo4j_cfg.password),
+                database=_neo4j_cfg.database,
+            )
+        except TypeError:
+            # Backward-compatible signature used by older releases.
+            checkpointer = _Neo4jSaver.from_conn_string(
+                _neo4j_cfg.uri,
+                _neo4j_cfg.user,
+                _neo4j_cfg.password,
+            )
+        if hasattr(checkpointer, "setup"):
+            setup_result = checkpointer.setup()
+            if inspect.isawaitable(setup_result):
+                asyncio.run(setup_result)
+        logger.info("LangGraph checkpointer: Neo4jSaver (%s)", _neo4j_cfg.uri)
+    except Exception as _e:
+        logger.warning("Neo4jSaver init failed, falling back to SQLite: %s", _e)
+        _Neo4jSaver = None  # type: ignore[assignment]
+
+if _Neo4jSaver is None and SqliteSaver is not None:
     conn = sqlite3.connect(job_manager.db_path, check_same_thread=False)
     checkpointer = SqliteSaver(conn)
-    logger.info("✅ LangGraph checkpointer: SqliteSaver")
-else:
+    logger.info("LangGraph checkpointer: SqliteSaver")
+elif _Neo4jSaver is None:
     checkpointer = MemorySaver()
-    logger.warning("⚠️ LangGraph checkpointer: MemorySaver (SqliteSaver indisponível no ambiente)")
+    logger.warning("LangGraph checkpointer: MemorySaver (SqliteSaver indisponível no ambiente)")
 
 legal_workflow_app = workflow.compile(checkpointer=checkpointer)
 

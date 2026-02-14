@@ -153,6 +153,17 @@ export async function login(
   return data;
 }
 
+export async function microsoftSSOLogin(
+  microsoftToken: string
+): Promise<AuthResponse> {
+  const { data } = await api.post<AuthResponse>('/auth/microsoft-sso', {
+    microsoft_token: microsoftToken,
+    source: 'word-addin',
+  });
+  setTokens(data.access_token, data.refresh_token);
+  return data;
+}
+
 export function logout(): void {
   clearTokens();
 }

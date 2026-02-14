@@ -71,9 +71,12 @@ async def test_hearing_format_uses_transcript_markdown(monkeypatch, tmp_path):
         case_dir.mkdir(parents=True, exist_ok=True)
         return case_dir
 
-    monkeypatch.setattr(service, "_get_vomo", lambda **kwargs: fake_vomo)
+    monkeypatch.setattr(service, "_get_vomo", lambda *args, **kwargs: fake_vomo)
     monkeypatch.setattr(service, "_classify_segments_act_with_llm", fake_classify)
     monkeypatch.setattr(service, "_extract_claims_with_llm", fake_extract)
+    async def fake_infer_roles(*a, **kw):
+        return {}
+    monkeypatch.setattr(service, "_infer_speaker_roles_with_llm", fake_infer_roles)
     monkeypatch.setattr(service, "_detect_contradictions", lambda claims: [])
     monkeypatch.setattr(service, "_build_timeline", lambda claims, segments: [])
     monkeypatch.setattr(service, "_get_hearing_case_dir", _case_dir)
@@ -124,9 +127,12 @@ async def test_hearing_can_disable_timestamps(monkeypatch, tmp_path):
         case_dir.mkdir(parents=True, exist_ok=True)
         return case_dir
 
-    monkeypatch.setattr(service, "_get_vomo", lambda **kwargs: fake_vomo)
+    monkeypatch.setattr(service, "_get_vomo", lambda *args, **kwargs: fake_vomo)
     monkeypatch.setattr(service, "_classify_segments_act_with_llm", fake_classify)
     monkeypatch.setattr(service, "_extract_claims_with_llm", fake_extract)
+    async def fake_infer_roles(*a, **kw):
+        return {}
+    monkeypatch.setattr(service, "_infer_speaker_roles_with_llm", fake_infer_roles)
     monkeypatch.setattr(service, "_detect_contradictions", lambda claims: [])
     monkeypatch.setattr(service, "_build_timeline", lambda claims, segments: [])
     monkeypatch.setattr(service, "_get_hearing_case_dir", _case_dir)
@@ -177,9 +183,12 @@ async def test_hearing_allows_indirect_and_summary_for_audiencia(monkeypatch, tm
         case_dir.mkdir(parents=True, exist_ok=True)
         return case_dir
 
-    monkeypatch.setattr(service, "_get_vomo", lambda **kwargs: fake_vomo)
+    monkeypatch.setattr(service, "_get_vomo", lambda *args, **kwargs: fake_vomo)
     monkeypatch.setattr(service, "_classify_segments_act_with_llm", fake_classify)
     monkeypatch.setattr(service, "_extract_claims_with_llm", fake_extract)
+    async def fake_infer_roles(*a, **kw):
+        return {}
+    monkeypatch.setattr(service, "_infer_speaker_roles_with_llm", fake_infer_roles)
     monkeypatch.setattr(service, "_detect_contradictions", lambda claims: [])
     monkeypatch.setattr(service, "_build_timeline", lambda claims, segments: [])
     monkeypatch.setattr(service, "_get_hearing_case_dir", _case_dir)
@@ -227,9 +236,12 @@ async def test_hearing_forwards_skip_audit_flags(monkeypatch, tmp_path):
         case_dir.mkdir(parents=True, exist_ok=True)
         return case_dir
 
-    monkeypatch.setattr(service, "_get_vomo", lambda **kwargs: fake_vomo)
+    monkeypatch.setattr(service, "_get_vomo", lambda *args, **kwargs: fake_vomo)
     monkeypatch.setattr(service, "_classify_segments_act_with_llm", fake_classify)
     monkeypatch.setattr(service, "_extract_claims_with_llm", fake_extract)
+    async def fake_infer_roles(*a, **kw):
+        return {}
+    monkeypatch.setattr(service, "_infer_speaker_roles_with_llm", fake_infer_roles)
     monkeypatch.setattr(service, "_detect_contradictions", lambda claims: [])
     monkeypatch.setattr(service, "_build_timeline", lambda claims, segments: [])
     monkeypatch.setattr(service, "_get_hearing_case_dir", _case_dir)

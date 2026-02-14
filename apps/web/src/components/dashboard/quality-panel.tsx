@@ -1,3 +1,4 @@
+/** @deprecated Use UnifiedAuditPanel instead. This component will be removed in a future release. */
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -420,6 +421,23 @@ export function QualityPanel({
         if (Number.isNaN(parsed.valueOf())) return value;
         return parsed.toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" });
     };
+
+    const hasConsolidatedScore =
+        typeof consolidatedScore === "number" && Number.isFinite(consolidatedScore);
+    const consolidatedStatusNormalized = String(consolidatedStatus || "").toLowerCase();
+    const effectiveScore =
+        hasConsolidatedScore
+            ? normalizeScore(consolidatedScore)
+            : (report ? normalizeScore(report.score) : null);
+    const effectiveApproved =
+        hasConsolidatedScore
+            ? !["warning", "error", "critical", "reprovado", "failed", "blocked"].some((token) =>
+                consolidatedStatusNormalized.includes(token)
+            )
+            : report?.approved;
+    const effectiveStatusLabel = hasConsolidatedScore
+        ? (consolidatedStatus || (effectiveApproved ? "ok" : "warning"))
+        : (report ? (report.approved ? "Aprovado" : "Em revisão") : "—");
 
     const persistUiState = useCallback((patch: Partial<QualityUiState>) => {
         if (!uiStorageKey || typeof window === "undefined") return;
@@ -1307,16 +1325,16 @@ export function QualityPanel({
                                 <ListChecks className="h-3.5 w-3.5" />
                                 Fidelidade
                             </span>
-                            <Badge variant={report?.approved ? "default" : "outline"}>
-                                {report ? (report.approved ? "Aprovado" : "Em revisão") : "—"}
+                            <Badge variant={effectiveApproved ? "default" : "outline"}>
+                                {effectiveStatusLabel}
                             </Badge>
                         </div>
                         <div className="mt-2 font-display text-2xl text-foreground">
-                            {report ? `${normalizeScore(report.score).toFixed(1)}` : "—"}
+                            {typeof effectiveScore === "number" ? `${effectiveScore.toFixed(1)}` : "—"}
                             <span className="text-sm text-muted-foreground">/10</span>
                         </div>
                         <div className="text-[10px] text-muted-foreground mt-1">
-                            Última validação: {formatTimestamp(report?.validated_at)}
+                            {hasConsolidatedScore ? "Nota consolidada de auditoria" : `Última validação: ${formatTimestamp(report?.validated_at)}`}
                         </div>
                     </div>
                     <div className="rounded-2xl border border-white/70 bg-white/90 p-4 shadow-soft">
@@ -1358,8 +1376,10 @@ export function QualityPanel({
                 {/* Status Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-full border border-white/70 bg-white/80 px-4 py-2 text-[11px]">
                     <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant={report?.approved ? "default" : "outline"}>
-                            {report ? (report.approved ? "Documento aprovado" : "Revisão necessária") : "Sem validação"}
+                        <Badge variant={effectiveApproved ? "default" : "outline"}>
+                            {typeof effectiveScore === "number"
+                                ? (effectiveApproved ? "Documento aprovado" : "Revisão necessária")
+                                : "Sem validação"}
                         </Badge>
                         <span className="text-muted-foreground">
                             Validação: {formatTimestamp(report?.validated_at)}

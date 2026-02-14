@@ -90,6 +90,12 @@ from app.services.ai.shared.sse_protocol import (
     artifact_token_event,
     artifact_done_event,
 )
+from app.services.ai.observability import (
+    langsmith_trace,
+    extract_langsmith_run_metadata,
+)
+from app.services.ai.observability.audit_log import get_tool_audit_log
+from app.services.ai.shared.security_profile import SecurityProfile
 
 # =============================================================================
 # CONFIGURATION
@@ -97,13 +103,22 @@ from app.services.ai.shared.sse_protocol import (
 
 # Environment variables
 CLAUDE_AGENT_ENABLED = os.getenv("CLAUDE_AGENT_ENABLED", "true").lower() == "true"
-CLAUDE_AGENT_DEFAULT_MODEL = os.getenv("CLAUDE_AGENT_DEFAULT_MODEL", "claude-sonnet-4-5")
+CLAUDE_AGENT_DEFAULT_MODEL = os.getenv("CLAUDE_AGENT_DEFAULT_MODEL", "claude-opus-4-6")
 CLAUDE_AGENT_MAX_ITERATIONS = int(os.getenv("CLAUDE_AGENT_MAX_ITERATIONS", "50"))
 CLAUDE_AGENT_PERMISSION_MODE = os.getenv("CLAUDE_AGENT_PERMISSION_MODE", "ask")
 CONTEXT_COMPACTION_THRESHOLD = float(os.getenv("CONTEXT_COMPACTION_THRESHOLD", "0.7"))
+CLAUDE_AGENT_PROMPT_CACHING_ENABLED = (
+    os.getenv("CLAUDE_AGENT_PROMPT_CACHING_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+)
+CLAUDE_AGENT_PROMPT_CACHE_CONTROL = os.getenv("CLAUDE_AGENT_PROMPT_CACHE_CONTROL", "ephemeral").strip().lower() or "ephemeral"
+
+SYSTEM_CONTEXT_MARKER = "\n\n## CONTEXTO DISPONÍVEL\n\n"
 
 # Model context windows
 MODEL_CONTEXT_WINDOWS = {
+    # Claude 4.6 (current)
+    "claude-opus-4-6": 200_000,
+    "claude-opus-4-6-20260115": 200_000,
     # Claude 4.5 (current)
     "claude-sonnet-4-5-20250929": 200_000,
     "claude-sonnet-4-5": 200_000,
@@ -196,13 +211,18 @@ class AgentConfig:
     checkpoint_interval: int = 5
     use_sdk: bool = True  # Use Claude Agent SDK when available (fallback to raw API)
     enable_code_execution: bool = True  # Anthropic code execution server tool (beta)
-    code_execution_effort: Optional[str] = None  # "low", "medium", "high" — only Opus 4.5 (requires effort-2025-11-24 beta)
+    code_execution_effort: Optional[str] = None  # "low" | "medium" | "high" | "max" (Opus 4.6 adaptive supports max)
+    enable_prompt_caching: bool = CLAUDE_AGENT_PROMPT_CACHING_ENABLED
+    prompt_cache_control: str = CLAUDE_AGENT_PROMPT_CACHE_CONTROL
 
     def __post_init__(self):
         # Merge default permissions with custom ones
         merged = dict(DEFAULT_TOOL_PERMISSIONS)
         merged.update(self.tool_permissions)
         self.tool_permissions = merged
+
+        if self.prompt_cache_control not in ("ephemeral",):
+            self.prompt_cache_control = "ephemeral"
 
         # Set context window from model
         if self.model in MODEL_CONTEXT_WINDOWS:
@@ -216,6 +236,7 @@ class PendingToolApproval:
     tool_name: str
     tool_input: Dict[str, Any]
     iteration: int
+    approval_token: Optional[str] = None
     timestamp: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -343,6 +364,16 @@ class ClaudeAgentExecutor:
         # Tool Gateway adapter
         self._mcp_adapter: Optional[ClaudeMCPAdapter] = None
         self._execution_context: Optional[Dict[str, Any]] = None
+
+        # Permission manager (hierarchical: session > project > global > system)
+        self._permission_manager: Optional[Any] = None
+        self._audit_context: Dict[str, Optional[str]] = {
+            "provider": "anthropic",
+            "user_id": None,
+            "session_id": None,
+            "project_id": None,
+            "job_id": None,
+        }
 
         # Claude Agent SDK session (for resume across turns)
         self._sdk_session_id: Optional[str] = None
@@ -545,12 +576,129 @@ class ClaudeAgentExecutor:
             self._get_context()
         )
 
+    def _coerce_permission_mode(self, value: Any) -> ToolApprovalMode:
+        """Normalize permission values coming from config/DB."""
+        if isinstance(value, ToolApprovalMode):
+            return value
+        raw = str(value or "").strip().lower()
+        if raw == ToolApprovalMode.ALLOW.value:
+            return ToolApprovalMode.ALLOW
+        if raw == ToolApprovalMode.DENY.value:
+            return ToolApprovalMode.DENY
+        return ToolApprovalMode.ASK
+
     def _get_tool_permission(self, tool_name: str) -> ToolApprovalMode:
-        """Get permission mode for a tool."""
-        return self.config.tool_permissions.get(
+        """Get fallback permission mode from local config."""
+        value = self.config.tool_permissions.get(
             tool_name,
-            self.config.default_permission_mode
+            self.config.default_permission_mode,
         )
+        return self._coerce_permission_mode(value)
+
+    async def _init_permission_manager(
+        self,
+        *,
+        db: Optional[Any],
+        user_id: Optional[str],
+        session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        security_profile: Optional[str] = None,
+    ) -> None:
+        """Initialize PermissionManager for this run when DB/user are available."""
+        self._permission_manager = None
+        if not db or not user_id:
+            return
+        try:
+            from app.services.ai.claude_agent.permissions import PermissionManager
+
+            self._permission_manager = PermissionManager(
+                db=db,
+                user_id=user_id,
+                session_id=session_id,
+                project_id=project_id,
+                security_profile=SecurityProfile.from_value(security_profile),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize PermissionManager: {e}")
+
+    async def _resolve_tool_permission(
+        self,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+    ) -> ToolApprovalMode:
+        """
+        Resolve permission via PermissionManager first, then local fallback.
+        """
+        if self._permission_manager:
+            try:
+                pm_result = await self._permission_manager.check(tool_name, tool_input)
+                return self._coerce_permission_mode(pm_result.decision)
+            except Exception as e:
+                logger.warning(
+                    f"PermissionManager check failed for {tool_name}, using local fallback: {e}"
+                )
+                fallback = self._get_tool_permission(tool_name)
+                try:
+                    get_tool_audit_log().record_permission_decision(
+                        tool_name=tool_name,
+                        decision=fallback.value,
+                        user_id=self._audit_context.get("user_id"),
+                        session_id=self._audit_context.get("session_id"),
+                        project_id=self._audit_context.get("project_id"),
+                        job_id=self._audit_context.get("job_id"),
+                        provider="anthropic",
+                        source="permission_manager_fallback",
+                        rule_scope="executor_fallback",
+                        tool_input=tool_input,
+                    )
+                except Exception:
+                    pass
+                return fallback
+
+        fallback = self._get_tool_permission(tool_name)
+        try:
+            get_tool_audit_log().record_permission_decision(
+                tool_name=tool_name,
+                decision=fallback.value,
+                user_id=self._audit_context.get("user_id"),
+                session_id=self._audit_context.get("session_id"),
+                project_id=self._audit_context.get("project_id"),
+                job_id=self._audit_context.get("job_id"),
+                provider="anthropic",
+                source="executor_config",
+                rule_scope="executor_fallback",
+                tool_input=tool_input,
+            )
+        except Exception:
+            pass
+        return fallback
+
+    def _attach_trace_metadata_to_done_event(
+        self,
+        event: SSEEvent,
+        trace_metadata: Dict[str, Any],
+    ) -> SSEEvent:
+        """Attach LangSmith metadata to DONE events so frontend can render trace links."""
+        if not trace_metadata or event.type != SSEEventType.DONE:
+            return event
+
+        data = dict(event.data or {})
+        metadata = dict(data.get("metadata") or {})
+        changed = False
+        for key, value in trace_metadata.items():
+            if not value:
+                continue
+            if metadata.get(key) in (None, ""):
+                metadata[key] = value
+                changed = True
+            if data.get(key) in (None, ""):
+                data[key] = value
+                changed = True
+
+        if changed:
+            data["metadata"] = metadata
+            event.data = data
+        return event
 
     async def _default_tool_executor(
         self,
@@ -599,14 +747,55 @@ class ClaudeAgentExecutor:
 
         # Add context if provided
         if context:
-            parts.append(f"\n\n## CONTEXTO DISPONÍVEL\n\n{context}")
+            parts.append(f"{SYSTEM_CONTEXT_MARKER}{context}")
 
         return "\n\n".join(parts)
+
+    def _build_system_payload(
+        self,
+        system_prompt: Any,
+    ) -> Any:
+        """
+        Build Anthropic `system` payload with prompt caching blocks when enabled.
+
+        Preserves backward compatibility by returning the original string when
+        prompt caching is disabled or input is not a string.
+        """
+        if not self.config.enable_prompt_caching or not isinstance(system_prompt, str):
+            return system_prompt
+
+        if not system_prompt.strip():
+            return system_prompt
+
+        base_prompt, marker, context_part = system_prompt.partition(SYSTEM_CONTEXT_MARKER)
+        blocks: List[Dict[str, Any]] = []
+
+        base_text = base_prompt.strip()
+        if base_text:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": base_text,
+                    "cache_control": {"type": self.config.prompt_cache_control},
+                }
+            )
+
+        context_text = context_part.strip()
+        if marker and context_text:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": f"## CONTEXTO DISPONÍVEL\n\n{context_text}",
+                    "cache_control": {"type": self.config.prompt_cache_control},
+                }
+            )
+
+        return blocks or system_prompt
 
     async def _call_claude(
         self,
         messages: List[Dict[str, Any]],
-        system_prompt: str,
+        system_prompt: Any,
         container_id: Optional[str] = None,
     ) -> Any:
         """
@@ -623,11 +812,13 @@ class ClaudeAgentExecutor:
         if not self.async_client:
             raise RuntimeError("Anthropic async client not initialized")
 
+        system_payload = self._build_system_payload(system_prompt)
+
         # Build API kwargs
         kwargs: Dict[str, Any] = {
             "model": self.config.model,
             "max_tokens": self.config.max_tokens,
-            "system": system_prompt,
+            "system": system_payload,
             "messages": messages,
         }
 
@@ -654,14 +845,23 @@ class ClaudeAgentExecutor:
         if tools:
             kwargs["tools"] = tools
 
-        # Add extended thinking if enabled
+        is_opus_46 = self.config.model.startswith("claude-opus-4-6")
+
+        # Thinking config:
+        # - Opus 4.6: adaptive thinking (opt-in via `thinking`)
+        # - Legacy models: extended thinking with budget_tokens
         if self.config.enable_thinking:
-            kwargs["metadata"] = {
-                "thinking": {
+            if is_opus_46:
+                kwargs["thinking"] = {"type": "adaptive"}
+                adaptive_effort = (self.config.code_execution_effort or os.getenv("CLAUDE_ADAPTIVE_THINKING_EFFORT", "high")).strip().lower()
+                if adaptive_effort not in ("low", "medium", "high", "max"):
+                    adaptive_effort = "high"
+                kwargs["output_config"] = {"effort": adaptive_effort}
+            else:
+                kwargs["thinking"] = {
                     "type": "enabled",
                     "budget_tokens": self.config.thinking_budget_tokens,
                 }
-            }
 
         # Add temperature
         if not self.config.enable_thinking:
@@ -675,20 +875,46 @@ class ClaudeAgentExecutor:
         if use_beta and container_id:
             kwargs["container"] = container_id
 
-        # Effort parameter (only Opus 4.5, requires separate beta header)
+        # Effort parameter (legacy Opus models only, requires separate beta header).
+        # Opus 4.6 uses adaptive thinking + output_config without effort beta.
         _effort_betas: List[str] = []
-        if self.config.code_execution_effort and self.config.code_execution_effort in ("low", "medium", "high"):
-            if self.config.model.startswith("claude-opus-4"):
+        if (
+            not is_opus_46
+            and self.config.code_execution_effort
+            and self.config.code_execution_effort in ("low", "medium", "high")
+            and self.config.model.startswith("claude-opus-4")
+        ):
                 kwargs["output_config"] = {"effort": self.config.code_execution_effort}
                 _effort_betas.append("effort-2025-11-24")
 
         start_time = time.time()
         try:
+            standard_kwargs = dict(kwargs)
+            # Standard messages endpoint does not accept beta-only fields.
+            standard_kwargs.pop("betas", None)
+            standard_kwargs.pop("container", None)
+
             if use_beta:
-                kwargs["betas"] = ["code-execution-2025-08-25"] + _effort_betas
-                response = await self.async_client.beta.messages.create(**kwargs)
+                beta_kwargs = dict(kwargs)
+                beta_kwargs["betas"] = ["code-execution-2025-08-25"] + _effort_betas
+
+                try:
+                    response = await self.async_client.beta.messages.create(**beta_kwargs)
+                except Exception as beta_exc:
+                    logger.warning(
+                        f"Claude beta.messages.create failed ({beta_exc}); falling back to messages.create"
+                    )
+                    response = await self.async_client.messages.create(**standard_kwargs)
+                else:
+                    content = getattr(response, "content", None)
+                    stop_reason = getattr(response, "stop_reason", None)
+                    if not isinstance(content, list) or not isinstance(stop_reason, (str, type(None))):
+                        logger.warning(
+                            "Claude beta response malformed; falling back to messages.create"
+                        )
+                        response = await self.async_client.messages.create(**standard_kwargs)
             else:
-                response = await self.async_client.messages.create(**kwargs)
+                response = await self.async_client.messages.create(**standard_kwargs)
             latency_ms = int((time.time() - start_time) * 1000)
 
             # Record API call for billing
@@ -723,6 +949,23 @@ class ClaudeAgentExecutor:
                 },
             )
             raise
+
+    def _usage_tokens(self, response: Any) -> Tuple[int, int]:
+        """Safely extract usage tokens from SDK responses/mocks."""
+        usage = getattr(response, "usage", None)
+        raw_in = getattr(usage, "input_tokens", 0) if usage is not None else 0
+        raw_out = getattr(usage, "output_tokens", 0) if usage is not None else 0
+
+        try:
+            tokens_in = int(raw_in)
+        except Exception:
+            tokens_in = 0
+        try:
+            tokens_out = int(raw_out)
+        except Exception:
+            tokens_out = 0
+
+        return max(0, tokens_in), max(0, tokens_out)
 
     def _extract_response_content(self, response: Any) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]]:
         """
@@ -825,8 +1068,8 @@ class ClaudeAgentExecutor:
         tool_name = tool_use["name"]
         tool_input = tool_use["input"]
 
-        # Get permission for this tool
-        permission = self._get_tool_permission(tool_name)
+        # Resolve permission for this tool (hierarchical PM -> local fallback)
+        permission = await self._resolve_tool_permission(tool_name, tool_input)
 
         # Emit tool_call event
         yield tool_call_event(
@@ -851,11 +1094,28 @@ class ClaudeAgentExecutor:
 
         if permission == ToolApprovalMode.ASK:
             # Need user approval - pause execution
+            approval_token: Optional[str] = None
+            try:
+                from app.services.ai.shared.approval_tokens import make_tool_approval_token
+                approval_token = make_tool_approval_token(
+                    job_id=state.job_id,
+                    tool_id=tool_id,
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tenant_id=(
+                        str(self._execution_context.get("tenant_id"))
+                        if isinstance(getattr(self, "_execution_context", None), dict) and self._execution_context.get("tenant_id")
+                        else None
+                    ),
+                )
+            except Exception:
+                approval_token = None
             pending = PendingToolApproval(
                 tool_id=tool_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 iteration=state.iteration,
+                approval_token=approval_token,
             )
             state.pending_approvals.append(pending)
             state.status = AgentStatus.WAITING_APPROVAL
@@ -866,11 +1126,13 @@ class ClaudeAgentExecutor:
                 tool_input=tool_input,
                 tool_id=tool_id,
                 risk_level="medium" if "edit" in tool_name or "write" in tool_name else "low",
+                approval_token=approval_token,
             )
             return
 
-        # Permission is ALLOW - execute the tool
-        await self._execute_and_emit_tool(tool_id, tool_name, tool_input, state)
+        # Permission is ALLOW - execute the tool and emit result event
+        result_event = await self._execute_and_emit_tool(tool_id, tool_name, tool_input, state)
+        yield result_event
 
     async def _execute_and_emit_tool(
         self,
@@ -900,6 +1162,22 @@ class ClaudeAgentExecutor:
                 "execution_time_ms": execution_time_ms,
                 "iteration": state.iteration,
             })
+            try:
+                get_tool_audit_log().record_tool_execution(
+                    tool_name=tool_name,
+                    success=success,
+                    user_id=self._audit_context.get("user_id"),
+                    session_id=self._audit_context.get("session_id"),
+                    project_id=self._audit_context.get("project_id"),
+                    job_id=self._audit_context.get("job_id"),
+                    provider="anthropic",
+                    tool_id=tool_id,
+                    duration_ms=execution_time_ms,
+                    error=(result.get("error") if isinstance(result, dict) else None),
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
 
             return tool_result_event(
                 job_id=state.job_id,
@@ -925,6 +1203,22 @@ class ClaudeAgentExecutor:
                 "execution_time_ms": execution_time_ms,
                 "iteration": state.iteration,
             })
+            try:
+                get_tool_audit_log().record_tool_execution(
+                    tool_name=tool_name,
+                    success=False,
+                    user_id=self._audit_context.get("user_id"),
+                    session_id=self._audit_context.get("session_id"),
+                    project_id=self._audit_context.get("project_id"),
+                    job_id=self._audit_context.get("job_id"),
+                    provider="anthropic",
+                    tool_id=tool_id,
+                    duration_ms=execution_time_ms,
+                    error=str(e),
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
 
             return tool_result_event(
                 job_id=state.job_id,
@@ -1033,11 +1327,37 @@ class ClaudeAgentExecutor:
                 user_templates = await load_agent_templates(user_id, db)
             except Exception as e:
                 logger.warning(f"Failed to load agent templates: {e}")
+        matched_skill_prompt = ""
+        matched_skill_name: Optional[str] = None
+        if user_id and db:
+            try:
+                from app.services.ai.skills.matcher import match_user_skill, render_skill_prompt
+
+                skill_match = await match_user_skill(
+                    user_id=user_id,
+                    user_input=prompt,
+                    db=db,
+                    include_builtin=True,
+                )
+                if skill_match:
+                    matched_skill_prompt = render_skill_prompt(skill_match)
+                    matched_skill_name = skill_match.skill.name
+            except Exception as e:
+                logger.warning(f"Failed to match user skill: {e}")
 
         # Build full system prompt
         full_system = self._build_system_prompt(system_prompt, context)
         if user_templates:
             full_system = f"{full_system}\n\n# INSTRUÇÕES DO USUÁRIO (Templates)\n\n{user_templates}"
+        if matched_skill_prompt:
+            full_system = f"{full_system}\n\n# SKILL CORRESPONDENTE\n\n{matched_skill_prompt}"
+
+        sdk_permission_mode = (os.getenv("CLAUDE_SDK_PERMISSION_MODE", "default") or "default").strip().lower()
+        if sdk_permission_mode not in ("default", "ask", "allow", "deny", "bypass"):
+            sdk_permission_mode = "default"
+        # When hierarchical PermissionManager is available, keep SDK in safer interactive mode.
+        if self._permission_manager and sdk_permission_mode == "default":
+            sdk_permission_mode = "ask"
 
         # Build SDK options
         options = ClaudeAgentOptions(
@@ -1045,7 +1365,7 @@ class ClaudeAgentExecutor:
             system_prompt=full_system,
             mcp_servers=mcp_servers if mcp_servers else None,
             allowed_tools=["mcp__iudex-legal__*"] if mcp_servers else None,
-            permission_mode="default",
+            permission_mode=sdk_permission_mode,
             max_turns=self.config.max_iterations,
         )
 
@@ -1062,6 +1382,7 @@ class ClaudeAgentExecutor:
                 "max_iterations": self.config.max_iterations,
                 "sdk_mode": True,
                 "tools_count": 7 if mcp_servers else 0,
+                "matched_skill": matched_skill_name,
             },
             job_id=job_id,
             phase="agent",
@@ -1083,13 +1404,42 @@ class ClaudeAgentExecutor:
                         if hasattr(block, "text") and block.text:
                             yield token_event(job_id=job_id, token=block.text)
                         elif hasattr(block, "name"):
+                            tool_name = str(getattr(block, "name", "") or "")
+                            tool_input = getattr(block, "input", {}) or {}
+                            if not isinstance(tool_input, dict):
+                                tool_input = {}
+                            permission_mode = ToolApprovalMode.ASK
+                            if self._permission_manager:
+                                permission_mode = await self._resolve_tool_permission(tool_name, tool_input)
+                            else:
+                                if sdk_permission_mode == "allow":
+                                    permission_mode = ToolApprovalMode.ALLOW
+                                elif sdk_permission_mode == "deny":
+                                    permission_mode = ToolApprovalMode.DENY
+                                try:
+                                    get_tool_audit_log().record_permission_decision(
+                                        tool_name=tool_name,
+                                        decision=permission_mode.value,
+                                        user_id=self._audit_context.get("user_id"),
+                                        session_id=self._audit_context.get("session_id"),
+                                        project_id=self._audit_context.get("project_id"),
+                                        job_id=self._audit_context.get("job_id"),
+                                        provider="anthropic",
+                                        tool_id=getattr(block, "id", None),
+                                        source="sdk_permission_mode",
+                                        rule_scope="sdk",
+                                        tool_input=tool_input,
+                                    )
+                                except Exception:
+                                    pass
+
                             # Tool use block
                             yield tool_call_event(
                                 job_id=job_id,
-                                tool_name=block.name,
-                                tool_input=getattr(block, "input", {}),
+                                tool_name=tool_name,
+                                tool_input=tool_input,
                                 tool_id=getattr(block, "id", str(uuid.uuid4())),
-                                permission_mode=ToolApprovalMode.ALLOW,
+                                permission_mode=permission_mode,
                             )
 
                 elif isinstance(message, ResultMessage):
@@ -1107,6 +1457,7 @@ class ClaudeAgentExecutor:
                         metadata={
                             "sdk_mode": True,
                             "session_id": self._sdk_session_id,
+                            "matched_skill": matched_skill_name,
                         },
                     )
                     return
@@ -1114,7 +1465,11 @@ class ClaudeAgentExecutor:
             # Stream ended without ResultMessage
             yield done_event(
                 job_id=job_id,
-                metadata={"sdk_mode": True, "stream_ended": True},
+                metadata={
+                    "sdk_mode": True,
+                    "stream_ended": True,
+                    "matched_skill": matched_skill_name,
+                },
             )
 
         except Exception as e:
@@ -1134,7 +1489,9 @@ class ClaudeAgentExecutor:
         initial_messages: Optional[List[Dict[str, Any]]] = None,
         user_id: Optional[str] = None,
         case_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         db: Optional[Any] = None,
+        security_profile: Optional[str] = None,
     ) -> AsyncGenerator[SSEEvent, None]:
         """
         Run the agent loop — dispatcher for SDK vs raw API mode.
@@ -1156,33 +1513,70 @@ class ClaudeAgentExecutor:
             SSE events for each action in the agent loop
         """
         job_id = job_id or str(uuid.uuid4())
+        await self._init_permission_manager(
+            db=db,
+            user_id=user_id,
+            session_id=session_id,
+            project_id=case_id,
+            security_profile=security_profile,
+        )
+        self._audit_context = {
+            "provider": "anthropic",
+            "user_id": str(user_id) if user_id else None,
+            "session_id": str(session_id) if session_id else None,
+            "project_id": str(case_id) if case_id else None,
+            "job_id": str(job_id) if job_id else None,
+        }
 
-        # Try SDK mode first
-        if CLAUDE_SDK_AVAILABLE and self.config.use_sdk:
-            try:
-                async for event in self._run_with_sdk(
-                    prompt=prompt,
-                    system_prompt=system_prompt,
-                    context=context,
-                    job_id=job_id,
-                    user_id=user_id,
-                    case_id=case_id,
-                    db=db,
-                ):
-                    yield event
-                return
-            except Exception as exc:
-                logger.warning(f"[{job_id}] Claude SDK failed, falling back to raw API: {exc}")
+        trace_metadata = {
+            "job_id": job_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "case_id": case_id,
+            "model": self.config.model,
+            "use_sdk": bool(CLAUDE_SDK_AVAILABLE and self.config.use_sdk),
+        }
+        with langsmith_trace(
+            "claude_agent_executor.run",
+            run_type="agent",
+            metadata=trace_metadata,
+            tags=["claude-agent", "executor"],
+        ) as run_ctx:
+            langsmith_metadata = extract_langsmith_run_metadata(run_ctx)
+            # Try SDK mode first
+            if CLAUDE_SDK_AVAILABLE and self.config.use_sdk:
+                try:
+                    async for event in self._run_with_sdk(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        context=context,
+                        job_id=job_id,
+                        user_id=user_id,
+                        case_id=case_id,
+                        db=db,
+                    ):
+                        yield self._attach_trace_metadata_to_done_event(
+                            event,
+                            langsmith_metadata,
+                        )
+                    return
+                except Exception as exc:
+                    logger.warning(f"[{job_id}] Claude SDK failed, falling back to raw API: {exc}")
 
-        # Fallback: raw Anthropic API loop
-        async for event in self._run_with_raw_api(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            context=context,
-            job_id=job_id,
-            initial_messages=initial_messages,
-        ):
-            yield event
+            # Fallback: raw Anthropic API loop
+            async for event in self._run_with_raw_api(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                context=context,
+                job_id=job_id,
+                initial_messages=initial_messages,
+                user_id=user_id,
+                db=db,
+            ):
+                yield self._attach_trace_metadata_to_done_event(
+                    event,
+                    langsmith_metadata,
+                )
 
     async def _run_with_raw_api(
         self,
@@ -1191,6 +1585,8 @@ class ClaudeAgentExecutor:
         context: Optional[str] = None,
         job_id: Optional[str] = None,
         initial_messages: Optional[List[Dict[str, Any]]] = None,
+        user_id: Optional[str] = None,
+        db: Optional[Any] = None,
     ) -> AsyncGenerator[SSEEvent, None]:
         """
         Run the agent loop using the raw Anthropic API.
@@ -1230,6 +1626,23 @@ class ClaudeAgentExecutor:
 
         # Build complete system prompt
         full_system_prompt = self._build_system_prompt(system_prompt, context)
+        matched_skill_name: Optional[str] = None
+        if user_id and db:
+            try:
+                from app.services.ai.skills.matcher import match_user_skill, render_skill_prompt
+
+                skill_match = await match_user_skill(
+                    user_id=user_id,
+                    user_input=prompt,
+                    db=db,
+                    include_builtin=True,
+                )
+                if skill_match:
+                    matched_skill_name = skill_match.skill.name
+                    skill_prompt = render_skill_prompt(skill_match)
+                    full_system_prompt = f"{full_system_prompt}\n\n# SKILL CORRESPONDENTE\n\n{skill_prompt}"
+            except Exception as e:
+                logger.warning(f"Failed to match user skill (raw mode): {e}")
 
         # Add user message
         state.messages.append({"role": "user", "content": prompt})
@@ -1242,6 +1655,7 @@ class ClaudeAgentExecutor:
                 "model": self.config.model,
                 "max_iterations": self.config.max_iterations,
                 "tools_count": len(self._tools),
+                "matched_skill": matched_skill_name,
             },
             job_id=job_id,
             phase="agent",
@@ -1285,9 +1699,10 @@ class ClaudeAgentExecutor:
                     )
                     return
 
-                # Update token counts
-                state.total_input_tokens += response.usage.input_tokens
-                state.total_output_tokens += response.usage.output_tokens
+                # Update token counts (robust to mocked/non-numeric usage payloads)
+                tokens_in, tokens_out = self._usage_tokens(response)
+                state.total_input_tokens += tokens_in
+                state.total_output_tokens += tokens_out
                 state.last_response = response
 
                 # Extract container_id for code execution reuse
@@ -1340,6 +1755,7 @@ class ClaudeAgentExecutor:
                             "iterations": state.iteration,
                             "total_tokens": state.total_input_tokens + state.total_output_tokens,
                             "tools_called": len(state.tools_called),
+                            "matched_skill": matched_skill_name,
                         }
                     )
                     return
@@ -1396,6 +1812,7 @@ class ClaudeAgentExecutor:
                 metadata={
                     "max_iterations_reached": True,
                     "iterations": state.iteration,
+                    "matched_skill": matched_skill_name,
                 }
             )
 
@@ -1415,6 +1832,7 @@ class ClaudeAgentExecutor:
         self,
         approval: bool,
         tool_id: Optional[str] = None,
+        approval_token: Optional[str] = None,
         remember_choice: bool = False,
         scope: Literal["session", "project", "global"] = "session",
     ) -> AsyncGenerator[SSEEvent, None]:
@@ -1424,6 +1842,7 @@ class ClaudeAgentExecutor:
         Args:
             approval: True to approve, False to deny
             tool_id: Specific tool ID to approve (approves first pending if not specified)
+            approval_token: Optional cryptographically-binding token from TOOL_APPROVAL_REQUIRED event
             remember_choice: Whether to remember this choice
             scope: Scope for remembering choice
 
@@ -1473,6 +1892,34 @@ class ClaudeAgentExecutor:
             )
             return
 
+        # Optional: verify token binds approval to the exact tool call that was previewed.
+        require_token = (os.getenv("TOOL_APPROVAL_REQUIRE_TOKEN", "false") or "false").strip().lower() in ("1", "true", "yes", "y")
+        if require_token:
+            token = (approval_token or "").strip()
+            if not token:
+                yield error_event(
+                    job_id=state.job_id,
+                    error="approval_token is required to resume this tool call",
+                    error_type="approval_token_missing",
+                )
+                return
+            try:
+                from app.services.ai.shared.approval_tokens import verify_tool_approval_token
+                ok, payload, err = verify_tool_approval_token(token)
+                if not ok or not isinstance(payload, dict):
+                    raise ValueError(err or "invalid")
+                if str(payload.get("job_id")) != str(state.job_id) or str(payload.get("tool_id")) != str(pending.tool_id):
+                    raise ValueError("mismatch")
+                if str(payload.get("tool_name")) != str(pending.tool_name):
+                    raise ValueError("mismatch")
+            except Exception:
+                yield error_event(
+                    job_id=state.job_id,
+                    error="Invalid approval_token for this tool call",
+                    error_type="approval_token_invalid",
+                )
+                return
+
         # Remove from pending
         state.pending_approvals.remove(pending)
 
@@ -1480,7 +1927,22 @@ class ClaudeAgentExecutor:
             # Update permission for this tool
             new_permission = ToolApprovalMode.ALLOW if approval else ToolApprovalMode.DENY
             self.config.tool_permissions[pending.tool_name] = new_permission
-            # TODO: Persist to database based on scope
+            if self._permission_manager:
+                try:
+                    target_scope: Literal["session", "project", "global"] = scope
+                    if target_scope == "session" and not getattr(self._permission_manager, "session_id", None):
+                        target_scope = "project" if getattr(self._permission_manager, "project_id", None) else "global"
+                    if target_scope == "project" and not getattr(self._permission_manager, "project_id", None):
+                        target_scope = "global"
+
+                    await self._permission_manager.add_rule(
+                        tool_name=pending.tool_name,
+                        mode=new_permission.value,
+                        scope=target_scope,
+                        description=f"Saved via agent resume ({state.job_id})",
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to persist permission rule: {e}")
 
         if approval:
             # Execute the tool
@@ -1543,6 +2005,40 @@ class ClaudeAgentExecutor:
             async for event in self._continue_run():
                 yield event
 
+    async def approve_tool(
+        self,
+        tool_name: Optional[str],
+        approved: bool,
+        remember: bool = False,
+        *,
+        tool_id: Optional[str] = None,
+        approval_token: Optional[str] = None,
+        scope: Literal["session", "project", "global"] = "session",
+    ) -> None:
+        """
+        Compatibility shim for /chats/{id}/tool-approval endpoint.
+
+        Approves/denies a pending tool call and advances execution by running `resume`.
+        This does not stream events by itself; callers should reconnect to SSE stream
+        (or handle returned events in a future enhancement).
+        """
+        # If tool_id not provided, try to find a pending approval matching tool_name.
+        if not tool_id and self._state and tool_name:
+            for p in (self._state.pending_approvals or []):
+                if p.tool_name == tool_name:
+                    tool_id = p.tool_id
+                    break
+
+        async for _ in self.resume(
+            approval=bool(approved),
+            tool_id=tool_id,
+            approval_token=approval_token,
+            remember_choice=bool(remember),
+            scope=scope,
+        ):
+            # Intentionally discard events here. The caller can stream from SSE session.
+            pass
+
     async def _continue_run(self) -> AsyncGenerator[SSEEvent, None]:
         """Continue the agent loop after approval."""
         if not self._state:
@@ -1576,8 +2072,9 @@ class ClaudeAgentExecutor:
                     container_id=state.container_id,
                 )
 
-                state.total_input_tokens += response.usage.input_tokens
-                state.total_output_tokens += response.usage.output_tokens
+                tokens_in, tokens_out = self._usage_tokens(response)
+                state.total_input_tokens += tokens_in
+                state.total_output_tokens += tokens_out
                 state.last_response = response
 
                 # Extract container_id for code execution reuse

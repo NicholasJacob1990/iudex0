@@ -588,19 +588,17 @@ class KanonEmbeddingsProvider:
         except Exception as e:
             logger.warning("Voyage fallback import/call falhou: %s", e)
 
-        # Último recurso: OpenAI
+        # Último recurso: OpenAI (Matryoshka reduction to match target dimensions)
         try:
             from openai import AsyncOpenAI
 
             openai_key = os.getenv("OPENAI_API_KEY", "")
             if openai_key.strip():
                 client = AsyncOpenAI(api_key=openai_key)
-                openai_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
-                openai_dims = int(os.getenv("EMBEDDING_DIMENSIONS", "3072"))
                 response = await client.embeddings.create(
-                    model=openai_model,
+                    model="text-embedding-3-large",
                     input=texts,
-                    dimensions=openai_dims,
+                    dimensions=self._dimensions,
                 )
                 sorted_data = sorted(response.data, key=lambda x: x.index)
                 return [item.embedding for item in sorted_data]

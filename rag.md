@@ -56,7 +56,7 @@ Os meus alunos do Instituto Federal de Goiás, amo vocês!
 - 5.2 Definição de grafo
 - 5.3 De Textos para Grafos
 - 5.4 Neo4j
-- 5.5 Instalando o Neo4J no Docker
+- 5.5 Ambientes Neo4j (DEV e PRODUÇÃO)
 - 5.6 Cypher: Conversando com o Grafo
 - SUMÁRIO
 
@@ -3184,109 +3184,65 @@ etapa remove a sensação de ’grafo mágico’, porque tudo fica verificável:
 como foi ligado e como pode ser consultado, preparando o terreno para as próximas etapas
 do pipeline.
 ```
-## 5.5 Instalando o Neo4J no Docker
+## 5.5 Ambientes Neo4j (DEV e PRODUÇÃO)
 
 ```
-Para instalar a o Neo4J no Docker, usaremos a versão Enterprise , o que amplia as
-capacidades do sistema e permite recursos necessários para implementações de GraphRAG
-com suporte vetorial e processamento otimizado. Essa versão roda a imagem ’neo4j:5.21.0-
-enterprise’ e adiciona novos parâmetros no docker-compose, especialmente a aceitação da
-licença de desenvolvedor e a desativação da validação estrita de configuração, que costuma
-ser necessária quando vocês adicionam componentes de vetorização e integrações externas.
-No bloco ’environment’ , o parâmetro ’NEO4J_ACCEPT_LICENSE_AGREEMENT’ de-
-finido como yes indica que vocês aceitam automaticamente os termos da licença de desen-
-volvedor. Essa licença é chamada oficialmente de Neo4j Enterprise Developer License e
-permite uso local para pesquisa, ensino e desenvolvimento experimental, desde que vocês
-não implantem o sistema em produção comercial.
-Além da aceitação da licença, existe uma variável importante:
+Este projeto adota dois caminhos possíveis para GraphRAG:
+1) Neo4j Enterprise local com Developer License (DEV)
+2) Neo4j Aura Enterprise (staging/produção)
 ```
-CAPÍTULO 5. O RAG EM GRAFOS: GRAPHRAG 84
 
+**Adoção atual no app (por enquanto)**
 
 ```
-’NEO4J_server_config_strict__validation_enabled’ definida como False no texto expli-
-cativo (no arquivo de configuração ela aparece como ’false’). Ela desativa a validação rígida
-das configurações internas, o que costuma ser necessário para que o módulo vetorial em
-cenários de GraphRAG funcione sem bloquear parâmetros adicionais.
+No desenvolvimento local, estamos usando Neo4j Enterprise local (Developer License),
+rodando em localhost:7687.
 ```
-CAPÍTULO 5. O RAG EM GRAFOS: GRAPHRAG 85
 
+```env
+NEO4J_URI=bolt://localhost:7687
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=<senha-local>
+NEO4J_DATABASE=iudex
+```
 
-```
-A estrutura do docker-compose completo para a versão Enterprise fica assim:
-```
-```
-services:
-neo4j:
-image: neo4j:5.21.0-enterprise
-container_name: neo4j-enterprise
-restart: unless-stopped
-ports:
-```
-- "7474:7474" # Web Browser
-- "7687:7687" # Bolt protocol
-environment:
-# Autenticacao
-NEO4J_AUTH: neo4j/sandeco123 #altere a senha
+**Subindo Neo4j local (DEV)**
 
+```bash
+# Script padrão do projeto
+./apps/api/scripts/dev-neo4j.sh up
+./apps/api/scripts/dev-neo4j.sh status
+./apps/api/scripts/dev-neo4j.sh logs
+./apps/api/scripts/dev-neo4j.sh down
 ```
-# Aceita automaticamente a licenca Developer (uso gratuito local)
-NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+
+```bash
+# Alternativa direta via compose (somente Neo4j)
+docker compose -f apps/api/docker-compose.rag.yml up -d neo4j
 ```
-```
-# Ativa plugins essenciais
-NEO4J_PLUGINS: ’["apoc", "graph-data-science"]’
-```
-```
-# Configuracoes de memoria (ajuste conforme sua maquina)
-NEO4J_server_memory_heap_initial__size: 1G
-NEO4J_server_memory_heap_max__size: 2G
-NEO4J_dbms_memory_pagecache_size: 1G
-```
-```
-# Permite import/export via APOC
-NEO4J_apoc_export_file_enabled: "true"
-NEO4J_apoc_import_file_enabled: "true"
-NEO4J_apoc_import_file_use__neo4j__config: "true"
-```
-```
-# Config extra
-NEO4J_server_config_strict__validation_enabled: "false"
-```
-```
-volumes:
-```
-- ./data:/data # Banco de dados persistente
-- ./logs:/logs
-- ./import:/import # Pasta para LOAD CSV / importacoes
-- ./plugins:/plugins # Plugins instalados (APOC, GDS)
-networks:
-- neo4jnet
 
 ```
-networks:
-neo4jnet:
-driver: bridge
+Observação: esse modo é para desenvolvimento/estudo e não deve ser usado como padrão
+de produção comercial.
 ```
-```
-Em resumo: vocês podem usar essa versão Enterprise localmente para pesquisa, ensino
-```
-CAPÍTULO 5. O RAG EM GRAFOS: GRAPHRAG 86
 
+**Produção (recomendado) com Aura Enterprise**
+
+```env
+NEO4J_URI=neo4j+s://<instance-id>.databases.neo4j.io
+NEO4J_USER=neo4j
+NEO4J_PASSWORD=<secret>
+NEO4J_DATABASE=neo4j
+```
+
+**Boas práticas de produção**
 
 ```
-e desenvolvimento experimental. Se o projeto evoluir para uma aplicação comercial em
-produção, aí sim será necessário obter uma licença paga junto à Neo4j Inc.
-```
-**Instalando**
-
-```
-Execute o comando abaixo na mesma pasta onde está o arquivo docker-compose.yml
-para subir o Neo4j em segundo plano. Em seguida, acessem http://localhost:7474 e façam
-login com usuário neo4j e senha sandeco123 , exatamente como foi definido no compose.
-```
-```
-docker compose up -d
+1. Credenciais em secret manager (sem segredo em arquivo versionado).
+2. Rotação periódica de senha/chave.
+3. Restrição de rede (allowlist, PrivateLink/VPC peering quando aplicável).
+4. Monitoramento de latência, erros e timeouts.
+5. Plano de backup/restore validado com RPO/RTO definidos.
 ```
 ## 5.6 Cypher: Conversando com o Grafo
 
@@ -3413,5 +3369,3 @@ CAPÍTULO 5. O RAG EM GRAFOS: GRAPHRAG 90
 ### CONTINUA...
 
 CAPÍTULO 5. O RAG EM GRAFOS: GRAPHRAG 91
-
-

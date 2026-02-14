@@ -530,10 +530,11 @@ class JurisBERTProvider:
                 raise RuntimeError("OPENAI_API_KEY não configurada")
 
             client = AsyncOpenAI(api_key=openai_key)
+            # Matryoshka reduction to match JurisBERT 768d collection
             response = await client.embeddings.create(
-                model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
+                model="text-embedding-3-large",
                 input=texts,
-                dimensions=int(os.getenv("EMBEDDING_DIMENSIONS", "3072")),
+                dimensions=JURISBERT_DIMENSIONS,
             )
             sorted_data = sorted(response.data, key=lambda x: x.index)
             return [item.embedding for item in sorted_data]

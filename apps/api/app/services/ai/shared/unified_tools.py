@@ -45,8 +45,8 @@ class ToolRiskLevel(str, Enum):
 # Mapeamento de risco para permissão padrão
 RISK_TO_PERMISSION = {
     ToolRiskLevel.LOW: ToolApprovalMode.ALLOW,
-    ToolRiskLevel.MEDIUM: ToolApprovalMode.ALLOW,
-    ToolRiskLevel.HIGH: ToolApprovalMode.ALLOW,
+    ToolRiskLevel.MEDIUM: ToolApprovalMode.ASK,
+    ToolRiskLevel.HIGH: ToolApprovalMode.DENY,
 }
 
 
@@ -486,6 +486,52 @@ Use para:
 )
 
 
+SEARCH_JUSBRASIL_TOOL = UnifiedTool(
+    name="search_jusbrasil",
+    description="""Pesquisa conteudo juridico no JusBrasil.
+
+Use para:
+- Encontrar jurisprudencia e publicacoes de tribunais
+- Localizar pecas e noticias juridicas indexadas
+- Acelerar descoberta de precedentes com filtro por tribunal""",
+    category=ToolCategory.SEARCH,
+    risk_level=ToolRiskLevel.LOW,
+    parameters={
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Termos de busca"
+            },
+            "tribunal": {
+                "type": "string",
+                "description": "Sigla opcional do tribunal (ex: STJ, TJSP)"
+            },
+            "tipo": {
+                "type": "string",
+                "description": "Tipo de conteudo (ex: jurisprudencia, noticia, doutrina)"
+            },
+            "data_inicio": {
+                "type": "string",
+                "format": "date",
+                "description": "Data inicial (YYYY-MM-DD)"
+            },
+            "data_fim": {
+                "type": "string",
+                "format": "date",
+                "description": "Data final (YYYY-MM-DD)"
+            },
+            "max_results": {
+                "type": "integer",
+                "default": 10,
+                "description": "Numero maximo de resultados (1-30)"
+            }
+        },
+        "required": ["query"]
+    }
+)
+
+
 SEARCH_LEGISLACAO_TOOL = UnifiedTool(
     name="search_legislacao",
     description="""Pesquisa legislação federal, estadual e municipal.
@@ -558,6 +604,58 @@ Retorna status de verificação e fonte.""",
         },
         "required": ["citation_text"]
     }
+)
+
+
+VALIDATE_CPC_COMPLIANCE_TOOL = UnifiedTool(
+    name="validate_cpc_compliance",
+    description="""Valida conformidade processual basica com o CPC.
+
+Checks:
+- Requisitos formais por tipo de peca (peticao inicial, contestacao, recursos)
+- Alertas de base legal (ex: referencia a CPC/73)
+- Verificacao heuristica de prazo processual quando datas sao informadas
+
+Retorna checklist estruturado com pass/warning/fail e score.""",
+    category=ToolCategory.ANALYSIS,
+    risk_level=ToolRiskLevel.LOW,
+    parameters={
+        "type": "object",
+        "properties": {
+            "document_text": {
+                "type": "string",
+                "description": "Texto integral da peca juridica.",
+            },
+            "document_type": {
+                "type": "string",
+                "enum": [
+                    "auto",
+                    "peticao_inicial",
+                    "contestacao",
+                    "apelacao",
+                    "agravo_instrumento",
+                    "embargos_declaracao",
+                    "generic",
+                ],
+                "default": "auto",
+                "description": "Tipo da peca para aplicar regras especificas.",
+            },
+            "reference_date": {
+                "type": "string",
+                "description": "Data inicial de contagem de prazo (YYYY-MM-DD ou DD/MM/YYYY).",
+            },
+            "filing_date": {
+                "type": "string",
+                "description": "Data de protocolo/apresentacao (YYYY-MM-DD ou DD/MM/YYYY).",
+            },
+            "strict_mode": {
+                "type": "boolean",
+                "default": False,
+                "description": "Se true, warnings viram falhas no resumo final.",
+            },
+        },
+        "required": ["document_text"],
+    },
 )
 
 
@@ -681,10 +779,205 @@ teses, conceitos), encontrar caminhos semânticos, ou buscar co-ocorrências.
 5. **count** - Conta entidades com filtros
    - params: {entity_type?, query?}
 
+6. **link_entities** - Cria relação entre duas entidades existentes no grafo
+   - params: {source_id, target_id, relation_type?, properties?, confirm?, preflight_token?}
+   - **IMPORTANTE (workflow recomendado):**
+     1) Use **search** para resolver `entity_id` (NÃO invente IDs).
+     2) Se a busca retornar mais de um candidato plausível, **peça confirmação** ao usuário.
+     3) Faça um **preflight** com `confirm=false` (o servidor retorna preview + `preflight_token`).
+     4) Só então chame **link_entities** com `confirm=true` + `preflight_token`.
+   - **REGRA:** Nunca envie `confirm=true` sem o usuário ter confirmado explicitamente na conversa.
+   - relation_type válidos: REMETE_A, INTERPRETA, APLICA, APLICA_SUMULA, PERTENCE_A,
+     FUNDAMENTA, FIXA_TESE, JULGA_TEMA, CITA, CONFIRMA, SUPERA, DISTINGUE,
+     COMPLEMENTA, EXCEPCIONA, REGULAMENTA, ESPECIALIZA, REVOGA, ALTERA,
+     CANCELA, SUBSTITUI, PROFERIDA_POR, PARTICIPA_DE, REPRESENTA, RELATED_TO
+   - Se relation_type inválido, será usado RELATED_TO como fallback.
+   - `properties` é opcional; campos de auditoria (`source`, `layer`, `verified`, `created_by`, `created_via`)
+     são forçados pelo servidor e não podem ser sobrescritos.
+   - Ex: "Conecte Art. 5 CF com Súmula 473 STF via INTERPRETA"
+
+7. **discover_hubs** - Identifica os nós mais conectados (hubs) do grafo
+   - params: {top_n?}
+   - Retorna categorias: artigos mais referenciados, artigos que mais referenciam,
+     artigos mais conectados, decisões com mais teses, leis com mais artigos
+   - Ex: "Quais são os artigos mais centrais do grafo?"
+
+8. **text2cypher** - Converte pergunta em linguagem natural para Cypher
+   - params: {question}
+   - Usa LLM para gerar Cypher read-only com 3 camadas de segurança
+   - Use quando nenhuma outra operação atende (perguntas complexas/agregações)
+   - Ex: "Quantos artigos da CF são referenciados por mais de 3 decisões?"
+
+9. **legal_chain** - Cadeia semântica multi-hop entre dispositivos legais
+   - params: {source_id, target_id? (opcional), max_hops?, limit?}
+   - Percorre REMETE_A, INTERPRETA, APLICA etc. entre entidades
+   - Ex: "Qual a cadeia entre Art. 37 CF e Lei 14133?"
+
+10. **precedent_network** - Rede de precedentes que influenciam uma decisão
+    - params: {decision_id, limit?}
+    - Segue CITA, FUNDAMENTA, APLICA, INTERPRETA
+    - Ex: "Quais precedentes influenciam ADI 5432?"
+
+11. **related_entities** - Entidades conectadas por arestas DIRETAS do grafo
+    - params: {entity_id, relation_filter? (ex: REMETE_A), limit?}
+    - Diferente de neighbors (co-ocorrência): percorre relações reais do grafo
+    - Ex: "Quais artigos o Art. 5 CF referencia diretamente?"
+
+12. **entity_stats** - Estatísticas gerais do grafo (contagens por tipo, tipos de relação)
+    - params: {} (nenhum obrigatório)
+    - Retorna visão geral: total de entidades, distribuição por tipo, tipos de relação
+    - Ex: "Quantas entidades existem no grafo?" / "Qual o tamanho do grafo?"
+
+**GDS (Graph Data Science) - Algoritmos Avançados:**
+
+13. **betweenness_centrality** - Identifica nós-ponte (conectam áreas distintas)
+    - params: {entity_type?, limit?}
+    - Calcula betweenness centrality: nós que aparecem em muitos caminhos curtos
+    - Útil para: "Artigos que conectam direito civil e tributário"
+    - Ex: "Quais artigos servem de ponte entre temas diferentes?"
+
+14. **community_detection** - Detecta comunidades temáticas (Louvain)
+    - params: {entity_type?, limit?}
+    - Agrupa entidades por conexões implícitas (clusters automáticos)
+    - Útil para: "Agrupar artigos por tema sem rotular manualmente"
+    - Ex: "Quais são as comunidades de artigos no grafo?"
+
+15. **node_similarity** - Encontra entidades similares (vizinhos compartilhados)
+    - params: {entity_type?, entity_id?, top_k?, limit?}
+    - Calcula similaridade baseada em conexões compartilhadas
+    - Útil para: "Decisões parecidas com X", "Artigos relacionados a Y"
+    - Ex: "Quais decisões são similares ao Acórdão 123?"
+
+16. **pagerank_personalized** - Ranking de importância com viés (sementes)
+    - params: {source_ids (array), entity_type?, limit?}
+    - PageRank personalizado: nós mais relevantes a partir de sementes
+    - Útil para: "Artigos mais importantes conectados à CF/88 Art. 5"
+    - Ex: "Qual a rede de influência a partir desses 3 artigos?"
+
+17. **weakly_connected_components** - Componentes desconectados (ilhas)
+    - params: {entity_type?, limit?}
+    - Identifica subgrafos isolados (WCC)
+    - Útil para: "Existem artigos órfãos?", "Quais ilhas no grafo?"
+    - Ex: "Há temas isolados sem conexão com jurisprudência?"
+
+18. **shortest_path_weighted** - Caminho mais curto ponderado (Dijkstra)
+    - params: {source_id, target_id, weight_property?, direction?, limit?}
+    - Dijkstra com pesos personalizados (ex: co-ocorrência, relevância)
+    - direction: "OUTGOING" (padrão), "INCOMING", "BOTH"
+    - Útil para: "Caminho mais forte entre Art. X e Súmula Y"
+    - Ex: "Qual o caminho com maior co-ocorrência entre esses 2 artigos?"
+
+19. **triangle_count** - Contagem de triângulos (clustering)
+    - params: {entity_type?, limit?}
+    - Conta triângulos: nós com alto clustering coefficient
+    - Útil para: "Artigos mais interligados em grupos", "Núcleos densos"
+    - Ex: "Quais artigos formam triângulos (rede densa)?"
+
+20. **degree_centrality** - Centralidade por grau (conexões diretas)
+    - params: {entity_type?, direction?, limit?}
+    - Conta conexões diretas (in-degree, out-degree ou total)
+    - direction: "OUTGOING" (mais citações), "INCOMING" (mais citado), "BOTH" (total)
+    - Útil para: "Artigos mais citados", "Artigos que mais citam"
+    - Ex: "Quais súmulas são mais referenciadas?"
+
+**GDS Fase 1 - Prioridade Máxima:**
+
+21. **closeness_centrality** - Centralidade por proximidade
+    - params: {entity_type?, limit?}
+    - Mede distância média de um nó a todos os outros
+    - Nós com maior closeness são "hubs" de acesso rápido
+    - Útil para: "Artigos que conectam rapidamente toda a rede"
+    - Ex: "Quais artigos estão mais perto de todos os outros?"
+
+22. **eigenvector_centrality** - Centralidade por conexões importantes
+    - params: {entity_type?, limit?, max_iterations?}
+    - Similar ao PageRank, mas sem damping factor
+    - Mede importância baseada em conexões com outros nós importantes (recursivo)
+    - Útil para: "Artigos centrais em redes de prestígio"
+    - Ex: "Quais artigos são conectados a outros artigos importantes?"
+
+23. **leiden** - Detecção de comunidades (sucessor do Louvain)
+    - params: {entity_type?, limit?}
+    - Agrupa nós em comunidades maximizando modularidade
+    - Melhor qualidade de particionamento que Louvain
+    - Útil para: "Descobrir clusters temáticos no grafo jurídico"
+    - Ex: "Quais grupos de artigos formam temas coesos?"
+
+24. **k_core_decomposition** - Núcleos densos (k-core)
+    - params: {entity_type?, limit?}
+    - Identifica subgrafos onde cada nó tem pelo menos k conexões
+    - coreValue maior = nó em núcleos mais densos/coesos
+    - Útil para: "Identificar clusters fortemente conectados"
+    - Ex: "Quais artigos estão em núcleos altamente interconectados?"
+
+25. **knn** - K-Nearest Neighbors (vizinhos mais similares)
+    - params: {entity_type?, top_k?, limit?}
+
+25. **adamic_adar** - Predição de links via vizinhos comuns ponderados
+    - params: {node1_id, node2_id}
+    - Calcula score de "força" de ligação potencial entre dois nós
+    - Vizinhos comuns raros = score mais alto (mais indicativo de link)
+    - Útil para: "Qual a probabilidade de Art. X e Art. Y estarem relacionados?"
+    - Ex: "Score de conexão potencial entre Art. 5º CF e Art. 93 Lei 8.213"
+
+26. **node2vec** - Embeddings vetoriais para machine learning
+    - params: {entity_type?, embedding_dimension?, iterations?, limit?}
+    - Gera vetores (embeddings) de nós via random walks
+    - embedding_dimension: tamanho do vetor (padrão 128)
+    - Útil para: similaridade, classificação, clustering de entidades
+    - Ex: "Gerar embeddings de artigos da CF para análise de similaridade"
+
+27. **all_pairs_shortest_path** - Matriz de distâncias completa
+    - params: {entity_type?, limit?}
+    - Calcula caminho mais curto entre TODOS os pares de nós
+    - Pode retornar muitos pares (limit alto recomendado: 1000+)
+    - Útil para: análise de conectividade global, grafos de distâncias
+    - Ex: "Matriz de distâncias entre todos os artigos da Lei 8.112"
+
+28. **harmonic_centrality** - Closeness robusta para grafos desconectados
+    - params: {entity_type?, limit?}
+    - Variante de closeness que funciona em grafos com componentes desconexos
+    - Usa média harmônica (distância infinita → contribuição 0)
+    - Útil para: "Artigos mais centrais mesmo em grafo fragmentado"
+    - Ex: "Quais artigos são mais centrais considerando componentes isolados?"
+    - Encontra os top-K nós mais similares a cada nó
+    - Baseado em similaridade de vizinhança
+    - Útil para: "Recomendações e descoberta de entidades relacionadas"
+    - Ex: "Quais artigos são mais similares entre si por suas conexões?"
+
+**GDS Fase 2 - Casos Específicos:**
+
+26. **bridges** - Identifica arestas críticas (pontes)
+    - params: {entity_type?, limit?}
+    - Detecta arestas cuja remoção desconecta o grafo (bridge edges)
+    - Útil para: "Quais relações são indispensáveis para conectividade?"
+    - Ex: "Quais conexões, se removidas, isolam partes do grafo jurídico?"
+
+27. **articulation_points** - Identifica nós críticos (pontos de articulação)
+    - params: {entity_type?, limit?}
+    - Detecta nós cuja remoção aumenta componentes desconexos
+    - Útil para: "Quais artigos são pontos únicos de falha?"
+    - Ex: "Sem quais artigos a rede jurídica se fragmenta?"
+
+28. **strongly_connected_components** - Detecta ciclos de referência mútua (SCCs)
+    - params: {entity_type?, limit?}
+    - Identifica subgrafos onde qualquer nó alcança qualquer outro (direcionado)
+    - Útil para: "Quais artigos formam ciclos de citação mútua?"
+    - Ex: "Artigos que se referenciam mutuamente (Art. A → B → C → A)?"
+
+29. **yens_k_shortest_paths** - K caminhos alternativos mais curtos (Yen)
+    - params: {source_id, target_id, k?, entity_type?}
+    - Retorna múltiplos caminhos (não apenas 1) entre dois nós
+    - k: número de caminhos alternativos (padrão 3, máx 10)
+    - Útil para: "Quais são as 3 rotas mais curtas entre Art. X e Art. Y?"
+    - Ex: "Existem caminhos alternativos entre Lei 14.133 e Súmula 331?"
+
 **Tipos de entidade válidos:**
 lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
 
-**IMPORTANTE:** Esta tool NÃO aceita Cypher arbitrário. Use as operações acima.""",
+**IMPORTANTE:**
+- Para perguntas complexas ou agregações que não se encaixam nas operações 1-28, use text2cypher (operação 8)
+- Operações GDS (13-28) requerem NEO4J_GDS_ENABLED=true e plugin GDS instalado""",
     category=ToolCategory.SEARCH,
     risk_level=ToolRiskLevel.LOW,
     requires_context=True,
@@ -693,7 +986,7 @@ lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
         "properties": {
             "operation": {
                 "type": "string",
-                "enum": ["path", "neighbors", "cooccurrence", "search", "count"],
+                "enum": ["path", "neighbors", "cooccurrence", "search", "count", "link_entities", "discover_hubs", "text2cypher", "legal_chain", "precedent_network", "related_entities", "entity_stats", "betweenness_centrality", "community_detection", "node_similarity", "pagerank_personalized", "weakly_connected_components", "shortest_path_weighted", "triangle_count", "degree_centrality", "closeness_centrality", "eigenvector_centrality", "leiden", "k_core_decomposition", "knn", "bridges", "articulation_points", "strongly_connected_components", "yens_k_shortest_paths", "adamic_adar", "node2vec", "all_pairs_shortest_path", "harmonic_centrality"],
                 "description": "Operação a executar no grafo"
             },
             "params": {
@@ -702,15 +995,15 @@ lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
                 "properties": {
                     "source_id": {
                         "type": "string",
-                        "description": "Entity ID de origem (para path)"
+                        "description": "Entity ID de origem (para path/link_entities/legal_chain)"
                     },
                     "target_id": {
                         "type": "string",
-                        "description": "Entity ID de destino (para path)"
+                        "description": "Entity ID de destino (para path/link_entities/legal_chain, opcional em legal_chain)"
                     },
                     "entity_id": {
                         "type": "string",
-                        "description": "Entity ID (para neighbors)"
+                        "description": "Entity ID (para neighbors/related_entities)"
                     },
                     "entity1_id": {
                         "type": "string",
@@ -738,6 +1031,87 @@ lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
                         "type": "integer",
                         "default": 20,
                         "description": "Número máximo de resultados"
+                    },
+                    "relation_type": {
+                        "type": "string",
+                        "description": "Tipo de relação para link_entities (ex: INTERPRETA, REMETE_A, APLICA_SUMULA)"
+                    },
+                    "confirm": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Para link_entities: se true, confirma a escrita no grafo (sem isso o servidor pode responder em modo preflight)."
+                    },
+                    "preflight_token": {
+                        "type": "string",
+                        "description": "Token assinado retornado no preflight. Obrigatório quando confirm=true."
+                    },
+                    "top_n": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Quantidade de hubs a retornar por categoria (para discover_hubs, máx 50)"
+                    },
+                    "question": {
+                        "type": "string",
+                        "description": "Pergunta em linguagem natural (para text2cypher)"
+                    },
+                    "decision_id": {
+                        "type": "string",
+                        "description": "Entity ID da decisão (para precedent_network)"
+                    },
+                    "relation_filter": {
+                        "type": "string",
+                        "description": "Filtrar por tipo de relação (para related_entities, ex: REMETE_A, INTERPRETA)"
+                    },
+                    "source_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Lista de entity IDs sementes (para pagerank_personalized)"
+                    },
+                    "weight_property": {
+                        "type": "string",
+                        "description": "Nome da propriedade de peso nas arestas (para shortest_path_weighted, ex: 'cooccurrence_count')"
+                    },
+                    "direction": {
+                        "type": "string",
+                        "enum": ["OUTGOING", "INCOMING", "BOTH"],
+                        "default": "BOTH",
+                        "description": "Direção das arestas (para shortest_path_weighted, degree_centrality)"
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Top K resultados (para node_similarity, knn)"
+                    },
+                    "k": {
+                        "type": "integer",
+                        "default": 3,
+                        "description": "Número de caminhos alternativos (para yens_k_shortest_paths, máx 10)"
+                    },
+                    "node1_id": {
+                        "type": "string",
+                        "description": "Primeiro nó (para adamic_adar)"
+                    },
+                    "node2_id": {
+                        "type": "string",
+                        "description": "Segundo nó (para adamic_adar)"
+                    },
+                    "embedding_dimension": {
+                        "type": "integer",
+                        "default": 128,
+                        "description": "Dimensão dos embeddings (para node2vec, padrão 128)"
+                    },
+                    "iterations": {
+                        "type": "integer",
+                        "default": 10,
+                        "description": "Número de iterações (para node2vec, padrão 10)"
+                    },
+                    "properties": {
+                        "type": "object",
+                        "description": (
+                            "Propriedades adicionais da relação (opcional). "
+                            "Campos de auditoria (source, layer, verified, created_by, created_via) "
+                            "são geridos pelo servidor e não podem ser sobrescritos."
+                        )
                     }
                 }
             },
@@ -754,6 +1128,97 @@ lei, artigo, sumula, tema, tribunal, tese, conceito, principio, instituto
         },
         "required": ["operation"]
     }
+)
+
+
+# =============================================================================
+# GRAPH RISK / AUDIT TOOLS (READ-ONLY, deterministic)
+# =============================================================================
+
+SCAN_GRAPH_RISK_TOOL = UnifiedTool(
+    name="scan_graph_risk",
+    description="""Executa um scan determinístico de risco/fraude no grafo (multi-cenário) e retorna sinais ranqueados.
+
+Use quando o usuário pedir: "descobrir fraudes", "auditar conexões", "sinais de risco", "todos os cenários".
+
+Perfis:
+- precision: menos falsos positivos (thresholds mais altos, menos candidates)
+- balanced: default
+- recall: mais cobertura (inclui candidates, thresholds mais baixos)
+
+Retorna:
+- signals[] com score, entidades foco e evidências (co-menções e/ou arestas existentes)
+- report_id quando persist=true (histórico por 30 dias)
+""",
+    category=ToolCategory.SEARCH,
+    risk_level=ToolRiskLevel.LOW,
+    requires_context=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "profile": {"type": "string", "enum": ["precision", "balanced", "recall"], "default": "balanced"},
+            "scenarios": {"type": "array", "items": {"type": "string"}, "description": "Lista de cenários (omitir = todos)"},
+            "include_candidates": {"type": "boolean", "description": "Override do include_candidates"},
+            "limit": {"type": "integer", "default": 30, "description": "Max sinais por detector (1-200)"},
+            "min_shared_docs": {"type": "integer", "default": 2, "description": "Threshold de co-menções (1-20)"},
+            "max_hops": {"type": "integer", "default": 4, "description": "Para auditorias/cadeias (1-6)"},
+            "scope": {"type": "string", "enum": ["global", "private", "local"], "description": "Escopo (group bloqueado)"},
+            "include_global": {"type": "boolean", "default": True, "description": "Inclui corpus global além do tenant"},
+            "case_id": {"type": "string", "description": "Filtro por caso (quando scope=local)"},
+            "persist": {"type": "boolean", "default": True, "description": "Persistir relatório por 30 dias"},
+        },
+    },
+)
+
+
+AUDIT_GRAPH_EDGE_TOOL = UnifiedTool(
+    name="audit_graph_edge",
+    description="""Audita a relação entre duas entidades: arestas diretas + co-menções (chunks/docs).
+
+Use quando o usuário pedir: "qual a evidência", "mostre o trecho", "tem ligação direta?", "audite esse link".
+""",
+    category=ToolCategory.SEARCH,
+    risk_level=ToolRiskLevel.LOW,
+    requires_context=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "source_id": {"type": "string", "description": "Entity ID origem"},
+            "target_id": {"type": "string", "description": "Entity ID destino"},
+            "include_candidates": {"type": "boolean", "default": False},
+            "limit_docs": {"type": "integer", "default": 5, "description": "Max docs/chunks amostrados (1-20)"},
+            "scope": {"type": "string", "enum": ["global", "private", "local"]},
+            "include_global": {"type": "boolean", "default": True},
+            "case_id": {"type": "string"},
+        },
+        "required": ["source_id", "target_id"],
+    },
+)
+
+
+AUDIT_GRAPH_CHAIN_TOOL = UnifiedTool(
+    name="audit_graph_chain",
+    description="""Audita caminho(s) entre duas entidades (multi-hop) com tipos de relação e evidências quando disponíveis.
+
+Use quando o usuário pedir: "cadeia entre X e Y", "como conecta?", "mostre o caminho".
+""",
+    category=ToolCategory.SEARCH,
+    risk_level=ToolRiskLevel.LOW,
+    requires_context=True,
+    parameters={
+        "type": "object",
+        "properties": {
+            "source_id": {"type": "string", "description": "Entity ID origem"},
+            "target_id": {"type": "string", "description": "Entity ID destino"},
+            "max_hops": {"type": "integer", "default": 4, "description": "Max hops (1-6)"},
+            "include_candidates": {"type": "boolean", "default": False},
+            "limit": {"type": "integer", "default": 5, "description": "Max caminhos (1-20)"},
+            "scope": {"type": "string", "enum": ["global", "private", "local"]},
+            "include_global": {"type": "boolean", "default": True},
+            "case_id": {"type": "string"},
+        },
+        "required": ["source_id", "target_id"],
+    },
 )
 
 
@@ -837,12 +1302,17 @@ ALL_UNIFIED_TOOLS: List[UnifiedTool] = [
     SUBAGENT_TOOL,
     # Legal Domain
     SEARCH_JURISPRUDENCIA_TOOL,
+    SEARCH_JUSBRASIL_TOOL,
     SEARCH_LEGISLACAO_TOOL,
     VERIFY_CITATION_TOOL,
+    VALIDATE_CPC_COMPLIANCE_TOOL,
     SEARCH_RAG_TOOL,
     CREATE_SECTION_TOOL,
     # Graph
     ASK_GRAPH_TOOL,
+    SCAN_GRAPH_RISK_TOOL,
+    AUDIT_GRAPH_EDGE_TOOL,
+    AUDIT_GRAPH_CHAIN_TOOL,
     # MCP
     MCP_SEARCH_TOOL,
     MCP_CALL_TOOL,

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -10,6 +10,7 @@ from app.services.mcp_hub import mcp_hub, MCPHubError
 
 MCP_TOOL_SEARCH_NAME = "mcp_tool_search"
 MCP_TOOL_CALL_NAME = "mcp_tool_call"
+ToolPermissionChecker = Callable[[str, Dict[str, Any]], Awaitable[str]]
 
 
 def _normalize_server_labels(value: Any) -> Optional[List[str]]:
@@ -115,6 +116,9 @@ async def execute_mcp_tool(
     arguments: Dict[str, Any],
     *,
     allowed_server_labels: Optional[List[str]] = None,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     if tool_name == MCP_TOOL_SEARCH_NAME:
         query = str(arguments.get("query") or "")
@@ -132,7 +136,12 @@ async def execute_mcp_tool(
             limit = int(limit_raw)
         except (TypeError, ValueError):
             limit = 20
-        return await mcp_hub.tool_search(query, server_labels=server_labels, limit=limit)
+        return await mcp_hub.tool_search(
+            query,
+            server_labels=server_labels,
+            limit=limit,
+            tenant_id=tenant_id,
+        )
     if tool_name == MCP_TOOL_CALL_NAME:
         server_label = str(arguments.get("server_label") or "")
         if allowed_server_labels and server_label not in set(allowed_server_labels):
@@ -141,7 +150,14 @@ async def execute_mcp_tool(
         tool_args = arguments.get("arguments") or {}
         if not isinstance(tool_args, dict):
             tool_args = {}
-        return await mcp_hub.tool_call(server_label, mcp_tool_name, tool_args)
+        return await mcp_hub.tool_call(
+            server_label,
+            mcp_tool_name,
+            tool_args,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            session_id=session_id,
+        )
     raise MCPHubError(f"Unknown MCP helper tool: {tool_name}")
 
 
@@ -160,6 +176,46 @@ def _safe_json_loads(value: Any) -> Dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _normalize_permission_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in ("allow", "deny", "ask"):
+        return raw
+    return "ask"
+
+
+async def _resolve_mcp_permission(
+    helper_tool_name: str,
+    helper_args: Dict[str, Any],
+    permission_checker: Optional[ToolPermissionChecker],
+) -> str:
+    """
+    Resolve permission for MCP helper calls.
+
+    For `mcp_tool_call`, permission is checked against the underlying target
+    tool name (args.tool_name) and its arguments payload.
+    """
+    if not permission_checker:
+        return "allow"
+
+    target_tool_name = helper_tool_name
+    target_tool_input = helper_args or {}
+
+    if helper_tool_name == MCP_TOOL_CALL_NAME:
+        nested_tool_name = str((helper_args or {}).get("tool_name") or "").strip()
+        nested_args = (helper_args or {}).get("arguments")
+        if nested_tool_name:
+            target_tool_name = nested_tool_name
+            target_tool_input = nested_args if isinstance(nested_args, dict) else {}
+
+    try:
+        return _normalize_permission_mode(
+            await permission_checker(target_tool_name, target_tool_input)
+        )
+    except Exception as e:
+        logger.warning(f"Permission checker failed for MCP tool '{target_tool_name}': {e}")
+        return "ask"
+
+
 async def run_openai_tool_loop(
     *,
     client: Any,
@@ -170,6 +226,10 @@ async def run_openai_tool_loop(
     temperature: float,
     allowed_server_labels: Optional[List[str]] = None,
     max_rounds: int = 6,
+    permission_checker: Optional[ToolPermissionChecker] = None,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Non-streaming tool loop for OpenAI ChatCompletions.
@@ -220,14 +280,76 @@ async def run_openai_tool_loop(
             for tc in tool_calls:
                 name = tc.function.name
                 args = _safe_json_loads(tc.function.arguments)
+                permission_mode = await _resolve_mcp_permission(
+                    name,
+                    args,
+                    permission_checker,
+                )
+                if permission_mode == "deny":
+                    denied = {
+                        "error": f"Tool '{name}' denied by permission policy",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(denied, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(denied, ensure_ascii=False),
+                        }
+                    )
+                    continue
+                if permission_mode == "ask":
+                    approval_needed = {
+                        "error": f"Tool '{name}' requires approval in quick mode",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(approval_needed, ensure_ascii=False),
+                        }
+                    )
+                    continue
                 try:
                     result = await execute_mcp_tool(
                         name,
                         args,
                         allowed_server_labels=allowed_server_labels,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        session_id=session_id,
                     )
                     preview = json.dumps(result, ensure_ascii=False)[:500]
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": preview})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -237,7 +359,15 @@ async def run_openai_tool_loop(
                     )
                 except Exception as e:
                     logger.warning(f"MCP tool call failed ({name}): {e}")
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": f"ERROR: {e}"})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": f"ERROR: {e}",
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     messages.append(
                         {
                             "role": "tool",
@@ -265,6 +395,10 @@ async def run_anthropic_tool_loop(
     temperature: float,
     allowed_server_labels: Optional[List[str]] = None,
     max_rounds: int = 6,
+    permission_checker: Optional[ToolPermissionChecker] = None,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Non-streaming tool loop for Anthropic Messages API.
@@ -303,14 +437,78 @@ async def run_anthropic_tool_loop(
                 tool_input = getattr(b, "input", None) or {}
                 tool_id = getattr(b, "id", None) or getattr(b, "tool_use_id", None) or ""
                 args = tool_input if isinstance(tool_input, dict) else {}
+                permission_mode = await _resolve_mcp_permission(
+                    str(tool_name),
+                    args,
+                    permission_checker,
+                )
+                if permission_mode == "deny":
+                    denied = {
+                        "error": f"Tool '{tool_name}' denied by permission policy",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(denied, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": tool_name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": json.dumps(denied, ensure_ascii=False),
+                            "is_error": True,
+                        }
+                    )
+                    continue
+                if permission_mode == "ask":
+                    approval_needed = {
+                        "error": f"Tool '{tool_name}' requires approval in quick mode",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": tool_name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": json.dumps(approval_needed, ensure_ascii=False),
+                            "is_error": True,
+                        }
+                    )
+                    continue
                 try:
                     result = await execute_mcp_tool(
                         str(tool_name),
                         args,
                         allowed_server_labels=allowed_server_labels,
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        session_id=session_id,
                     )
                     preview = json.dumps(result, ensure_ascii=False)[:500]
-                    tool_trace.append({"name": tool_name, "arguments": args, "result_preview": preview})
+                    tool_trace.append(
+                        {
+                            "name": tool_name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -320,7 +518,15 @@ async def run_anthropic_tool_loop(
                     )
                 except Exception as e:
                     logger.warning(f"MCP tool call failed ({tool_name}): {e}")
-                    tool_trace.append({"name": tool_name, "arguments": args, "result_preview": f"ERROR: {e}"})
+                    tool_trace.append(
+                        {
+                            "name": tool_name,
+                            "arguments": args,
+                            "result_preview": f"ERROR: {e}",
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -396,6 +602,10 @@ async def run_gemini_tool_loop(
     temperature: float,
     allowed_server_labels: Optional[List[str]] = None,
     max_rounds: int = 6,
+    permission_checker: Optional[ToolPermissionChecker] = None,
+    tenant_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """
     Non-streaming tool loop for Google GenAI (Gemini) function calling.
@@ -451,14 +661,80 @@ async def run_gemini_tool_loop(
             args = getattr(fc, "args", None) or {}
             call_id = getattr(fc, "id", None)
             safe_args = args if isinstance(args, dict) else {}
+            permission_mode = await _resolve_mcp_permission(
+                name,
+                safe_args,
+                permission_checker,
+            )
+            if permission_mode == "deny":
+                denied = {
+                    "error": f"Tool '{name}' denied by permission policy",
+                    "permission_mode": permission_mode,
+                }
+                preview = json.dumps(denied, ensure_ascii=False)[:500]
+                tool_trace.append(
+                    {
+                        "name": name,
+                        "arguments": safe_args,
+                        "result_preview": preview,
+                        "permission_mode": permission_mode,
+                        "blocked": True,
+                    }
+                )
+                response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response=denied,
+                        )
+                    )
+                )
+                continue
+            if permission_mode == "ask":
+                approval_needed = {
+                    "error": f"Tool '{name}' requires approval in quick mode",
+                    "permission_mode": permission_mode,
+                }
+                preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                tool_trace.append(
+                    {
+                        "name": name,
+                        "arguments": safe_args,
+                        "result_preview": preview,
+                        "permission_mode": permission_mode,
+                        "blocked": True,
+                    }
+                )
+                response_parts.append(
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id=call_id,
+                            name=name,
+                            response=approval_needed,
+                        )
+                    )
+                )
+                continue
             try:
                 result = await execute_mcp_tool(
                     name,
                     safe_args,
                     allowed_server_labels=allowed_server_labels,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
                 )
                 preview = json.dumps(result, ensure_ascii=False)[:500]
-                tool_trace.append({"name": name, "arguments": safe_args, "result_preview": preview})
+                tool_trace.append(
+                    {
+                        "name": name,
+                        "arguments": safe_args,
+                        "result_preview": preview,
+                        "permission_mode": permission_mode,
+                        "blocked": False,
+                    }
+                )
                 response_parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(
@@ -470,7 +746,15 @@ async def run_gemini_tool_loop(
                 )
             except Exception as e:
                 logger.warning(f"MCP tool call failed ({name}): {e}")
-                tool_trace.append({"name": name, "arguments": safe_args, "result_preview": f"ERROR: {e}"})
+                tool_trace.append(
+                    {
+                        "name": name,
+                        "arguments": safe_args,
+                        "result_preview": f"ERROR: {e}",
+                        "permission_mode": permission_mode,
+                        "blocked": False,
+                    }
+                )
                 response_parts.append(
                     types.Part(
                         function_response=types.FunctionResponse(

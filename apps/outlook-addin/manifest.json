@@ -1,0 +1,105 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/office/unified-manifest/1.0/schema.json",
+  "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+  "version": "1.0.0",
+  "name": {
+    "short": "Vorbium",
+    "full": "Vorbium - IA Juridica para Outlook"
+  },
+  "description": {
+    "short": "Assistente juridico com IA para analise de e-mails.",
+    "full": "Analise de e-mails juridicos, extracao de prazos, classificacao automatica e pesquisa no corpus — direto do Outlook."
+  },
+  "developer": {
+    "name": "Vorbium",
+    "websiteUrl": "https://vorbium.com.br",
+    "privacyUrl": "https://vorbium.com.br/privacidade",
+    "termsOfUseUrl": "https://vorbium.com.br/termos"
+  },
+  "icons": {
+    "outline": "assets/outline.png",
+    "color": "assets/color.png"
+  },
+  "accentColor": "#4F46E5",
+  "localizationInfo": {
+    "defaultLanguageTag": "pt-BR"
+  },
+  "authorization": {
+    "permissions": {
+      "resourceSpecific": []
+    }
+  },
+  "extensions": [
+    {
+      "requirements": {
+        "capabilities": [
+          {
+            "name": "Mailbox",
+            "minVersion": "1.5"
+          }
+        ]
+      },
+      "ribbons": [
+        {
+          "contexts": ["mailRead"],
+          "tabs": [
+            {
+              "builtInTabId": "TabDefault",
+              "groups": [
+                {
+                  "id": "VorbiumGroup",
+                  "label": "Vorbium",
+                  "controls": [
+                    {
+                      "id": "AnalyzeButton",
+                      "type": "button",
+                      "label": "Analisar E-mail",
+                      "icons": [
+                        { "size": 16, "url": "assets/icon-16.png" },
+                        { "size": 32, "url": "assets/icon-32.png" },
+                        { "size": 80, "url": "assets/icon-80.png" }
+                      ],
+                      "supertip": {
+                        "title": "Analisar E-mail",
+                        "description": "Analisar e-mail com IA: sumarizar, classificar e extrair prazos."
+                      },
+                      "actionId": "showTaskpane"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "runtimes": [
+        {
+          "requirements": {
+            "capabilities": [
+              {
+                "name": "Mailbox",
+                "minVersion": "1.5"
+              }
+            ]
+          },
+          "id": "TaskPaneRuntime",
+          "type": "general",
+          "code": {
+            "page": "https://localhost:3200/index.html"
+          },
+          "lifetime": "short",
+          "actions": [
+            {
+              "id": "showTaskpane",
+              "type": "openPage"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "webApplicationInfo": {
+    "id": "c256c4ab-8325-442b-bd9c-36c112e14eb7",
+    "resource": "api://c256c4ab-8325-442b-bd9c-36c112e14eb7"
+  }
+}

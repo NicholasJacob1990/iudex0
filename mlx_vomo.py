@@ -6898,12 +6898,15 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         return transcript_result
 
-    def _transcribe_with_segments_chunked(self, audio_path: str, *, beam_size: Optional[int] = None) -> dict:
+    def _transcribe_with_segments_chunked(self, audio_path: str, *, beam_size: Optional[int] = None, extra_terms: Optional[str] = None) -> dict:
         """
         v2.33: Transcreve áudio longo em chunks com suporte a segmentos e diarização.
 
         Divide o áudio em chunks menores, transcreve cada um, ajusta timestamps,
         e opcionalmente aplica diarização por chunk para evitar estouro de memória.
+
+        Args:
+            extra_terms: Termos adicionais de área/keyterms para initial_prompt (passado por request, sem estado global).
         """
         import gc
 
@@ -6922,7 +6925,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             return {"text": "", "segments": [], "words": [], "diarization": []}
 
         # Preparar kwargs do Whisper
-        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1), extra_terms=extra_terms) or ""
         whisper_lang = self._resolve_whisper_language()
         mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
@@ -7150,7 +7153,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
                 except Exception:
                     pass
 
-    def transcribe(self, audio_path, *, beam_size: Optional[int] = None):
+    def transcribe(self, audio_path, *, beam_size: Optional[int] = None, extra_terms: Optional[str] = None):
         """
         MLX-Whisper OTIMIZADO com GPU acelerado + Diarização
 
@@ -7159,13 +7162,16 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         - Batched inference (múltiplos chunks GPU)
         - condition_on_previous_text (contexto melhorado)
         - Hallucination suppression (evita texto inventado)
+
+        Args:
+            extra_terms: Termos adicionais de área/keyterms para initial_prompt (passado por request, sem estado global).
         """
         print(f"{Fore.GREEN}🎙️  Iniciando transcrição OTIMIZADA (MLX GPU)...")
         start_time = time.time()
-        
+
         # Cache de transcrição (separa diarização ON/OFF + hash de parâmetros)
         # Importante: incluir parâmetros que mudam o output (ex.: initial_prompt).
-        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1), extra_terms=extra_terms) or ""
         prompt_hash = hashlib.sha256(initial_prompt.encode()).hexdigest()[:8] if initial_prompt else "noprompt"
         clean_enabled = _env_truthy("VOMO_FILTER_ASR_HALLUCINATIONS", default=True)
         params_str = f"{self.model_name}_{self._diarization_enabled}_{self._condition_on_previous}_{prompt_hash}_clean{int(bool(clean_enabled))}"
@@ -7471,11 +7477,14 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         
         return transcript_result
     
-    def transcribe_with_segments(self, audio_path, *, beam_size: Optional[int] = None):
+    def transcribe_with_segments(self, audio_path, *, beam_size: Optional[int] = None, extra_terms: Optional[str] = None):
         """
         Transcreve e retorna segmentos com timestamps e speaker_label quando diarização estiver disponível.
 
         v2.33: Suporte a chunking para áudios longos (> AUDIO_MAX_DURATION_SECONDS).
+
+        Args:
+            extra_terms: Termos adicionais de área/keyterms para initial_prompt (passado por request, sem estado global).
         """
         if not mlx_whisper:
             raise ImportError("mlx_whisper não instalado.")
@@ -7489,11 +7498,11 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         if audio_duration > max_duration:
             print(f"{Fore.YELLOW}   ⚠️ Áudio longo detectado ({audio_duration/3600:.1f}h) - ATIVANDO CHUNKING{Style.RESET_ALL}")
-            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size)
+            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size, extra_terms=extra_terms)
         elif audio_duration == 0:
             print(f"{Fore.RED}   ❌ AVISO: Duração não detectada! Arquivo: {audio_path}{Style.RESET_ALL}")
 
-        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1)) or ""
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=bool(beam_size and beam_size > 1), extra_terms=extra_terms) or ""
         whisper_lang = self._resolve_whisper_language()
         mlx_kwargs = dict(
             path_or_hf_repo=f"mlx-community/whisper-{self.model_name}",
@@ -7600,11 +7609,14 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             "diarization": diarization_segments
         }
 
-    def transcribe_beam_with_segments(self, audio_path):
+    def transcribe_beam_with_segments(self, audio_path, *, extra_terms: Optional[str] = None):
         """
         Transcrição Beam Search com retorno de segmentos.
 
         v2.33/v2.34: Suporte a chunking para áudios longos.
+
+        Args:
+            extra_terms: Termos adicionais de área/keyterms para initial_prompt (passado por request, sem estado global).
         """
         beam_size = self._get_asr_beam_size()
 
@@ -7617,17 +7629,17 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         if audio_duration > max_duration:
             print(f"{Fore.YELLOW}   ⚠️ Áudio longo detectado ({audio_duration/3600:.1f}h) - ATIVANDO CHUNKING{Style.RESET_ALL}")
-            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size)
+            return self._transcribe_with_segments_chunked(audio_path, beam_size=beam_size, extra_terms=extra_terms)
         elif audio_duration == 0:
             print(f"{Fore.RED}   ❌ AVISO: Duração não detectada! Arquivo: {audio_path}{Style.RESET_ALL}")
 
         if not FASTER_WHISPER_AVAILABLE:
             print(f"{Fore.YELLOW}⚠️ faster-whisper não instalado. Tentando Beam Search via MLX ({beam_size})...")
-            return self.transcribe_with_segments(audio_path, beam_size=beam_size)
+            return self.transcribe_with_segments(audio_path, beam_size=beam_size, extra_terms=extra_terms)
 
         model_size = "large-v3-turbo"
         model = WhisperModel(model_size, device="cpu", compute_type="int8")
-        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=True) or ""
+        initial_prompt = self._get_whisper_initial_prompt_for_asr(high_accuracy=True, extra_terms=extra_terms) or ""
         whisper_lang = self._resolve_whisper_language()
         segments, info = model.transcribe(
             audio_path,
@@ -8036,7 +8048,7 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
             value = 10
         return value
 
-    def _get_whisper_initial_prompt_for_asr(self, *, high_accuracy: bool) -> Optional[str]:
+    def _get_whisper_initial_prompt_for_asr(self, *, high_accuracy: bool, extra_terms: Optional[str] = None) -> Optional[str]:
         """
         Decide o `initial_prompt` do Whisper para a etapa de ASR.
 
@@ -8052,9 +8064,14 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         - Se VOMO_WHISPER_USE_MODE_PROMPT não estiver definido:
           - high_accuracy=True -> usa prompt por modo
           - high_accuracy=False -> não usa prompt (default)
+        - extra_terms: termos adicionais de área/keyterms (passado explicitamente, sem estado global).
+          Se fornecido, concatena ao prompt base. Se não há prompt base, usa extra_terms sozinho.
         """
         explicit = (os.getenv("VOMO_WHISPER_INITIAL_PROMPT") or "").strip()
         if explicit:
+            # Concatenar extra_terms se houver
+            if extra_terms:
+                return f"{explicit} {extra_terms}"
             return explicit
 
         # Se o usuário não definiu explicitamente, decidimos pelo modo:
@@ -8064,8 +8081,9 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
         if use_mode_prompt is None:
             use_mode_prompt = bool(high_accuracy)
 
+        # Se temos extra_terms mas sem prompt de modo, retornar só os termos
         if not use_mode_prompt:
-            return None
+            return extra_terms if extra_terms else None
 
         mode_key = getattr(self, "_current_mode", "FIDELIDADE")
         if isinstance(mode_key, str):
@@ -8075,11 +8093,15 @@ Se você receber um CONTEXTO de referência (entre delimitadores ━━━):
 
         lang = getattr(self, "_current_language", "pt") or "pt"
         # Tenta prompt i18n primeiro, depois fallback para pt
+        base_prompt = None
         if lang != "pt" and lang != "auto":
-            i18n_prompt = self.INITIAL_PROMPTS_I18N.get((mode_key, lang))
-            if i18n_prompt:
-                return i18n_prompt
-        return self.INITIAL_PROMPTS.get(mode_key, self.INITIAL_PROMPTS["FIDELIDADE"])
+            base_prompt = self.INITIAL_PROMPTS_I18N.get((mode_key, lang))
+        if not base_prompt:
+            base_prompt = self.INITIAL_PROMPTS.get(mode_key, self.INITIAL_PROMPTS["FIDELIDADE"])
+
+        if extra_terms and base_prompt:
+            return f"{base_prompt} {extra_terms}"
+        return base_prompt
 
     def _get_whisper_initial_prompt(self) -> Optional[str]:
         """
@@ -10770,6 +10792,7 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         diarization: Optional[bool] = None,
         diarization_strict: Optional[bool] = None,
         language: Optional[str] = None,
+        extra_terms: Optional[str] = None,
     ) -> dict:
         """
         Transcrição com política de diarização por modo.
@@ -10795,8 +10818,8 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
             if self._local_diarization_available():
                 # Diarização local via pyannote
                 if high_accuracy:
-                    return self.transcribe_beam_with_segments(audio_path)
-                return self.transcribe_with_segments(audio_path)
+                    return self.transcribe_beam_with_segments(audio_path, extra_terms=extra_terms)
+                return self.transcribe_with_segments(audio_path, extra_terms=extra_terms)
             else:
                 # Diarização disponível externamente (RunPod/AAI) — transcrever sem diarização local,
                 # o chamador (transcription_service) fará a diarização via provider externo
@@ -10805,9 +10828,9 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
                 try:
                     self._diarization_enabled = False
                     if high_accuracy:
-                        result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size())
+                        result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size(), extra_terms=extra_terms)
                     else:
-                        result = self.transcribe_with_segments(audio_path)
+                        result = self.transcribe_with_segments(audio_path, extra_terms=extra_terms)
                     result["_needs_external_diarization"] = True
                     return result
                 finally:
@@ -10819,9 +10842,9 @@ Retorne APENAS o texto Markdown corrigido, sem explicações adicionais."""
         try:
             self._diarization_enabled = False  # Forçar desabilitado para não rodar pyannote
             if high_accuracy:
-                result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size())
+                result = self.transcribe_with_segments(audio_path, beam_size=self._get_asr_beam_size(), extra_terms=extra_terms)
             else:
-                result = self.transcribe_with_segments(audio_path)
+                result = self.transcribe_with_segments(audio_path, extra_terms=extra_terms)
             return result
         finally:
             self._diarization_enabled = original_diarization_enabled

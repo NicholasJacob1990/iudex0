@@ -2,7 +2,7 @@
 Embedding Router — Roteamento multi-embedding por jurisdição/idioma/tipo.
 
 Roteia queries e documentos para o modelo de embedding correto:
-  - Direito BR → JurisBERT (self-hosted) + voyage-multilingual-2 (fallback)
+  - Direito BR → Voyage 4 large (1024d) — padrão desde 2026-02
   - Direito US/UK/INT → Kanon 2 Embedder (Isaacus API)
   - Direito EU → Voyage law-2 com Noxtua (ou Kanon 2 fallback)
   - Conteúdo geral → OpenAI text-embedding-3-large
@@ -14,7 +14,8 @@ Arquitetura de 3 camadas:
   Camada 3: Fallback generalista (OpenAI)
 
 Collections Qdrant separadas por jurisdição:
-  - legal_br: JurisBERT (768d)
+  - legal_br_v4: Voyage 4 large (1024d) — padrão
+  - legal_br: JurisBERT (768d) — legado, consultado via include_legacy
   - legal_international: Kanon 2 (1024d)
   - legal_eu: Voyage law-2 (1024d)
   - general: OpenAI text-embedding-3-large (3072d)
@@ -85,7 +86,9 @@ class EmbeddingProviderName(str, Enum):
     JURISBERT = "jurisbert"
     KANON2 = "kanon2"
     VOYAGE_LAW = "voyage_law"
+    VOYAGE_CONTEXT = "voyage_context"
     VOYAGE_NOXTUA = "voyage_noxtua"
+    VOYAGE_V4 = "voyage_v4"
     OPENAI = "openai"
 
 
@@ -224,7 +227,20 @@ EMBEDDING_COLLECTIONS: Dict[str, Dict[str, Any]] = {
     "legal_br": {
         "provider": EmbeddingProviderName.JURISBERT,
         "dimensions": 768,
-        "description": "Direito brasileiro — JurisBERT",
+        "description": "Direito brasileiro — JurisBERT (legado)",
+    },
+    "legal_br_v4": {
+        "provider": EmbeddingProviderName.VOYAGE_V4,
+        "dimensions": 1024,
+        "description": "Direito brasileiro — Voyage 4 large (1024d, padrão)",
+    },
+    # Optional: Voyage Context 3 collection (contextualized chunk embeddings).
+    # Keep this as a separate collection to allow gradual migration without breaking
+    # existing 768d JurisBERT indexes.
+    "legal_br_ctx3": {
+        "provider": EmbeddingProviderName.VOYAGE_CONTEXT,
+        "dimensions": 1024,
+        "description": "Direito brasileiro — Voyage context-3 (contextualized chunks)",
     },
     "legal_international": {
         "provider": EmbeddingProviderName.KANON2,
@@ -236,6 +252,11 @@ EMBEDDING_COLLECTIONS: Dict[str, Dict[str, Any]] = {
         "dimensions": 1024,
         "description": "Direito europeu — Voyage law-2",
     },
+    "legal_eu_ctx3": {
+        "provider": EmbeddingProviderName.VOYAGE_CONTEXT,
+        "dimensions": 1024,
+        "description": "Direito europeu — Voyage context-3 (contextualized chunks)",
+    },
     "general": {
         "provider": EmbeddingProviderName.OPENAI,
         "dimensions": 3072,
@@ -245,7 +266,7 @@ EMBEDDING_COLLECTIONS: Dict[str, Dict[str, Any]] = {
 
 # Mapeamento jurisdição -> collection
 JURISDICTION_TO_COLLECTION: Dict[Jurisdiction, str] = {
-    Jurisdiction.BR: "legal_br",
+    Jurisdiction.BR: "legal_br_v4",
     Jurisdiction.US: "legal_international",
     Jurisdiction.UK: "legal_international",
     Jurisdiction.INT: "legal_international",
@@ -255,13 +276,50 @@ JURISDICTION_TO_COLLECTION: Dict[Jurisdiction, str] = {
 
 # Mapeamento jurisdição -> provider
 JURISDICTION_TO_PROVIDER: Dict[Jurisdiction, EmbeddingProviderName] = {
-    Jurisdiction.BR: EmbeddingProviderName.JURISBERT,
+    Jurisdiction.BR: EmbeddingProviderName.VOYAGE_V4,
     Jurisdiction.US: EmbeddingProviderName.KANON2,
     Jurisdiction.UK: EmbeddingProviderName.KANON2,
     Jurisdiction.INT: EmbeddingProviderName.KANON2,
     Jurisdiction.EU: EmbeddingProviderName.VOYAGE_LAW,
     Jurisdiction.GENERAL: EmbeddingProviderName.OPENAI,
 }
+
+
+def _env_provider(value: str) -> Optional[EmbeddingProviderName]:
+    raw = (value or "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return EmbeddingProviderName(raw)
+    except Exception:
+        return None
+
+
+def _routing_overrides(
+    jurisdiction: Jurisdiction,
+    *,
+    default_provider: EmbeddingProviderName,
+    default_collection: str,
+) -> Tuple[EmbeddingProviderName, str]:
+    """
+    Optional env-driven overrides for routing.
+
+    Supports:
+      - RAG_ROUTER_BR_PROVIDER / RAG_ROUTER_BR_COLLECTION
+      - RAG_ROUTER_EU_PROVIDER / RAG_ROUTER_EU_COLLECTION
+      - ... (US/UK/INT/GENERAL)
+
+    Example to switch BR to Voyage Context 3 without code changes:
+      RAG_ROUTER_BR_PROVIDER=voyage_context
+      RAG_ROUTER_BR_COLLECTION=legal_br_ctx3
+    """
+    j = str(jurisdiction.value or "").strip().upper()
+    prov_env = os.getenv(f"RAG_ROUTER_{j}_PROVIDER", "")
+    coll_env = os.getenv(f"RAG_ROUTER_{j}_COLLECTION", "")
+
+    provider = _env_provider(prov_env) or default_provider
+    collection = (coll_env or "").strip() or default_collection
+    return provider, collection
 
 # Threshold para pular RAG (enviar direto ao LLM)
 # ~2000 páginas * ~500 palavras/página * ~1.3 tokens/palavra = ~1.3M tokens
@@ -270,6 +328,9 @@ SKIP_RAG_CHAR_THRESHOLD = int(os.getenv("SMART_SKIP_RAG_CHARS", "400000"))
 
 # ---------------------------------------------------------------------------
 # Collections legadas — todas usam OpenAI text-embedding-3-large (3072d)
+# DEPRECATED: Migrar para collections novas (legal_br_v4 etc.) via
+#   EmbeddingRouter.migrate_collection()
+# Para desativar buscas legacy, passe include_legacy=False em search_with_routing()
 # ---------------------------------------------------------------------------
 
 LEGACY_COLLECTIONS: Dict[str, List[str]] = {
@@ -282,6 +343,9 @@ LEGACY_COLLECTIONS: Dict[str, List[str]] = {
 }
 
 LEGACY_EMBEDDING_DIMENSIONS = 3072  # OpenAI text-embedding-3-large
+
+# Track whether we already emitted legacy deprecation warning (log only once)
+_legacy_warning_emitted = False
 
 
 def reciprocal_rank_fusion(
@@ -474,6 +538,12 @@ class EmbeddingRouter:
         # Lazy-loaded providers
         self._providers: Dict[EmbeddingProviderName, Any] = {}
         self._providers_lock = threading.Lock()
+
+        # Usage counters for monitoring
+        self._usage_lock = threading.Lock()
+        self._usage_counts: Dict[str, int] = {}  # provider -> count
+        self._usage_by_jurisdiction: Dict[str, int] = {}  # jurisdiction -> count
+        self._usage_by_method: Dict[str, int] = {}  # method -> count
 
         # QdrantClient compartilhado (lazy init) — evita criar conexão a cada busca
         self._qdrant_client: Optional[Any] = None
@@ -824,6 +894,11 @@ class EmbeddingRouter:
             collection = JURISDICTION_TO_COLLECTION.get(
                 jurisdiction, "general"
             )
+            provider, collection = _routing_overrides(
+                jurisdiction,
+                default_provider=provider,
+                default_collection=collection,
+            )
 
             return EmbeddingRoutingDecision(
                 jurisdiction=jurisdiction,
@@ -839,6 +914,31 @@ class EmbeddingRouter:
         except Exception as e:
             logger.warning("Falha ao parsear resposta LLM: %s", e)
             return None
+
+    # ------------------------------------------------------------------
+    # Usage tracking
+    # ------------------------------------------------------------------
+
+    def _record_usage(self, decision: EmbeddingRoutingDecision) -> None:
+        """Record provider usage for monitoring."""
+        with self._usage_lock:
+            prov = decision.provider.value
+            self._usage_counts[prov] = self._usage_counts.get(prov, 0) + 1
+            juris = decision.jurisdiction.value
+            self._usage_by_jurisdiction[juris] = self._usage_by_jurisdiction.get(juris, 0) + 1
+            method = decision.method
+            self._usage_by_method[method] = self._usage_by_method.get(method, 0) + 1
+
+    def get_usage_stats(self) -> Dict[str, Any]:
+        """Return provider usage statistics for monitoring."""
+        with self._usage_lock:
+            total = sum(self._usage_counts.values())
+            return {
+                "total_routes": total,
+                "by_provider": dict(self._usage_counts),
+                "by_jurisdiction": dict(self._usage_by_jurisdiction),
+                "by_method": dict(self._usage_by_method),
+            }
 
     # ------------------------------------------------------------------
     # Método principal: route
@@ -872,7 +972,12 @@ class EmbeddingRouter:
                 jurisdiction = Jurisdiction(hint_jurisdiction)
                 provider = JURISDICTION_TO_PROVIDER[jurisdiction]
                 collection = JURISDICTION_TO_COLLECTION[jurisdiction]
-                dims = EMBEDDING_COLLECTIONS[collection]["dimensions"]
+                provider, collection = _routing_overrides(
+                    jurisdiction,
+                    default_provider=provider,
+                    default_collection=collection,
+                )
+                dims = EMBEDDING_COLLECTIONS.get(collection, {"dimensions": 3072})["dimensions"]
 
                 decision = EmbeddingRoutingDecision(
                     jurisdiction=jurisdiction,
@@ -895,6 +1000,7 @@ class EmbeddingRouter:
                     elapsed,
                 )
 
+                self._record_usage(decision)
                 return EmbeddingRoute(
                     provider=provider,
                     collection=collection,
@@ -926,7 +1032,12 @@ class EmbeddingRouter:
                 jurisdiction, EmbeddingProviderName.OPENAI
             )
             collection = JURISDICTION_TO_COLLECTION.get(jurisdiction, "general")
-            dims = EMBEDDING_COLLECTIONS[collection]["dimensions"]
+            provider, collection = _routing_overrides(
+                jurisdiction,
+                default_provider=provider,
+                default_collection=collection,
+            )
+            dims = EMBEDDING_COLLECTIONS.get(collection, {"dimensions": 3072})["dimensions"]
 
             decision = EmbeddingRoutingDecision(
                 jurisdiction=jurisdiction,
@@ -957,6 +1068,7 @@ class EmbeddingRouter:
                 elapsed,
             )
 
+            self._record_usage(decision)
             return EmbeddingRoute(
                 provider=provider,
                 collection=collection,
@@ -993,6 +1105,7 @@ class EmbeddingRouter:
                 elapsed,
             )
 
+            self._record_usage(llm_decision)
             return EmbeddingRoute(
                 provider=llm_decision.provider,
                 collection=collection,
@@ -1013,7 +1126,12 @@ class EmbeddingRouter:
             collection = "general"
             jurisdiction = Jurisdiction.GENERAL
 
-        dims = EMBEDDING_COLLECTIONS[collection]["dimensions"]
+        provider, collection = _routing_overrides(
+            jurisdiction,
+            default_provider=provider,
+            default_collection=collection,
+        )
+        dims = EMBEDDING_COLLECTIONS.get(collection, {"dimensions": 3072})["dimensions"]
 
         decision = EmbeddingRoutingDecision(
             jurisdiction=jurisdiction,
@@ -1041,6 +1159,7 @@ class EmbeddingRouter:
             elapsed,
         )
 
+        self._record_usage(decision)
         return EmbeddingRoute(
             provider=provider,
             collection=collection,
@@ -1106,9 +1225,18 @@ class EmbeddingRouter:
                 vectors = await provider.embed_batch(texts)
             elif route.decision.provider == EmbeddingProviderName.KANON2:
                 vectors = await provider.embed_batch(texts, task="retrieval/document")
+            elif route.decision.provider == EmbeddingProviderName.VOYAGE_V4:
+                vectors = await provider.embed_batch(
+                    texts, model="voyage-4-large", input_type="document"
+                )
             elif route.decision.provider == EmbeddingProviderName.VOYAGE_LAW:
                 vectors = await provider.embed_batch(
                     texts, model="voyage-law-2", input_type="document"
+                )
+            elif route.decision.provider == EmbeddingProviderName.VOYAGE_CONTEXT:
+                model = os.getenv("VOYAGE_CONTEXT_MODEL", "voyage-context-3")
+                vectors = await provider.embed_batch(
+                    texts, model=model, input_type="document"
                 )
             else:
                 # OpenAI via EmbeddingsService existente
@@ -1192,9 +1320,18 @@ class EmbeddingRouter:
                 query_vector = await provider.embed_query(
                     query, task="retrieval/query"
                 )
+            elif route.decision.provider == EmbeddingProviderName.VOYAGE_V4:
+                query_vector = await provider.embed_query(
+                    query, model="voyage-4-large", input_type="query"
+                )
             elif route.decision.provider == EmbeddingProviderName.VOYAGE_LAW:
                 query_vector = await provider.embed_query(
                     query, model="voyage-law-2", input_type="query"
+                )
+            elif route.decision.provider == EmbeddingProviderName.VOYAGE_CONTEXT:
+                model = os.getenv("VOYAGE_CONTEXT_QUERY_MODEL", os.getenv("VOYAGE_CONTEXT_MODEL", "voyage-context-3"))
+                query_vector = await provider.embed_query(
+                    query, model=model, input_type="query"
                 )
             else:
                 from app.services.rag.core.embeddings import get_embeddings_service
@@ -1288,7 +1425,9 @@ class EmbeddingRouter:
                 provider = get_kanon_provider()
 
             elif name in (
+                EmbeddingProviderName.VOYAGE_V4,
                 EmbeddingProviderName.VOYAGE_LAW,
+                EmbeddingProviderName.VOYAGE_CONTEXT,
                 EmbeddingProviderName.VOYAGE_NOXTUA,
             ):
                 from app.services.rag.voyage_embeddings import (
@@ -1361,11 +1500,38 @@ class EmbeddingRouter:
                     logger.error("Collection 'general' também não existe")
                     return []
 
-            results = client.search(
-                collection_name=collection,
-                query_vector=query_vector,
-                limit=top_k,
-            )
+            try:
+                from app.services.rag.config import get_rag_config as _get_rag_cfg
+
+                _rcfg = _get_rag_cfg()
+                _sparse_enabled = bool(getattr(_rcfg, "qdrant_sparse_enabled", False))
+                _dense_name = str(getattr(_rcfg, "qdrant_dense_vector_name", "dense") or "dense")
+            except Exception:
+                _sparse_enabled = False
+                _dense_name = "dense"
+
+            # Hybrid collections use named dense vectors; try to pass a vector name if supported.
+            # Keep compatibility with older qdrant-client versions.
+            if _sparse_enabled:
+                try:
+                    results = client.search(
+                        collection_name=collection,
+                        query_vector=query_vector,
+                        vector_name=_dense_name,
+                        limit=top_k,
+                    )
+                except TypeError:
+                    results = client.search(
+                        collection_name=collection,
+                        query_vector=query_vector,
+                        limit=top_k,
+                    )
+            else:
+                results = client.search(
+                    collection_name=collection,
+                    query_vector=query_vector,
+                    limit=top_k,
+                )
 
             return [
                 {
@@ -1403,10 +1569,21 @@ class EmbeddingRouter:
         Returns:
             Lista combinada de resultados de todas as collections legadas.
         """
+        global _legacy_warning_emitted
         juris_key = jurisdiction.value
         legacy_colls = LEGACY_COLLECTIONS.get(juris_key, [])
         if not legacy_colls:
             return []
+
+        if not _legacy_warning_emitted:
+            logger.warning(
+                "DEPRECATED: Searching legacy collections %s (OpenAI 3072d). "
+                "Migrate to new collections (legal_br_v4 etc.) via "
+                "EmbeddingRouter.migrate_collection(). "
+                "Set include_legacy=False to disable.",
+                legacy_colls,
+            )
+            _legacy_warning_emitted = True
 
         # Gerar embedding OpenAI para as collections legadas
         try:
@@ -1487,6 +1664,11 @@ class EmbeddingRouter:
         target_provider_name = JURISDICTION_TO_PROVIDER.get(
             target_jurisdiction, EmbeddingProviderName.OPENAI
         )
+        target_provider_name, target_collection = _routing_overrides(
+            target_jurisdiction,
+            default_provider=target_provider_name,
+            default_collection=target_collection,
+        )
 
         logger.info(
             "migrate_collection: %s -> %s (provider=%s, batch=%d, limit=%s)",
@@ -1552,6 +1734,35 @@ class EmbeddingRouter:
 
                 if texts:
                     try:
+                        # Optional: contextual embeddings (prefix metadata context before embedding)
+                        contextual_enabled = bool(os.getenv("RAG_CONTEXTUAL_EMBEDDINGS_ENABLED", "").strip().lower() in ("1", "true", "yes", "on"))
+                        max_prefix = int(os.getenv("RAG_CONTEXTUAL_EMBEDDINGS_MAX_PREFIX_CHARS", "240") or "240")
+                        # Avoid double-contextualization when using voyage-context-3.
+                        if target_provider_name == EmbeddingProviderName.VOYAGE_CONTEXT:
+                            contextual_enabled = False
+                        if contextual_enabled:
+                            try:
+                                from app.services.rag.core.contextual_embeddings import build_embedding_input
+                            except Exception:
+                                build_embedding_input = None  # type: ignore
+                            if build_embedding_input is not None:
+                                contextual_texts = []
+                                contextual_payload_extras = []
+                                for t, pl in zip(texts, payloads):
+                                    emb_in, info = build_embedding_input(
+                                        t,
+                                        {**(pl or {}), "jurisdiction": target_jurisdiction.value},
+                                        enabled=True,
+                                        max_prefix_chars=max_prefix,
+                                    )
+                                    contextual_texts.append(emb_in)
+                                    contextual_payload_extras.append(info.to_payload_fields())
+                                texts = contextual_texts
+                            else:
+                                contextual_payload_extras = [{"_embedding_variant": "raw"} for _ in texts]
+                        else:
+                            contextual_payload_extras = [{"_embedding_variant": "raw"} for _ in texts]
+
                         # Gerar novos embeddings com o provider correto
                         embed_result = await self.embed_with_routing(
                             texts,
@@ -1562,6 +1773,15 @@ class EmbeddingRouter:
 
                         # Inserir na collection nova
                         from qdrant_client.models import PointStruct
+                        try:
+                            from app.services.rag.config import get_rag_config as _get_rag_cfg
+
+                            _rcfg = _get_rag_cfg()
+                            _sparse_enabled = bool(getattr(_rcfg, "qdrant_sparse_enabled", False))
+                            _dense_name = str(getattr(_rcfg, "qdrant_dense_vector_name", "dense") or "dense")
+                        except Exception:
+                            _sparse_enabled = False
+                            _dense_name = "dense"
 
                         new_points = []
                         for i, (pid, payload, vector) in enumerate(
@@ -1571,14 +1791,16 @@ class EmbeddingRouter:
                             enriched_payload = dict(payload)
                             enriched_payload["_migrated_from"] = source_collection
                             enriched_payload["_migration_timestamp"] = time.time()
+                            try:
+                                enriched_payload.update(contextual_payload_extras[i])
+                            except Exception:
+                                pass
 
-                            new_points.append(
-                                PointStruct(
-                                    id=pid,
-                                    vector=vector,
-                                    payload=enriched_payload,
-                                )
-                            )
+                            vec_any: Any = vector
+                            if _sparse_enabled:
+                                # Hybrid collections use named dense vectors.
+                                vec_any = {_dense_name: vector}
+                            new_points.append(PointStruct(id=pid, vector=vec_any, payload=enriched_payload))
 
                         client.upsert(
                             collection_name=target_collection,

@@ -19,6 +19,11 @@ from app.services.ai.orchestration.router import (
     RoutingDecision,
     OrchestrationContext,
 )
+from app.services.ai.observability.metrics import (
+    get_observability_metrics,
+    reset_observability_metrics,
+)
+from app.services.ai.shared.quotas import TenantQuotaManager
 from app.services.ai.shared.sse_protocol import SSEEvent, SSEEventType
 
 
@@ -145,6 +150,80 @@ class TestDetermineExecutor:
 
         assert decision.executor_type == ExecutorType.LANGGRAPH
 
+    def test_large_document_forces_langgraph_even_with_agent(self, router):
+        """Large documents (>500 pages) force LangGraph routing."""
+        ctx = OrchestrationContext(
+            prompt="texto",
+            job_id="job-1",
+            max_pages=800,
+        )
+        decision = router.determine_executor(["claude-agent"], "chat", context=ctx)
+
+        assert decision.executor_type == ExecutorType.LANGGRAPH
+        assert decision.document_route == "chunked_rag"
+        assert decision.estimated_pages == 800
+        assert decision.primary_models == ["gemini-3-flash"]
+
+    def test_medium_document_keeps_agent_route_with_rag_enhanced_hint(self, router):
+        """Medium documents (<=500 pages) keep normal routing decisions."""
+        ctx = OrchestrationContext(
+            prompt="texto",
+            job_id="job-2",
+            max_pages=320,
+        )
+        decision = router.determine_executor(["claude-agent"], "chat", context=ctx)
+
+        assert decision.executor_type == ExecutorType.CLAUDE_AGENT
+        assert decision.document_route == "rag_enhanced"
+        assert decision.estimated_pages == 320
+
+    def test_huge_document_multi_pass_uses_non_agent_models(self, router):
+        """Very large documents should route to LangGraph multi_pass without agent IDs."""
+        ctx = OrchestrationContext(
+            prompt="texto",
+            job_id="job-3",
+            max_pages=2500,
+        )
+        decision = router.determine_executor(
+            ["claude-agent", "gpt-4o", "gemini-3-flash"],
+            "chat",
+            context=ctx,
+        )
+
+        assert decision.executor_type == ExecutorType.LANGGRAPH
+        assert decision.document_route == "multi_pass"
+        assert "claude-agent" not in decision.primary_models
+        assert "gpt-4o" in decision.primary_models
+        assert "gemini-3-flash" in decision.primary_models
+
+    def test_skill_prefer_workflow_forces_langgraph(self, router):
+        """Matched skills can force workflow path even on agent model selection."""
+        ctx = OrchestrationContext(
+            prompt="texto",
+            job_id="job-skill-workflow",
+            skill_matched=True,
+            skill_prefer_workflow=True,
+            skill_name="document-drafting",
+        )
+        decision = router.determine_executor(["claude-agent"], "chat", context=ctx)
+
+        assert decision.executor_type == ExecutorType.LANGGRAPH
+        assert "prefer_workflow" in decision.reason
+
+    def test_skill_prefer_agent_routes_to_provider_agent(self, router):
+        """Matched skills can route normal models to native provider agent executors."""
+        ctx = OrchestrationContext(
+            prompt="texto",
+            job_id="job-skill-agent",
+            skill_matched=True,
+            skill_prefer_agent=True,
+            skill_name="petition-analysis",
+        )
+        decision = router.determine_executor(["gpt-5.2"], "chat", context=ctx)
+
+        assert decision.executor_type == ExecutorType.OPENAI_AGENT
+        assert decision.primary_models == ["openai-agent"]
+
 
 class TestValidateModelSelection:
     """Tests for validate_model_selection."""
@@ -252,6 +331,142 @@ class TestExecute:
         ]
         assert len(start_events) >= 1
 
+    @pytest.mark.asyncio
+    async def test_execute_records_observability_metrics_on_success(self, router):
+        """execute() records latency/success/cost metrics for successful runs."""
+        reset_observability_metrics()
+
+        async def fake_claude_events(ctx):
+            from app.services.ai.shared.sse_protocol import done_event
+            yield done_event(job_id="test-job", final_text="ok")
+
+        with patch.object(router, "_execute_claude_agent", side_effect=fake_claude_events):
+            events = []
+            async for event in router.execute(
+                prompt="teste",
+                selected_models=["claude-agent"],
+                context={"user_id": "tenant-test", "estimated_cost_usd": 1.25},
+                mode="chat",
+                job_id="test-job",
+            ):
+                events.append(event)
+
+        assert any(e.type == SSEEventType.NODE_COMPLETE for e in events)
+        snapshot = get_observability_metrics().snapshot()
+        assert snapshot["requests"]["total"] == 1
+        assert snapshot["requests"]["success_count"] == 1
+        assert snapshot["requests"]["success_rate"] == 1.0
+        assert snapshot["requests"]["cost_avg_usd"] == pytest.approx(1.25)
+
+    @pytest.mark.asyncio
+    async def test_execute_records_observability_metrics_on_quota_block(self, router):
+        """execute() records a failed request metric when quota blocks execution."""
+        reset_observability_metrics()
+        router.tenant_quotas = TenantQuotaManager(
+            max_requests_per_window=0,
+            max_delegated_tokens_per_window=1000,
+            max_concurrent_subagents=1,
+            window_seconds=60,
+        )
+
+        events = []
+        async for event in router.execute(
+            prompt="teste",
+            selected_models=["claude-agent"],
+            context={"user_id": "tenant-test"},
+            mode="chat",
+            job_id="test-job",
+        ):
+            events.append(event)
+
+        assert any(
+            e.type == SSEEventType.ERROR and e.data.get("error_type") == "quota_exceeded"
+            for e in events
+        )
+        snapshot = get_observability_metrics().snapshot()
+        assert snapshot["requests"]["total"] == 1
+        assert snapshot["requests"]["success_count"] == 0
+        assert snapshot["requests"]["success_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_execute_claude_agent_uses_registry_model_in_config(self, router, monkeypatch):
+        """_execute_claude_agent should inject registry model explicitly into AgentConfig."""
+        from app.services.ai.shared.sse_protocol import done_event
+
+        captured = {}
+
+        class DummyAgentConfig:
+            def __init__(self, **kwargs):
+                self.__dict__.update(kwargs)
+
+        class DummyClaudeExecutor:
+            def __init__(self, config=None):
+                captured["config"] = config
+
+            def load_unified_tools(self, **kwargs):
+                captured["load_unified_tools_kwargs"] = kwargs
+                return None
+
+            async def run(self, **kwargs):
+                yield done_event(job_id="test-job", final_text="ok")
+
+        monkeypatch.setattr(
+            "app.services.ai.model_registry.get_api_model_name",
+            lambda model_id: "claude-opus-4-6" if model_id == "claude-agent" else model_id,
+        )
+        monkeypatch.setattr(
+            "app.services.ai.claude_agent.executor.AgentConfig",
+            DummyAgentConfig,
+        )
+        monkeypatch.setattr(
+            "app.services.ai.claude_agent.executor.ClaudeAgentExecutor",
+            DummyClaudeExecutor,
+        )
+
+        ctx = OrchestrationContext(prompt="teste", job_id="test-job")
+        events = [event async for event in router._execute_claude_agent(ctx)]
+
+        assert any(e.type == SSEEventType.DONE for e in events)
+        assert captured["config"] is not None
+        assert captured["config"].model == "claude-opus-4-6"
+        assert "tool_names" in captured.get("load_unified_tools_kwargs", {})
+
+
+    @pytest.mark.asyncio
+    async def test_execute_claude_agent_tool_allowlist_enables_ask_graph_in_graph_ui(self, router, monkeypatch):
+        """Graph UI extra_instructions should allow ask_graph but keep risk tools disabled by default."""
+        from app.services.ai.shared.sse_protocol import done_event
+
+        captured = {}
+
+        class DummyClaudeExecutor:
+            def __init__(self, config=None):
+                pass
+
+            def load_unified_tools(self, **kwargs):
+                captured["tool_names"] = kwargs.get("tool_names")
+                return None
+
+            async def run(self, **kwargs):
+                yield done_event(job_id="test-job", final_text="ok")
+
+        monkeypatch.setattr(
+            "app.services.ai.claude_agent.executor.ClaudeAgentExecutor",
+            DummyClaudeExecutor,
+        )
+
+        ctx = OrchestrationContext(
+            prompt="mostre comunidades",
+            job_id="test-job",
+            user_id="tenant-test",
+            extra_instructions="MODO GRAFO (UI)",
+        )
+        events = [event async for event in router._execute_claude_agent(ctx)]
+        assert any(e.type == SSEEventType.DONE for e in events)
+        assert isinstance(captured.get("tool_names"), list)
+        assert "ask_graph" in captured["tool_names"]
+        assert "scan_graph_risk" not in captured["tool_names"]
+
 
 # =============================================================================
 # ORCHESTRATION CONTEXT TESTS
@@ -285,3 +500,20 @@ class TestOrchestrationContext:
         assert ctx.temperature == 0.3
         assert ctx.web_search is False
         assert ctx.chat_personality == "juridico"
+
+    def test_from_dict_pages_fields(self):
+        ctx = OrchestrationContext.from_dict(
+            {
+                "target_pages": 120,
+                "min_pages": 80,
+                "max_pages": 200,
+                "estimated_pages": 140,
+                "document_route": "rag_enhanced",
+            }
+        )
+
+        assert ctx.target_pages == 120
+        assert ctx.min_pages == 80
+        assert ctx.max_pages == 200
+        assert ctx.estimated_pages == 140
+        assert ctx.document_route == "rag_enhanced"

@@ -117,8 +117,7 @@ from app.services.context_strategy import decide_context_mode_from_paths, suppor
 from app.utils.validators import InputValidator
 from app.services.rag_policy import resolve_rag_scope
 from app.services.corpus_chat_tool import search_corpus_for_chat, should_search_corpus
-from app.services.document_processor import extract_text_from_pdf_with_ocr
-from app.services.docling_adapter import get_docling_adapter
+from app.services.document_extraction_service import extract_text_from_path
 from app.services.ai.citations import extract_perplexity
 from app.services.ai.citations.base import (
     render_perplexity,
@@ -686,21 +685,12 @@ def _expand_context_file_paths(paths: List[str], max_files: int) -> List[str]:
 
 
 async def _extract_text_for_context_file(path: str) -> str:
-    ext = Path(path).suffix.lower()
-    adapter = get_docling_adapter()
-    result = await adapter.extract(path)
-    text = str(result.text or "")
-
-    ocr_enabled = bool(getattr(settings, "DOCLING_OCR_ENABLED", True)) and bool(settings.ENABLE_OCR)
-    if ext == ".pdf" and (not text or len(text.strip()) < 50) and ocr_enabled:
-        try:
-            ocr_text = await extract_text_from_pdf_with_ocr(path)
-            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
-                return ocr_text
-        except Exception as exc:
-            logger.warning(f"OCR fallback falhou em context_file PDF {path}: {exc}")
-
-    return text
+    extraction = await extract_text_from_path(
+        path,
+        min_pdf_chars=50,
+        allow_pdf_ocr_fallback=True,
+    )
+    return str(extraction.text or "")
 
 
 async def _build_local_rag_context_from_paths(
@@ -753,7 +743,12 @@ async def _build_local_rag_context_from_paths(
                 chunks = index.index_documento(path)
                 remaining -= 1
                 if chunks <= 0 and ext == ".pdf" and settings.ENABLE_OCR:
-                    text = await extract_text_from_pdf_with_ocr(path)
+                    extraction = await extract_text_from_path(
+                        path,
+                        min_pdf_chars=50,
+                        allow_pdf_ocr_fallback=True,
+                    )
+                    text = str(extraction.text or "")
                     if text and text.strip():
                         index.index_text(
                             text,
@@ -917,10 +912,10 @@ async def _resolve_matched_skill_prompt(
     user_id: str,
     user_input: str,
     db: AsyncSession,
-) -> tuple[str, Optional[str]]:
+) -> tuple[str, Optional[str], Dict[str, Any]]:
     """Resolve a skill prompt block for the given user input (best-effort)."""
     if not user_id or not user_input:
-        return "", None
+        return "", None, {}
     try:
         from app.services.ai.skills.matcher import match_user_skill, render_skill_prompt
 
@@ -931,11 +926,20 @@ async def _resolve_matched_skill_prompt(
             include_builtin=True,
         )
         if not match:
-            return "", None
-        return render_skill_prompt(match), match.skill.name
+            return "", None, {}
+        return (
+            render_skill_prompt(match),
+            match.skill.name,
+            {
+                "skill_matched": True,
+                "skill_name": match.skill.name,
+                "skill_prefer_workflow": bool(getattr(match.skill, "prefer_workflow", False)),
+                "skill_prefer_agent": bool(getattr(match.skill, "prefer_agent", True)),
+            },
+        )
     except Exception as e:
         logger.warning(f"Falha ao resolver skill no chat rápido: {e}")
-        return "", None
+        return "", None, {}
 
 
 def _estimate_token_usage(prompt: str, output: str, model_id: str, label: Optional[str] = None) -> dict:
@@ -1559,7 +1563,7 @@ async def send_message(
     clean_content, system_context, mentions_meta = await mention_service.parse_mentions(
         message_in.content, db, current_user.id, sticky_docs=sticky_docs
     )
-    matched_skill_prompt, matched_skill_name = await _resolve_matched_skill_prompt(
+    matched_skill_prompt, matched_skill_name, matched_skill_context = await _resolve_matched_skill_prompt(
         user_id=str(current_user.id),
         user_input=clean_content,
         db=db,
@@ -2175,7 +2179,7 @@ async def send_message_stream(
     clean_content, system_context, mentions_meta = await mention_service.parse_mentions(
         message_in.content, db, current_user.id, sticky_docs=sticky_docs
     )
-    matched_skill_prompt, matched_skill_name = await _resolve_matched_skill_prompt(
+    matched_skill_prompt, matched_skill_name, matched_skill_context = await _resolve_matched_skill_prompt(
         user_id=str(current_user.id),
         user_input=clean_content,
         db=db,
@@ -4693,7 +4697,18 @@ async def send_message_stream(
                             "chat_id": chat_id,
                             "rag_context": bridge_rag_context,
                             "template_structure": template_instruction or "",
-                            "extra_instructions": "",
+                            "extra_instructions": (
+                                "\n\n".join(
+                                    [
+                                        str(getattr(message_in, "thesis", "") or "").strip(),
+                                        (
+                                            f"chat_source={str(chat.context.get('source')).strip()}"
+                                            if isinstance(getattr(chat, "context", None), dict) and chat.context.get("source")
+                                            else ""
+                                        ),
+                                    ]
+                                ).strip()
+                            ),
                             "conversation_history": conversation_history,
                             "chat_personality": chat_personality,
                             "reasoning_level": reasoning_level,
@@ -4701,11 +4716,19 @@ async def send_message_stream(
                             "web_search": bool(web_search),
                             "max_tokens": int(max_tokens),
                             "execution_profile": "quick",
+                            "skill_matched": bool(matched_skill_context.get("skill_matched", False)),
+                            "skill_name": matched_skill_context.get("skill_name"),
+                            "skill_prefer_workflow": bool(matched_skill_context.get("skill_prefer_workflow", False)),
+                            "skill_prefer_agent": bool(matched_skill_context.get("skill_prefer_agent", False)),
                         }
 
                         bridge_text_parts: List[str] = []
                         bridge_final_text = ""
                         bridge_thinking_parts: List[str] = []
+                        bridge_langsmith_run_id: Optional[str] = None
+                        bridge_langsmith_trace_url: Optional[str] = None
+                        bridge_document_route: Optional[str] = None
+                        bridge_estimated_pages: Optional[int] = None
 
                         async for orch_event in router.execute(
                             prompt=clean_content,
@@ -4767,10 +4790,45 @@ async def send_message_stream(
                                     "result_preview": str(ev_data.get("result", ""))[:500],
                                     "turn_id": turn_id,
                                 })
+                            elif ev_type == "node_start":
+                                maybe_route = str(ev_data.get("document_route", "") or "").strip()
+                                if maybe_route:
+                                    bridge_document_route = maybe_route
+                                pages_raw = ev_data.get("estimated_pages")
+                                try:
+                                    pages_val = int(pages_raw) if pages_raw is not None else 0
+                                except (TypeError, ValueError):
+                                    pages_val = 0
+                                if pages_val > 0:
+                                    bridge_estimated_pages = pages_val
+                                yield sse_event({
+                                    "type": "meta",
+                                    "phase": "routing",
+                                    "turn_id": turn_id,
+                                    "request_id": request_id,
+                                    "document_route": bridge_document_route,
+                                    "estimated_pages": bridge_estimated_pages,
+                                    "execution_path": execution_path,
+                                })
                             elif ev_type == "done":
                                 maybe_final = str(ev_data.get("final_text", "") or "")
                                 if maybe_final:
                                     bridge_final_text = maybe_final
+                                maybe_run_id = str(ev_data.get("langsmith_run_id", "") or "").strip()
+                                if maybe_run_id:
+                                    bridge_langsmith_run_id = maybe_run_id
+                                maybe_trace_url = str(ev_data.get("langsmith_trace_url", "") or "").strip()
+                                if maybe_trace_url:
+                                    bridge_langsmith_trace_url = maybe_trace_url
+                                done_meta = ev_data.get("metadata") if isinstance(ev_data.get("metadata"), dict) else {}
+                                if not bridge_langsmith_run_id:
+                                    nested_run_id = str(done_meta.get("langsmith_run_id", "") or "").strip()
+                                    if nested_run_id:
+                                        bridge_langsmith_run_id = nested_run_id
+                                if not bridge_langsmith_trace_url:
+                                    nested_trace_url = str(done_meta.get("langsmith_trace_url", "") or "").strip()
+                                    if nested_trace_url:
+                                        bridge_langsmith_trace_url = nested_trace_url
                             elif ev_type == "error":
                                 raise RuntimeError(str(ev_data.get("error") or "Quick Agent Bridge failed"))
 
@@ -4820,6 +4878,14 @@ async def send_message_stream(
                             bridge_metadata["mentions"] = mentions_meta
                         if bridge_citations:
                             bridge_metadata["citations"] = bridge_citations
+                        if bridge_langsmith_run_id:
+                            bridge_metadata["langsmith_run_id"] = bridge_langsmith_run_id
+                        if bridge_langsmith_trace_url:
+                            bridge_metadata["langsmith_trace_url"] = bridge_langsmith_trace_url
+                        if bridge_document_route:
+                            bridge_metadata["document_route"] = bridge_document_route
+                        if bridge_estimated_pages:
+                            bridge_metadata["estimated_pages"] = bridge_estimated_pages
 
                         history_payload = conversation_history_full + [
                             {"role": "user", "content": message_in.content},
@@ -4863,6 +4929,10 @@ async def send_message_stream(
                             "execution_mode": execution_mode,
                             "execution_path": execution_path,
                             "matched_skill": matched_skill_name,
+                            "langsmith_run_id": bridge_langsmith_run_id,
+                            "langsmith_trace_url": bridge_langsmith_trace_url,
+                            "document_route": bridge_document_route,
+                            "estimated_pages": bridge_estimated_pages,
                         })
                         try:
                             get_observability_metrics().record_fallback("sdk_to_raw", used_fallback=False)
@@ -6241,7 +6311,7 @@ async def send_message_stream(
             await db.commit()
 
             # Activity: Mark thinking as done
-            if show_thinking_step:
+            if thinking_enabled:
                 yield sse_activity_event(
                     turn_id=turn_id,
                     op="done",
@@ -7107,11 +7177,15 @@ async def approve_tool_call(
 ):
     """Approve or deny a pending tool call for an agent executor."""
     from app.services.agent_session_registry import agent_session_registry
+    from app.services.job_manager import job_manager
 
     job_id = body.get("job_id")
     tool_name = body.get("tool")
+    tool_id = body.get("tool_id")
+    approval_token = body.get("approval_token")
     approved = body.get("approved", False)
     remember = body.get("remember", False)
+    scope = body.get("scope") or "session"
 
     if not job_id:
         raise HTTPException(status_code=400, detail="job_id is required")
@@ -7121,8 +7195,52 @@ async def approve_tool_call(
         raise HTTPException(status_code=404, detail="No active agent session for this job")
 
     try:
-        if hasattr(executor, "approve_tool"):
-            await executor.approve_tool(tool_name, approved, remember=remember)
+        # Prefer driving the resume generator here so events get published to JobManager
+        # streams (/jobs/{job_id}/stream) and the UI continues without requiring the
+        # approval endpoint to be a streaming response.
+        if hasattr(executor, "resume"):
+            import asyncio
+
+            async def _drive_resume() -> None:
+                try:
+                    async for ev in executor.resume(
+                        approval=bool(approved),
+                        tool_id=tool_id,
+                        approval_token=approval_token,
+                        remember_choice=bool(remember),
+                        scope=scope,
+                    ):
+                        try:
+                            if hasattr(ev, "to_dict"):
+                                d = ev.to_dict()
+                                job_manager.emit_event(str(d.get("job_id") or job_id), str(d.get("type") or ""), d.get("data") or {})
+                            elif isinstance(ev, dict):
+                                job_manager.emit_event(str(ev.get("job_id") or job_id), str(ev.get("type") or ""), ev.get("data") or {})
+                        except Exception:
+                            # Best-effort; don't crash resume loop due to logging/emit failures
+                            pass
+                finally:
+                    # Cleanup executor if it is no longer waiting for approvals
+                    try:
+                        state = getattr(executor, "_state", None)
+                        status = getattr(state, "status", None) if state is not None else None
+                        status_val = getattr(status, "value", status)
+                        if str(status_val) != "waiting_approval":
+                            agent_session_registry.unregister(job_id)
+                    except Exception:
+                        pass
+
+            asyncio.create_task(_drive_resume())
+        elif hasattr(executor, "approve_tool"):
+            # Fallback (some executors implement a direct approve API)
+            await executor.approve_tool(
+                tool_name,
+                approved,
+                remember=remember,
+                tool_id=tool_id,
+                approval_token=approval_token,
+                scope=scope,
+            )
         elif hasattr(executor, "permission_manager"):
             if approved:
                 executor.permission_manager.approve(tool_name, remember=remember)

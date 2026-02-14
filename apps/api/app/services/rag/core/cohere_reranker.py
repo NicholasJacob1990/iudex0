@@ -59,7 +59,7 @@ class CohereRerankerConfig:
 
     # API settings
     api_key: str = ""
-    model: str = "rerank-multilingual-v3.0"  # Best for PT-BR
+    model: str = "rerank-v4.0-pro"  # Best quality, 32k context, 100+ langs
 
     # Reranking settings
     top_k: int = 10
@@ -81,7 +81,7 @@ class CohereRerankerConfig:
         rag_config = get_rag_config()
         return cls(
             api_key=os.getenv("COHERE_API_KEY", ""),
-            model=os.getenv("COHERE_RERANK_MODEL", "rerank-multilingual-v3.0"),
+            model=os.getenv("COHERE_RERANK_MODEL", "rerank-v4.0-pro"),
             top_k=rag_config.rerank_top_k,
             max_candidates=int(os.getenv("COHERE_RERANK_MAX_CANDIDATES", "100")),
             legal_domain_boost=float(os.getenv("COHERE_LEGAL_BOOST", "0.1")),
@@ -122,6 +122,7 @@ class CohereReranker:
     def __init__(self, config: Optional[CohereRerankerConfig] = None):
         self.config = config or CohereRerankerConfig.from_env()
         self._client = None
+        self._client_kind = ""  # "v2" | "v1"
         self._initialized = False
 
     def _ensure_client(self) -> bool:
@@ -138,11 +139,25 @@ class CohereReranker:
         try:
             import cohere
 
-            self._client = cohere.Client(
-                api_key=self.config.api_key,
-                timeout=self.config.timeout_seconds,
+            # Cohere SDK evolved: v4 models are exposed on ClientV2 in newer SDKs,
+            # but older environments may only have Client().
+            if hasattr(cohere, "ClientV2"):
+                self._client = cohere.ClientV2(
+                    api_key=self.config.api_key,
+                    timeout=self.config.timeout_seconds,
+                )
+                self._client_kind = "v2"
+            else:
+                self._client = cohere.Client(
+                    api_key=self.config.api_key,
+                    timeout=self.config.timeout_seconds,
+                )
+                self._client_kind = "v1"
+            logger.info(
+                "Cohere client initialized (kind=%s) with model: %s",
+                self._client_kind or "unknown",
+                self.config.model,
             )
-            logger.info(f"Cohere client initialized with model: {self.config.model}")
             return True
 
         except ImportError:
@@ -200,6 +215,45 @@ class CohereReranker:
                 indices.append(idx)
 
         return documents, indices
+
+    @staticmethod
+    def _iter_rerank_results(resp: Any) -> List[tuple[int, float]]:
+        """
+        Normalize Cohere rerank response across SDK versions.
+
+        Returns:
+            List of (doc_index, relevance_score)
+        """
+        if resp is None:
+            return []
+
+        items = getattr(resp, "results", None)
+        if items is None and isinstance(resp, dict):
+            items = resp.get("results") or resp.get("data")
+        if items is None:
+            items = getattr(resp, "data", None)
+        if not items:
+            return []
+
+        out: List[tuple[int, float]] = []
+        for it in items:
+            if isinstance(it, dict):
+                idx = it.get("index")
+                score = it.get("relevance_score", it.get("relevanceScore", it.get("score")))
+            else:
+                idx = getattr(it, "index", None)
+                score = getattr(it, "relevance_score", None)
+                if score is None:
+                    score = getattr(it, "relevanceScore", None)
+                if score is None:
+                    score = getattr(it, "score", None)
+            if idx is None or score is None:
+                continue
+            try:
+                out.append((int(idx), float(score)))
+            except Exception:
+                continue
+        return out
 
     def rerank(
         self,
@@ -272,6 +326,7 @@ class CohereReranker:
         for attempt in range(self.config.max_retries):
             try:
                 api_calls += 1
+                # Use named args; SDK versions may differ slightly but usually accept these.
                 cohere_results = self._client.rerank(
                     query=query,
                     documents=documents,
@@ -298,13 +353,13 @@ class CohereReranker:
         # Process Cohere results and apply legal boost
         scored_results = []
 
-        for cohere_result in cohere_results.results:
-            doc_idx = cohere_result.index
+        for doc_idx, cohere_score in self._iter_rerank_results(cohere_results):
+            if doc_idx < 0 or doc_idx >= len(indices):
+                continue
             original_idx = indices[doc_idx]
+            if original_idx < 0 or original_idx >= len(candidates):
+                continue
             result = candidates[original_idx].copy()
-
-            # Cohere score (0-1 relevance score)
-            cohere_score = cohere_result.relevance_score
 
             # Apply legal domain boost
             text = documents[doc_idx]

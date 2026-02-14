@@ -9,12 +9,13 @@ Inspirado no conceito de "Vault" da Harvey AI.
 
 from __future__ import annotations
 
+import mimetypes
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from loguru import logger
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.responses import Response
+from starlette.responses import FileResponse, HTMLResponse, Response
 
 from app.core.database import get_db
 from app.core.rate_limit import (
@@ -34,7 +35,11 @@ from app.schemas.corpus import (
     CorpusBackfillSourceIdResponse,
     CorpusCollectionInfo,
     CorpusDocumentList,
+    CorpusDocumentSource,
+    CorpusDocumentViewerManifest,
     CorpusRegionalSourcesCatalogResponse,
+    CorpusViewerBackfillRequest,
+    CorpusViewerBackfillResponse,
     CorpusExtendTTLRequest,
     CorpusExtendTTLResponse,
     CorpusIngestRequest,
@@ -183,6 +188,216 @@ async def export_corpus_documents(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Falha ao exportar documentos do Corpus.",
+        )
+
+
+@router.get("/documents/{document_id}/source", response_model=CorpusDocumentSource)
+async def get_corpus_document_source(
+    document_id: str = Path(..., description="ID do documento"),
+    ctx: OrgContext = Depends(get_org_context),
+    service: CorpusService = Depends(get_corpus_service),
+    _rl: None = Depends(corpus_read_limit),
+) -> CorpusDocumentSource:
+    """
+    Resolve metadados de fonte para visualização do documento original.
+
+    Retorna URLs de viewer/download quando o arquivo original está disponível.
+    """
+    try:
+        source = await service.get_document_source(
+            document_id=document_id,
+            user_id=ctx.user.id,
+            org_id=ctx.organization_id,
+        )
+        if source is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Documento não encontrado ou sem permissão.",
+            )
+        return source
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao resolver source do documento do Corpus: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falha ao resolver documento fonte no Corpus.",
+        )
+
+
+@router.get(
+    "/documents/{document_id}/viewer-manifest",
+    response_model=CorpusDocumentViewerManifest,
+)
+async def get_corpus_document_viewer_manifest(
+    document_id: str = Path(..., description="ID do documento"),
+    ctx: OrgContext = Depends(get_org_context),
+    service: CorpusService = Depends(get_corpus_service),
+    _rl: None = Depends(corpus_read_limit),
+) -> CorpusDocumentViewerManifest:
+    """Retorna manifesto de viewer para navegação precisa em evidências."""
+    try:
+        manifest = await service.get_document_viewer_manifest(
+            document_id=document_id,
+            user_id=ctx.user.id,
+            org_id=ctx.organization_id,
+        )
+        if manifest is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Documento não encontrado ou sem permissão.",
+            )
+        return manifest
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao resolver viewer-manifest do documento do Corpus: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falha ao resolver viewer-manifest do documento no Corpus.",
+        )
+
+
+@router.get("/documents/{document_id}/content")
+async def get_corpus_document_content(
+    document_id: str = Path(..., description="ID do documento"),
+    download: bool = Query(False, description="Se true, força download em vez de visualização inline."),
+    ctx: OrgContext = Depends(get_org_context),
+    service: CorpusService = Depends(get_corpus_service),
+    _rl: None = Depends(corpus_read_limit),
+) -> Response:
+    """
+    Retorna o arquivo original do documento (streaming) para viewer RAG.
+    """
+    try:
+        resolved = await service.get_document_file_path(
+            document_id=document_id,
+            user_id=ctx.user.id,
+            org_id=ctx.organization_id,
+        )
+        if resolved is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Arquivo original não disponível para este documento.",
+            )
+
+        document, file_path = resolved
+        filename = (document.original_name or document.name or f"{document.id}").strip()
+        mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        disposition = "attachment" if download else "inline"
+
+        return FileResponse(
+            file_path,
+            media_type=mime_type,
+            headers={"Content-Disposition": f'{disposition}; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao servir conteúdo do documento do Corpus: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falha ao abrir conteúdo do documento no Corpus.",
+        )
+
+
+@router.get("/documents/{document_id}/preview")
+async def get_corpus_document_preview(
+    document_id: str = Path(..., description="ID do documento"),
+    q: Optional[str] = Query(None, description="Trecho para highlight (best-effort)"),
+    page: Optional[int] = Query(None, ge=1, description="Página para navegação (best-effort)"),
+    ctx: OrgContext = Depends(get_org_context),
+    service: CorpusService = Depends(get_corpus_service),
+    _rl: None = Depends(corpus_read_limit),
+) -> Response:
+    """
+    Retorna preview HTML gerado para documentos Office/OpenOffice.
+    """
+    try:
+        resolved = await service.get_document_preview_path(
+            document_id=document_id,
+            user_id=ctx.user.id,
+            org_id=ctx.organization_id,
+        )
+        if resolved is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Preview não disponível para este documento.",
+            )
+        _document, preview_path = resolved
+
+        # highlight/page query no HTML para navegação por evidência.
+        # Mantemos comportamento best-effort sem alterar o arquivo original.
+        if q or page:
+            with open(preview_path, "r", encoding="utf-8", errors="ignore") as fh:
+                html_text = fh.read()
+            safe_q = (q or "").replace("\\", "\\\\").replace('"', '\\"')
+            page_value = page or 1
+            injection = f"""
+<script>
+(function () {{
+  const targetPage = {int(page_value)};
+  const q = "{safe_q}".trim();
+  function markFirst(root, needle) {{
+    if (!needle) return null;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+    const lowerNeedle = needle.toLowerCase();
+    while (walker.nextNode()) {{
+      const node = walker.currentNode;
+      const text = node.nodeValue || "";
+      const idx = text.toLowerCase().indexOf(lowerNeedle);
+      if (idx < 0) continue;
+      const before = text.slice(0, idx);
+      const hit = text.slice(idx, idx + needle.length);
+      const after = text.slice(idx + needle.length);
+      const span = document.createElement("span");
+      span.textContent = before;
+      const mark = document.createElement("mark");
+      mark.textContent = hit;
+      mark.style.background = "#fde68a";
+      mark.style.padding = "0 2px";
+      mark.style.borderRadius = "3px";
+      const tail = document.createTextNode(after);
+      const frag = document.createDocumentFragment();
+      frag.appendChild(span);
+      frag.appendChild(mark);
+      frag.appendChild(tail);
+      node.parentNode.replaceChild(frag, node);
+      return mark;
+    }}
+    return null;
+  }}
+  const pageEl = document.querySelector('[data-page-number="' + targetPage + '"]') || null;
+  if (pageEl) {{
+    pageEl.scrollIntoView({{ behavior: "smooth", block: "start" }});
+  }}
+  const mark = markFirst(document.body, q);
+  if (mark) {{
+    setTimeout(function () {{
+      mark.scrollIntoView({{ behavior: "smooth", block: "center" }});
+    }}, 50);
+  }}
+}})();
+</script>
+"""
+            if "</body>" in html_text:
+                html_text = html_text.replace("</body>", f"{injection}</body>")
+            else:
+                html_text += injection
+            return HTMLResponse(content=html_text, media_type="text/html")
+
+        return FileResponse(
+            preview_path,
+            media_type="text/html; charset=utf-8",
+            headers={"Content-Disposition": 'inline; filename="preview.html"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro ao servir preview do documento do Corpus: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falha ao abrir preview do documento no Corpus.",
         )
 
 
@@ -782,6 +997,33 @@ async def backfill_source_id(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Falha ao executar backfill de source_id.",
+        )
+
+
+@router.post("/admin/viewer/backfill", response_model=CorpusViewerBackfillResponse)
+async def backfill_viewer_previews(
+    request: CorpusViewerBackfillRequest,
+    ctx: OrgContext = Depends(get_org_context),
+    service: CorpusService = Depends(get_corpus_service),
+    _rl: None = Depends(corpus_write_limit),
+) -> CorpusViewerBackfillResponse:
+    """
+    Enfileira geração assíncrona de previews de viewer para documentos legados.
+    """
+    org_id = _require_admin_org(ctx)
+    try:
+        return await service.backfill_viewer_previews(
+            org_id=org_id,
+            limit=int(request.limit or 200),
+            dry_run=bool(request.dry_run),
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"Erro no backfill de viewer previews: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Falha ao executar backfill de previews de viewer.",
         )
 
 

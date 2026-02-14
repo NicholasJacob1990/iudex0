@@ -27,6 +27,11 @@ export const libraryKeys = {
   items: () => [...libraryKeys.all, 'items'] as const,
 };
 
+export const skillsKeys = {
+  all: ['skills'] as const,
+  list: () => [...skillsKeys.all, 'list'] as const,
+};
+
 export const playbookKeys = {
   all: ['playbooks'] as const,
   list: (filters?: Record<string, unknown>) => ['playbooks', filters] as const,
@@ -88,6 +93,13 @@ export const prefetchFns = {
     qc.prefetchQuery({
       queryKey: libraryKeys.items(),
       queryFn: () => apiClient.getLibraryItems(),
+      staleTime: 1000 * 60 * 2,
+    }),
+
+  skillsList: (qc: ReturnType<typeof useQueryClient>) =>
+    qc.prefetchQuery({
+      queryKey: skillsKeys.list(),
+      queryFn: () => apiClient.listSkillsFromLibrary(),
       staleTime: 1000 * 60 * 2,
     }),
 };
@@ -164,6 +176,8 @@ export function prefetchForRoute(
       prefetchFns.workflowsList(qc);
     } else if (pathname.startsWith('/library')) {
       prefetchFns.libraryItems(qc);
+    } else if (pathname.startsWith('/skills')) {
+      prefetchFns.skillsList(qc);
     }
   } catch {
     // Falha silenciosa

@@ -16,6 +16,7 @@ import asyncio
 import csv
 import io
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +24,7 @@ from sqlalchemy import func, case as sql_case, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
+from app.core.config import settings
 from app.models.document import Document, DocumentCategory, DocumentStatus
 from app.models.user import User
 from app.schemas.corpus import (
@@ -36,6 +38,8 @@ from app.schemas.corpus import (
     CorpusCollectionInfo,
     CorpusDocument,
     CorpusDocumentList,
+    CorpusDocumentSource,
+    CorpusDocumentViewerManifest,
     CorpusExtendTTLResponse,
     CorpusIngestResponse,
     CorpusPromoteResponse,
@@ -45,7 +49,9 @@ from app.schemas.corpus import (
     CorpusSearchResult,
     CorpusStats,
     CorpusTransferResponse,
+    CorpusViewerBackfillResponse,
 )
+from app.services.document_viewer_service import DocumentViewerService
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +114,7 @@ class CorpusService:
 
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.viewer_service = DocumentViewerService()
 
     # =========================================================================
     # Stats
@@ -1131,6 +1138,87 @@ class CorpusService:
             qdrant_details=qdrant_details,
         )
 
+    async def backfill_viewer_previews(
+        self,
+        *,
+        org_id: str,
+        limit: int = 200,
+        dry_run: bool = False,
+    ) -> CorpusViewerBackfillResponse:
+        """
+        Enfileira geração de previews office para documentos legados do corpus.
+        """
+        q = (
+            select(Document)
+            .where(
+                and_(
+                    Document.organization_id == org_id,
+                    Document.is_archived == False,  # noqa: E712
+                )
+            )
+            .order_by(Document.updated_at.desc())
+            .limit(limit)
+        )
+        result = await self.db.execute(q)
+        docs = result.scalars().all()
+
+        total_candidates = 0
+        queued = 0
+        skipped = 0
+        errors: List[Dict[str, str]] = []
+
+        for doc in docs:
+            local_path = self._resolve_local_path_from_document(doc)
+            source_data = self.viewer_service.build_source_data(document=doc, local_path=local_path)
+            if str(source_data.get("viewer_kind") or "") != "office_html":
+                continue
+            total_candidates += 1
+
+            preview_status = str(source_data.get("preview_status") or "").lower()
+            if preview_status in {"ready", "processing"}:
+                skipped += 1
+                continue
+
+            if not local_path:
+                errors.append(
+                    {
+                        "document_id": doc.id,
+                        "error": "Arquivo local não encontrado para gerar preview.",
+                    }
+                )
+                continue
+
+            if dry_run:
+                queued += 1
+                continue
+
+            try:
+                from app.workers.tasks.document_tasks import generate_document_preview_task
+
+                task = generate_document_preview_task.delay(doc.id, local_path)
+                meta = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+                viewer_meta = meta.get("viewer") if isinstance(meta.get("viewer"), dict) else {}
+                meta["viewer"] = {
+                    **viewer_meta,
+                    "status": "processing",
+                    "kind": "office_html",
+                    "task_id": str(getattr(task, "id", "") or ""),
+                }
+                doc.doc_metadata = meta
+                queued += 1
+            except Exception as exc:
+                errors.append({"document_id": doc.id, "error": str(exc)})
+
+        if not dry_run:
+            await self.db.commit()
+
+        return CorpusViewerBackfillResponse(
+            total_candidates=total_candidates,
+            queued=queued,
+            skipped=skipped,
+            errors=errors,
+        )
+
     # =========================================================================
     # Remove from Corpus
     # =========================================================================
@@ -1248,14 +1336,14 @@ class CorpusService:
                 include_global=True,
             )
             for hit in lexical_results:
+                metadata = hit.get("metadata") if isinstance(hit, dict) else {}
                 results.append(
-                    CorpusSearchResult(
-                        document_id=hit.get("metadata", {}).get("doc_id"),
-                        chunk_text=hit.get("text", ""),
-                        collection=hit.get("metadata", {}).get("source_type"),
-                        score=hit.get("score", 0.0),
+                    self._build_search_result(
+                        chunk_text=hit.get("text", "") if isinstance(hit, dict) else "",
+                        collection=metadata.get("source_type") if isinstance(metadata, dict) else None,
+                        score=hit.get("score", 0.0) if isinstance(hit, dict) else 0.0,
                         source="lexical",
-                        metadata=hit.get("metadata"),
+                        metadata=metadata if isinstance(metadata, dict) else {},
                     )
                 )
         except Exception as e:
@@ -1281,14 +1369,15 @@ class CorpusService:
                             scopes=[scope] if scope else None,
                         )
                         for hit in vector_results:
+                            metadata = hit.metadata if isinstance(hit.metadata, dict) else {}
                             results.append(
-                                CorpusSearchResult(
-                                    document_id=hit.metadata.get("doc_id"),
+                                self._build_search_result(
+                                    document_id=metadata.get("doc_id"),
                                     chunk_text=hit.text,
                                     collection=coll,
                                     score=hit.score,
                                     source="vector",
-                                    metadata=hit.metadata,
+                                    metadata=metadata,
                                 )
                             )
                     except Exception as e:
@@ -1305,6 +1394,125 @@ class CorpusService:
             total=len(results),
             query=query,
         )
+
+    async def get_document_source(
+        self,
+        document_id: str,
+        user_id: str,
+        org_id: Optional[str] = None,
+    ) -> Optional[CorpusDocumentSource]:
+        """
+        Retorna metadados para abrir o documento original associado ao Corpus.
+        """
+        doc = await self._get_accessible_document(
+            document_id=document_id,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if doc is None:
+            return None
+
+        local_path = self._resolve_local_path_from_document(doc)
+        metadata = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+        source_data = self.viewer_service.build_source_data(
+            document=doc,
+            local_path=local_path,
+        )
+        await self._ensure_office_preview_queued(doc=doc, local_path=local_path, source_data=source_data)
+
+        return CorpusDocumentSource(
+            document_id=doc.id,
+            name=doc.name,
+            original_name=doc.original_name,
+            file_type=doc.type.value if doc.type else None,
+            size_bytes=doc.size,
+            available=bool(local_path or source_data.get("source_url")),
+            source_url=source_data.get("source_url"),
+            viewer_url=source_data.get("viewer_url"),
+            download_url=source_data.get("download_url"),
+            viewer_kind=source_data.get("viewer_kind"),
+            preview_status=source_data.get("preview_status"),
+            page_count=source_data.get("page_count"),
+            metadata=metadata or None,
+        )
+
+    async def get_document_viewer_manifest(
+        self,
+        document_id: str,
+        user_id: str,
+        org_id: Optional[str] = None,
+    ) -> Optional[CorpusDocumentViewerManifest]:
+        """Retorna manifesto de viewer para navegação de evidência."""
+        doc = await self._get_accessible_document(
+            document_id=document_id,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if doc is None:
+            return None
+
+        local_path = self._resolve_local_path_from_document(doc)
+        metadata = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+        source_data = self.viewer_service.build_source_data(
+            document=doc,
+            local_path=local_path,
+        )
+        await self._ensure_office_preview_queued(doc=doc, local_path=local_path, source_data=source_data)
+
+        return CorpusDocumentViewerManifest(
+            document_id=doc.id,
+            viewer_kind=str(source_data.get("viewer_kind") or "unavailable"),
+            viewer_url=source_data.get("viewer_url"),
+            download_url=source_data.get("download_url"),
+            source_url=source_data.get("source_url"),
+            page_count=source_data.get("page_count"),
+            supports_highlight=bool(source_data.get("supports_highlight")),
+            supports_page_jump=bool(source_data.get("supports_page_jump")),
+            preview_status=str(source_data.get("preview_status") or "not_supported"),
+            metadata=metadata or None,
+        )
+
+    async def get_document_file_path(
+        self,
+        document_id: str,
+        user_id: str,
+        org_id: Optional[str] = None,
+    ) -> Optional[Tuple[Document, str]]:
+        """
+        Resolve caminho local do arquivo original para streaming/download.
+        """
+        doc = await self._get_accessible_document(
+            document_id=document_id,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if doc is None:
+            return None
+
+        local_path = self._resolve_local_path_from_document(doc)
+        if not local_path:
+            return None
+
+        return doc, local_path
+
+    async def get_document_preview_path(
+        self,
+        document_id: str,
+        user_id: str,
+        org_id: Optional[str] = None,
+    ) -> Optional[Tuple[Document, str]]:
+        """Resolve caminho do preview HTML gerado para office/openoffice."""
+        doc = await self._get_accessible_document(
+            document_id=document_id,
+            user_id=user_id,
+            org_id=org_id,
+        )
+        if doc is None:
+            return None
+        preview_path = self.viewer_service.get_preview_file_path(doc)
+        if not preview_path:
+            return None
+        return doc, preview_path
 
     # =========================================================================
     # Collections
@@ -2090,6 +2298,146 @@ class CorpusService:
     # =========================================================================
     # Helpers privados
     # =========================================================================
+
+    def _build_search_result(
+        self,
+        *,
+        chunk_text: str,
+        collection: Optional[str],
+        score: float,
+        source: str,
+        metadata: Dict[str, Any],
+        document_id: Optional[str] = None,
+    ) -> CorpusSearchResult:
+        meta = metadata if isinstance(metadata, dict) else {}
+        doc_id = str(
+            document_id
+            or meta.get("doc_id")
+            or meta.get("document_id")
+            or ""
+        ).strip() or None
+        source_page = self._extract_source_page(meta)
+        source_url = self._build_source_url(doc_id, meta)
+        highlight_text = self._extract_highlight_text(meta, chunk_text)
+
+        return CorpusSearchResult(
+            document_id=doc_id,
+            chunk_text=chunk_text,
+            collection=collection,
+            score=float(score or 0.0),
+            source=source,
+            source_url=source_url,
+            source_page=source_page,
+            highlight_text=highlight_text,
+            metadata=meta,
+        )
+
+    @staticmethod
+    def _extract_source_page(metadata: Dict[str, Any]) -> Optional[int]:
+        for key in ("page", "page_number", "page_num", "source_page", "pagina"):
+            raw = metadata.get(key)
+            if raw is None:
+                continue
+            try:
+                page = int(str(raw).strip())
+            except (TypeError, ValueError):
+                continue
+            if page > 0:
+                return page
+        return None
+
+    @staticmethod
+    def _extract_highlight_text(metadata: Dict[str, Any], fallback_text: str) -> Optional[str]:
+        raw_highlights = metadata.get("highlights")
+        if isinstance(raw_highlights, list):
+            for item in raw_highlights:
+                text = str(item or "").strip()
+                if text:
+                    return text
+        for key in ("highlight", "snippet", "excerpt"):
+            value = str(metadata.get(key) or "").strip()
+            if value:
+                return value
+        fallback = str(fallback_text or "").strip()
+        return fallback[:280] if fallback else None
+
+    @staticmethod
+    def _build_source_url(document_id: Optional[str], metadata: Dict[str, Any]) -> Optional[str]:
+        if document_id:
+            return f"/api/corpus/documents/{document_id}/content"
+        for key in ("source_url", "url", "source_path"):
+            value = str(metadata.get(key) or "").strip()
+            if value.startswith(("http://", "https://")):
+                return value
+        return None
+
+    @staticmethod
+    def _resolve_local_path_from_document(doc: Document) -> Optional[str]:
+        metadata = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+        candidates = [
+            doc.url,
+            metadata.get("local_path"),
+            metadata.get("file_path"),
+            metadata.get("source_path"),
+        ]
+        for candidate in candidates:
+            path = str(candidate or "").strip()
+            if not path:
+                continue
+            expanded = os.path.abspath(os.path.expanduser(path))
+            if os.path.isfile(expanded):
+                return expanded
+        return None
+
+    async def _ensure_office_preview_queued(
+        self,
+        *,
+        doc: Document,
+        local_path: Optional[str],
+        source_data: Dict[str, Any],
+    ) -> None:
+        """
+        Enfileira geração de preview office quando necessário.
+
+        Evita re-enfileirar caso já esteja em processing/ready.
+        """
+        if not bool(getattr(settings, "RAG_VIEWER_OFFICE_PREVIEW_ENABLED", True)):
+            return
+        if str(source_data.get("viewer_kind") or "") != "office_html":
+            return
+        preview_status = str(source_data.get("preview_status") or "").lower()
+        if preview_status in {"ready", "processing"}:
+            return
+        if not local_path:
+            return
+
+        try:
+            from app.workers.tasks.document_tasks import generate_document_preview_task
+
+            task = generate_document_preview_task.delay(doc.id, local_path)
+            metadata = doc.doc_metadata if isinstance(doc.doc_metadata, dict) else {}
+            viewer_meta = metadata.get("viewer") if isinstance(metadata.get("viewer"), dict) else {}
+            metadata["viewer"] = {
+                **viewer_meta,
+                "status": "processing",
+                "kind": "office_html",
+                "task_id": str(getattr(task, "id", "") or ""),
+            }
+            doc.doc_metadata = metadata
+            await self.db.commit()
+        except Exception as exc:
+            logger.warning(f"Falha ao enfileirar preview office para {doc.id}: {exc}")
+
+    async def _get_accessible_document(
+        self,
+        *,
+        document_id: str,
+        user_id: str,
+        org_id: Optional[str],
+    ) -> Optional[Document]:
+        filters = [Document.id == document_id, *self._build_doc_filter(user_id, org_id)]
+        result = await self.db.execute(select(Document).where(and_(*filters)))
+        return result.scalar_one_or_none()
 
     def _build_doc_filter(
         self,

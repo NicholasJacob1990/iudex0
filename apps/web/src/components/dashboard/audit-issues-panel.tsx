@@ -1,3 +1,4 @@
+/** @deprecated Use UnifiedAuditPanel instead. This component will be removed in a future release. */
 "use client";
 
 import { AlertCircle, AlertTriangle, CheckCircle, Loader2, ChevronDown, ChevronRight } from "lucide-react";

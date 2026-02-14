@@ -1,0 +1,16 @@
+{
+  "pluginId": "productivity@knowledge-work-plugins",
+  "createdAt": "2026-02-11T18:35:27.484Z",
+  "files": {
+    ".claude-plugin/plugin.json": "f56b8e236024a8ab7e233eca0d033bd89165947ee9f455e21d1756923a4ee6d8",
+    ".mcp.json": "02b569f2f2cb54311d419492ade01e3f5ebfbc067fc22049d7637e7eb5d8b000",
+    "CONNECTORS.md": "891ab9d7f6fc0b69667db8be16a2eba917721704619298079be6844172a6320f",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "README.md": "09694a4796a4b2bc25ab5013f045779480669eb461bcb1e5f5303e322d5777fe",
+    "commands/start.md": "9a7ca7c70f4e365839886b1d05e25e7076319c509624a02d428fe0a64a7b6a15",
+    "commands/update.md": "7d0c2cd50b6c21d3352161db5544926ba556b425b5e4af465855a43b572ffc48",
+    "skills/dashboard.html": "548b3e27ba0d4ebebb95c039040306a73be69eafd6cfa135f339b60549f9d790",
+    "skills/memory-management/SKILL.md": "165c4083833a8920a461c8eee76e2164c266184670bb6c11076d4a939ae56db3",
+    "skills/task-management/SKILL.md": "a21f43ab86af12e60793e0156b034d252ec8b0c758fcc187b7d5e2746882a264"
+  }
+}

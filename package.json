@@ -5,12 +5,14 @@
   "private": true,
   "workspaces": [
     "apps/*",
+    "apps/teams-app/tab",
     "packages/*"
   ],
   "scripts": {
     "dev": "turbo run dev",
     "dev:core": "turbo run dev --filter=@iudex/web",
-    "dev:api": "cd apps/api && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000",
+    "dev:api": "bash apps/api/scripts/dev-api-tunnel.sh",
+    "dev:api:notunnel": "cd apps/api && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8000",
     "build": "turbo run build",
     "start": "turbo run start",
     "lint": "turbo run lint",

@@ -7,3 +7,8 @@ Cada node representa uma etapa do workflow de geração de documentos:
 - debate: Debate multi-modelo
 - audit: Auditoria e verificação
 """
+
+from .claude_agent_node import ClaudeAgentNode
+from .parallel_agents_node import ParallelAgentsNode
+
+__all__ = ["ClaudeAgentNode", "ParallelAgentsNode"]

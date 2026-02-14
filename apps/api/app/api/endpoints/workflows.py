@@ -19,6 +19,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import secrets
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -33,7 +34,7 @@ from starlette.requests import Request
 from app.core.database import get_db
 from app.core.security import get_current_user, get_current_user_optional, require_role
 from app.core.time_utils import utcnow
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.workflow import Workflow, WorkflowRun, WorkflowRunStatus, WorkflowStatus, WorkflowVersion
 from app.services.ai.workflow_compiler import validate_graph, GraphValidationError
 from app.services.ai.workflow_runner import WorkflowRunner
@@ -174,6 +175,7 @@ async def create_workflow(
         practice_area=request.practice_area,
         output_type=request.output_type,
     )
+    _sync_trigger_configuration(workflow, request.graph_json)
     db.add(workflow)
     await db.commit()
     await db.refresh(workflow)
@@ -206,10 +208,11 @@ async def workflow_catalog(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Browse published workflows catalog with filters."""
+    """Browse published workflow templates catalog with filters."""
     stmt = select(Workflow).where(
         Workflow.is_active == True,
         Workflow.status == "published",
+        Workflow.is_template == True,
     )
     if category:
         stmt = stmt.where(Workflow.category == category)
@@ -225,6 +228,21 @@ async def workflow_catalog(
     result = await db.execute(stmt)
     workflows = result.scalars().all()
     return [_workflow_to_response(w) for w in workflows]
+
+
+@router.post("/templates/seed")
+async def seed_workflow_templates(
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
+):
+    """Seed idempotente de templates de workflow no banco (admin)."""
+    try:
+        from app.scripts import seed_workflow_templates as seeder
+
+        result = await seeder.seed(seed_user_id=str(current_user.id))
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error("Erro ao fazer seed de workflow templates: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Erro interno ao carregar templates.")
 
 
 @router.post("/{workflow_id}/clone", response_model=WorkflowResponse)
@@ -526,6 +544,7 @@ async def update_workflow(
             if errors:
                 raise HTTPException(status_code=422, detail={"validation_errors": errors})
         workflow.graph_json = request.graph_json
+        _sync_trigger_configuration(workflow, request.graph_json)
 
     if request.name is not None:
         workflow.name = request.name
@@ -989,12 +1008,16 @@ async def run_workflow(
     db: AsyncSession = Depends(get_db),
 ):
     """Execute a workflow with SSE streaming."""
-    workflow = await _get_user_workflow(workflow_id, current_user, db)
+    workflow = await _get_workflow_for_run(workflow_id, current_user, db)
 
     # Inject context session if provided
     input_data = dict(request.input_data)
     # Inject user_id for per-user credential resolution (PJe, etc.)
     input_data["user_id"] = str(current_user.id)
+    # Inject tenant_id/org_id for graph tools and other context-aware tools
+    tenant_id = getattr(current_user, "tenant_id", None) or getattr(current_user, "organization_id", None)
+    if tenant_id:
+        input_data["tenant_id"] = str(tenant_id)
     if request.context_session_id:
         from app.services.unified_context_store import unified_context
         ctx_str = await unified_context.get_context_string(
@@ -1068,7 +1091,7 @@ async def test_workflow(
     db: AsyncSession = Depends(get_db),
 ):
     """Test a workflow without creating a persistent run record."""
-    workflow = await _get_user_workflow(workflow_id, current_user, db)
+    workflow = await _get_workflow_for_run(workflow_id, current_user, db)
 
     input_data = dict(request.input_data)
     input_data["user_id"] = str(current_user.id)
@@ -1507,20 +1530,19 @@ async def get_schedule(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get schedule configuration for a workflow."""
     wf = await _get_user_workflow(workflow_id, current_user, db)
+    webhook_url = f'/workflows/{workflow_id}/trigger' if wf.webhook_secret else None
     return {
-        "cron": wf.schedule_cron,
-        "enabled": wf.schedule_enabled,
-        "timezone": wf.schedule_timezone or "America/Sao_Paulo",
-        "last_run": (
+        'cron': wf.schedule_cron,
+        'enabled': wf.schedule_enabled,
+        'timezone': wf.schedule_timezone or 'America/Sao_Paulo',
+        'last_run': (
             wf.last_scheduled_run.isoformat() if wf.last_scheduled_run else None
         ),
-        "webhook_url": (
-            f"/workflows/{workflow_id}/trigger" if wf.webhook_secret else None
-        ),
+        'webhook_url': webhook_url,
+        'webhook_active': bool(wf.webhook_secret),
+        'webhook_secret_configured': bool(wf.webhook_secret),
     }
-
 
 @router.put("/{workflow_id}/schedule")
 async def update_schedule(
@@ -1529,7 +1551,7 @@ async def update_schedule(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update schedule configuration for a workflow."""
+    '''Update schedule configuration for a workflow.'''
     wf = await _get_user_workflow(workflow_id, current_user, db)
 
     # Validate cron expression
@@ -1539,14 +1561,57 @@ async def update_schedule(
 
             croniter(config.cron)
         except (ValueError, KeyError):
-            raise HTTPException(400, "Invalid cron expression")
+            raise HTTPException(400, 'Invalid cron expression')
 
     wf.schedule_cron = config.cron
     wf.schedule_enabled = config.enabled
     wf.schedule_timezone = config.timezone
     await db.commit()
-    return {"status": "ok", "schedule": config.model_dump()}
+    return {'status': 'ok', 'schedule': config.model_dump()}
 
+@router.post('/{workflow_id}/webhook-secret')
+async def ensure_webhook_secret(
+    workflow_id: str,
+    rotate: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    '''Create or rotate the webhook secret used by this workflow.'''
+    wf = await _get_user_workflow(workflow_id, current_user, db)
+
+    generated = False
+    if rotate or not wf.webhook_secret:
+        wf.webhook_secret = _generate_webhook_secret()
+        generated = True
+        await db.commit()
+
+    return {
+        'status': 'ok',
+        'webhook_active': bool(wf.webhook_secret),
+        'webhook_url': f'/workflows/{workflow_id}/trigger' if wf.webhook_secret else None,
+        'webhook_secret': wf.webhook_secret if generated else None,
+        'generated': generated,
+        'rotated': bool(rotate and generated),
+    }
+
+
+@router.delete('/{workflow_id}/webhook-secret')
+async def disable_webhook_secret(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    '''Disable webhook trigger authentication for this workflow.'''
+    wf = await _get_user_workflow(workflow_id, current_user, db)
+    if wf.webhook_secret:
+        wf.webhook_secret = None
+        await db.commit()
+
+    return {
+        'status': 'ok',
+        'webhook_active': False,
+        'webhook_url': None,
+    }
 
 @router.post("/{workflow_id}/trigger")
 async def webhook_trigger(
@@ -1649,6 +1714,111 @@ async def revoke_permission(
 # ---------------------------------------------------------------------------
 
 
+def _iter_trigger_nodes(graph_json: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(graph_json, dict):
+        return []
+
+    nodes = graph_json.get('nodes', [])
+    if not isinstance(nodes, list):
+        return []
+
+    trigger_nodes: List[Dict[str, Any]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        if node.get('type') != 'trigger':
+            continue
+        data = node.get('data')
+        if isinstance(data, dict):
+            trigger_nodes.append(data)
+
+    return trigger_nodes
+
+
+def _extract_schedule_trigger(
+    graph_json: Optional[Dict[str, Any]],
+) -> tuple[bool, Optional[str], str]:
+    default_timezone = 'America/Sao_Paulo'
+    for trigger_data in _iter_trigger_nodes(graph_json):
+        if trigger_data.get('trigger_type') != 'schedule':
+            continue
+
+        trigger_config = trigger_data.get('trigger_config')
+        trigger_config = trigger_config if isinstance(trigger_config, dict) else {}
+
+        cron_raw = trigger_config.get('cron')
+        cron = cron_raw.strip() if isinstance(cron_raw, str) else None
+
+        timezone_raw = trigger_config.get('timezone')
+        timezone_value = timezone_raw.strip() if isinstance(timezone_raw, str) else ''
+        timezone = timezone_value or default_timezone
+
+        return True, (cron or None), timezone
+
+    return False, None, default_timezone
+
+
+def _has_trigger_type(graph_json: Optional[Dict[str, Any]], trigger_type: str) -> bool:
+    for trigger_data in _iter_trigger_nodes(graph_json):
+        if trigger_data.get('trigger_type') == trigger_type:
+            return True
+    return False
+
+
+def _is_valid_cron(cron_expr: Optional[str]) -> bool:
+    if not cron_expr:
+        return False
+
+    try:
+        from croniter import croniter
+
+        croniter(cron_expr)
+        return True
+    except Exception:
+        logger.warning('Ignoring invalid cron expression from trigger config: %s', cron_expr)
+        return False
+
+
+def _generate_webhook_secret() -> str:
+    return secrets.token_hex(32)
+
+
+def _sync_trigger_configuration(workflow: Workflow, graph_json: Optional[Dict[str, Any]]) -> None:
+    has_schedule, cron_expr, timezone = _extract_schedule_trigger(graph_json)
+
+    if has_schedule:
+        workflow.schedule_cron = cron_expr
+        workflow.schedule_timezone = timezone
+        workflow.schedule_enabled = _is_valid_cron(cron_expr)
+    else:
+        workflow.schedule_cron = None
+        workflow.schedule_enabled = False
+        if not workflow.schedule_timezone:
+            workflow.schedule_timezone = 'America/Sao_Paulo'
+
+    has_webhook = _has_trigger_type(graph_json, 'webhook')
+    if has_webhook and not workflow.webhook_secret:
+        workflow.webhook_secret = _generate_webhook_secret()
+    if not has_webhook:
+        workflow.webhook_secret = None
+
+
+async def _get_workflow_for_run(
+    workflow_id: str, user: User, db: AsyncSession
+) -> Workflow:
+    workflow = await db.get(Workflow, workflow_id)
+    if not workflow:
+        raise HTTPException(status_code=404, detail='Workflow not found')
+
+    from app.services.workflow_permission_service import WorkflowPermissionService
+
+    permission_service = WorkflowPermissionService(db)
+    if await permission_service.can_run(str(user.id), workflow):
+        return workflow
+
+    raise HTTPException(status_code=403, detail='Not authorized')
+
+
 async def _get_user_workflow(
     workflow_id: str, user: User, db: AsyncSession
 ) -> Workflow:
@@ -1672,16 +1842,36 @@ async def _get_user_run(
 
 
 def _workflow_to_response(w: Workflow) -> WorkflowResponse:
+    graph_json = w.graph_json
+    if isinstance(graph_json, str):
+        try:
+            graph_json = json.loads(graph_json)
+        except Exception:
+            graph_json = {}
+    if not isinstance(graph_json, dict):
+        graph_json = {}
+
+    nodes = graph_json.get("nodes")
+    edges = graph_json.get("edges")
+    graph_json = {
+        **graph_json,
+        "nodes": nodes if isinstance(nodes, list) else [],
+        "edges": edges if isinstance(edges, list) else [],
+    }
+
+    tags = w.tags if isinstance(w.tags, list) else []
+    embedded_files = w.embedded_files if isinstance(w.embedded_files, list) else []
+
     return WorkflowResponse(
         id=w.id,
         user_id=w.user_id,
         name=w.name,
         description=w.description,
-        graph_json=w.graph_json,
+        graph_json=graph_json,
         is_active=w.is_active,
         is_template=w.is_template,
-        tags=w.tags or [],
-        embedded_files=w.embedded_files or [],
+        tags=tags,
+        embedded_files=embedded_files,
         status=getattr(w, "status", None) or "draft",
         published_version=getattr(w, "published_version", None),
         submitted_at=w.submitted_at.isoformat() if getattr(w, "submitted_at", None) else None,

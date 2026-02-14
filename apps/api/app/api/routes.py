@@ -4,7 +4,7 @@ Router principal da API
 
 from fastapi import APIRouter
 
-from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, health, mcp, mcp_bnp, tribunais, webhooks, graph, graph_ask, organizations, agent_tasks, context_bridge, workflows, marketplace, playbooks, corpus, corpus_projects, review_tables, extraction_jobs, assistant, analytics, spaces, word_addin, guest_auth, dms, dashboard, audit_logs, models
+from app.api.endpoints import auth, users, documents, chats, library, templates, clauses, knowledge, transcription, cases, chat_integration, jobs, chat, audit, quality_control, rag, advanced, djen, config, billing, admin_rag, admin_flags, health, mcp, mcp_bnp, tribunais, webhooks, graph, graph_ask, graph_risk, organizations, agent_tasks, context_bridge, workflows, marketplace, playbooks, corpus, corpus_projects, review_tables, extraction_jobs, assistant, analytics, spaces, word_addin, guest_auth, dms, dashboard, audit_logs, models, skills, microsoft_sso, outlook_addin, teams_bot, graph_webhooks, email_triggers
 
 api_router = APIRouter()
 
@@ -39,6 +39,7 @@ api_router.include_router(tribunais.router, prefix="/tribunais", tags=["tribunai
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(graph.router, prefix="/graph", tags=["graph"])
 api_router.include_router(graph_ask.router, prefix="/graph", tags=["graph-ask"])
+api_router.include_router(graph_risk.router, prefix="/graph", tags=["graph-risk"])
 api_router.include_router(organizations.router, prefix="/organizations", tags=["organizations"])
 api_router.include_router(agent_tasks.router, prefix="/agent", tags=["agent-tasks"])
 api_router.include_router(context_bridge.router, prefix="/context", tags=["context-bridge"])
@@ -58,3 +59,10 @@ api_router.include_router(dms.router, prefix="/dms", tags=["dms"])
 api_router.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 api_router.include_router(audit_logs.router, prefix="/audit-logs", tags=["audit-logs"])
 api_router.include_router(models.router, prefix="/models", tags=["model-routing"])
+api_router.include_router(skills.router, prefix="/skills", tags=["skills"])
+api_router.include_router(admin_flags.router, tags=["admin-flags"])
+api_router.include_router(microsoft_sso.router, prefix="/auth", tags=["microsoft-sso"])
+api_router.include_router(outlook_addin.router, prefix="/outlook-addin", tags=["outlook-addin"])
+api_router.include_router(teams_bot.router, prefix="/teams-bot", tags=["teams-bot"])
+api_router.include_router(graph_webhooks.router, prefix="/graph-webhooks", tags=["graph-webhooks"])
+api_router.include_router(email_triggers.router, prefix="/email-triggers", tags=["email-triggers"])

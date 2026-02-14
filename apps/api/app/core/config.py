@@ -105,6 +105,12 @@ class Settings(BaseSettings):
         # Office Add-in (dev)
         "https://localhost:3100",
         "https://127.0.0.1:3100",
+        # Outlook Add-in (dev)
+        "https://localhost:3200",
+        "https://127.0.0.1:3200",
+        # Teams Tab (dev)
+        "http://localhost:3300",
+        "http://127.0.0.1:3300",
     ]
     
     @field_validator("CORS_ORIGINS", mode="before")
@@ -221,6 +227,11 @@ class Settings(BaseSettings):
     
     # Sentry
     SENTRY_DSN: Optional[str] = None
+
+    # LangSmith (optional tracing)
+    LANGSMITH_ENABLED: bool = False
+    LANGSMITH_API_KEY: Optional[str] = None
+    LANGSMITH_PROJECT: str = "iudex-legal-ai"
     
     # Limites
     MAX_UPLOAD_SIZE_MB: int = 4096
@@ -245,6 +256,14 @@ class Settings(BaseSettings):
     ENABLE_WEB_SEARCH: bool = True
     ENABLE_OCR: bool = True
     ENABLE_TRANSCRIPTION: bool = True
+    DOCLING_ENABLED: bool = True
+    DOCLING_ASYNC_THRESHOLD_MB: int = 10
+    DOCLING_OCR_ENABLED: bool = True
+    RAG_VIEWER_ENABLED: bool = True
+    RAG_VIEWER_HYBRID_ENABLED: bool = True
+    RAG_VIEWER_OFFICE_PREVIEW_ENABLED: bool = True
+    ASK_CITATION_VIEWER_ENABLED: bool = True
+    RAG_VIEWER_BACKFILL_ENABLED: bool = True
     # Opt-in: diarização em APOSTILA/FIDELIDADE (AUDIENCIA/REUNIAO já usam diarização por padrão no VomoMLX)
     ENABLE_DIARIZATION_APOSTILA: bool = False
     ENABLE_PODCAST_GENERATION: bool = True
@@ -270,6 +289,25 @@ class Settings(BaseSettings):
     DJEN_API_KEY: Optional[str] = None
     JURISPRUDENCE_API_URL: Optional[str] = None
     JURISPRUDENCE_API_KEY: Optional[str] = None
+    JUSBRASIL_API_URL: Optional[str] = None
+    JUSBRASIL_API_KEY: Optional[str] = None
+
+    # Azure AD (Office Add-ins)
+    AZURE_CLIENT_ID: Optional[str] = None
+    AZURE_CLIENT_SECRET: Optional[str] = None
+    AZURE_TENANT_ID: Optional[str] = None
+
+    # Teams Bot
+    TEAMS_BOT_APP_ID: Optional[str] = None
+    TEAMS_BOT_APP_PASSWORD: Optional[str] = None
+
+    # Graph Webhooks
+    GRAPH_WEBHOOK_SECRET: Optional[str] = None
+    GRAPH_NOTIFICATION_URL: Optional[str] = None
+
+    # Feature flags — Office Add-ins
+    OUTLOOK_ADDIN_ENABLED: bool = False
+    TEAMS_BOT_ENABLED: bool = False
 
     # DMS (Document Management System)
     GOOGLE_DRIVE_CLIENT_ID: Optional[str] = None

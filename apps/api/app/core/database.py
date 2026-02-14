@@ -67,10 +67,15 @@ async def init_db() -> None:
         from app.models.shared_space import SharedSpace, SpaceInvite, SpaceResource  # noqa: F401
         from app.models.corpus_project import CorpusProject, CorpusProjectDocument, CorpusProjectShare  # noqa: F401
         from app.models.corpus_retention import CorpusRetentionConfig  # noqa: F401
+        from app.models.graph_risk_report import GraphRiskReport  # noqa: F401
         from app.models.guest_session import GuestSession  # noqa: F401
         from app.models.audit_log import AuditLog  # noqa: F401
         from app.models.redline_state import RedlineState  # noqa: F401
         from app.models.extraction_job import ExtractionJob, ExtractionJobDocument  # noqa: F401
+        from app.models.microsoft_user import MicrosoftUser  # noqa: F401
+        from app.models.graph_subscription import GraphSubscription  # noqa: F401
+        from app.models.email_analysis_cache import EmailAnalysisCache  # noqa: F401
+        from app.models.email_trigger_config import EmailTriggerConfig  # noqa: F401
 
         # Testar conexão e criar tabelas
         async with engine.begin() as conn:

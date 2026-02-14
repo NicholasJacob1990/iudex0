@@ -19,7 +19,7 @@ Configuration:
     RAG_GRAPH_BACKEND=neo4j     # Uses Neo4j database
 
     # Neo4j specific (only needed if backend=neo4j)
-    NEO4J_URI=bolt://localhost:7687
+    NEO4J_URI=bolt://localhost:8687
     NEO4J_USER=neo4j
     NEO4J_PASSWORD=password
     NEO4J_DATABASE=iudex
@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 from abc import ABC, abstractmethod
 from enum import Enum
@@ -503,6 +504,39 @@ class Neo4jAdapter:
         "SEMANTICALLY_RELATED",
     })
 
+    _SAFE_CYPHER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
+    @classmethod
+    def _normalize_relationship_type(cls, rel: str) -> Optional[str]:
+        token = str(rel or "").strip().upper().replace(" ", "_")
+        if not token or not cls._SAFE_CYPHER_TOKEN_RE.fullmatch(token):
+            return None
+        if token not in cls.ALLOWED_RELATIONSHIP_TYPES:
+            return None
+        return token
+
+    @classmethod
+    def _normalize_relationship_types(cls, relationship_types: Optional[List[str]]) -> List[str]:
+        if not relationship_types:
+            return []
+        out: List[str] = []
+        for rel in relationship_types:
+            token = cls._normalize_relationship_type(rel)
+            if token and token not in out:
+                out.append(token)
+        return out
+
+    @classmethod
+    def _normalize_entity_types(cls, entity_types: Optional[List[str]]) -> List[str]:
+        if not entity_types:
+            return []
+        out: List[str] = []
+        for entity_type in entity_types:
+            token = str(entity_type or "").strip().upper().replace(" ", "_")
+            if token and cls._SAFE_CYPHER_TOKEN_RE.fullmatch(token) and token not in out:
+                out.append(token)
+        return out
+
     def add_relationship(
         self,
         from_entity: str,
@@ -513,12 +547,12 @@ class Neo4jAdapter:
         try:
             props = properties or {}
             # Sanitize relationship type for Cypher
-            rel_type = relationship_type.upper().replace(" ", "_")
+            rel_type = self._normalize_relationship_type(relationship_type)
 
             # Prevent Cypher injection: only allow whitelisted relationship types
-            if rel_type not in self.ALLOWED_RELATIONSHIP_TYPES:
+            if rel_type is None:
                 logger.warning(
-                    "Rejected unknown relationship type %r (not in whitelist)", rel_type
+                    "Rejected unknown relationship type %r (not in whitelist)", relationship_type
                 )
                 return False
 
@@ -566,23 +600,27 @@ class Neo4jAdapter:
         max_hops: int = 1,
     ) -> List[Dict[str, Any]]:
         try:
-            # Build relationship filter
-            if relationship_types:
-                rel_filter = "|".join(r.upper().replace(" ", "_") for r in relationship_types)
-                rel_pattern = f"[r:{rel_filter}*1..{max_hops}]"
-            else:
-                rel_pattern = f"[r*1..{max_hops}]"
-
+            hops = max(1, min(int(max_hops or 1), 6))
+            rel_types = self._normalize_relationship_types(relationship_types)
             query = f"""
-            MATCH (start:Entity {{entity_id: $entity_id}})-{rel_pattern}-(neighbor:Entity)
-            RETURN DISTINCT neighbor,
-                   length(shortestPath((start)-[*]-(neighbor))) as distance
+            MATCH path = (start:Entity {{entity_id: $entity_id}})-[*1..{hops}]-(neighbor:Entity)
+            WHERE (
+                $relationship_types IS NULL
+                OR size($relationship_types) = 0
+                OR ALL(rel IN relationships(path) WHERE type(rel) IN $relationship_types)
+            )
+            WITH neighbor, min(length(path)) AS distance
+            RETURN neighbor, distance
             ORDER BY distance
             LIMIT 50
             """
             neighbors = []
             with self._driver.session(database=self._database) as session:
-                result = session.run(query, entity_id=entity_id)
+                result = session.run(
+                    query,
+                    entity_id=entity_id,
+                    relationship_types=rel_types,
+                )
                 for record in result:
                     node_data = dict(record["neighbor"])
                     node_data["distance"] = record["distance"]
@@ -599,22 +637,27 @@ class Neo4jAdapter:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         try:
-            # Use full-text search if available, otherwise CONTAINS
-            type_filter = ""
-            if entity_types:
-                types_str = ", ".join(f"'{t}'" for t in entity_types)
-                type_filter = f"AND e.entity_type IN [{types_str}]"
+            normalized_types = self._normalize_entity_types(entity_types)
 
-            cypher = f"""
+            cypher = """
             MATCH (e:Entity)
             WHERE (e.name CONTAINS $search_term OR e.entity_id CONTAINS $search_term)
-            {type_filter}
+              AND (
+                $entity_types IS NULL
+                OR size($entity_types) = 0
+                OR toUpper(e.entity_type) IN $entity_types
+              )
             RETURN e
             LIMIT $max_results
             """
             results = []
             with self._driver.session(database=self._database) as session:
-                result = session.run(cypher, search_term=query, max_results=limit)
+                result = session.run(
+                    cypher,
+                    search_term=query,
+                    max_results=limit,
+                    entity_types=normalized_types,
+                )
                 for record in result:
                     results.append(dict(record["e"]))
             return results

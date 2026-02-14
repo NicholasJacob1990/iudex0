@@ -1,12 +1,15 @@
 'use client';
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { useAskPageState } from '@/hooks/use-ask-page-state';
 import { ChatInterface, ChatInput } from '@/components/chat';
 import { CanvasContainer, OutlineApprovalModal, MinutaSettingsDrawer } from '@/components/dashboard';
 import { AskSourcesPanel, AskStreamingStatus } from '@/components/ask';
 import { Button } from '@/components/ui/button';
 import { RichTooltip } from '@/components/ui/rich-tooltip';
+import { tintToColor, mixHex, LIGHT_STOPS, DARK_STOPS } from '@/components/layout/top-nav';
+import { getChatTintStyles } from '@/lib/chat-tint-styles';
+import { useTheme } from 'next-themes';
 import {
   PanelRight,
   PanelRightClose,
@@ -31,9 +34,16 @@ import {
   Loader2,
   ChevronDown,
   ChevronUp,
+  MoreHorizontal,
 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import { useChatStore } from '@/stores';
+import { useChatStore, useUIStore } from '@/stores';
 
 // Sugestões estáticas para quando não há mensagens (modo individual)
 const INITIAL_SUGGESTIONS = [
@@ -45,18 +55,52 @@ const INITIAL_SUGGESTIONS = [
 
 export default function AskPage() {
   const s = useAskPageState('/ask');
+  const { chatBgTintLight, chatBgTintDark, tintMode } = useUIStore();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+  const activeTint = isDark ? chatBgTintDark : chatBgTintLight;
+
+  const chatBg = useMemo(
+    () => tintToColor(activeTint, isDark ? DARK_STOPS : LIGHT_STOPS),
+    [activeTint, isDark],
+  );
+  const toolbarStyle = useMemo(
+    () => ({
+      backgroundColor: mixHex(chatBg, isDark ? '#0f1115' : '#ffffff', 0.88),
+      borderColor: mixHex(chatBg, isDark ? '#334155' : '#cbd5e1', 0.35),
+    }),
+    [chatBg, isDark],
+  );
+  const toolbarGroupStyle = useMemo(
+    () => ({
+      backgroundColor: mixHex(chatBg, isDark ? '#111827' : '#ffffff', 0.72),
+      borderColor: mixHex(chatBg, isDark ? '#475569' : '#d1d5db', 0.25),
+    }),
+    [chatBg, isDark],
+  );
+  const { messageAreaStyle, assistantBubbleStyle, inputAreaStyle, canvasStyle } = useMemo(
+    () => getChatTintStyles({ tintMode, isDark, chatBg }),
+    [chatBg, isDark, tintMode],
+  );
 
   return (
-    <div ref={s.pageRootRef} className="flex h-[calc(100vh-64px)] bg-background">
+    <div
+      ref={s.pageRootRef}
+      className="flex h-[calc(100vh-64px)] transition-colors duration-500 ease-out"
+      style={{ backgroundColor: chatBg }}
+    >
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col overflow-hidden">
         {/* ── Toolbar ── */}
         {s.showToolbar ? (
-        <header className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+        <header
+          className="flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b backdrop-blur supports-[backdrop-filter]:bg-transparent/60 transition-colors duration-500"
+          style={toolbarStyle}
+        >
           {/* Left: Mode controls + streaming status */}
           <div className="flex flex-wrap items-center gap-3">
             {/* Generation Mode Toggle: Rápido / Comitê */}
-            <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="flex items-center rounded-lg border p-0.5 transition-colors duration-500" style={toolbarGroupStyle}>
               <RichTooltip
                 title="Modo Chat (Rápido)"
                 description="Conversa livre e rápida. Ideal para tirar dúvidas pontuais ou pedir resumos."
@@ -108,7 +152,7 @@ export default function AskPage() {
             <div className="h-5 w-px bg-border hidden sm:block" />
 
             {/* Chat Mode Toggle: Normal / Comparar */}
-            <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="flex items-center rounded-lg border p-0.5 transition-colors duration-500" style={toolbarGroupStyle}>
               <RichTooltip
                 title="Chat Normal"
                 description="Conversa com um único modelo. Ideal para iterações rápidas."
@@ -156,6 +200,10 @@ export default function AskPage() {
               status={s.streamingStatus}
               stepsCount={s.stepsCount}
               isStreaming={s.isSending}
+              minPages={s.minPages}
+              maxPages={s.maxPages}
+              estimatedPages={s.routedPages}
+              documentRoute={s.routedDocumentRoute}
             />
           </div>
 
@@ -173,7 +221,7 @@ export default function AskPage() {
             </Button>
 
             {/* Layout Toggle: Chat / Split / Canvas */}
-            <div className="flex items-center rounded-md border border-border bg-muted/50 p-0.5">
+            <div className="flex items-center rounded-md border p-0.5 transition-colors duration-500" style={toolbarGroupStyle}>
               <button
                 type="button"
                 onClick={s.toggleChatMode}
@@ -269,15 +317,24 @@ export default function AskPage() {
               </Button>
             )}
 
-            {/* Share & Export */}
-            <Button variant="ghost" size="sm" className="gap-2">
-              <Share2 className="h-4 w-4" />
-              Share
-            </Button>
-            <Button variant="ghost" size="sm" className="gap-2">
-              <Download className="h-4 w-4" />
-              Export
-            </Button>
+            {/* Compartilhar & Exportar (agrupados) */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" className="h-8 w-8">
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem onClick={s.handleShareChat}>
+                  <Share2 className="mr-2 h-4 w-4" />
+                  Compartilhar
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={s.handleExportChat}>
+                  <Download className="mr-2 h-4 w-4" />
+                  Exportar
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
             {/* Sources panel toggle */}
             <Button
@@ -306,7 +363,10 @@ export default function AskPage() {
         </header>
         ) : (
           /* Collapsed toolbar: thin bar with expand button */
-          <div className="flex items-center justify-center border-b bg-background/95">
+          <div
+            className="flex items-center justify-center border-b transition-colors duration-500"
+            style={toolbarStyle}
+          >
             <button
               type="button"
               onClick={() => s.setShowToolbar(true)}
@@ -327,7 +387,7 @@ export default function AskPage() {
           <div
             ref={s.chatPanelRef}
             className={cn(
-              "relative flex flex-col min-w-0 bg-background transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
+              "relative flex flex-col min-w-0 transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
               s.layoutMode === 'split' ? 'border-r border-border' : '',
               s.canvasState === 'expanded' ? 'hidden w-0 opacity-0' : '',
               s.isFullscreen && s.pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full' : ''
@@ -392,12 +452,15 @@ export default function AskPage() {
 
             {/* Chat Content - conditional by mode */}
             <div className="flex-1 overflow-y-auto min-h-0">
-              {s.currentChat && !s.isChatEmpty ? (
+              {s.currentChat && (s.mode === 'multi-agent' || !s.isChatEmpty) ? (
                 <ChatInterface
                   chatId={s.currentChat.id}
                   hideInput={s.mode === 'individual'}
                   autoCanvasOnDocumentRequest={s.mode === 'multi-agent'}
                   showCanvasButton={s.mode === 'multi-agent'}
+                  messageAreaStyle={messageAreaStyle}
+                  assistantBubbleStyle={assistantBubbleStyle}
+                  inputAreaStyle={inputAreaStyle}
                 />
               ) : s.mode === 'multi-agent' ? (
                 /* Multi-agent empty state */
@@ -466,9 +529,12 @@ export default function AskPage() {
 
             {/* Input Area (individual mode: standalone input; multi-agent: built-in in ChatInterface) */}
             {s.mode === 'individual' && (
-              <div className="border-t p-4 pb-5 shrink-0">
-                <div className="max-w-3xl mx-auto">
-                  <ChatInput onSend={s.handleSend} />
+              <div className="border-t px-4 py-1.5 shrink-0 transition-colors duration-500" style={inputAreaStyle}>
+                <div className="max-w-5xl mx-auto">
+                  <ChatInput
+                    onSend={s.handleSend}
+                    placeholder="Faça sua pergunta jurídica... (Digite '/' para prompts, '@' para contexto)"
+                  />
                 </div>
               </div>
             )}
@@ -507,7 +573,8 @@ export default function AskPage() {
           {s.canvasState !== 'hidden' && (
             <div
               ref={s.canvasPanelRef}
-              className="min-h-0 h-full flex-1 bg-background overflow-hidden transition-[flex-grow,width,opacity,transform] duration-300 ease-in-out"
+              className="min-h-0 h-full flex-1 bg-background overflow-hidden transition-[flex-grow,width,opacity,transform,background-color] duration-300 ease-in-out"
+              style={canvasStyle}
             >
               <CanvasContainer mode={s.mode === 'multi-agent' ? 'full' : 'chat'} />
             </div>
@@ -523,6 +590,7 @@ export default function AskPage() {
             onClose={() => s.setShowSourcesPanel(false)}
             contextItems={s.contextItems}
             onRemoveItem={s.removeItem}
+            onOpenEvidence={s.handleOpenCitationEvidence}
           />
         </div>
       )}
@@ -556,6 +624,10 @@ export default function AskPage() {
         resetPageRange={s.resetPageRange}
         formattingOptions={s.formattingOptions}
         setFormattingOptions={s.setFormattingOptions}
+        citationStyle={s.citationStyle}
+        setCitationStyle={s.setCitationStyle}
+        graphHops={s.graphHops}
+        setGraphHops={s.setGraphHops}
         reasoningLevel={(['low', 'medium', 'high'].includes(s.reasoningLevel) ? s.reasoningLevel : 'medium') as 'low' | 'medium' | 'high'}
         setReasoningLevel={s.setReasoningLevel}
         effortLevel={s.effortLevel}

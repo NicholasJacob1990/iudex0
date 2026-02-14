@@ -11,6 +11,7 @@ import json
 import hashlib
 import re
 import tempfile
+import time as _time_mod
 import asyncio
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 from loguru import logger
 from app.services.api_call_tracker import record_api_call
+from app.services.mlx_loader import load_vomo_class
 from app.services.false_positive_prevention import (
     FalsePositivePrevention,
     ValidationThresholds,
@@ -55,7 +57,7 @@ class QualityService:
         """Lazy load VomoMLX to avoid slow startup."""
         if self._vomo is None:
             try:
-                from mlx_vomo import VomoMLX
+                VomoMLX = load_vomo_class(caller_file=__file__)
                 self._vomo = VomoMLX()
             except SystemExit as e:
                 logger.error(f"Failed to initialize VomoMLX (SystemExit): {e}")
@@ -316,6 +318,47 @@ class QualityService:
                         'severity': 'low'
                     })
 
+                # Heading semantic mismatch processing with optional AI refinement
+                ai_enabled = os.getenv("IUDEX_HEADING_RENAME_AI_ENABLED", "").lower() == "true"
+                ai_model = os.getenv("IUDEX_HEADING_RENAME_AI_MODEL", "gemini-2.0-flash")
+                for issue in raw_issues.get('heading_semantic_issues', []):
+                    fix = {
+                        'id': issue.get('id', ''),
+                        'type': 'heading_semantic_mismatch',
+                        'heading_line': issue.get('heading_line'),
+                        'heading_level': issue.get('heading_level'),
+                        'old_title': issue.get('old_title', ''),
+                        'new_title': issue.get('new_title', ''),
+                        'old_raw': issue.get('old_raw', ''),
+                        'new_raw': issue.get('new_raw', ''),
+                        'confidence': issue.get('confidence', 0.0),
+                        'reason': issue.get('reason', ''),
+                        'action': issue.get('action', 'RENAME'),
+                        'severity': 'medium',
+                    }
+                    conf = fix['confidence']
+                    if ai_enabled and 0.7 <= conf <= 0.95:
+                        try:
+                            prompt = (
+                                f"Analise se o título '{fix['old_title']}' é adequado para o conteúdo abaixo.\n"
+                                f"Sugestão atual: '{fix['new_title']}' (confiança {conf:.2f}).\n\n"
+                                f"Conteúdo:\n{content[:2000]}\n\n"
+                                "Responda em JSON: {\"decision\": \"KEEP|REWRITE\", \"new_title\": \"...\", "
+                                "\"confidence\": 0.0-1.0, \"reason\": \"...\"}"
+                            )
+                            ai_resp = await self._call_gemini(prompt, model=ai_model)
+                            if ai_resp:
+                                ai_data = json.loads(ai_resp)
+                                if ai_data.get('decision') == 'REWRITE' and ai_data.get('new_title'):
+                                    fix['new_title'] = ai_data['new_title']
+                                    fix['action'] = 'RENAME'
+                                    fix['rename_source'] = 'hybrid_ai_rewrite'
+                                    fix['confidence'] = ai_data.get('confidence', conf)
+                                    fix['reason'] = ai_data.get('reason', fix['reason'])
+                        except Exception as e:
+                            logger.warning(f"AI heading refinement failed: {e}")
+                    pending_fixes.append(fix)
+
                 return {
                     "document_name": document_name,
                     "analyzed_at": datetime.now().isoformat(),
@@ -338,7 +381,6 @@ class QualityService:
                 }
             finally:
                 # Cleanup temp files
-                import os
                 os.unlink(temp_path)
                 if raw_temp_path:
                     os.unlink(raw_temp_path)
@@ -1409,11 +1451,18 @@ class QualityService:
 
         current_content = content
         fixes: List[str] = []
+        fix_ids_seen: set[str] = set()
         errors: List[str] = []
 
         # 1) Prefer section-level patching when we can locate where to apply.
+        #    LLM calls are independent per section, so we fire them in parallel
+        #    and apply the resulting patches bottom-up to preserve character offsets.
         sections = _index_h2_sections(current_content)
         remaining: List[Dict[str, Any]] = []
+
+        # (a) Merge legal + other issues into a single per-section grouping.
+        all_section_issues: Dict[int, List[Dict[str, Any]]] = {}
+        all_section_labels: Dict[int, str] = {}
         for target_list, label in (
             (legal_issues, "AUDITORIA JURIDICA"),
             (other_issues, "OMISSOES/DISTORCOES"),
@@ -1422,32 +1471,90 @@ class QualityService:
                 continue
             grouped, leftover = _group_by_section(target_list, content_text=current_content, sections=sections)
             remaining.extend(leftover)
-            # Apply patches from bottom to top so section indices remain stable.
-            for sec_idx, grouped_issues in sorted(grouped.items(), key=lambda kv: kv[0], reverse=True):
+            for sec_idx, issues_in_sec in grouped.items():
+                all_section_issues.setdefault(sec_idx, []).extend(issues_in_sec)
+                existing = all_section_labels.get(sec_idx, "")
+                if existing and label not in existing:
+                    all_section_labels[sec_idx] = f"{existing} + {label}"
+                else:
+                    all_section_labels[sec_idx] = label
+
+        # (b) Concurrent worker with semaphore to limit API pressure.
+        raw_max_concurrent = os.getenv("IUDEX_HIL_MAX_CONCURRENT_SECTIONS", "5")
+        try:
+            max_concurrent = int(raw_max_concurrent)
+        except (TypeError, ValueError):
+            logger.warning(
+                "IUDEX_HIL_MAX_CONCURRENT_SECTIONS inválido (%r). Usando padrão=5.",
+                raw_max_concurrent,
+            )
+            max_concurrent = 5
+        # Evita deadlock com semáforo zerado/negativo e limita burst de requests.
+        max_concurrent = max(1, min(max_concurrent, 20))
+        sem = asyncio.Semaphore(max_concurrent)
+        # Capture original content once — all prompts read from this snapshot.
+        original_content_snapshot = current_content
+
+        async def _patch_guarded(
+            s_idx: int, sec: Dict[str, Any],
+            issues_list: List[Dict[str, Any]], lbl: str,
+        ):
+            async with sem:
                 try:
-                    sec = next((s for s in sections if int(s["idx"]) == int(sec_idx)), None)
-                    if not sec:
-                        remaining.extend(grouped_issues)
-                        continue
-                    patched_section, err = await _patch_section(
-                        sec,
-                        grouped_issues,
-                        task_label=label,
-                        content_text=current_content,
+                    patched, err = await _patch_section(
+                        sec, issues_list, task_label=lbl,
+                        content_text=original_content_snapshot,
                     )
-                    if err or not patched_section:
-                        remaining.extend(grouped_issues)
-                        if err:
-                            errors.append(err)
-                        continue
-                    # Replace this section slice only.
-                    start = int(sec["start"])
-                    end = int(sec["end"])
-                    current_content = (current_content[:start] + patched_section + current_content[end:]).strip() + "\n"
-                    fixes.extend([i.get("id") for i in grouped_issues if i.get("id")])
-                except Exception as patch_error:
-                    errors.append(str(patch_error))
-                    remaining.extend(grouped_issues)
+                    return (s_idx, patched, err, issues_list)
+                except Exception as exc:
+                    return (s_idx, None, str(exc), issues_list)
+
+        # (c) Fire all LLM calls in parallel.
+        tasks = []
+        for sec_idx, issues_list in all_section_issues.items():
+            sec = next((s for s in sections if int(s["idx"]) == int(sec_idx)), None)
+            if not sec:
+                remaining.extend(issues_list)
+                continue
+            tasks.append(_patch_guarded(
+                sec_idx, sec, issues_list,
+                all_section_labels.get(sec_idx, "PATCH"),
+            ))
+
+        if tasks:
+            t0 = _time_mod.monotonic()
+            logger.info(f"🔧 HIL parallel: {len(tasks)} seções, max_concurrent={max_concurrent}")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            elapsed = _time_mod.monotonic() - t0
+            logger.info(f"✅ HIL parallel: {len(tasks)} seções em {elapsed:.1f}s")
+
+            # (d) Collect successful patches, then apply bottom-up.
+            successful: List[tuple] = []
+            for r in results:
+                if isinstance(r, Exception):
+                    errors.append(str(r))
+                    continue
+                s_idx, patched, err, issues_list = r
+                if err or not patched:
+                    remaining.extend(issues_list)
+                    if err:
+                        errors.append(err)
+                    continue
+                successful.append((s_idx, patched, issues_list))
+
+            for s_idx, patched, issues_list in sorted(successful, key=lambda x: x[0], reverse=True):
+                sec = next((s for s in sections if int(s["idx"]) == int(s_idx)), None)
+                if not sec:
+                    remaining.extend(issues_list)
+                    continue
+                start = int(sec["start"])
+                end = int(sec["end"])
+                current_content = (current_content[:start] + patched + current_content[end:]).strip() + "\n"
+                for issue in issues_list:
+                    issue_id = issue.get("id")
+                    if issue_id and issue_id not in fix_ids_seen:
+                        fix_ids_seen.add(issue_id)
+                        fixes.append(issue_id)
 
         # 2) Fallback: patch whole document ONLY for issues we couldn't localize.
         if remaining:
@@ -1503,7 +1610,11 @@ Retorne o texto formatado corrigido COMPLETO, preservando a formatacao Markdown.
                         logger.warning(f"⚠️ Tabelas recuperadas automaticamente: {restored_count}")
                         fixed_full = restored_content
                     current_content = (fixed_full or "").strip() + "\n"
-                    fixes.extend([i.get("id") for i in remaining if i.get("id")])
+                    for issue in remaining:
+                        issue_id = issue.get("id")
+                        if issue_id and issue_id not in fix_ids_seen:
+                            fix_ids_seen.add(issue_id)
+                            fixes.append(issue_id)
                 else:
                     errors.append("Falha ao aplicar correcoes no fallback (resposta vazia/truncada)")
 

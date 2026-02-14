@@ -10,7 +10,7 @@ interface StatCardProps {
 
 export function StatCard({ label, value, trend, color }: StatCardProps) {
   return (
-    <div className="rounded-3xl border border-white/80 bg-white/90 p-5 shadow-soft">
+    <div className="rounded-3xl border border-black/[0.06] bg-white/80 p-5 shadow-soft backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.04]">
       <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
       <p className="mt-2 font-display text-3xl text-foreground">{value}</p>
       <p className="text-sm text-muted-foreground">{trend}</p>

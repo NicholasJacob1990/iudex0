@@ -872,16 +872,15 @@ async def import_document_preview(
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Extrair texto usando funcoes existentes
-        from app.services.document_processor import (
-            extract_text_from_pdf,
-            extract_text_from_docx,
-        )
+        # Extrair texto via entrypoint unificado
+        from app.services.document_extraction_service import extract_text_from_path
 
-        if filename_lower.endswith(".pdf"):
-            document_text = await extract_text_from_pdf(tmp_path)
-        else:
-            document_text = await extract_text_from_docx(tmp_path)
+        extraction = await extract_text_from_path(
+            tmp_path,
+            min_pdf_chars=50,
+            allow_pdf_ocr_fallback=True,
+        )
+        document_text = extraction.text or ""
 
         if not document_text or not document_text.strip():
             raise HTTPException(

@@ -126,7 +126,7 @@ class TestHybridReranker:
             original_count=2,
             reranked_count=2,
             scores=[0.95, 0.85],
-            model_used="rerank-multilingual-v3.0",
+            model_used="rerank-v4.0-pro",
             duration_ms=100.0,
             api_calls=1,
         )

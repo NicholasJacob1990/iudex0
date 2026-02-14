@@ -8,7 +8,7 @@ without requiring external MCP servers. Uses existing internal services directly
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from loguru import logger
 
@@ -84,6 +84,7 @@ CHAT_TOOLS: List[Dict[str, Any]] = [
 ]
 
 CHAT_TOOL_NAMES = {t["name"] for t in CHAT_TOOLS}
+ToolPermissionChecker = Callable[[str, Dict[str, Any]], Awaitable[str]]
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +251,29 @@ def _safe_json(value: Any) -> Dict[str, Any]:
         return {}
 
 
+def _is_claude_opus_46(model: str) -> bool:
+    model_id = (model or "").strip().lower()
+    return "opus-4-6" in model_id
+
+
+def _claude_effort_from_reasoning(reasoning_level: Optional[str]) -> str:
+    level = (reasoning_level or "medium").strip().lower()
+    if level in ("xhigh", "max"):
+        return "max"
+    if level == "high":
+        return "high"
+    if level == "low":
+        return "low"
+    return "medium"
+
+
+def _normalize_permission_mode(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in ("allow", "deny", "ask"):
+        return raw
+    return "ask"
+
+
 # ---------------------------------------------------------------------------
 # Tool loops — non-streaming, return (final_text, tool_trace)
 # ---------------------------------------------------------------------------
@@ -263,6 +287,7 @@ async def run_openai_chat_tool_loop(
     max_tokens: int,
     temperature: float,
     max_rounds: int = 4,
+    permission_checker: Optional[ToolPermissionChecker] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """OpenAI tool loop using internal chat tools."""
     tools = get_openai_chat_tools()
@@ -309,10 +334,75 @@ async def run_openai_chat_tool_loop(
             for tc in tool_calls:
                 name = tc.function.name
                 args = _safe_json(tc.function.arguments)
+                permission_mode = "allow"
+                if permission_checker:
+                    try:
+                        permission_mode = _normalize_permission_mode(
+                            await permission_checker(name, args)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Permission checker failed for {name}: {e}")
+                        permission_mode = "ask"
+
+                if permission_mode == "deny":
+                    denied = {
+                        "error": f"Tool '{name}' denied by permission policy",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(denied, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(denied, ensure_ascii=False),
+                        }
+                    )
+                    continue
+
+                if permission_mode == "ask":
+                    approval_needed = {
+                        "error": f"Tool '{name}' requires approval in quick mode",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": tc.id,
+                            "content": json.dumps(approval_needed, ensure_ascii=False),
+                        }
+                    )
+                    continue
                 try:
                     result = await execute_chat_tool(name, args)
                     preview = json.dumps(result, ensure_ascii=False)[:500]
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": preview})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -320,7 +410,15 @@ async def run_openai_chat_tool_loop(
                     })
                 except Exception as e:
                     logger.warning(f"Chat tool call failed ({name}): {e}")
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": f"ERROR: {e}"})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": f"ERROR: {e}",
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
@@ -343,7 +441,9 @@ async def run_anthropic_chat_tool_loop(
     user_prompt: str,
     max_tokens: int,
     temperature: float,
+    reasoning_level: Optional[str] = None,
     max_rounds: int = 4,
+    permission_checker: Optional[ToolPermissionChecker] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Anthropic tool loop using internal chat tools."""
     tools = get_anthropic_chat_tools()
@@ -351,16 +451,25 @@ async def run_anthropic_chat_tool_loop(
         {"role": "user", "content": [{"type": "text", "text": user_prompt}]},
     ]
     tool_trace: List[Dict[str, Any]] = []
+    use_adaptive_thinking = _is_claude_opus_46(model)
+    adaptive_effort = _claude_effort_from_reasoning(reasoning_level)
 
     for _ in range(max_rounds):
-        resp = await client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            system=system_instruction,
-            messages=messages,
-            tools=tools,
-        )
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": system_instruction,
+            "messages": messages,
+            "tools": tools,
+        }
+        if use_adaptive_thinking:
+            # Claude Opus 4.6: adaptive thinking is opt-in via `thinking`.
+            kwargs["thinking"] = {"type": "adaptive"}
+            kwargs["output_config"] = {"effort": adaptive_effort}
+        else:
+            kwargs["temperature"] = temperature
+
+        resp = await client.messages.create(**kwargs)
         content_blocks = getattr(resp, "content", None) or []
         tool_uses = [b for b in content_blocks if getattr(b, "type", None) == "tool_use"]
         text_blocks = [b for b in content_blocks if getattr(b, "type", None) == "text"]
@@ -371,10 +480,77 @@ async def run_anthropic_chat_tool_loop(
             for tu in tool_uses:
                 name = tu.name
                 args = tu.input if isinstance(tu.input, dict) else {}
+                permission_mode = "allow"
+                if permission_checker:
+                    try:
+                        permission_mode = _normalize_permission_mode(
+                            await permission_checker(name, args)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Permission checker failed for {name}: {e}")
+                        permission_mode = "ask"
+
+                if permission_mode == "deny":
+                    denied = {
+                        "error": f"Tool '{name}' denied by permission policy",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(denied, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu.id,
+                            "content": json.dumps(denied, ensure_ascii=False),
+                            "is_error": True,
+                        }
+                    )
+                    continue
+
+                if permission_mode == "ask":
+                    approval_needed = {
+                        "error": f"Tool '{name}' requires approval in quick mode",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tu.id,
+                            "content": json.dumps(approval_needed, ensure_ascii=False),
+                            "is_error": True,
+                        }
+                    )
+                    continue
                 try:
                     result = await execute_chat_tool(name, args)
                     preview = json.dumps(result, ensure_ascii=False)[:500]
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": preview})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -382,7 +558,15 @@ async def run_anthropic_chat_tool_loop(
                     })
                 except Exception as e:
                     logger.warning(f"Chat tool call failed ({name}): {e}")
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": f"ERROR: {e}"})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": f"ERROR: {e}",
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tu.id,
@@ -409,6 +593,7 @@ async def run_gemini_chat_tool_loop(
     max_tokens: int,
     temperature: float,
     max_rounds: int = 4,
+    permission_checker: Optional[ToolPermissionChecker] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Gemini tool loop using internal chat tools."""
     try:
@@ -451,10 +636,67 @@ async def run_gemini_chat_tool_loop(
                 fc = fc_part.function_call
                 name = fc.name
                 args = dict(fc.args) if fc.args else {}
+                permission_mode = "allow"
+                if permission_checker:
+                    try:
+                        permission_mode = _normalize_permission_mode(
+                            await permission_checker(name, args)
+                        )
+                    except Exception as e:
+                        logger.warning(f"Permission checker failed for {name}: {e}")
+                        permission_mode = "ask"
+
+                if permission_mode == "deny":
+                    denied = {
+                        "error": f"Tool '{name}' denied by permission policy",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(denied, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    fn_responses.append(
+                        types.Part.from_function_response(name=name, response=denied)
+                    )
+                    continue
+
+                if permission_mode == "ask":
+                    approval_needed = {
+                        "error": f"Tool '{name}' requires approval in quick mode",
+                        "permission_mode": permission_mode,
+                    }
+                    preview = json.dumps(approval_needed, ensure_ascii=False)[:500]
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": True,
+                        }
+                    )
+                    fn_responses.append(
+                        types.Part.from_function_response(name=name, response=approval_needed)
+                    )
+                    continue
                 try:
                     result = await execute_chat_tool(name, args)
                     preview = json.dumps(result, ensure_ascii=False)[:500]
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": preview})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": preview,
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     fn_responses.append(
                         types.Part.from_function_response(
                             name=name,
@@ -463,7 +705,15 @@ async def run_gemini_chat_tool_loop(
                     )
                 except Exception as e:
                     logger.warning(f"Chat tool call failed ({name}): {e}")
-                    tool_trace.append({"name": name, "arguments": args, "result_preview": f"ERROR: {e}"})
+                    tool_trace.append(
+                        {
+                            "name": name,
+                            "arguments": args,
+                            "result_preview": f"ERROR: {e}",
+                            "permission_mode": permission_mode,
+                            "blocked": False,
+                        }
+                    )
                     fn_responses.append(
                         types.Part.from_function_response(
                             name=name,

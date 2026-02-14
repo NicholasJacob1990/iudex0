@@ -741,3 +741,153 @@ async def build_rag_context_unified(
 
 # Convenience alias
 build_rag_context = build_rag_context_unified
+
+
+async def build_rag_context_fast(
+    *,
+    query: str,
+    rag_sources: Optional[List[str]] = None,
+    rag_top_k: Optional[int] = None,
+    tenant_id: str = "",
+    user_id: Optional[str] = None,
+    scope_groups: Optional[List[str]] = None,
+    allow_global_scope: Optional[bool] = None,
+    allow_private_scope: Optional[bool] = None,
+    allow_group_scope: Optional[bool] = None,
+    history: Optional[List[dict]] = None,
+    rewrite_query: bool = True,
+    filters: Optional[Dict[str, Any]] = None,
+    graph_rag_enabled: bool = False,
+    graph_hops: int = 1,
+    argument_graph_enabled: Optional[bool] = None,
+) -> Tuple[str, str, List[dict]]:
+    """Fast RAG context builder for chat — skips HyDE/CRAG/Compress/Parent-Child.
+
+    Keeps graph retrieval, argument graph, and CogRAG active.
+    Uses ``RAGPipeline.search_fast()`` under the hood.
+    """
+    started_at = time.perf_counter()
+
+    try:
+        from app.services.rag.pipeline.rag_pipeline import RAGPipeline
+        from app.services.rag.config import get_rag_config
+    except ImportError as e:
+        logger.warning(f"RAGPipeline not available for fast path: {e}")
+        return "", "", []
+
+    config = get_rag_config()
+
+    # Resolve sources → indices/collections
+    indices: Optional[List[str]] = None
+    collections: Optional[List[str]] = None
+    effective_sources = [str(s).strip().lower() for s in (rag_sources or []) if str(s).strip()]
+    effective_sources = list(dict.fromkeys(effective_sources))
+    if not effective_sources:
+        _corpus_auto = os.getenv("CORPUS_AUTO_SEARCH", "true").lower() in ("1", "true", "yes", "on")
+        if _corpus_auto:
+            effective_sources = ["lei", "juris", "doutrina", "pecas_modelo", "sei"]
+
+    if effective_sources:
+        source_to_index = {
+            "lei": config.opensearch_index_lei,
+            "juris": config.opensearch_index_juris,
+            "pecas_modelo": config.opensearch_index_pecas,
+            "pecas": config.opensearch_index_pecas,
+            "doutrina": config.opensearch_index_doutrina,
+            "sei": config.opensearch_index_sei,
+            "local": config.opensearch_index_local,
+        }
+        source_to_collection = {
+            "lei": config.qdrant_collection_lei,
+            "juris": config.qdrant_collection_juris,
+            "pecas_modelo": config.qdrant_collection_pecas,
+            "pecas": config.qdrant_collection_pecas,
+            "doutrina": config.qdrant_collection_doutrina,
+            "sei": config.qdrant_collection_sei,
+            "local": config.qdrant_collection_local,
+        }
+        indices = list(dict.fromkeys(
+            source_to_index[s] for s in effective_sources if s in source_to_index
+        )) or None
+        collections = list(dict.fromkeys(
+            source_to_collection[s] for s in effective_sources if s in source_to_collection
+        )) or None
+
+    # Build filters
+    effective_filters: Dict[str, Any] = dict(filters or {})
+    if tenant_id:
+        effective_filters.setdefault("tenant_id", tenant_id)
+    if allow_global_scope is None:
+        allow_global_scope = os.getenv("RAG_ALLOW_GLOBAL", "false").lower() in ("1", "true", "yes", "on")
+    if allow_private_scope is None:
+        allow_private_scope = True
+    if allow_group_scope is None:
+        allow_group_scope = True if scope_groups else False
+    effective_filters.setdefault("include_global", bool(allow_global_scope))
+    effective_filters.setdefault("include_private", bool(allow_private_scope))
+    if allow_group_scope and scope_groups:
+        effective_filters.setdefault("group_ids", list(scope_groups))
+    if user_id:
+        effective_filters.setdefault("user_id", user_id)
+
+    # Optional query rewrite from history
+    effective_query = query
+    # Query rewrite uses an LLM (latency). Keep it explicit on fast path.
+    if rewrite_query and history and _env_bool("CHAT_RAG_FAST_REWRITE", False):
+        try:
+            from app.services.ai.rag_helpers import rewrite_query_with_history
+            rewritten = await rewrite_query_with_history(
+                query=query, history=history, summary_text=None,
+            )
+            rewritten = (rewritten or "").strip()
+            if rewritten and rewritten != query:
+                effective_query = rewritten
+        except Exception as exc:
+            logger.warning(f"History rewrite failed (fast path): {exc}")
+
+    # Execute fast search
+    pipeline = RAGPipeline()
+    try:
+        argument_enabled = bool(argument_graph_enabled) and _env_bool("ARGUMENT_RAG_ENABLED", True)
+        include_graph = bool(graph_rag_enabled) or bool(argument_enabled)
+        result = await pipeline.search_fast(
+            query=effective_query,
+            indices=indices,
+            collections=collections,
+            top_k=rag_top_k,
+            include_graph=include_graph,
+            argument_graph_enabled=bool(argument_enabled),
+            graph_hops=graph_hops,
+            tenant_id=tenant_id or effective_filters.get("tenant_id"),
+            filters=effective_filters,
+        )
+    except Exception as e:
+        logger.error(f"RAGPipeline.search_fast failed: {e}")
+        return "", "", []
+
+    # Format results
+    try:
+        from app.core.config import settings
+        result_max_chars = settings.RAG_CONTEXT_MAX_CHARS
+    except Exception:
+        result_max_chars = 12000
+
+    rag_context_str = _format_results_for_prompt(result.results, max_chars=int(result_max_chars))
+    graph_context_str = ""
+    if result.graph_context:
+        graph_context_str = _format_graph_context(
+            result.graph_context.__dict__,
+            max_chars=max(1500, min(9000, int(result_max_chars * 0.35))),
+        )
+
+    if rag_context_str or graph_context_str:
+        header = _augmented_policy_header(effective_query)
+        if rag_context_str:
+            rag_context_str = f"{header}\n{rag_context_str}".strip()
+        else:
+            graph_context_str = f"{header}\n{graph_context_str}".strip()
+
+    elapsed_ms = (time.perf_counter() - started_at) * 1000
+    logger.info(f"RAG context (fast) built in {elapsed_ms:.1f}ms")
+
+    return rag_context_str, graph_context_str, result.results

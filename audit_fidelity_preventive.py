@@ -27,9 +27,75 @@ CHUNK_OVERLAP_CHARS = int(os.getenv("FIDELITY_AUDIT_CHUNK_OVERLAP", "4000"))
 MAX_LIST_ITEMS = int(os.getenv("FIDELITY_AUDIT_MAX_ITEMS", "200"))
 GEMINI_HTTP_TIMEOUT_MS = int(os.getenv("IUDEx_GEMINI_TIMEOUT_MS", "600000"))
 PARALLEL_AUDIT_WORKERS = int(os.getenv("IUDEX_PARALLEL_AUDIT", "3"))
+DEFAULT_AUDIT_MODEL = os.getenv("IUDEX_PREVENTIVE_AUDIT_MODEL", "gemini-3-flash-preview").strip() or "gemini-3-flash-preview"
+CHUNK_CONTEXT_UTILIZATION = float(os.getenv("IUDEX_PREVENTIVE_AUDIT_CONTEXT_UTILIZATION", "0.82"))
+PROMPT_CHAR_RESERVE = int(os.getenv("IUDEX_PREVENTIVE_AUDIT_PROMPT_CHAR_RESERVE", "22000"))
+
+MODEL_CONTEXT_TOKENS = {
+    "gemini-3-pro": 2_000_000,
+    "gemini-3-pro-preview": 2_000_000,
+    "gemini-2.0-pro": 2_000_000,
+    "gemini-1.5-pro": 2_000_000,
+    "gemini-3-flash": 1_000_000,
+    "gemini-3-flash-preview": 1_000_000,
+    "gemini-2.5-pro": 1_000_000,
+    "gemini-2.5-flash": 1_000_000,
+    "gemini-2.0-flash": 1_000_000,
+    "gemini-2.0-flash-thinking": 1_000_000,
+    "gemini-1.5-flash": 1_000_000,
+}
 
 
-def _call_gemini_with_retry(client, prompt: str, config, max_retries: int = 5) -> str:
+def _normalize_model_name(model: str | None) -> str:
+    normalized = (model or DEFAULT_AUDIT_MODEL).strip().lower()
+    aliases = {
+        "gemini": "gemini-3-flash-preview",
+        "gemini-flash": "gemini-3-flash-preview",
+        "gemini-3-flash": "gemini-3-flash-preview",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _get_model_context_tokens(model: str) -> int:
+    normalized = _normalize_model_name(model)
+    if normalized in MODEL_CONTEXT_TOKENS:
+        return MODEL_CONTEXT_TOKENS[normalized]
+    for candidate, tokens in MODEL_CONTEXT_TOKENS.items():
+        if candidate in normalized:
+            return tokens
+    return 1_000_000
+
+
+def _estimate_effective_chunk_config(raw_text: str, formatted_text: str, model: str) -> tuple[int, int]:
+    """
+    Estimate chunk size/overlap to exploit model context while keeping headroom
+    for prompt instructions and JSON output.
+    """
+    context_tokens = _get_model_context_tokens(model)
+    # Conservative conversion: ~4 chars/token.
+    max_context_chars = int(context_tokens * 4 * CHUNK_CONTEXT_UTILIZATION)
+    available_for_payload = max(40_000, max_context_chars - PROMPT_CHAR_RESERVE)
+    # Prompt includes RAW + formatted chunk, so divide by 2.
+    adaptive_max_chars = max(60_000, min(MAX_CHARS_PER_CHUNK, available_for_payload // 2))
+    adaptive_overlap = min(CHUNK_OVERLAP_CHARS, max(1_000, adaptive_max_chars // 12))
+
+    # If the document fits comfortably, use a single full chunk.
+    pair_len = len(raw_text) + len(formatted_text)
+    if pair_len <= available_for_payload:
+        adaptive_max_chars = max(len(raw_text), 1)
+        adaptive_overlap = 0
+
+    return adaptive_max_chars, adaptive_overlap
+
+
+def _call_gemini_with_retry(
+    client,
+    prompt: str,
+    config,
+    max_retries: int = 5,
+    *,
+    model_name: str | None = None,
+) -> str:
     """
     Chama Gemini com backoff exponencial para lidar com 429 RESOURCE_EXHAUSTED.
 
@@ -49,7 +115,7 @@ def _call_gemini_with_retry(client, prompt: str, config, max_retries: int = 5) -
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
-                model='gemini-3-flash-preview',
+                model=_normalize_model_name(model_name),
                 contents=prompt,
                 config=config
             )
@@ -357,10 +423,16 @@ def _map_chunk(raw_start: int, raw_end: int, raw_len: int, fmt_len: int):
     return fmt_start, fmt_end
 
 
-def _build_chunk_pairs(raw_text: str, formatted_text: str):
+def _build_chunk_pairs(
+    raw_text: str,
+    formatted_text: str,
+    *,
+    max_chars: int = MAX_CHARS_PER_CHUNK,
+    overlap_chars: int = CHUNK_OVERLAP_CHARS,
+):
     raw_len = len(raw_text)
     fmt_len = len(formatted_text)
-    bounds = _chunk_bounds(raw_len, MAX_CHARS_PER_CHUNK, CHUNK_OVERLAP_CHARS)
+    bounds = _chunk_bounds(raw_len, max_chars, overlap_chars)
     chunks = []
     for idx, (r_start, r_end) in enumerate(bounds, 1):
         f_start, f_end = _map_chunk(r_start, r_end, raw_len, fmt_len)
@@ -727,7 +799,8 @@ def auditar_fidelidade_preventiva(
     doc_name: str,
     output_path: str = None,
     modo: str = "APOSTILA",
-    include_sources: bool = True
+    include_sources: bool = True,
+    audit_model: str | None = None,
 ):
     """
     Auditoria preventiva completa de fidelidade.
@@ -779,8 +852,22 @@ def auditar_fidelidade_preventiva(
     dispositivos_fmt = _extract_dispositivos(formatted_text)
     taxa_preservacao = (len(dispositivos_fmt) / len(dispositivos_raw)) if dispositivos_raw else 1.0
 
-    chunks = _build_chunk_pairs(raw_text, formatted_text)
-    print(f"   🔪 Chunks: {len(chunks)} (max {MAX_CHARS_PER_CHUNK:,} chars, overlap {CHUNK_OVERLAP_CHARS:,})")
+    audit_model_name = _normalize_model_name(audit_model)
+    adaptive_chunk_chars, adaptive_overlap_chars = _estimate_effective_chunk_config(
+        raw_text,
+        formatted_text,
+        audit_model_name,
+    )
+    chunks = _build_chunk_pairs(
+        raw_text,
+        formatted_text,
+        max_chars=adaptive_chunk_chars,
+        overlap_chars=adaptive_overlap_chars,
+    )
+    print(
+        f"   🔪 Chunks: {len(chunks)} (max {adaptive_chunk_chars:,} chars, "
+        f"overlap {adaptive_overlap_chars:,}, model {audit_model_name})"
+    )
 
     resultados = []
     chunk_word_counts = []
@@ -833,7 +920,12 @@ def auditar_fidelidade_preventiva(
                 thinking_level="HIGH"
             ),
         )
-        response_text = _call_gemini_with_retry(client, prompt, config)
+        response_text = _call_gemini_with_retry(
+            client,
+            prompt,
+            config,
+            model_name=audit_model_name,
+        )
 
         parsed = _safe_json_parse(response_text)
         if not isinstance(parsed, dict):
@@ -971,8 +1063,10 @@ def auditar_fidelidade_preventiva(
             },
             "chunks": {
                 "total": len(chunks),
-                "max_chars": MAX_CHARS_PER_CHUNK,
-                "overlap_chars": CHUNK_OVERLAP_CHARS,
+                "max_chars": adaptive_chunk_chars,
+                "overlap_chars": adaptive_overlap_chars,
+                "model": audit_model_name,
+                "context_tokens": _get_model_context_tokens(audit_model_name),
             },
         }
 

@@ -94,12 +94,17 @@ class ToolHandlers:
             "delegate_research": self.handle_delegate_research,
             # Legal Domain
             "search_jurisprudencia": self.handle_search_jurisprudencia,
+            "search_jusbrasil": self.handle_search_jusbrasil,
             "search_legislacao": self.handle_search_legislacao,
             "verify_citation": self.handle_verify_citation,
+            "validate_cpc_compliance": self.handle_validate_cpc_compliance,
             "search_rag": self.handle_search_rag,
             "create_section": self.handle_create_section,
             # Graph
             "ask_graph": self.handle_ask_graph,
+            "scan_graph_risk": self.handle_scan_graph_risk,
+            "audit_graph_edge": self.handle_audit_graph_edge,
+            "audit_graph_chain": self.handle_audit_graph_chain,
             # MCP
             "mcp_tool_search": self.handle_mcp_tool_search,
             "mcp_tool_call": self.handle_mcp_tool_call,
@@ -531,6 +536,53 @@ class ToolHandlers:
                 "error": str(e),
             }
 
+    async def handle_search_jusbrasil(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """Pesquisa conteudo juridico no JusBrasil."""
+        query = str(params.get("query") or "").strip()
+        tribunal = params.get("tribunal")
+        tipo = params.get("tipo")
+        data_inicio = params.get("data_inicio")
+        data_fim = params.get("data_fim")
+        max_results = params.get("max_results", 10)
+        use_cache = params.get("use_cache", True)
+
+        if not query:
+            return {"success": False, "error": "query is required", "results": [], "total": 0}
+
+        try:
+            from app.services.jusbrasil_service import jusbrasil_service
+
+            result = await jusbrasil_service.search(
+                query=query,
+                tribunal=str(tribunal).strip() if tribunal else None,
+                tipo=str(tipo).strip() if tipo else None,
+                data_inicio=str(data_inicio).strip() if data_inicio else None,
+                data_fim=str(data_fim).strip() if data_fim else None,
+                max_results=int(max_results),
+                use_cache=bool(use_cache),
+            )
+            return result
+        except ImportError:
+            return {
+                "success": False,
+                "query": query,
+                "results": [],
+                "total": 0,
+                "error": "jusbrasil_service not available",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "query": query,
+                "results": [],
+                "total": 0,
+                "error": str(e),
+            }
+
     async def handle_search_legislacao(
         self,
         params: Dict[str, Any],
@@ -607,6 +659,54 @@ class ToolHandlers:
                 "error": str(e),
             }
 
+    async def handle_validate_cpc_compliance(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """Valida conformidade basica com CPC para a peca enviada."""
+        document_text = params.get("document_text") or params.get("text") or ""
+        document_type = params.get("document_type", "auto")
+        filing_date = params.get("filing_date")
+        reference_date = params.get("reference_date")
+        strict_raw = params.get("strict_mode", False)
+        if isinstance(strict_raw, bool):
+            strict_mode = strict_raw
+        elif isinstance(strict_raw, str):
+            strict_mode = strict_raw.strip().lower() in {"1", "true", "yes", "on", "y"}
+        else:
+            strict_mode = bool(strict_raw)
+
+        if not str(document_text).strip():
+            return {
+                "success": False,
+                "error": "document_text é obrigatório",
+            }
+
+        try:
+            from app.services.ai.claude_agent.tools.cpc_validator import (
+                validate_cpc_compliance,
+            )
+
+            result = await validate_cpc_compliance(
+                document_text=str(document_text),
+                document_type=str(document_type or "auto"),
+                filing_date=str(filing_date) if filing_date else None,
+                reference_date=str(reference_date) if reference_date else None,
+                strict_mode=strict_mode,
+            )
+            return result
+        except ImportError:
+            return {
+                "success": False,
+                "error": "cpc_validator não disponível",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+            }
+
     async def handle_search_rag(
         self,
         params: Dict[str, Any],
@@ -664,21 +764,65 @@ class ToolHandlers:
         consolidate = params.get("consolidate", True)
         max_per_source = params.get("max_results_per_source", 5)
 
+        if isinstance(queries, dict):
+            queries = [queries]
+        if not isinstance(queries, list):
+            queries = []
+        if not queries and isinstance(params.get("query"), str):
+            queries = [{"query": params.get("query"), "source": params.get("source")}]
+
         try:
             from app.services.ai.langgraph.subgraphs import run_parallel_research
 
-            results = await run_parallel_research(
-                queries=queries,
-                case_id=ctx.case_id if ctx else None,
-                max_per_source=max_per_source,
-            )
+            tasks = []
+            normalized_queries: List[Dict[str, str]] = []
+            for item in queries:
+                if isinstance(item, dict):
+                    source = str(item.get("source") or "").strip() or "mixed"
+                    query_text = str(item.get("query") or "").strip()
+                else:
+                    source = "mixed"
+                    query_text = str(item or "").strip()
+
+                if not query_text:
+                    continue
+
+                normalized_queries.append({"source": source, "query": query_text})
+                tasks.append(
+                    run_parallel_research(
+                        query=query_text,
+                        tenant_id=ctx.tenant_id if ctx else None,
+                        processo_id=ctx.case_id if ctx else None,
+                        top_k=int(max_per_source),
+                    )
+                )
+
+            raw_results = await asyncio.gather(*tasks, return_exceptions=True) if tasks else []
+            results = []
+            for query_info, item in zip(normalized_queries, raw_results):
+                if isinstance(item, Exception):
+                    results.append(
+                        {
+                            "source": query_info["source"],
+                            "query": query_info["query"],
+                            "error": str(item),
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "source": query_info["source"],
+                            "query": query_info["query"],
+                            "result": item,
+                        }
+                    )
 
             if consolidate:
                 # TODO: Consolidar com LLM
                 pass
 
             return {
-                "queries": len(queries),
+                "queries": len(normalized_queries),
                 "results": results,
                 "consolidated": consolidate,
             }
@@ -731,6 +875,23 @@ class ToolHandlers:
         operation = params.get("operation", "search")
         operation_params = params.get("params", {})
 
+        # UI-mode guardrail: never allow writes from the LLM stream chat widget.
+        # Writes must stay deterministic (/link or explicit non-LLM flows).
+        extra = ""
+        if ctx and isinstance(getattr(ctx, "services", None), dict):
+            extra = str(ctx.services.get("extra_instructions") or "")
+        ui_mode = "modo grafo (ui)" in extra.lower()
+        if ui_mode and operation in ("link_entities", "recompute_co_menciona"):
+            return {
+                "operation": operation,
+                "success": False,
+                "results": [],
+                "error": (
+                    "Operacao bloqueada no MODO GRAFO (UI). "
+                    "Para escrita no grafo, use /link fora do modo LLM."
+                ),
+            }
+
         # Extrair parâmetros comuns do nível superior se não estiverem em params
         if "source_id" in params and "source_id" not in operation_params:
             operation_params["source_id"] = params["source_id"]
@@ -750,6 +911,36 @@ class ToolHandlers:
             operation_params["max_hops"] = params["max_hops"]
         if "entity_type" in params and "entity_type" not in operation_params:
             operation_params["entity_type"] = params["entity_type"]
+        if "relation_type" in params and "relation_type" not in operation_params:
+            operation_params["relation_type"] = params["relation_type"]
+        if "top_n" in params and "top_n" not in operation_params:
+            operation_params["top_n"] = params["top_n"]
+        if "question" in params and "question" not in operation_params:
+            operation_params["question"] = params["question"]
+        if "decision_id" in params and "decision_id" not in operation_params:
+            operation_params["decision_id"] = params["decision_id"]
+        if "relation_filter" in params and "relation_filter" not in operation_params:
+            operation_params["relation_filter"] = params["relation_filter"]
+        if "source_ids" in params and "source_ids" not in operation_params:
+            operation_params["source_ids"] = params["source_ids"]
+        if "weight_property" in params and "weight_property" not in operation_params:
+            operation_params["weight_property"] = params["weight_property"]
+        if "direction" in params and "direction" not in operation_params:
+            operation_params["direction"] = params["direction"]
+        if "top_k" in params and "top_k" not in operation_params:
+            operation_params["top_k"] = params["top_k"]
+        if "confirm" in params and "confirm" not in operation_params:
+            operation_params["confirm"] = params["confirm"]
+        if "preflight_token" in params and "preflight_token" not in operation_params:
+            operation_params["preflight_token"] = params["preflight_token"]
+        if "node1_id" in params and "node1_id" not in operation_params:
+            operation_params["node1_id"] = params["node1_id"]
+        if "node2_id" in params and "node2_id" not in operation_params:
+            operation_params["node2_id"] = params["node2_id"]
+        if "embedding_dimension" in params and "embedding_dimension" not in operation_params:
+            operation_params["embedding_dimension"] = params["embedding_dimension"]
+        if "iterations" in params and "iterations" not in operation_params:
+            operation_params["iterations"] = params["iterations"]
 
         try:
             from app.services.graph_ask_service import get_graph_ask_service
@@ -786,6 +977,7 @@ class ToolHandlers:
                 "result_count": result.result_count,
                 "execution_time_ms": result.execution_time_ms,
                 "error": result.error,
+                "metadata": result.metadata,
             }
 
         except ImportError:
@@ -804,6 +996,76 @@ class ToolHandlers:
                 "error": str(e),
             }
 
+    async def handle_scan_graph_risk(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """Executa scan determinístico de risco/fraude no grafo."""
+        if not ctx or not ctx.tenant_id:
+            return {"success": False, "error": "Contexto sem tenant_id (bloqueado por segurança)."}
+        if not ctx.user_id:
+            return {"success": False, "error": "Contexto sem user_id (bloqueado por segurança)."}
+        if not ctx.db:
+            return {"success": False, "error": "Contexto sem db_session (necessário para persistência/relatórios)."}
+
+        try:
+            from app.schemas.graph_risk import RiskScanRequest
+            from app.services.graph_risk_service import get_graph_risk_service
+
+            req = RiskScanRequest(**(params or {}))
+            service = get_graph_risk_service()
+            res = await service.scan(
+                tenant_id=str(ctx.tenant_id),
+                user_id=str(ctx.user_id),
+                db=ctx.db,
+                request=req,
+            )
+            return res.model_dump()
+        except Exception as e:
+            logger.error("scan_graph_risk handler failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def handle_audit_graph_edge(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """Audita relação direta e evidências (co-menções) entre duas entidades."""
+        if not ctx or not ctx.tenant_id:
+            return {"success": False, "error": "Contexto sem tenant_id (bloqueado por segurança)."}
+        try:
+            from app.schemas.graph_risk import AuditEdgeRequest
+            from app.services.graph_risk_service import get_graph_risk_service
+
+            req = AuditEdgeRequest(**(params or {}))
+            service = get_graph_risk_service()
+            res = await service.audit_edge(tenant_id=str(ctx.tenant_id), request=req)
+            return res.model_dump()
+        except Exception as e:
+            logger.error("audit_graph_edge handler failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def handle_audit_graph_chain(
+        self,
+        params: Dict[str, Any],
+        ctx: Optional[ToolExecutionContext] = None,
+    ) -> Dict[str, Any]:
+        """Audita caminhos multi-hop entre duas entidades."""
+        if not ctx or not ctx.tenant_id:
+            return {"success": False, "error": "Contexto sem tenant_id (bloqueado por segurança)."}
+        try:
+            from app.schemas.graph_risk import AuditChainRequest
+            from app.services.graph_risk_service import get_graph_risk_service
+
+            req = AuditChainRequest(**(params or {}))
+            service = get_graph_risk_service()
+            res = await service.audit_chain(tenant_id=str(ctx.tenant_id), request=req)
+            return res.model_dump()
+        except Exception as e:
+            logger.error("audit_graph_chain handler failed: %s", e)
+            return {"success": False, "error": str(e)}
+
     # =========================================================================
     # MCP HANDLERS
     # =========================================================================
@@ -821,15 +1083,18 @@ class ToolHandlers:
         try:
             from app.services.mcp_hub import mcp_hub
 
-            tools = await mcp_hub.search_tools(
+            payload = await mcp_hub.tool_search(
                 query=query,
                 server_labels=server_labels,
                 limit=limit,
+                tenant_id=(str(ctx.tenant_id) if ctx and ctx.tenant_id else None),
             )
+            tools = payload.get("matches", []) if isinstance(payload, dict) else []
             return {
                 "query": query,
                 "tools": tools,
                 "count": len(tools),
+                "servers_considered": payload.get("servers_considered", []) if isinstance(payload, dict) else [],
             }
         except ImportError:
             return {
@@ -856,10 +1121,13 @@ class ToolHandlers:
         try:
             from app.services.mcp_hub import mcp_hub
 
-            result = await mcp_hub.call_tool(
+            result = await mcp_hub.tool_call(
                 server_label=server_label,
                 tool_name=tool_name,
                 arguments=arguments,
+                tenant_id=(str(ctx.tenant_id) if ctx and ctx.tenant_id else None),
+                user_id=(str(ctx.user_id) if ctx and ctx.user_id else None),
+                session_id=(str(ctx.chat_id) if ctx and ctx.chat_id else None),
             )
             return {
                 "server": server_label,

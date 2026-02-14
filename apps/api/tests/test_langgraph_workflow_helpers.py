@@ -1,6 +1,7 @@
 import pytest
 
 from app.services.ai import langgraph_legal_workflow as wf
+from app.services.ai.document_chunker import TextChunk
 
 
 @pytest.mark.asyncio
@@ -103,3 +104,116 @@ def test_validate_citations_detects_missing_and_orphans():
     assert report["used_keys"] == ["1", "2"]
     assert report["missing_keys"] == ["2"]
     assert "3" in report["orphan_keys"]
+
+
+@pytest.mark.asyncio
+async def test_audit_node_attaches_citation_subagent_report(monkeypatch):
+    async def fake_citation_subagent(state, full_document, citations_map):
+        return {
+            "subagent_enabled": True,
+            "subagent_status": "ok",
+            "coverage": 0.9,
+            "claims_without_citation": [],
+            "suspicious_citations": [],
+            "summary": "ok",
+        }
+
+    monkeypatch.setattr(wf, "_maybe_run_citation_subagent", fake_citation_subagent)
+    monkeypatch.setattr(
+        wf.audit_service,
+        "audit_document",
+        lambda _doc: {"audit_report_markdown": "Aprovado", "citations": []},
+    )
+
+    state = {
+        "full_document": "Documento final com citacao [1].",
+        "citations_map": {"1": {"title": "Fonte 1"}},
+    }
+    result = await wf.audit_node(state)
+
+    assert result["citation_subagent_report"]["subagent_status"] == "ok"
+    assert result["audit_report"]["citation_subagent"]["subagent_status"] == "ok"
+
+
+def test_entry_router_routes_large_docs_to_multi_pass_prepare():
+    state = {
+        "input_text": "A" * 20000,
+        "document_route": "chunked_rag",
+        "estimated_pages": 850,
+    }
+    assert wf.entry_router(state) == "multi_pass_prepare"
+
+
+@pytest.mark.asyncio
+async def test_multi_pass_prepare_node_is_noop_for_small_docs():
+    state = {
+        "input_text": "texto curto",
+        "estimated_pages": 1,
+        "document_route": "direct",
+    }
+    result = await wf.multi_pass_prepare_node(state)
+
+    assert result["input_text"] == "texto curto"
+    assert result["document_route"] == "direct"
+    assert result["estimated_pages"] == 1
+    assert "multi_pass_report" not in result or result["multi_pass_report"] is None
+
+
+@pytest.mark.asyncio
+async def test_multi_pass_prepare_node_summarizes_large_docs(monkeypatch):
+    chunks = [
+        TextChunk(index=0, text="Fatos relevantes do bloco 1", start_char=0, end_char=100),
+        TextChunk(index=1, text="Fundamentos relevantes do bloco 2", start_char=101, end_char=200),
+    ]
+
+    monkeypatch.setattr(wf, "split_text_for_multi_pass", lambda *args, **kwargs: chunks)
+    async def fake_call(model, prompt, **kwargs):
+        if "bloco 1/2" in prompt.lower():
+            return "Resumo sintético do chunk 1"
+        return "Resumo sintético do chunk 2"
+
+    monkeypatch.setattr(wf, "_call_model_any_async", fake_call)
+
+    state = {
+        "job_id": "",
+        "input_text": "texto original muito grande",
+        "document_route": "chunked_rag",
+        "estimated_pages": 900,
+    }
+    result = await wf.multi_pass_prepare_node(state)
+
+    assert result["original_input_text"] == "texto original muito grande"
+    assert "[Chunk 1]" in result["input_text"]
+    assert "[Chunk 2]" in result["input_text"]
+    report = result["multi_pass_report"]
+    assert report["status"] == "prepared"
+    assert report["chunks_total"] == 2
+    assert report["document_route"] == "chunked_rag"
+
+
+@pytest.mark.asyncio
+async def test_run_workflow_async_wraps_langsmith_trace(monkeypatch):
+    entered = {"value": False}
+    exited = {"value": False}
+
+    class DummyTrace:
+        def __enter__(self):
+            entered["value"] = True
+            return None
+
+        def __exit__(self, exc_type, exc, tb):
+            exited["value"] = True
+            return False
+
+    class DummyApp:
+        async def ainvoke(self, initial_state, config=None):
+            return {"job_id": initial_state.get("job_id"), "full_document": "ok"}
+
+    monkeypatch.setattr(wf, "langsmith_trace", lambda *args, **kwargs: DummyTrace())
+    monkeypatch.setattr(wf, "legal_workflow_app", DummyApp())
+
+    result = await wf.run_workflow_async({"job_id": "job-trace"})
+
+    assert entered["value"] is True
+    assert exited["value"] is True
+    assert result["full_document"] == "ok"

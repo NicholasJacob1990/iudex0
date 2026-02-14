@@ -17,6 +17,7 @@ from .parallel_research import (
     search_rag_global,
     search_web,
     search_jurisprudencia,
+    run_parallel_claude_agents,
     merge_research_results,
     parallel_search_node,
     # Convenience function
@@ -35,6 +36,7 @@ __all__ = [
     "search_rag_global",
     "search_web",
     "search_jurisprudencia",
+    "run_parallel_claude_agents",
     "merge_research_results",
     "parallel_search_node",
     # Convenience function

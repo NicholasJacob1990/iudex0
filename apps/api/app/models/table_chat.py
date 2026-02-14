@@ -61,12 +61,12 @@ class TableChatMessage(Base):
 
     review_table_id: Mapped[str] = mapped_column(
         String, ForeignKey("review_tables.id", ondelete="CASCADE"),
-        nullable=False, index=True
+        nullable=False
     )
 
     user_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.id"),
-        nullable=False, index=True
+        nullable=False
     )
 
     role: Mapped[str] = mapped_column(

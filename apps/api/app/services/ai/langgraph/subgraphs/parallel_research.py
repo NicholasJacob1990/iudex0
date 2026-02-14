@@ -60,6 +60,7 @@ class ResearchState(TypedDict):
     results_rag_global: List[Dict[str, Any]]
     results_web: List[Dict[str, Any]]
     results_juris: List[Dict[str, Any]]
+    results_agent_parallel: List[Dict[str, Any]]
 
     # Output
     merged_context: str                 # Final formatted context
@@ -553,6 +554,7 @@ async def merge_research_results(state: ResearchState) -> ResearchState:
         ("rag_global", "results_rag_global"),
         ("web", "results_web"),
         ("jurisprudencia", "results_juris"),
+        ("agent_parallel", "results_agent_parallel"),
     ]:
         results = state.get(results_key, [])
         if results:
@@ -593,13 +595,14 @@ async def merge_research_results(state: ResearchState) -> ResearchState:
     citation_number = 1
 
     # Group by source type for better organization
-    source_order = ["lei", "juris", "sei", "pecas_modelo", "web"]
+    source_order = ["lei", "juris", "sei", "pecas_modelo", "agent_parallel", "web"]
     source_labels = {
         "lei": "LEGISLACAO",
         "juris": "JURISPRUDENCIA",
         "sei": "DOCUMENTOS DO CASO",
         "pecas_modelo": "MODELOS E TEMPLATES",
         "web": "FONTES WEB",
+        "agent_parallel": "ANALISE PARALELA DE AGENTS",
     }
 
     # Process results by source type
@@ -668,6 +671,7 @@ async def merge_research_results(state: ResearchState) -> ResearchState:
         state.get("metrics", {}).get("rag_global_latency_ms", 0),
         state.get("metrics", {}).get("web_latency_ms", 0),
         state.get("metrics", {}).get("juris_latency_ms", 0),
+        state.get("metrics", {}).get("agent_parallel_latency_ms", 0),
         latency,
     ])
 
@@ -701,6 +705,102 @@ async def merge_research_results(state: ResearchState) -> ResearchState:
 # PARALLEL EXECUTION WRAPPER
 # =============================================================================
 
+def _agent_fanout_enabled() -> bool:
+    return os.getenv("IUDEX_PARALLEL_RESEARCH_AGENT_FANOUT", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+async def run_parallel_claude_agents(state: ResearchState) -> List[Dict[str, Any]]:
+    """
+    Optional sub fan-out using lightweight Claude agents.
+
+    Returns normalized results compatible with merge_research_results.
+    """
+    try:
+        from app.services.ai.langgraph.nodes import ParallelAgentsNode
+
+        prompts = []
+        for candidate in [
+            state.get("query_rag_local"),
+            state.get("query_juris"),
+            state.get("query_web"),
+            state.get("query"),
+        ]:
+            text = str(candidate or "").strip()
+            if text and text not in prompts:
+                prompts.append(text)
+        prompts = prompts[:3]
+        if not prompts:
+            return []
+
+        model = os.getenv("IUDEX_PARALLEL_RESEARCH_AGENT_MODEL", "claude-haiku-4-5")
+        max_iterations = int(os.getenv("IUDEX_PARALLEL_RESEARCH_AGENT_MAX_ITERATIONS", "3"))
+        max_tokens = int(os.getenv("IUDEX_PARALLEL_RESEARCH_AGENT_MAX_TOKENS", "1200"))
+        max_parallel = int(os.getenv("IUDEX_PARALLEL_RESEARCH_AGENT_MAX_PARALLEL", "3"))
+
+        node = ParallelAgentsNode(
+            node_id="parallel_research_agents",
+            prompt_templates=prompts,
+            models=[model for _ in prompts],
+            system_prompt=(
+                "Voce e um assistente juridico de suporte. Responda de forma curta, "
+                "factual e com foco na pergunta."
+            ),
+            max_iterations=max_iterations,
+            max_tokens=max_tokens,
+            include_mcp=False,
+            tool_names=["search_rag", "search_jurisprudencia", "search_legislacao"],
+            use_sdk=False,
+            max_parallel=max_parallel,
+            aggregation_strategy="json",
+        )
+
+        node_state: Dict[str, Any] = {
+            "input": state.get("query", ""),
+            "output": "",
+            "llm_responses": {},
+            "variables": {},
+            "step_outputs": {},
+            "logs": [],
+            "user_id": state.get("tenant_id"),
+            "case_id": state.get("processo_id"),
+        }
+
+        result_state = await node(node_state)
+        branch_rows = (
+            result_state.get("step_outputs", {})
+            .get("parallel_research_agents", {})
+            .get("branches", [])
+        )
+        normalized: List[Dict[str, Any]] = []
+        for row in branch_rows:
+            if not isinstance(row, dict):
+                continue
+            output_text = str(row.get("output") or "").strip()
+            if not output_text:
+                continue
+            normalized.append(
+                {
+                    "text": output_text,
+                    "score": 0.55,
+                    "source_type": "agent_parallel",
+                    "metadata": {
+                        "title": row.get("branch_id"),
+                        "model": row.get("model"),
+                        "error": row.get("error"),
+                    },
+                }
+            )
+        return normalized
+    except Exception as exc:
+        logger.warning(f"[Research] parallel agent fan-out unavailable: {exc}")
+        return []
+
+
 async def parallel_search_node(state: ResearchState) -> ResearchState:
     """
     Execute all search nodes in parallel using asyncio.gather.
@@ -712,13 +812,18 @@ async def parallel_search_node(state: ResearchState) -> ResearchState:
     _emit_event(state.get("job_id"), "research_stage", {"stage": "parallel_search"})
 
     # Execute all searches in parallel
-    results = await asyncio.gather(
+    tasks = [
         search_rag_local(state),
         search_rag_global(state),
         search_web(state),
         search_jurisprudencia(state),
-        return_exceptions=True,
-    )
+    ]
+    source_names = ["rag_local", "rag_global", "web", "juris"]
+    if _agent_fanout_enabled():
+        tasks.append(run_parallel_claude_agents(state))
+        source_names.append("agent_parallel")
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
 
     # Merge results from all parallel tasks
     merged_state = dict(state)
@@ -726,13 +831,22 @@ async def parallel_search_node(state: ResearchState) -> ResearchState:
 
     for i, result in enumerate(results):
         if isinstance(result, Exception):
-            source_names = ["rag_local", "rag_global", "web", "juris"]
             logger.error(f"[Research] {source_names[i]} failed: {result}")
+            continue
+
+        if source_names[i] == "agent_parallel" and isinstance(result, list):
+            merged_state["results_agent_parallel"] = result
+            merged_metrics["agent_parallel_count"] = len(result)
             continue
 
         if isinstance(result, dict):
             # Merge results
-            for key in ["results_rag_local", "results_rag_global", "results_web", "results_juris"]:
+            for key in [
+                "results_rag_local",
+                "results_rag_global",
+                "results_web",
+                "results_juris",
+            ]:
                 if key in result:
                     merged_state[key] = result[key]
 
@@ -836,6 +950,7 @@ async def run_parallel_research(
         results_rag_global=[],
         results_web=[],
         results_juris=[],
+        results_agent_parallel=[],
         merged_context="",
         citations_map={},
         sources_used=[],

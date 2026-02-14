@@ -10,7 +10,7 @@ from loguru import logger
 from app.services.ai.agents import ClaudeAgent, GeminiAgent, GPTAgent
 from app.services.ai.base_agent import AgentResponse, AgentReview
 from app.services.ai.langgraph_workflow import MinutaWorkflow
-from app.services.legal_prompts import LegalPrompts
+
 from app.services.web_search_service import web_search_service, is_breadth_first
 from app.services.ai.deep_research_service import deep_research_service
 from app.services.ai.model_registry import get_api_model_name
@@ -54,7 +54,6 @@ class MultiAgentOrchestrator:
         self.claude_client = init_anthropic_client()
         
         # Manter agentes antigos apenas se necessário para fallback (por enquanto não usa)
-        # self.prompts = LegalPrompts() 
         # self.workflow = MinutaWorkflow()
         
         # Inicializar Drafter para o Juiz (Gemini)

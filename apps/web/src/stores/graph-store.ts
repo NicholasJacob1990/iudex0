@@ -101,6 +101,12 @@ export interface Remissao {
     group: string;
     co_occurrences: number;
     sample_text?: string;
+    // Transparency-first hybrid
+    verified?: boolean;
+    relationship_type?: string; // REMETE_A | CO_MENCIONA | co_occurrence | ...
+    layer?: string; // verified | candidate
+    dimension?: string; // hierarquica | horizontal | remissiva
+    evidence?: string;
 }
 
 export interface GraphStats {

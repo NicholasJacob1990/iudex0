@@ -2,6 +2,7 @@
 
 import {
   FileText,
+  Eye,
   CheckCircle2,
   Clock,
   AlertCircle,
@@ -42,6 +43,7 @@ interface DocumentViewProps {
   documents: DocumentItem[];
   viewMode: CorpusViewMode;
   isLoading: boolean;
+  onView?: (id: string, name: string) => void;
   onDelete?: (id: string, name: string) => void;
   onReindex?: (id: string, name: string) => void;
   onMove?: (id: string, name: string) => void;
@@ -103,11 +105,13 @@ function EmptyState() {
 
 function ListView({
   documents,
+  onView,
   onDelete,
   onReindex,
   onMove,
 }: {
   documents: DocumentItem[];
+  onView?: (id: string, name: string) => void;
   onDelete?: (id: string, name: string) => void;
   onReindex?: (id: string, name: string) => void;
   onMove?: (id: string, name: string) => void;
@@ -180,6 +184,17 @@ function ListView({
                 </p>
               </div>
               <div className="col-span-1 flex items-center justify-end gap-1">
+                {onView && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 rounded-full"
+                    onClick={() => onView(doc.id, doc.name)}
+                    title="Abrir origem"
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                  </Button>
+                )}
                 {onMove && (
                   <Button
                     variant="ghost"
@@ -228,10 +243,12 @@ function ListView({
 
 function GridView({
   documents,
+  onView,
   onDelete,
   onReindex,
 }: {
   documents: DocumentItem[];
+  onView?: (id: string, name: string) => void;
   onDelete?: (id: string, name: string) => void;
   onReindex?: (id: string, name: string) => void;
 }) {
@@ -296,6 +313,16 @@ function GridView({
                   {doc.ingested_at ? formatDate(doc.ingested_at) : 'Pendente'}
                 </span>
                 <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {onView && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 rounded-full"
+                      onClick={() => onView(doc.id, doc.name)}
+                    >
+                      <Eye className="h-3 w-3" />
+                    </Button>
+                  )}
                   {onReindex && (
                     <Button
                       variant="ghost"
@@ -332,10 +359,12 @@ function GridView({
 
 function GroupedView({
   documents,
+  onView,
   onDelete,
   onReindex,
 }: {
   documents: DocumentItem[];
+  onView?: (id: string, name: string) => void;
   onDelete?: (id: string, name: string) => void;
   onReindex?: (id: string, name: string) => void;
 }) {
@@ -387,6 +416,16 @@ function GroupedView({
                       {status.label}
                     </Badge>
                     <div className="flex items-center gap-1 shrink-0">
+                      {onView && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 rounded-full"
+                          onClick={() => onView(doc.id, doc.name)}
+                        >
+                          <Eye className="h-3 w-3" />
+                        </Button>
+                      )}
                       {onReindex && (
                         <Button
                           variant="ghost"
@@ -427,6 +466,7 @@ export function CorpusDocumentViews({
   documents,
   viewMode,
   isLoading,
+  onView,
   onDelete,
   onReindex,
   onMove,
@@ -441,11 +481,33 @@ export function CorpusDocumentViews({
 
   switch (viewMode) {
     case 'grid':
-      return <GridView documents={documents} onDelete={onDelete} onReindex={onReindex} />;
+      return (
+        <GridView
+          documents={documents}
+          onView={onView}
+          onDelete={onDelete}
+          onReindex={onReindex}
+        />
+      );
     case 'grouped':
-      return <GroupedView documents={documents} onDelete={onDelete} onReindex={onReindex} />;
+      return (
+        <GroupedView
+          documents={documents}
+          onView={onView}
+          onDelete={onDelete}
+          onReindex={onReindex}
+        />
+      );
     case 'list':
     default:
-      return <ListView documents={documents} onDelete={onDelete} onReindex={onReindex} onMove={onMove} />;
+      return (
+        <ListView
+          documents={documents}
+          onView={onView}
+          onDelete={onDelete}
+          onReindex={onReindex}
+          onMove={onMove}
+        />
+      );
   }
 }

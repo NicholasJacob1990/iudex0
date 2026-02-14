@@ -129,6 +129,9 @@ class PreventiveFidelityPlugin(AuditPlugin):
             score = _normalize_score(data.get("nota_fidelidade"))
             approved = bool(data.get("aprovado", True))
             status = "ok" if approved else "warning"
+            recommendation = data.get("recomendacao_hil") or {}
+            if bool(recommendation.get("pausar_para_revisao")):
+                status = "warning"
             if data.get("erro"):
                 status = "error"
                 issues.append(
@@ -158,6 +161,64 @@ class PreventiveFidelityPlugin(AuditPlugin):
                             severity=_normalize_severity(item_dict.get("gravidade")),
                             description=str(desc),
                             extra={"raw_item": item_dict},
+                        )
+                    )
+            sources = data.get("auditoria_fontes")
+            if isinstance(sources, dict):
+                source_score = _normalize_score(sources.get("nota_consistencia"))
+                source_errors = sources.get("erros_criticos") or []
+                source_ambiguities = sources.get("ambiguidades") or []
+                sources_inconclusive = bool(sources.get("inconclusivo")) or (
+                    len(source_errors) == 0
+                    and len(source_ambiguities) == 0
+                    and (source_score is None or source_score <= 0)
+                ) or (
+                    len(source_errors) == 0 and bool(sources.get("erro"))
+                )
+                if source_score is not None and not sources_inconclusive:
+                    score = min(score, source_score) if score is not None else source_score
+                if not sources_inconclusive and "aprovado" in sources and not bool(sources.get("aprovado")):
+                    status = "warning"
+                for item in source_errors:
+                    item_dict = _coerce_item(item)
+                    desc = (
+                        item_dict.get("correcao_sugerida")
+                        or item_dict.get("problema")
+                        or item_dict.get("descricao")
+                        or item_dict.get("trecho_formatado")
+                    )
+                    if not desc:
+                        desc = json.dumps(item_dict, ensure_ascii=False)[:240]
+                    issues.append(
+                        _issue(
+                            source=self.id,
+                            category="autoria",
+                            severity=_normalize_severity(item_dict.get("gravidade") or "alta"),
+                            description=str(desc),
+                            extra={"raw_item": item_dict},
+                        )
+                    )
+                for item in source_ambiguities:
+                    item_dict = _coerce_item(item)
+                    desc = item_dict.get("sugestao") or item_dict.get("problema") or item_dict.get("descricao")
+                    if not desc:
+                        desc = json.dumps(item_dict, ensure_ascii=False)[:240]
+                    issues.append(
+                        _issue(
+                            source=self.id,
+                            category="autoria_ambiguidade",
+                            severity="medium",
+                            description=str(desc),
+                            extra={"raw_item": item_dict},
+                        )
+                    )
+                if isinstance(sources.get("erro"), str) and sources.get("erro").strip() and not source_errors:
+                    issues.append(
+                        _issue(
+                            source=self.id,
+                            category="autoria",
+                            severity="warning",
+                            description=sources.get("erro").strip(),
                         )
                     )
         elif md:
@@ -377,17 +438,24 @@ def run_audit_pipeline(
         if result.get("score") is not None:
             scores[plugin.id] = float(result["score"])
 
-    # NOVO: Consolidar notas - usar apenas UMA fonte para evitar contradição
-    # Prioridade: preventive_fidelity > validation_fidelity
+    # Consolidated score policy:
+    # - If preventive and validation exist, use the most conservative value (minimum).
+    # - Otherwise, fall back to whichever is available.
     summary_score = None
-    if "preventive_fidelity" in scores:
-        summary_score = scores["preventive_fidelity"]
-        # Remove nota de validação para evitar conflito no frontend
-        # A nota 0.33 vs 9.07 era causada por dois sistemas diferentes
-        scores.pop("validation_fidelity", None)
-        logger.debug(f"Usando nota da auditoria preventiva: {summary_score}")
-    elif "validation_fidelity" in scores:
-        summary_score = scores["validation_fidelity"]
+    preventive_score = scores.get("preventive_fidelity")
+    validation_score = scores.get("validation_fidelity")
+    if preventive_score is not None and validation_score is not None:
+        summary_score = min(float(preventive_score), float(validation_score))
+        logger.debug(
+            "Consolidated audit score using conservative policy min(preventive=%s, validation=%s) => %s",
+            preventive_score,
+            validation_score,
+            summary_score,
+        )
+    elif preventive_score is not None:
+        summary_score = float(preventive_score)
+    elif validation_score is not None:
+        summary_score = float(validation_score)
 
     # NOVO: Validar issues para remover falsos positivos E enriquecer com evidências
     validated_issues = issues
@@ -432,7 +500,7 @@ def run_audit_pipeline(
     issues = validated_issues
 
     status = "ok"
-    if any(mod.get("status") == "error" for mod in modules):
+    if any(mod.get("status") in {"warning", "error"} for mod in modules):
         status = "warning"
     if any(issue.get("severity") == "critical" for issue in issues):
         status = "warning"
@@ -444,6 +512,9 @@ def run_audit_pipeline(
         "status": status,
         "score": summary_score,
         "scores": scores,
+        # Nome explícito para diferenciar diagnóstico de correções HIL aplicáveis.
+        "diagnostic_issues_total": len(issues),
+        # Compatibilidade retroativa com consumidores legados.
         "issues_total": len(issues),
         "issues": issues[:200],
         "false_positives_removed": false_positives_count,  # NOVO: para debug

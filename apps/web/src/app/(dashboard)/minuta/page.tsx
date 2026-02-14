@@ -2,10 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { useChatStore, useCanvasStore } from '@/stores';
+import { useChatStore, useCanvasStore, useUIStore } from '@/stores';
 import { useAuthStore } from '@/stores/auth-store';
 import { Button } from '@/components/ui/button';
 import { ChatInterface, ChatInput } from '@/components/chat';
+import { useTheme } from 'next-themes';
+import { tintToColor, LIGHT_STOPS, DARK_STOPS } from '@/components/layout/top-nav';
+import { getChatTintStyles } from '@/lib/chat-tint-styles';
 import {
   Sparkles,
   FileText,
@@ -106,6 +109,9 @@ export default function MinutaPage() {
   const router = useRouter();
   const params = useParams<{ chatId?: string | string[] }>();
   const { isAuthenticated } = useAuthStore();
+  const { chatBgTintLight, chatBgTintDark, tintMode } = useUIStore();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
   const autoCreateAttemptedRef = useRef(false);
   const pageRootRef = useRef<HTMLDivElement>(null);
   const chatPanelRef = useRef<HTMLDivElement>(null);
@@ -194,6 +200,8 @@ export default function MinutaPage() {
     setMaxDivergenceHilRounds,
     formattingOptions,
     setFormattingOptions,
+    citationStyle,
+    setCitationStyle,
     chatMode,
     setChatMode,
     selectedModels,
@@ -224,10 +232,21 @@ export default function MinutaPage() {
     setCreativityMode,
     temperatureOverride,
     setTemperatureOverride,
+    graphHops,
+    setGraphHops,
   } = useChatStore();
 
   const { state: canvasState, showCanvas, hideCanvas, setState: setCanvasState, setActiveTab } = useCanvasStore();
   const { items: contextItems } = useContextStore();
+  const activeTint = isDark ? chatBgTintDark : chatBgTintLight;
+  const chatBg = useMemo(
+    () => tintToColor(activeTint, isDark ? DARK_STOPS : LIGHT_STOPS),
+    [activeTint, isDark],
+  );
+  const { messageAreaStyle, assistantBubbleStyle, inputAreaStyle, canvasStyle } = useMemo(
+    () => getChatTintStyles({ tintMode, isDark, chatBg }),
+    [chatBg, isDark, tintMode],
+  );
 
   const [showFontes, setShowFontes] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -721,11 +740,11 @@ export default function MinutaPage() {
   return (
     <div ref={pageRootRef} className="flex h-full flex-1 min-h-0 flex-col gap-3">
       {/* Compact Toolbar */}
-      <div className="flex flex-none flex-wrap items-center justify-between gap-2 rounded-xl bg-white/90 border border-slate-200/60 px-4 py-2.5 shadow-sm">
+      <div className="flex flex-none flex-wrap items-center justify-between gap-2 rounded-xl bg-background/90 border border-border/60 px-4 py-2.5 shadow-sm backdrop-blur-sm">
         {/* Left: Mode controls */}
         <div className="flex flex-wrap items-center gap-3">
           {/* Generation Mode Toggle */}
-          <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
             <RichTooltip
               title="Modo Chat (Rápido)"
               description="Conversa livre e rápida. Ideal para tirar dúvidas pontuais ou pedir resumos."
@@ -740,8 +759,8 @@ export default function MinutaPage() {
                 className={cn(
                   "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
                   mode === 'individual'
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 <Zap className="h-3.5 w-3.5" />
@@ -763,7 +782,7 @@ export default function MinutaPage() {
                   "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
                   mode === 'multi-agent'
                     ? "bg-indigo-600 text-white shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 <Users className="h-3.5 w-3.5" />
@@ -772,10 +791,10 @@ export default function MinutaPage() {
             </RichTooltip>
           </div>
 
-          <div className="h-5 w-px bg-slate-200 hidden sm:block" />
+          <div className="h-5 w-px bg-border hidden sm:block" />
 
           {/* Chat Mode Toggle */}
-          <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
             <RichTooltip
               title="Chat Normal"
               description="Conversa com um único modelo. Ideal para iterações rápidas."
@@ -787,8 +806,8 @@ export default function MinutaPage() {
                 className={cn(
                   "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
                   chatMode !== 'multi-model'
-                    ? "bg-white text-slate-900 shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 <User className="h-3.5 w-3.5" />
@@ -807,7 +826,7 @@ export default function MinutaPage() {
                   "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-all",
                   chatMode === 'multi-model'
                     ? "bg-amber-500 text-white shadow-sm"
-                    : "text-slate-500 hover:text-slate-700"
+                    : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 <Scale className="h-3.5 w-3.5" />
@@ -830,12 +849,12 @@ export default function MinutaPage() {
             Auditoria
           </Button>
 
-          <div className="flex items-center rounded-lg border border-slate-200 bg-slate-50 p-0.5">
+          <div className="flex items-center rounded-lg border border-border bg-muted/50 p-0.5">
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className={cn("h-8 px-2 text-[11px]", chatActive && "bg-white shadow-sm")}
+              className={cn("h-8 px-2 text-[11px]", chatActive && "bg-background shadow-sm")}
               onClick={toggleChatMode}
               title={
                 layoutMode === 'chat'
@@ -849,7 +868,7 @@ export default function MinutaPage() {
               type="button"
               variant="ghost"
               size="sm"
-              className={cn("h-8 px-2 text-[11px]", canvasActive && "bg-white shadow-sm")}
+              className={cn("h-8 px-2 text-[11px]", canvasActive && "bg-background shadow-sm")}
               onClick={toggleCanvasMode}
               title={
                 layoutMode === 'canvas'
@@ -878,7 +897,7 @@ export default function MinutaPage() {
           <Button
             variant="ghost"
             size="icon"
-            className={cn("h-8 w-8 rounded-lg", showSettings && "bg-slate-100")}
+            className={cn("h-8 w-8 rounded-lg", showSettings && "bg-accent")}
             onClick={() => setShowSettings(!showSettings)}
             data-testid="settings-toggle"
           >
@@ -917,17 +936,17 @@ export default function MinutaPage() {
         <div
           ref={chatPanelRef}
           className={cn(
-            "relative flex flex-col min-w-0 bg-white/50 backdrop-blur-sm transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
-            layoutMode === 'split' ? 'border-r border-slate-200/60' : '',
+            "relative flex flex-col min-w-0 bg-background/50 backdrop-blur-sm transition-[width,opacity,transform] duration-300 ease-in-out will-change-[width]",
+            layoutMode === 'split' ? 'border-r border-border/60' : '',
             canvasState === 'expanded' ? 'hidden w-0 opacity-0' : '',
-            isFullscreen && pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full bg-white' : ''
+            isFullscreen && pendingFullscreenTarget === 'chat' ? 'fixed inset-0 z-50 w-full h-full bg-background' : ''
           )}
           style={{
             width: canvasState === 'normal' ? `${chatPanelWidth}%` : '100%',
           }}
         >
           {/* Mode Status Bar */}
-          <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-slate-100 bg-slate-50/50">
+          <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-border/50 bg-muted/30">
             <div className="flex items-center gap-2">
               <div className={cn(
                 "flex h-2 w-2 rounded-full",
@@ -967,7 +986,7 @@ export default function MinutaPage() {
                       "flex h-4 w-4 items-center justify-center rounded-full flex-shrink-0",
                       step.status === 'completed' && "bg-emerald-100 text-emerald-600",
                       step.status === 'working' && "bg-indigo-100 text-indigo-600",
-                      step.status === 'pending' && "bg-slate-100 text-slate-400",
+                      step.status === 'pending' && "bg-muted text-muted-foreground",
                     )}>
                       {step.status === 'completed' && <CheckCircle2 className="h-3 w-3" />}
                       {step.status === 'working' && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -975,7 +994,7 @@ export default function MinutaPage() {
                     </div>
                     <span className={cn(
                       "text-xs truncate",
-                      step.status === 'working' ? "text-indigo-700 font-medium" : "text-slate-600"
+                      step.status === 'working' ? "text-indigo-700 dark:text-indigo-400 font-medium" : "text-muted-foreground"
                     )}>
                       {getAgentLabel(step.agent)}
                     </span>
@@ -1013,6 +1032,9 @@ export default function MinutaPage() {
                 hideInput={false}
                 autoCanvasOnDocumentRequest
                 showCanvasButton
+                messageAreaStyle={messageAreaStyle}
+                assistantBubbleStyle={assistantBubbleStyle}
+                inputAreaStyle={inputAreaStyle}
               />
             ) : (
               <>
@@ -1020,16 +1042,16 @@ export default function MinutaPage() {
                 <div className="flex-1 flex flex-col items-center justify-center gap-4 p-6 text-center">
                   <div className={cn(
                     "rounded-2xl p-5",
-                    mode === 'multi-agent' ? "bg-indigo-100" : "bg-slate-100"
+                    mode === 'multi-agent' ? "bg-indigo-100 dark:bg-indigo-500/20" : "bg-muted"
                   )}>
                     {mode === 'multi-agent'
                       ? <Users className="h-10 w-10 text-indigo-400" />
-                      : <Sparkles className="h-10 w-10 text-slate-400" />
+                      : <Sparkles className="h-10 w-10 text-muted-foreground" />
                     }
                   </div>
                   <div>
-                    <p className="text-base font-semibold text-slate-900 mb-1">Pronto para começar</p>
-                    <p className="text-sm text-slate-500 max-w-[280px]">
+                    <p className="text-base font-semibold text-foreground mb-1">Pronto para começar</p>
+                    <p className="text-sm text-muted-foreground max-w-[280px]">
                       {mode === 'multi-agent'
                         ? 'O comitê de agentes irá colaborar para gerar seu documento jurídico.'
                         : 'O modelo irá gerar seu documento diretamente.'}
@@ -1058,16 +1080,16 @@ export default function MinutaPage() {
           </div>
 
           {/* Fontes Panel (Collapsible) */}
-          <div className="border-t border-slate-100">
+          <div className="border-t border-border/50">
             <button
               onClick={() => setShowFontes(!showFontes)}
-              className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-slate-500 hover:bg-slate-50 transition-colors"
+              className="w-full flex items-center justify-between px-4 py-2.5 text-xs font-medium text-muted-foreground hover:bg-muted/50 transition-colors"
               data-testid="fontes-toggle"
             >
               <div className="flex items-center gap-2">
                 <FileSearch className="h-4 w-4" />
                 <span>Fontes RAG</span>
-                <span className="text-[10px] bg-slate-100 px-2 py-0.5 rounded-full text-slate-600">
+                <span className="text-[10px] bg-muted px-2 py-0.5 rounded-full text-muted-foreground">
                   {contextItems.length}
                 </span>
               </div>
@@ -1076,18 +1098,18 @@ export default function MinutaPage() {
 
             {showFontes && (
               <div
-                className="max-h-[150px] overflow-y-auto p-3 bg-slate-50/50 space-y-1.5"
+                className="max-h-[150px] overflow-y-auto p-3 bg-muted/30 space-y-1.5"
                 data-testid="fontes-panel"
               >
                 {contextItems.length > 0 ? (
                   contextItems.map((item: ContextItem, idx: number) => (
-                    <div key={idx} className="flex items-center gap-2 text-sm p-2.5 rounded-lg bg-white border border-slate-100">
+                    <div key={idx} className="flex items-center gap-2 text-sm p-2.5 rounded-lg bg-background border border-border/50">
                       <BookOpen className="h-4 w-4 text-indigo-500 flex-shrink-0" />
-                      <span className="truncate text-slate-600">{item.name || `Documento ${idx + 1}`}</span>
+                      <span className="truncate text-muted-foreground">{item.name || `Documento ${idx + 1}`}</span>
                     </div>
                   ))
                 ) : (
-                  <p className="text-xs text-slate-400 text-center py-3">
+                  <p className="text-xs text-muted-foreground text-center py-3">
                     Nenhum documento no contexto.
                   </p>
                 )}
@@ -1103,8 +1125,8 @@ export default function MinutaPage() {
             aria-label="Redimensionar painel"
             className={cn(
               "relative w-3 cursor-col-resize bg-transparent",
-              "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2 before:bg-slate-200/80",
-              isResizing && "bg-slate-100/80"
+              "before:absolute before:left-1/2 before:top-0 before:h-full before:w-px before:-translate-x-1/2 before:bg-border",
+              isResizing && "bg-accent/80"
             )}
             onPointerDown={handleDividerPointerDown}
             onPointerMove={handleDividerPointerMove}
@@ -1118,10 +1140,11 @@ export default function MinutaPage() {
         {/* Right Panel: Canvas */}
         {canvasState !== 'hidden' && (
           <div className={cn(
-            "min-h-0 h-full rounded-r-xl border border-l-0 border-slate-200/60 bg-white shadow-sm overflow-hidden transition-[flex-grow,width,opacity,transform] duration-300 ease-in-out",
+            "min-h-0 h-full rounded-r-xl border border-l-0 border-border/60 bg-background shadow-sm overflow-hidden transition-[flex-grow,width,opacity,transform,background-color] duration-300 ease-in-out",
             canvasState === 'expanded' ? "flex-1 rounded-xl border-l" : "flex-1"
           )}
             ref={canvasPanelRef}
+            style={canvasStyle}
           >
             <CanvasContainer />
           </div>
@@ -1155,6 +1178,10 @@ export default function MinutaPage() {
         resetPageRange={resetPageRange}
         formattingOptions={formattingOptions}
         setFormattingOptions={setFormattingOptions}
+        citationStyle={citationStyle}
+        setCitationStyle={setCitationStyle}
+        graphHops={graphHops}
+        setGraphHops={setGraphHops}
         reasoningLevel={(['low', 'medium', 'high'].includes(reasoningLevel) ? reasoningLevel : 'medium') as 'low' | 'medium' | 'high'}
         setReasoningLevel={setReasoningLevel}
         effortLevel={effortLevel}

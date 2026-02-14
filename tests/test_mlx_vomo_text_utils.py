@@ -3,6 +3,7 @@ Tests for deterministic text utilities in mlx_vomo.py.
 Run with: pytest tests/test_mlx_vomo_text_utils.py -v
 """
 import importlib
+import importlib.machinery
 import os
 import sys
 import types
@@ -14,6 +15,8 @@ def _install_stub(name, attrs=None):
     module = sys.modules.get(name)
     if module is None:
         module = types.ModuleType(name)
+        # Set __spec__ to avoid ValueError in importlib.util.find_spec
+        module.__spec__ = importlib.machinery.ModuleSpec(name, None)
         sys.modules[name] = module
     if attrs:
         for key, value in attrs.items():
@@ -39,13 +42,30 @@ def _install_external_stubs():
             pass
         genai.Client = DummyGenaiClient
 
-    openai = _install_stub("openai")
+    # Stub openai de forma que importlib.util.find_spec não quebre
+    # (faster_whisper → transformers verifica openai.__spec__)
+    if "openai" not in sys.modules:
+        openai = _install_stub("openai")
+    else:
+        openai = sys.modules["openai"]
     class DummyOpenAI:
         pass
     if not hasattr(openai, "OpenAI"):
         openai.OpenAI = DummyOpenAI
     if not hasattr(openai, "AsyncOpenAI"):
         openai.AsyncOpenAI = DummyOpenAI
+
+    # Stub faster_whisper/mlx_whisper para evitar cadeia de imports pesados
+    _install_stub("faster_whisper", {"WhisperModel": type("WhisperModel", (), {})})
+    _install_stub("mlx_whisper")
+
+    # Stub audit_unified
+    _install_stub("audit_unified", {
+        "UnifiedAuditEngine": type("UnifiedAuditEngine", (), {}),
+        "generate_unified_markdown": lambda *a, **k: "",
+        "UnifiedReport": type("UnifiedReport", (), {}),
+        "compare_reports": lambda *a, **k: {},
+    })
 
     tenacity = _install_stub("tenacity")
     if not hasattr(tenacity, "retry"):
@@ -78,6 +98,34 @@ def _install_external_stubs():
     })
 
 
+def _install_gemini_stubs():
+    """Stubs para permitir import de format_transcription_gemini sem google-genai instalado."""
+    google = _install_stub("google")
+    genai = _install_stub("google.genai")
+    types_mod = _install_stub("google.genai.types")
+    if not hasattr(google, "genai"):
+        google.genai = genai
+    if not hasattr(genai, "types"):
+        genai.types = types_mod
+    if not hasattr(types_mod, "GenerateContentConfig"):
+        types_mod.GenerateContentConfig = type("GenerateContentConfig", (), {})
+    if not hasattr(types_mod, "SafetySetting"):
+        types_mod.SafetySetting = type("SafetySetting", (), {})
+    if not hasattr(types_mod, "CreateCachedContentConfig"):
+        types_mod.CreateCachedContentConfig = type("CreateCachedContentConfig", (), {})
+    if not hasattr(genai, "Client"):
+        genai.Client = type("Client", (), {})
+
+    _install_stub("tqdm", {"tqdm": None})
+    _install_stub("docx")
+    _install_stub("docx.shared")
+    _install_stub("docx.enum")
+    _install_stub("docx.enum.text")
+    _install_stub("docx.enum.table")
+    _install_stub("docx.oxml")
+    _install_stub("docx.oxml.ns")
+
+
 @pytest.fixture(scope="module")
 def mlx_vomo_module():
     _install_external_stubs()
@@ -86,6 +134,16 @@ def mlx_vomo_module():
     if repo_root not in sys.path:
         sys.path.insert(0, repo_root)
     return importlib.import_module("mlx_vomo")
+
+
+@pytest.fixture(scope="module")
+def gemini_module():
+    _install_external_stubs()
+    _install_gemini_stubs()
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    return importlib.import_module("format_transcription_gemini")
 
 
 def test_renumerar_secoes_sequencial(mlx_vomo_module):
@@ -110,11 +168,11 @@ def test_renumber_headings_demotes_h2_decimal_to_h3(mlx_vomo_module):
     vomo = mlx_vomo_module.VomoMLX.__new__(mlx_vomo_module.VomoMLX)
     texto = "\n".join(
         [
-            "## 1. Seção 1",
-            "## 2. Seção 2",
-            "## 3. Seção 3",
-            "## 4. Seção 4",
-            "## 5. Seção 5",
+            "## 1. Competência",
+            "## 2. Partes e Litisconsórcio",
+            "## 3. Citação e Intimação",
+            "## 4. Contestação",
+            "## 5. Tutela Provisória",
             "### 5.1. Sub 1",
             "### 5.2. Sub 2",
             "### 5.3. Sub 3",
@@ -253,6 +311,116 @@ def test_dividir_por_blocos_markdown_custom_prefix(mlx_vomo_module):
     assert chunks, "deve reconhecer prefixo customizado"
     assert chunks[0]["inicio"] == 0
     assert chunks[-1]["fim"] == len(texto)
+
+
+def test_simplificar_estrutura_preserva_nivel3_quando_permitido(mlx_vomo_module):
+    estrutura = "\n".join(
+        [
+            "1. Processo de Conhecimento",
+            "1.1. Fase Postulatória",
+            "1.1.1. Petição Inicial",
+            "1.1.2. Emenda da Inicial",
+            "1.2. Saneamento",
+            "1.2.1. Delimitação de Provas",
+            "1.2.2. Decisão de Organização",
+            "2. Recursos",
+            "2.1. Apelação",
+            "2.1.1. Juízo de Admissibilidade",
+            "2.1.2. Efeitos",
+        ]
+    )
+
+    out = mlx_vomo_module.simplificar_estrutura_se_necessario(
+        estrutura,
+        max_linhas=8,
+        max_nivel=3,
+    )
+    assert "1.1.1. Petição Inicial" in out or "2.1.1. Juízo de Admissibilidade" in out
+
+
+def test_simplificar_estrutura_amostra_distribuida(mlx_vomo_module):
+    linhas = [f"{i}. Tópico {i}" for i in range(1, 101)]
+    estrutura = "\n".join(linhas)
+
+    out = mlx_vomo_module.simplificar_estrutura_se_necessario(
+        estrutura,
+        max_linhas=10,
+        max_nivel=3,
+    )
+    out_lines = [l.strip() for l in out.split("\n") if l.strip()]
+    assert len(out_lines) == 10
+    assert "1. Tópico 1" in out
+    assert "100. Tópico 100" in out
+    assert "10. Tópico 10" not in out  # evita corte puro no começo
+
+
+def test_sample_with_parents_preserva_ancestrais(mlx_vomo_module):
+    itens = [
+        "1. Processo",
+        "1.1. Fase Postulatória",
+        "1.1.1. Petição Inicial",
+        "2. Recursos",
+        "2.1. Apelação",
+        "2.1.1. Efeitos",
+    ]
+    sampled = mlx_vomo_module._sample_with_parents(itens, limit=4)
+    sampled_set = set(sampled)
+    for line in sampled:
+        key = mlx_vomo_module._extract_outline_key(line)
+        if not key or "." not in key:
+            continue
+        parent_key = ".".join(key.split(".")[:-1])
+        parent = next(
+            (
+                it
+                for it in itens
+                if mlx_vomo_module._extract_outline_key(it) == parent_key
+            ),
+            None,
+        )
+        if parent:
+            assert parent in sampled_set
+
+
+def test_simplificar_estrutura_nao_deixa_filho_orfao(mlx_vomo_module):
+    estrutura = "\n".join(
+        [
+            "1. Processo",
+            "1.1. Fase Postulatória",
+            "1.1.1. Petição Inicial",
+            "1.1.2. Emenda",
+            "1.2. Saneamento",
+            "1.2.1. Provas",
+            "2. Recursos",
+            "2.1. Apelação",
+            "2.1.1. Efeitos",
+            "2.1.2. Juízo de admissibilidade",
+            "2.2. Agravo",
+            "2.2.1. Cabimento",
+        ]
+    )
+    out = mlx_vomo_module.simplificar_estrutura_se_necessario(
+        estrutura,
+        max_linhas=6,
+        max_nivel=3,
+    )
+    linhas = [l.strip() for l in out.split("\n") if l.strip()]
+    sampled_set = set(linhas)
+    for line in linhas:
+        key = mlx_vomo_module._extract_outline_key(line)
+        if not key or key.count(".") < 2:
+            continue
+        parent_key = ".".join(key.split(".")[:-1])
+        parent = next(
+            (
+                it
+                for it in linhas
+                if mlx_vomo_module._extract_outline_key(it) == parent_key
+            ),
+            None,
+        )
+        assert parent is not None
+        assert parent in sampled_set
 
 
 def test_normalize_headings_removes_continuacao(mlx_vomo_module):
@@ -433,3 +601,132 @@ def test_normalize_asr_temas_consistency_override_matches_dotted(monkeypatch, ml
     assert "Tema 1.933" not in out
     assert "Tema 1933" not in out
     assert out.count("Tema 1033") == 2
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_mapped_structure (v2.47)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeMappedStructure:
+    """Testes para sanitização de títulos de estrutura mapeada."""
+
+    def test_speech_fragment_replaced_by_canonical_label(self, mlx_vomo_module):
+        """Título que é frase literal do professor → rótulo canônico."""
+        estrutura = "1. Já estávamos conversando aqui antes de começar a transmissão"
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert "Já estávamos" not in result
+        assert "Introdução" in result
+
+    def test_greeting_replaced_by_canonical_label(self, mlx_vomo_module):
+        """Saudação como título → 'Introdução e Contextualização'."""
+        estrutura = "1. Bom dia pessoal vamos começar falando sobre licitações e contratos"
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert "Bom dia" not in result
+        assert "Introdução" in result
+
+    def test_good_title_preserved(self, mlx_vomo_module):
+        """Título técnico curto não é alterado."""
+        estrutura = "2. Licitações e Contratos"
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert "Licitações e Contratos" in result
+
+    def test_subtopic_greeting_becomes_abertura(self, mlx_vomo_module):
+        """Saudação em subtópico → 'Abertura' (não 'Introdução')."""
+        estrutura = "   1.1. Bom dia a todos os presentes nesta sala"
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert "Bom dia" not in result
+        assert "Abertura" in result
+
+    def test_abre_fecha_anchors_preserved(self, mlx_vomo_module):
+        """Âncoras ABRE/FECHA devem ser preservadas intactas."""
+        estrutura = '1. Já estávamos conversando antes | ABRE: "já estávamos conversando" | FECHA: "vamos ao tema"'
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert "Já estávamos" not in result.split("| ABRE:")[0]
+        assert '| ABRE: "já estávamos conversando"' in result
+        assert '| FECHA: "vamos ao tema"' in result
+
+    def test_too_long_title_without_conversation_prefix(self, mlx_vomo_module):
+        """Título longo sem prefixo conversacional → rótulo canônico."""
+        title_words = " ".join(["palavra"] * 15)
+        estrutura = f"3. {title_words}"
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        assert title_words not in result
+
+    def test_mixed_structure_selective_fix(self, mlx_vomo_module):
+        """Estrutura mista: apenas títulos ruins são corrigidos."""
+        estrutura = "\n".join([
+            "1. Pessoal antes de começar eu queria dizer que estamos atrasados",
+            "   1.1. Licitações — Lei 14.133/2021",
+            "   1.2. Contratos Administrativos",
+            "2. Bom dia a todos vamos começar a aula",
+        ])
+        result = mlx_vomo_module._sanitize_mapped_structure(estrutura)
+        # Títulos ruins foram sanitizados
+        assert "Pessoal antes" not in result
+        assert "Bom dia a todos" not in result
+        # Títulos bons preservados
+        assert "Licitações — Lei 14.133/2021" in result
+        assert "Contratos Administrativos" in result
+
+    def test_empty_string_returns_empty(self, mlx_vomo_module):
+        assert mlx_vomo_module._sanitize_mapped_structure("") == ""
+
+    def test_none_returns_none(self, mlx_vomo_module):
+        assert mlx_vomo_module._sanitize_mapped_structure(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _sanitize_structure_titles (format_transcription_gemini.py, v2.47)
+# ---------------------------------------------------------------------------
+
+class TestSanitizeStructureTitlesGemini:
+    """Testes para _sanitize_structure_titles de format_transcription_gemini.py."""
+
+    def test_speech_fragment_replaced(self, gemini_module):
+        estrutura = "1. Já estávamos conversando aqui antes de começar a transmissão"
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Já estávamos" not in result
+        assert "Introdução" in result
+
+    def test_greeting_replaced(self, gemini_module):
+        estrutura = "1. Bom dia pessoal vamos começar a aula de hoje sobre licitações"
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Bom dia" not in result
+        assert "Introdução" in result
+
+    def test_good_title_preserved(self, gemini_module):
+        estrutura = "2. Licitações e Contratos"
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Licitações e Contratos" in result
+
+    def test_subtopic_greeting_becomes_abertura(self, gemini_module):
+        estrutura = "   1.1. Bom dia a todos os presentes nesta sala"
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Bom dia" not in result
+        assert "Abertura" in result
+
+    def test_abre_fecha_anchors_preserved(self, gemini_module):
+        estrutura = '1. Pessoal vamos começar | ABRE: "pessoal vamos começar" | FECHA: "agora sim"'
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Pessoal vamos" not in result.split("| ABRE:")[0]
+        assert '| ABRE: "pessoal vamos começar"' in result
+        assert '| FECHA: "agora sim"' in result
+
+    def test_mixed_structure_selective(self, gemini_module):
+        estrutura = "\n".join([
+            "1. Olha pessoal antes de começar vou me apresentar",
+            "   1.1. Direito Administrativo",
+            "   1.2. Contratos Administrativos",
+            "2. Bom dia vamos ao tema principal da aula de hoje",
+        ])
+        result = gemini_module._sanitize_structure_titles(estrutura)
+        assert "Olha pessoal" not in result
+        assert "Bom dia" not in result
+        assert "Direito Administrativo" in result
+        assert "Contratos Administrativos" in result
+
+    def test_empty_returns_empty(self, gemini_module):
+        assert gemini_module._sanitize_structure_titles("") == ""
+
+    def test_none_returns_none(self, gemini_module):
+        assert gemini_module._sanitize_structure_titles(None) is None

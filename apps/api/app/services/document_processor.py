@@ -453,7 +453,7 @@ class UnlimitedContextProcessor:
         return final_result
 
 
-import pdfplumber
+import fitz
 from docx import Document as DocxDocument
 import pytesseract
 from PIL import Image
@@ -472,23 +472,30 @@ class PageText:
 
 async def extract_text_from_pdf(file_path: str) -> str:
     """
-    Extrai texto de PDF usando pdfplumber
-    Melhor para manter layout e extrair tabelas
+    Extrai texto de PDF usando PyMuPDF (fitz).
+    Melhor para PDFs nativos com texto e alto desempenho.
     """
     logger.info(f"Extraindo texto de PDF: {file_path}")
     text_content = []
 
     try:
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
+        with fitz.open(file_path) as pdf:
+            for page in pdf:
+                text = page.get_text("text") or ""
                 text_content.append(text)
 
         return "\n\n".join(text_content)
     except Exception as e:
         logger.error(f"Erro ao extrair texto do PDF {file_path}: {e}")
-        # Fallback para pypdf se necessário ou re-raise
-        raise
+        # Fallback para pypdf quando PyMuPDF falha
+        try:
+            from pypdf import PdfReader
+
+            reader = PdfReader(file_path)
+            pages = [(p.extract_text() or "") for p in reader.pages]
+            return "\n\n".join(pages)
+        except Exception:
+            raise
 
 
 async def extract_pages_from_pdf(file_path: str) -> List[PageText]:
@@ -501,12 +508,12 @@ async def extract_pages_from_pdf(file_path: str) -> List[PageText]:
     global_line = 0
 
     try:
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text() or ""
+        with fitz.open(file_path) as pdf:
+            for i, page in enumerate(pdf, 1):
+                text = page.get_text("text") or ""
                 line_count = text.count("\n") + 1 if text.strip() else 0
                 pages.append(PageText(
-                    page_number=page.page_number,
+                    page_number=i,
                     text=text,
                     line_start=global_line,
                     line_end=global_line + line_count - 1 if line_count > 0 else global_line,
@@ -633,7 +640,7 @@ async def extract_text_from_pdf_with_ocr(
     Extrai texto de PDF usando estratégia híbrida de OCR
 
     Estratégia:
-    1. Se PDF tem texto selecionável e force_ocr=False → pdfplumber
+    1. Se PDF tem texto selecionável e force_ocr=False → PyMuPDF
     2. Se volume baixo → Tesseract local (gratuito)
     3. Se volume alto ou Tesseract falha → Cloud OCR (Azure/Google/Gemini)
 
@@ -673,14 +680,20 @@ async def extract_text_from_pdf_with_ocr(
 
 async def _extract_text_from_pdf_tesseract(file_path: str) -> str:
     """
-    Implementação original de OCR com Tesseract (fallback)
+    OCR local com Tesseract renderizando páginas via PyMuPDF.
     """
     logger.info(f"Aplicando OCR Tesseract em PDF: {file_path}")
     try:
-        from pdf2image import convert_from_path
-
-        logger.info("Convertendo PDF para imagens...")
-        images = convert_from_path(file_path, dpi=300)
+        logger.info("Convertendo PDF para imagens via PyMuPDF...")
+        dpi = 300
+        zoom = dpi / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        images = []
+        with fitz.open(file_path) as pdf:
+            for page in pdf:
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                images.append(image)
 
         logger.info(f"PDF convertido em {len(images)} imagens")
 
@@ -700,9 +713,7 @@ async def _extract_text_from_pdf_tesseract(file_path: str) -> str:
 
     except ImportError as e:
         logger.error("Bibliotecas necessárias não instaladas")
-        logger.error("Instale com: pip install pdf2image")
-        logger.error("macOS: brew install poppler")
-        logger.error("Linux: apt-get install poppler-utils")
+        logger.error("Instale com: pip install pymupdf pytesseract")
         return f"[Erro: bibliotecas de OCR não instaladas - {str(e)}]"
     except Exception as e:
         logger.error(f"Erro ao aplicar OCR em PDF {file_path}: {e}")

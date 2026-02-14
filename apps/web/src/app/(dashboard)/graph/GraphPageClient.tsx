@@ -138,6 +138,9 @@ function transformToNvlRels(links: GraphLink[]): Relationship[] {
     }));
 }
 
+// UI clamp: keep production-safe defaults (server may allow 6 for admins via API).
+const clampGraphHops = (value: number) => Math.max(1, Math.min(5, Math.floor(Number(value) || 3)));
+
 // =============================================================================
 // MAIN COMPONENT
 // =============================================================================
@@ -164,6 +167,24 @@ export default function GraphPage() {
 
     const [pathSource, setPathSource] = useState<string | null>(null);
     const [pathTarget, setPathTarget] = useState<string | null>(null);
+    const [graphHops, setGraphHops] = useState<number>(() => {
+        if (typeof window === 'undefined') return 3;
+        try {
+            return clampGraphHops(Number(localStorage.getItem('iudex_graph_page_hops') || 3));
+        } catch {
+            return 3;
+        }
+    });
+    const [showInferidos, setShowInferidos] = useState<boolean>(() => {
+        if (typeof window === 'undefined') return true;
+        try {
+            const raw = localStorage.getItem('iudex_graph_show_inferidos');
+            if (raw === null) return true; // default: show (Graph page is for exploration)
+            return raw === 'true';
+        } catch {
+            return true;
+        }
+    });
     const [showPathMode, setShowPathMode] = useState(false);
     const [activeTab, setActiveTab] = useState<string>('info');
     const [showFiltersPanel, setShowFiltersPanel] = useState(true);
@@ -308,7 +329,7 @@ export default function GraphPage() {
     const pathQuery = useGraphPath(
         pathSource,
         pathTarget,
-        { ...scopeParams, maxLength: 4 },
+        { ...scopeParams, maxLength: graphHops },
         showPathMode && !!pathSource && !!pathTarget
     );
 
@@ -542,6 +563,32 @@ export default function GraphPage() {
                             {showPathMode ? 'Sair do modo caminho' : 'Encontrar caminho'}
                         </Button>
 
+                        <div className="flex items-center gap-2 rounded-md border px-2.5 h-9 bg-background">
+                            <Label htmlFor="graph-hops-select" className="text-xs text-muted-foreground">
+                                Hops
+                            </Label>
+                            <select
+                                id="graph-hops-select"
+                                className="h-7 rounded border border-slate-200 bg-white px-1.5 text-xs"
+                                value={graphHops}
+                                onChange={(e) => {
+                                    const next = clampGraphHops(Number(e.target.value));
+                                    setGraphHops(next);
+                                    try {
+                                        localStorage.setItem('iudex_graph_page_hops', String(next));
+                                    } catch {
+                                        // ignore storage errors
+                                    }
+                                }}
+                            >
+                                {[1, 2, 3, 4, 5].map((hop) => (
+                                    <option key={hop} value={hop}>
+                                        {hop}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+
                         {/* Search */}
                         <form onSubmit={handleSearch} className="relative">
                             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -641,6 +688,9 @@ export default function GraphPage() {
                                 <div className="w-3 h-3 rounded-full" style={{ backgroundColor: NVL_COLORS.pathTarget }} />
                                 <span>Destino: {pathTarget ? graphData?.nodes.find(n => n.id === pathTarget)?.label || pathTarget : 'Selecione...'}</span>
                             </div>
+                            <Badge variant="outline" className="text-[10px]">
+                                max {graphHops} hops
+                            </Badge>
                             {pathQuery.isLoading && <Loader2 className="h-4 w-4 animate-spin" />}
                         </div>
                         <Button variant="ghost" size="sm" onClick={clearPath}>
@@ -976,17 +1026,48 @@ export default function GraphPage() {
                                             ) : remissoesQuery.data && remissoesQuery.data.length > 0 ? (
                                                 <Card>
                                                     <CardHeader className="pb-2">
-                                                        <CardTitle className="text-sm flex items-center gap-2">
-                                                            <Link2 className="h-4 w-4" />
-                                                            Remissoes ({remissoesQuery.data.length})
-                                                        </CardTitle>
+                                                        <div className="flex items-center justify-between gap-3">
+                                                            <CardTitle className="text-sm flex items-center gap-2">
+                                                                <Link2 className="h-4 w-4" />
+                                                                Remissoes (
+                                                                {(showInferidos
+                                                                    ? remissoesQuery.data
+                                                                    : remissoesQuery.data.filter((r) => r.verified !== false)
+                                                                ).length}
+                                                                )
+                                                            </CardTitle>
+                                                            <div className="flex items-center gap-2">
+                                                                <Checkbox
+                                                                    id="graph-show-inferidos"
+                                                                    checked={showInferidos}
+                                                                    onCheckedChange={(v) => {
+                                                                        const next = Boolean(v);
+                                                                        setShowInferidos(next);
+                                                                        try {
+                                                                            localStorage.setItem('iudex_graph_show_inferidos', String(next));
+                                                                        } catch {
+                                                                            // ignore
+                                                                        }
+                                                                    }}
+                                                                />
+                                                                <Label htmlFor="graph-show-inferidos" className="text-xs text-muted-foreground">
+                                                                    Mostrar inferidos
+                                                                </Label>
+                                                            </div>
+                                                        </div>
                                                         <CardDescription className="text-xs">
-                                                            Dispositivos semanticamente relacionados
+                                                            Dispositivos semanticamente relacionados.{' '}
+                                                            <span className="text-muted-foreground">
+                                                                Inferido = co-mencao (nao e remissao oficial).
+                                                            </span>
                                                         </CardDescription>
                                                     </CardHeader>
                                                     <CardContent>
                                                         <div className="space-y-1">
-                                                            {remissoesQuery.data.slice(0, 15).map((r) => (
+                                                            {(showInferidos
+                                                                ? remissoesQuery.data
+                                                                : remissoesQuery.data.filter((r) => r.verified !== false)
+                                                            ).slice(0, 15).map((r) => (
                                                                 <div
                                                                     key={r.id}
                                                                     className="flex items-center justify-between p-2 rounded-lg hover:bg-muted cursor-pointer transition-colors"
@@ -1000,6 +1081,16 @@ export default function GraphPage() {
                                                                         <span className="text-sm">{r.name}</span>
                                                                     </div>
                                                                     <div className="flex items-center gap-1">
+                                                                        {r.verified === false && (
+                                                                            <Badge variant="secondary" className="text-xs">
+                                                                                Inferido
+                                                                            </Badge>
+                                                                        )}
+                                                                        {r.relationship_type && r.relationship_type !== 'co_occurrence' && (
+                                                                            <Badge variant="outline" className="text-xs">
+                                                                                {r.relationship_type}
+                                                                            </Badge>
+                                                                        )}
                                                                         <Badge variant="outline" className="text-xs">
                                                                             {r.co_occurrences}x
                                                                         </Badge>
@@ -1092,6 +1183,16 @@ export default function GraphPage() {
             <GraphAuraAgentChat
                 selectedNodeId={selectedNode?.id ?? null}
                 onNavigateToNode={navigateToNode}
+                defaultMaxHops={graphHops}
+                onMaxHopsChange={(hops) => {
+                    const next = clampGraphHops(hops);
+                    setGraphHops(next);
+                    try {
+                        localStorage.setItem('iudex_graph_page_hops', String(next));
+                    } catch {
+                        // ignore storage errors
+                    }
+                }}
             />
         </div>
     );

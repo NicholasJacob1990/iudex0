@@ -100,6 +100,26 @@ async def sync_process_watchlists(
                 db.add(new_intimation)
                 result.new_intimations += 1
 
+                # Dispatch trigger for matching event-driven workflows
+                try:
+                    from app.services.workflow_triggers import trigger_registry
+                    trigger_event_data = {
+                        "npu": item.npu,
+                        "tipo": intimation_data.tipo_comunicacao or "",
+                        "conteudo": (intimation_data.texto or "")[:2000],
+                        "tribunal": intimation_data.tribunal_sigla or item.tribunal_sigla,
+                        "data": str(intimation_data.data_disponibilizacao or ""),
+                        "nome_orgao": intimation_data.nome_orgao or "",
+                    }
+                    await trigger_registry.dispatch_event(
+                        trigger_type="djen_movement",
+                        event_data=trigger_event_data,
+                        user_id=item.user_id,
+                        db=db,
+                    )
+                except Exception as trigger_err:
+                    logger.warning(f"Trigger dispatch for DJEN {item.npu} failed: {trigger_err}")
+
             data_mov, intimations = await djen_service.check_and_fetch(
                 npu=item.npu,
                 tribunal_sigla=item.tribunal_sigla,

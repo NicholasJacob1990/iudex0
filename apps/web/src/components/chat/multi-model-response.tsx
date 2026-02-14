@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type CSSProperties } from 'react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { ChatMessage } from './chat-message';
 import { TokenUsageCircle } from './token-usage-circle';
@@ -17,9 +17,10 @@ interface MultiModelResponseProps {
     onCopy?: (message: any) => void;
     onRegenerate?: (message: any) => void;
     disableRegenerate?: boolean;
+    assistantBubbleStyle?: CSSProperties;
 }
 
-export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRegenerate }: MultiModelResponseProps) {
+export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRegenerate, assistantBubbleStyle }: MultiModelResponseProps) {
     const { multiModelView, setMultiModelView, setChatMode, setSelectedModels, setSelectedModel, consolidateTurn } = useChatStore();
     const [isConsolidating, setIsConsolidating] = useState(false);
 
@@ -177,6 +178,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                                 onCopy={onCopy}
                                 onRegenerate={onRegenerate}
                                 disableRegenerate={disableRegenerate}
+                                assistantBubbleStyle={assistantBubbleStyle}
                             />
                         </TabsContent>
                     ))}
@@ -196,6 +198,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                                 onCopy={onCopy}
                                 onRegenerate={onRegenerate}
                                 disableRegenerate={disableRegenerate}
+                                assistantBubbleStyle={assistantBubbleStyle}
                             />
                         </div>
                     )}
@@ -245,6 +248,7 @@ export function MultiModelResponse({ messages, onCopy, onRegenerate, disableRege
                                         onCopy={onCopy}
                                         onRegenerate={onRegenerate}
                                         disableRegenerate={disableRegenerate}
+                                        assistantBubbleStyle={assistantBubbleStyle}
                                     />
                                 </div>
                             );

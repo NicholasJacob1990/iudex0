@@ -30,7 +30,9 @@ def test_validate_skill_markdown_detects_conflicts_and_risk_tools():
 name: risky-skill
 description: teste
 triggers:
-  - revisar
+  - revisar documento
+  - analisar contrato
+  - verificar minuta
 tools_required:
   - search_rag
   - bash

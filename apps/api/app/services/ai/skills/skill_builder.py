@@ -195,7 +195,9 @@ def validate_skill_markdown(markdown: str) -> Dict[str, Any]:
     parsed_skill = parse_skill_markdown(markdown or "", source="runtime")
     frontmatter, _ = _parse_frontmatter(markdown or "")
 
-    if parsed_skill is None:
+    _REQUIRED_FRONTMATTER = {"name", "triggers", "tools_required"}
+
+    if parsed_skill is None and (not frontmatter or not _REQUIRED_FRONTMATTER.issubset(set(frontmatter.keys()))):
         errors.append("Frontmatter inválido ou campos obrigatórios ausentes (name, triggers, tools_required).")
         return {
             "valid": False,
@@ -213,8 +215,11 @@ def validate_skill_markdown(markdown: str) -> Dict[str, Any]:
             "parsed": None,
         }
 
-    triggers = [str(t).strip() for t in (frontmatter.get("triggers") or parsed_skill.triggers or []) if str(t).strip()]
-    tools_required = [str(t).strip() for t in (frontmatter.get("tools_required") or parsed_skill.tools_required or []) if str(t).strip()]
+    if parsed_skill is None and frontmatter:
+        errors.append("Frontmatter rejeitado pelo parser (verifique conflitos e regras de validação).")
+
+    triggers = [str(t).strip() for t in (frontmatter.get("triggers") or (parsed_skill.triggers if parsed_skill else []) or []) if str(t).strip()]
+    tools_required = [str(t).strip() for t in (frontmatter.get("tools_required") or (parsed_skill.tools_required if parsed_skill else []) or []) if str(t).strip()]
     tools_denied = [str(t).strip() for t in (frontmatter.get("tools_denied") or []) if str(t).strip()]
     guardrails = [str(t).strip() for t in (frontmatter.get("guardrails") or []) if str(t).strip()]
     examples = [str(t).strip() for t in (frontmatter.get("examples") or []) if str(t).strip()]
@@ -301,11 +306,11 @@ def validate_skill_markdown(markdown: str) -> Dict[str, Any]:
             "recall_estimate": round(recall, 3),
         },
         "parsed": {
-            "name": parsed_skill.name,
-            "description": parsed_skill.description,
-            "triggers": parsed_skill.triggers,
-            "tools_required": parsed_skill.tools_required,
-            "subagent_model": parsed_skill.subagent_model,
+            "name": parsed_skill.name if parsed_skill else str(frontmatter.get("name", "") if frontmatter else ""),
+            "description": parsed_skill.description if parsed_skill else str(frontmatter.get("description", "") if frontmatter else ""),
+            "triggers": parsed_skill.triggers if parsed_skill else triggers,
+            "tools_required": parsed_skill.tools_required if parsed_skill else tools_required,
+            "subagent_model": parsed_skill.subagent_model if parsed_skill else str(frontmatter.get("subagent_model", "") if frontmatter else ""),
             "version": version,
             "audience": audience,
             "citation_style": citation_style,

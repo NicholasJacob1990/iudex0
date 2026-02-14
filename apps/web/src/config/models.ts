@@ -2,9 +2,16 @@
 
 export type ModelId =
     | "gpt-5.2"
+    | "gpt-5.2-pro"
+    | "gpt-5.2-codex"
+    | "gpt-5.3-codex"
     | "gpt-5.2-instant"
+    | "gpt-5.1"
+    | "gpt-5.1-codex"
+    | "gpt-5.1-codex-mini"
     | "gpt-5"
     | "gpt-5-mini"
+    | "gpt-5-nano"
     | "gpt-4o"
     | "grok-4"
     | "grok-4-fast"
@@ -61,6 +68,48 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         default: false,
         icon: "/logos/openai.png",
     },
+    "gpt-5.2-pro": {
+        id: "gpt-5.2-pro",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.2 Pro",
+        contextWindow: 400_000,
+        latencyTier: "high",
+        costTier: "high",
+        capabilities: ["chat", "code", "agents", "analysis", "deep_reasoning"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5.2-codex": {
+        id: "gpt-5.2-codex",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.2 Codex",
+        contextWindow: 400_000,
+        latencyTier: "high",
+        costTier: "high",
+        capabilities: ["code", "agents", "analysis"],
+        forAgents: true,
+        forJuridico: false,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5.3-codex": {
+        id: "gpt-5.3-codex",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.3 Codex",
+        contextWindow: 400_000,
+        latencyTier: "high",
+        costTier: "high",
+        capabilities: ["code", "agents", "analysis"],
+        forAgents: true,
+        forJuridico: false,
+        default: false,
+        icon: "/logos/openai.png",
+    },
     "gpt-5.2-instant": {
         id: "gpt-5.2-instant",
         provider: "openai",
@@ -72,6 +121,48 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         capabilities: ["chat", "code", "analysis"],
         forAgents: true,
         forJuridico: true,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5.1": {
+        id: "gpt-5.1",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.1",
+        contextWindow: 400_000,
+        latencyTier: "medium",
+        costTier: "medium_high",
+        capabilities: ["chat", "code", "analysis"],
+        forAgents: true,
+        forJuridico: true,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5.1-codex": {
+        id: "gpt-5.1-codex",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.1 Codex",
+        contextWindow: 400_000,
+        latencyTier: "medium",
+        costTier: "medium_high",
+        capabilities: ["code", "agents", "analysis"],
+        forAgents: true,
+        forJuridico: false,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5.1-codex-mini": {
+        id: "gpt-5.1-codex-mini",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5.1 Codex Mini",
+        contextWindow: 200_000,
+        latencyTier: "low",
+        costTier: "medium",
+        capabilities: ["code", "tools"],
+        forAgents: false,
+        forJuridico: false,
         default: false,
         icon: "/logos/openai.png",
     },
@@ -100,6 +191,20 @@ export const MODEL_REGISTRY: Record<ModelId, ModelConfig> = {
         capabilities: ["chat", "tools", "high_volume"],
         forAgents: true,
         forJuridico: true,
+        default: false,
+        icon: "/logos/openai.png",
+    },
+    "gpt-5-nano": {
+        id: "gpt-5-nano",
+        provider: "openai",
+        family: "gpt-5",
+        label: "GPT‑5 Nano",
+        contextWindow: 128_000,
+        latencyTier: "low",
+        costTier: "low",
+        capabilities: ["chat", "tools", "high_volume"],
+        forAgents: false,
+        forJuridico: false,
         default: false,
         icon: "/logos/openai.png",
     },

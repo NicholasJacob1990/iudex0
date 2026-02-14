@@ -26,6 +26,10 @@ from app.models.library import LibraryItem, Share
 from app.models.case import Case
 from app.models.workflow import Workflow, WorkflowRun
 from app.models.marketplace import MarketplaceItem, MarketplaceReview
+from app.models.microsoft_user import MicrosoftUser
+from app.models.graph_subscription import GraphSubscription
+from app.models.email_analysis_cache import EmailAnalysisCache
+from app.models.email_trigger_config import EmailTriggerConfig
 target_metadata = Base.metadata
 
 # other values from the config, defined by the needs of env.py,

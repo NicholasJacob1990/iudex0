@@ -8,6 +8,7 @@ and pipeline configuration.
 import asyncio
 import pytest
 from typing import Dict, Any, List
+from unittest.mock import MagicMock, patch
 
 
 class TestLegalSchema:
@@ -28,7 +29,7 @@ class TestLegalSchema:
         from app.services.rag.core.kg_builder.legal_schema import LEGAL_NODE_TYPES
 
         labels = {n["label"] for n in LEGAL_NODE_TYPES}
-        required = {"Lei", "Artigo", "Sumula", "Tribunal", "Processo", "Tema"}
+        required = {"Lei", "Artigo", "Sumula", "Tribunal", "Processo", "Tema", "Decisao", "Tese"}
         assert required.issubset(labels), f"Missing node types: {required - labels}"
 
     def test_node_types_cover_argument_entities(self):
@@ -43,8 +44,10 @@ class TestLegalSchema:
 
         labels = {r["label"] for r in LEGAL_RELATIONSHIP_TYPES}
         core = {"MENTIONS", "RELATED_TO", "CITA", "FUNDAMENTA"}
+        granular = {"PERTENCE_A", "REMETE_A", "PROFERIDA_POR", "FIXA_TESE", "JULGA_TEMA", "VINCULA"}
         argument = {"SUPPORTS", "OPPOSES", "EVIDENCES", "ARGUES", "RAISES"}
         assert core.issubset(labels), f"Missing core relationship types: {core - labels}"
+        assert granular.issubset(labels), f"Missing granular relationship types: {granular - labels}"
         assert argument.issubset(labels), f"Missing argument types: {argument - labels}"
 
     def test_patterns_are_valid_triplets(self):
@@ -66,10 +69,10 @@ class TestLegalSchema:
         from app.services.rag.core.kg_builder.legal_schema import build_legal_schema
 
         schema = build_legal_schema()
-        assert "node_types" in schema
-        assert "relationship_types" in schema
-        assert "patterns" in schema
-        assert schema.get("additional_node_types") is False
+        assert hasattr(schema, "node_types")
+        assert hasattr(schema, "relationship_types")
+        assert hasattr(schema, "patterns")
+        assert getattr(schema, "additional_node_types", None) is False
 
 
 class TestLegalRegexExtractor:
@@ -177,6 +180,14 @@ class TestFuzzyResolverNormalization:
 
         assert "sumula" in _normalize_legal("Súmula")
 
+    def test_normalize_canonical_siglas(self):
+        from app.services.rag.core.kg_builder.fuzzy_resolver import _normalize_legal
+
+        assert "cf" in _normalize_legal("Constituição Federal")
+        assert "cpc" in _normalize_legal("Código de Processo Civil")
+        assert "ctn" in _normalize_legal("Código Tributário Nacional")
+        assert "lef" in _normalize_legal("Lei de Execução Fiscal")
+
     def test_extract_numbers(self):
         from app.services.rag.core.kg_builder.fuzzy_resolver import _extract_numbers
 
@@ -216,6 +227,31 @@ class TestKGPipeline:
         assert stats["chunks_processed"] == 1
         assert stats["regex_nodes"] >= 3
 
+    @pytest.mark.asyncio
+    async def test_regex_extraction_creates_granular_links(self):
+        from app.services.rag.core.kg_builder.pipeline import _run_regex_extraction
+
+        chunks = [
+            {
+                "chunk_uid": "pipe_002",
+                "text": (
+                    "No REsp 1.134.186 do STJ, nos termos do art. 9 da LEF e conforme art. 135 do CTN, "
+                    "foi fixada a tese do Tema 390."
+                ),
+            },
+        ]
+        neo4j = MagicMock()
+        neo4j._merge_entity.return_value = None
+        neo4j.link_entities.return_value = True
+        with patch("app.services.rag.core.neo4j_mvp.get_neo4j_mvp", return_value=neo4j):
+            stats = await _run_regex_extraction(
+                chunks, "doc_granular", "tenant1",
+                case_id=None, scope="global",
+            )
+        assert stats["regex_typed_relationships"] >= 1
+        assert stats["regex_remissions"] >= 1
+        assert stats["regex_decision_links"] >= 1
+
     def test_rag_endpoint_has_kg_builder_integration(self):
         """Verify rag.py endpoint includes KG Builder integration."""
         import inspect
@@ -238,6 +274,48 @@ class TestKGPipeline:
             content = f.read()
         assert "neo4j-graphrag" in content, "neo4j-graphrag must be in requirements.txt"
         assert "rapidfuzz" in content, "rapidfuzz must be in requirements.txt"
+
+    def test_should_trigger_llm_fallback_low_coverage(self):
+        from app.services.rag.core.kg_builder.pipeline import _should_trigger_llm_fallback
+
+        decision = _should_trigger_llm_fallback(
+            chunks=[{"text": "a"}, {"text": "b"}, {"text": "c"}],
+            stats={"regex_nodes": 1, "gliner_nodes": 1, "gliner_avg_confidence": 0.55},
+            min_total_nodes=3,
+            min_gliner_coverage=0.5,
+            min_gliner_confidence=0.8,
+            gliner_enabled=True,
+        )
+        assert decision["trigger"] is True
+        assert len(decision["reasons"]) >= 1
+
+    def test_should_not_trigger_llm_fallback_when_quality_good(self):
+        from app.services.rag.core.kg_builder.pipeline import _should_trigger_llm_fallback
+
+        decision = _should_trigger_llm_fallback(
+            chunks=[{"text": "a"}, {"text": "b"}],
+            stats={"regex_nodes": 3, "gliner_nodes": 2, "gliner_avg_confidence": 0.9},
+            min_total_nodes=2,
+            min_gliner_coverage=0.1,
+            min_gliner_confidence=0.5,
+            gliner_enabled=True,
+        )
+        assert decision["trigger"] is False
+        assert decision["reasons"] == []
+
+    def test_should_not_trigger_gliner_zero_when_gliner_disabled(self):
+        from app.services.rag.core.kg_builder.pipeline import _should_trigger_llm_fallback
+
+        decision = _should_trigger_llm_fallback(
+            chunks=[{"text": "a"}, {"text": "b"}, {"text": "c"}],
+            stats={"regex_nodes": 5, "gliner_nodes": 0, "gliner_avg_confidence": 0.0},
+            min_total_nodes=2,
+            min_gliner_coverage=0.5,
+            min_gliner_confidence=0.8,
+            gliner_enabled=False,
+        )
+        assert decision["trigger"] is False
+        assert "gliner_zero_entities" not in decision["reasons"]
 
 
 # =============================================================================
@@ -970,12 +1048,14 @@ class TestStageGraphSearch:
     @pytest.mark.asyncio
     async def test_graph_search_fail_open(self):
         """When Neo4j raises, returns empty list (fail-open)."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
         from app.services.rag.pipeline.rag_pipeline import RAGPipeline, PipelineTrace
 
         pipeline = RAGPipeline.__new__(RAGPipeline)
         pipeline._neo4j = MagicMock()
-        pipeline._neo4j.query_chunks_by_entities.side_effect = ConnectionError("Neo4j down")
+        pipeline._neo4j.query_chunks_by_entities_async = AsyncMock(
+            side_effect=ConnectionError("Neo4j down")
+        )
 
         trace = MagicMock(spec=PipelineTrace)
         stage_mock = MagicMock()
@@ -996,12 +1076,12 @@ class TestStageGraphSearch:
     @pytest.mark.asyncio
     async def test_graph_search_returns_normalized_chunks(self):
         """Graph search returns chunks with pipeline-expected fields."""
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import AsyncMock, MagicMock, patch
         from app.services.rag.pipeline.rag_pipeline import RAGPipeline, PipelineTrace
 
         pipeline = RAGPipeline.__new__(RAGPipeline)
         pipeline._neo4j = MagicMock()
-        pipeline._neo4j.query_chunks_by_entities.return_value = [
+        pipeline._neo4j.query_chunks_by_entities_async = AsyncMock(return_value=[
             {
                 "chunk_uid": "c1",
                 "text_preview": "Art. 5 garante...",
@@ -1010,7 +1090,7 @@ class TestStageGraphSearch:
                 "source_type": "lei",
                 "matched_entities": ["art_5"],
             }
-        ]
+        ])
 
         trace = MagicMock(spec=PipelineTrace)
         stage_mock = MagicMock()

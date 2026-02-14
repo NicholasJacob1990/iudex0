@@ -47,6 +47,13 @@ from app.models.tool_permission import (
     PermissionMode,
     PermissionScope,
 )
+from app.services.ai.shared.security_profile import (
+    SecurityProfile,
+    is_server_sandbox_tool,
+    is_web_hard_denied_tool,
+)
+from app.services.ai.observability.metrics import get_observability_metrics
+from app.services.ai.observability.audit_log import get_tool_audit_log
 
 
 # Tipo para decisão de permissão
@@ -238,6 +245,7 @@ class PermissionManager:
         user_id: str,
         session_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        security_profile: SecurityProfile | str | None = None,
         cache_ttl_seconds: int = 60,
     ):
         """
@@ -254,6 +262,7 @@ class PermissionManager:
         self.user_id = user_id
         self.session_id = session_id
         self.project_id = project_id
+        self.security_profile = SecurityProfile.from_value(security_profile)
         self.cache_ttl = cache_ttl_seconds
 
         # Cache de regras
@@ -265,7 +274,8 @@ class PermissionManager:
 
         logger.debug(
             f"PermissionManager initialized: user={user_id}, "
-            f"session={session_id}, project={project_id}"
+            f"session={session_id}, project={project_id}, "
+            f"profile={self.security_profile.value}"
         )
 
     # ==================== PUBLIC METHODS ====================
@@ -305,6 +315,8 @@ class PermissionManager:
         # Encontra a regra mais específica que se aplica
         matching_rule = self._find_matching_rule(rules, tool_name, tool_input)
 
+        profile_override_reason: Optional[str] = None
+
         # Se encontrou regra, usa a decisão dela
         if matching_rule:
             decision = matching_rule.mode
@@ -318,6 +330,37 @@ class PermissionManager:
             logger.debug(
                 f"Permission check: tool={tool_name}, decision={decision} (default)"
             )
+
+        decision, profile_override_reason = self._apply_security_profile(
+            tool_name=tool_name,
+            decision=decision,
+            matching_rule=matching_rule,
+        )
+
+        try:
+            get_observability_metrics().record_tool_approval(decision)
+        except Exception:
+            # Observability nunca deve quebrar fluxo de autorização.
+            pass
+        try:
+            get_tool_audit_log().record_permission_decision(
+                tool_name=tool_name,
+                decision=decision,
+                user_id=self.user_id,
+                session_id=self.session_id,
+                project_id=self.project_id,
+                source="permission_manager",
+                rule_scope=(matching_rule.scope if matching_rule else "default"),
+                rule_id=(matching_rule.id if matching_rule else None),
+                tool_input=tool_input,
+                metadata={
+                    "security_profile": self.security_profile.value,
+                    "profile_override_reason": profile_override_reason,
+                },
+            )
+        except Exception:
+            # Auditoria nunca deve quebrar autorização.
+            pass
 
         return PermissionCheckResult(
             decision=decision,
@@ -580,6 +623,36 @@ class PermissionManager:
             self._cache_timestamp = datetime.utcnow()
 
             return rules
+
+    def _apply_security_profile(
+        self,
+        *,
+        tool_name: str,
+        decision: PermissionDecision,
+        matching_rule: Optional[PermissionRule],
+    ) -> tuple[PermissionDecision, Optional[str]]:
+        """Apply profile-level guardrails before returning the final decision."""
+        if self.security_profile == SecurityProfile.WEB and is_web_hard_denied_tool(tool_name):
+            if decision != "deny":
+                logger.info(
+                    f"SecurityProfile WEB override: forcing deny for tool={tool_name} "
+                    f"(previous={decision})"
+                )
+            return "deny", "web_hard_deny"
+
+        if self.security_profile == SecurityProfile.SERVER and is_server_sandbox_tool(tool_name):
+            # Respect explicit user/project/session deny rules.
+            if matching_rule and matching_rule.scope in {"session", "project", "global"}:
+                return decision, None
+
+            if decision == "deny":
+                logger.info(
+                    f"SecurityProfile SERVER override: allowing sandbox tool={tool_name} "
+                    "(system/default deny -> allow)"
+                )
+                return "allow", "server_sandbox_allow"
+
+        return decision, None
 
     def _is_cache_valid(self) -> bool:
         """Verifica se o cache ainda é válido."""

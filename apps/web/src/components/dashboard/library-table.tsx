@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Eye, Share2, Trash2, FolderInput, Search, Filter, ArrowUpDown } from 'lucide-react';
+import { Eye, Share2, Trash2, FolderInput, Search, Filter, ArrowUpDown, Database } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { useLibraryStore } from '@/stores';
 import { formatDateTime } from '@/lib/utils';
 import { toast } from 'sonner';
 import { ShareDialog } from './share-dialog';
+import apiClient from '@/lib/api-client';
+import { ExportToCorpusDialog } from './export-to-corpus-dialog';
 
 type SortField = 'name' | 'updated_at';
 type SortOrder = 'asc' | 'desc';
@@ -19,6 +21,10 @@ export function LibraryTable() {
   const [filterType, setFilterType] = useState<string>('all');
   const [sortField, setSortField] = useState<SortField>('updated_at');
   const [sortOrder, setSortOrder] = useState<SortOrder>('desc');
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportingToCorpus, setExportingToCorpus] = useState(false);
+  const [exportDocumentIds, setExportDocumentIds] = useState<string[]>([]);
+  const [exportSourceLabel, setExportSourceLabel] = useState('documento(s)');
 
   useEffect(() => {
     fetchItems().catch(() => {
@@ -77,6 +83,84 @@ export function LibraryTable() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
   const [shareItem, setShareItem] = useState<{ id: string; name: string } | null>(null);
 
+  const getDocumentIdsFromLibraryItems = (libraryItems: Array<{ type: string; resource_id: string }>) => {
+    return Array.from(
+      new Set(
+        (libraryItems || [])
+          .filter((item) => String(item.type || '').toUpperCase() === 'DOCUMENT')
+          .map((item) => String(item.resource_id || '').trim())
+          .filter(Boolean)
+      )
+    );
+  };
+
+  const openCorpusExportDialog = (documentIds: string[], sourceLabel: string) => {
+    if (!documentIds.length) {
+      toast.error('Nenhum item de documento selecionado para exportação.');
+      return;
+    }
+    setExportDocumentIds(documentIds);
+    setExportSourceLabel(sourceLabel);
+    setExportDialogOpen(true);
+  };
+
+  const handleBulkExportToCorpus = () => {
+    if (selectedItems.size === 0) {
+      toast.info('Selecione itens da biblioteca para exportar.');
+      return;
+    }
+    const selectedLibraryItems = items.filter((item) => selectedItems.has(item.id));
+    const documentIds = getDocumentIdsFromLibraryItems(selectedLibraryItems);
+    if (!documentIds.length) {
+      toast.error('A seleção não contém itens do tipo DOCUMENT.');
+      return;
+    }
+    openCorpusExportDialog(documentIds, 'item(ns) da biblioteca');
+  };
+
+  const handleItemExportToCorpus = (item: { id: string; type: string; resource_id: string; name: string }) => {
+    const documentIds = getDocumentIdsFromLibraryItems([item]);
+    if (!documentIds.length) {
+      toast.error('Somente itens do tipo DOCUMENT podem ser enviados ao Corpus.');
+      return;
+    }
+    openCorpusExportDialog(documentIds, 'item da biblioteca');
+  };
+
+  const handleExportToCorpus = async (payload: { scope: 'group'; collection: string; group_ids: string[] }) => {
+    if (!exportDocumentIds.length) return;
+    setExportingToCorpus(true);
+    try {
+      const response = await apiClient.ingestCorpusDocuments({
+        document_ids: exportDocumentIds,
+        scope: payload.scope,
+        collection: payload.collection,
+        group_ids: payload.group_ids,
+      });
+      const queued = Number(response?.queued ?? 0);
+      const skipped = Number(response?.skipped ?? 0);
+      const errors = Array.isArray(response?.errors) ? response.errors.length : 0;
+
+      if (queued > 0) {
+        toast.success(`${queued} documento(s) da biblioteca enviado(s) para o Corpus.`);
+      }
+      if (skipped > 0) {
+        toast.info(`${skipped} documento(s) já estavam ingeridos neste escopo.`);
+      }
+      if (errors > 0) {
+        toast.error(`${errors} documento(s) falharam na ingestão.`);
+      }
+      if (queued === 0 && skipped === 0 && errors === 0) {
+        toast.info('Nenhum documento foi processado pelo Corpus.');
+      }
+      setExportDialogOpen(false);
+    } catch {
+      toast.error('Não foi possível exportar os itens para o Corpus.');
+    } finally {
+      setExportingToCorpus(false);
+    }
+  };
+
   // Filter and sort
   const filteredItems = items
     .filter((item) => {
@@ -105,6 +189,17 @@ export function LibraryTable() {
             </p>
           </div>
           <div className="flex gap-2">
+            {selectedItems.size > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="rounded-full gap-2 text-xs"
+                onClick={handleBulkExportToCorpus}
+              >
+                <Database className="h-3 w-3" />
+                Corpus ({selectedItems.size})
+              </Button>
+            )}
             {selectedItems.size > 0 && (
               <Button
                 variant="outline"
@@ -228,6 +323,11 @@ export function LibraryTable() {
                         onClick={() => handleItemAction('Carregar na aba', item.name)}
                       />
                       <IconButton
+                        icon={<Database className="h-4 w-4" />}
+                        label="Enviar ao Corpus"
+                        onClick={() => handleItemExportToCorpus(item)}
+                      />
+                      <IconButton
                         icon={<Share2 className="h-4 w-4" />}
                         label="Compartilhar"
                         onClick={() => handleItemAction('Compartilhar', item.name, item.id)}
@@ -251,6 +351,15 @@ export function LibraryTable() {
         onOpenChange={setShareDialogOpen}
         itemName={shareItem?.name || ''}
         itemType="item"
+      />
+
+      <ExportToCorpusDialog
+        open={exportDialogOpen}
+        onOpenChange={setExportDialogOpen}
+        onConfirm={handleExportToCorpus}
+        loading={exportingToCorpus}
+        itemCount={exportDocumentIds.length}
+        sourceLabel={exportSourceLabel}
       />
     </section>
   );

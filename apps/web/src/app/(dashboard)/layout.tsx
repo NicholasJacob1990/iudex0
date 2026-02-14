@@ -1,10 +1,12 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useAuthStore, useChatStore } from '@/stores';
 import { TopNav, SidebarPro } from '@/components/layout';
 import { useUIStore } from '@/stores';
+import { useTheme } from 'next-themes';
+import { tintToColor, deriveTintTokens, LIGHT_STOPS, DARK_STOPS } from '@/components/layout/top-nav';
 import { HumanReviewModal } from '@/components/chat/human-review-modal';
 import { PageTransition } from '@/components/providers/page-transition';
 import { Scale } from 'lucide-react';
@@ -16,9 +18,24 @@ export default function DashboardLayout({
 }) {
   const router = useRouter();
   const pathname = usePathname();
-  const { isAuthenticated, fetchProfile, isLoading } = useAuthStore();
-  const { sidebarState, setSidebarState } = useUIStore();
+  const { isAuthenticated, fetchProfile, isLoading, user, isGuest } = useAuthStore();
+  const { sidebarState, setSidebarState, chatBgTintLight, chatBgTintDark, tintMode } = useUIStore();
   const { reviewData, submitReview } = useChatStore();
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+  const isGuestSession =
+    isGuest ||
+    user?.is_guest === true ||
+    String(user?.role || '').toUpperCase() === 'GUEST';
+  const activeTint = isDark ? chatBgTintDark : chatBgTintLight;
+  const contentBg = useMemo(
+    () => tintToColor(activeTint, isDark ? DARK_STOPS : LIGHT_STOPS),
+    [activeTint, isDark],
+  );
+  const tintTokens = useMemo(
+    () => deriveTintTokens(contentBg, isDark),
+    [contentBg, isDark],
+  );
   const [isHydrated, setIsHydrated] = useState(false);
 
   // Aguardar hidratação do Zustand persist
@@ -26,11 +43,23 @@ export default function DashboardLayout({
     setIsHydrated(true);
   }, []);
 
+  // Sync sidebar theme whenever the page theme changes (covers system pref changes too)
+  useEffect(() => {
+    if (!resolvedTheme) return;
+    useUIStore.getState().syncSidebarTheme(resolvedTheme === 'dark' ? 'dark' : 'light');
+  }, [resolvedTheme]);
+
   useEffect(() => {
     if (!isHydrated || isLoading) return;
 
     const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    const hasGuestSession =
+      typeof window !== 'undefined' ? !!localStorage.getItem('guest_session') : false;
     console.log('[DashboardLayout] Auth check:', { isAuthenticated, hasToken: !!token, tokenPreview: token?.substring(0, 20) });
+
+    if (token && (isGuestSession || hasGuestSession)) {
+      return;
+    }
 
     if (!isAuthenticated && !token) {
       console.log('[DashboardLayout] Sem auth e sem token, redirecionando para login');
@@ -62,7 +91,7 @@ export default function DashboardLayout({
       }
       router.push('/login');
     }
-  }, [isAuthenticated, isHydrated, isLoading, router, fetchProfile]);
+  }, [isAuthenticated, isGuestSession, isHydrated, isLoading, router, fetchProfile]);
 
   // Mostrar loading enquanto hidrata ou verifica autenticação
   if (!isHydrated || isLoading) {
@@ -87,7 +116,10 @@ export default function DashboardLayout({
   }
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div
+      className={`dashboard-shell flex h-screen overflow-hidden bg-background${tintMode === 'uniform' ? ' tint-homogenized' : ''}${tintMode === 'blended' ? ' tint-blended' : ''}${tintMode === 'inset' ? ' tint-inset' : ''}`}
+      style={tintTokens as React.CSSProperties}
+    >
       <div
         className={`fixed inset-0 z-30 bg-black/20 transition-opacity lg:hidden ${sidebarState !== 'hidden' ? 'opacity-100' : 'pointer-events-none opacity-0'
           }`}
@@ -96,7 +128,7 @@ export default function DashboardLayout({
       <SidebarPro />
       <div className="flex flex-1 flex-col">
         <TopNav />
-        <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div className="flex flex-1 min-h-0 overflow-hidden transition-colors duration-500 ease-out bg-background">
           <main className={`flex-1 min-h-0 ${pathname?.startsWith('/minuta') || pathname?.startsWith('/ask') ? 'flex h-full flex-col p-0 overflow-hidden' : 'overflow-y-auto px-4 pt-4 md:px-6 pb-4'}`}>
             <PageTransition>{children}</PageTransition>
           </main>

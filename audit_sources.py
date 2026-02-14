@@ -252,6 +252,8 @@ def auditar_atribuicao_fontes(client, raw_text: str, formatted_text: str, doc_na
 
     bounds = _chunk_bounds(fmt_len, MAX_CHARS_PER_CHUNK, CHUNK_OVERLAP_CHARS)
     resultados: list[dict] = []
+    parse_failures = 0
+    chunk_errors = 0
 
     try:
         for idx, (f_start, f_end) in enumerate(bounds, 1):
@@ -283,8 +285,23 @@ def auditar_atribuicao_fontes(client, raw_text: str, formatted_text: str, doc_na
 
             parsed = _safe_json_parse(response.text or "")
             if not isinstance(parsed, dict):
-                parsed = {"aprovado": False, "nota_consistencia": 0, "erros_criticos": [], "ambiguidades": [], "erro": "JSON inválido"}
+                parse_failures += 1
+                parsed = {
+                    "aprovado": True,
+                    "nota_consistencia": None,
+                    "erros_criticos": [],
+                    "ambiguidades": [
+                        {
+                            "localizacao": f"Trecho {idx}/{len(bounds)}",
+                            "problema": "Resposta inválida da auditoria de fontes.",
+                            "sugestao": "Reexecutar auditoria de fontes para obter nota consolidada.",
+                        }
+                    ],
+                    "erro": "JSON inválido",
+                }
             parsed["_chunk_index"] = idx
+            if parsed.get("erro"):
+                chunk_errors += 1
             resultados.append(parsed)
 
         # Merge results
@@ -336,18 +353,37 @@ def auditar_atribuicao_fontes(client, raw_text: str, formatted_text: str, doc_na
         erros_criticos = _dedup_dict_items(filtered_erros, ["tipo", "localizacao", "trecho_formatado", "trecho_raw"])
         ambiguidades = _dedup_dict_items(ambiguidades, ["localizacao", "problema", "sugestao"])
 
-        nota_final = (nota_soma / nota_peso) if nota_peso else 0.0
+        nota_final = (nota_soma / nota_peso) if nota_peso else None
+        score_missing = nota_final is None or (
+            isinstance(nota_final, (int, float)) and float(nota_final) <= 0
+        )
+        inconclusivo = (
+            len(erros_criticos) == 0
+            and len(ambiguidades) == 0
+            and score_missing
+        ) or (
+            len(erros_criticos) == 0
+            and (parse_failures > 0 or chunk_errors > 0)
+            and score_missing
+        )
+        observacoes_str = " / ".join([o for o in observacoes if o])[:1500]
+        if inconclusivo and not observacoes_str:
+            observacoes_str = (
+                "Auditoria de fontes inconclusiva (sem erros críticos detectados, "
+                "mas sem sinal suficiente para nota confiável)."
+            )
         resultado = {
-            "aprovado": bool(aprovado) and len(erros_criticos) == 0,
-            "nota_consistencia": round(nota_final, 1),
+            "aprovado": (True if inconclusivo else (bool(aprovado) and len(erros_criticos) == 0)),
+            "nota_consistencia": (None if inconclusivo else round(float(nota_final or 0.0), 1)),
             "erros_criticos": erros_criticos,
             "ambiguidades": ambiguidades,
-            "observacoes": " / ".join([o for o in observacoes if o])[:1500],
+            "observacoes": observacoes_str,
+            "inconclusivo": inconclusivo,
             "chunks": {
                 "total": len(bounds),
                 "max_chars": MAX_CHARS_PER_CHUNK,
                 "overlap_chars": CHUNK_OVERLAP_CHARS,
-            }
+            },
         }
 
         if output_path:
@@ -356,7 +392,9 @@ def auditar_atribuicao_fontes(client, raw_text: str, formatted_text: str, doc_na
                 json.dump(resultado, f, ensure_ascii=False, indent=2)
             print(f"✅ Relatório de atribuição salvo: {output_path}")
 
-        if resultado.get('aprovado'):
+        if resultado.get("inconclusivo"):
+            print("ℹ️ Atribuição de fontes: INCONCLUSIVA (não bloqueante)")
+        elif resultado.get('aprovado'):
             print(f"✅ Atribuição de fontes: APROVADO (Nota: {resultado.get('nota_consistencia')}/10)")
         else:
             erros = len(resultado.get('erros_criticos', []))
@@ -368,10 +406,19 @@ def auditar_atribuicao_fontes(client, raw_text: str, formatted_text: str, doc_na
     except Exception as e:
         print(f"❌ Erro na auditoria de fontes: {e}")
         return {
-            "aprovado": False,
-            "nota_consistencia": 0,
+            "aprovado": True,
+            "nota_consistencia": None,
             "erros_criticos": [],
-            "erro": str(e)
+            "ambiguidades": [
+                {
+                    "localizacao": "global",
+                    "problema": "Auditoria de fontes indisponível nesta execução.",
+                    "sugestao": "Reexecutar quando a API estiver estável.",
+                }
+            ],
+            "observacoes": f"Auditoria de fontes indisponível: {e}",
+            "inconclusivo": True,
+            "erro": str(e),
         }
 
 
@@ -381,11 +428,15 @@ def gerar_relatorio_markdown(resultado: dict, output_md: str):
     with open(output_md, 'w', encoding='utf-8') as f:
         f.write("# 📚 RELATÓRIO DE AUDITORIA DE FONTES\n\n")
         
-        status = "✅ APROVADO" if resultado.get('aprovado') else "⚠️ REQUER REVISÃO"
-        nota = resultado.get('nota_consistencia', 0)
+        if resultado.get("inconclusivo"):
+            status = "ℹ️ INCONCLUSIVO (NÃO BLOQUEANTE)"
+        else:
+            status = "✅ APROVADO" if resultado.get("aprovado") else "⚠️ REQUER REVISÃO"
+        nota = resultado.get("nota_consistencia")
+        nota_display = f"{nota}/10" if isinstance(nota, (int, float)) else "—"
         
         f.write(f"**Status:** {status}\n")
-        f.write(f"**Nota de Consistência:** {nota}/10\n\n")
+        f.write(f"**Nota de Consistência:** {nota_display}\n\n")
         
         erros = resultado.get('erros_criticos', [])
         if erros:

@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -27,11 +28,8 @@ from app.models.user import User
 from app.models.workflow_state import WorkflowState
 from app.models.case_task import CaseTask, TaskStatus, TaskPriority
 from app.services.ai.audit_service import AuditService
-from app.services.document_processor import (
-    extract_text_from_docx,
-    extract_text_from_pdf,
-    extract_text_from_pdf_with_ocr,
-)
+from app.services.document_extraction_service import extract_text_from_path
+from app.services.ai.observability.audit_log import get_tool_audit_log
 
 
 router = APIRouter()
@@ -43,26 +41,35 @@ def _safe_filename_base(name: str) -> str:
     return base[:80] or "documento"
 
 
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        normalized = value.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Formato de data inválido em 'since' ou 'until'. Use ISO-8601.",
+        )
+
+
 async def _extract_text(file_path: str, ext: str) -> str:
     ext = ext.lower()
-    if ext == ".pdf":
-        text = await extract_text_from_pdf(file_path)
-        # Fallback OCR para PDFs escaneados (pouco texto)
-        if not text or len(text.strip()) < 50:
-            try:
-                ocr_text = await extract_text_from_pdf_with_ocr(file_path)
-                if ocr_text and len(ocr_text.strip()) > len(text.strip()):
-                    return ocr_text
-            except Exception as e:
-                logger.warning(f"OCR falhou no PDF: {e}")
-        return text or ""
+    if ext not in {".pdf", ".docx", ".txt", ".md", ".rtf", ".odt", ".html", ".htm"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Formato não suportado para auditoria. Envie PDF, DOCX, TXT ou MD.",
+        )
 
-    if ext == ".docx":
-        return await extract_text_from_docx(file_path) or ""
-
-    if ext == ".txt" or ext == ".md":
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return f.read() or ""
+    extraction = await extract_text_from_path(
+        file_path,
+        min_pdf_chars=50,
+        allow_pdf_ocr_fallback=True,
+    )
+    text = str(extraction.text or "")
+    if text:
+        return text
 
     raise HTTPException(
         status_code=status.HTTP_400_BAD_REQUEST,
@@ -697,3 +704,68 @@ async def get_audit_summary(
             "overdue": overdue_count,
         },
     }
+
+
+@router.get("/tool-calls")
+async def list_tool_call_audit(
+    tool_name: Optional[str] = Query(None, description="Filter by tool name"),
+    event_type: Optional[str] = Query(
+        None,
+        description="Filter by event type: permission_decision|tool_execution",
+    ),
+    since: Optional[str] = Query(None, description="ISO datetime lower bound"),
+    until: Optional[str] = Query(None, description="ISO datetime upper bound"),
+    limit: int = Query(200, ge=1, le=5000),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Lista o audit trail estruturado de tools para o usuário atual.
+    """
+    since_dt = _parse_iso_datetime(since)
+    until_dt = _parse_iso_datetime(until)
+    entries = get_tool_audit_log().list_entries(
+        user_id=str(current_user.id),
+        tool_name=tool_name,
+        event_type=event_type,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+    )
+    return {
+        "items": entries,
+        "total": len(entries),
+        "limit": limit,
+    }
+
+
+@router.get("/tool-calls/export")
+async def export_tool_call_audit(
+    tool_name: Optional[str] = Query(None, description="Filter by tool name"),
+    event_type: Optional[str] = Query(
+        None,
+        description="Filter by event type: permission_decision|tool_execution",
+    ),
+    since: Optional[str] = Query(None, description="ISO datetime lower bound"),
+    until: Optional[str] = Query(None, description="ISO datetime upper bound"),
+    limit: int = Query(2000, ge=1, le=20000),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Exporta audit trail de tool calls em JSONL para compliance.
+    """
+    since_dt = _parse_iso_datetime(since)
+    until_dt = _parse_iso_datetime(until)
+    content = get_tool_audit_log().export_jsonl(
+        user_id=str(current_user.id),
+        tool_name=tool_name,
+        event_type=event_type,
+        since=since_dt,
+        until=until_dt,
+        limit=limit,
+    )
+    filename = f"tool_audit_{str(current_user.id)[:8]}.jsonl"
+    return StreamingResponse(
+        iter([content.encode("utf-8")]),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

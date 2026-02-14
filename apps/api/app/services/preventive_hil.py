@@ -117,6 +117,7 @@ def build_preventive_hil_issues(
         impacto = _as_text(obj.get("impacto")) or _as_text(obj.get("descricao")) or _as_text(obj.get("trecho_raw"))
         local = _as_text(obj.get("localizacao_formatado"))
         raw_snippet = _as_text(obj.get("trecho_raw"))
+        llm_formatted_snippet = _as_text(obj.get("trecho_formatado"))
         verdict = _as_text(obj.get("veredito"))
 
         description = f"Omissao critica{f' ({tipo})' if tipo else ''}: {_truncate(impacto or 'Conteudo omitido.')}"
@@ -149,6 +150,10 @@ def build_preventive_hil_issues(
             issue["raw_evidence"] = [{"snippet": raw_snippet}]
         if formatted_context:
             issue["formatted_context"] = formatted_context
+        # Prefer LLM-provided snippet, fall back to section anchor
+        evidence_for_display = llm_formatted_snippet or (formatted_context[:500] if formatted_context else "")
+        if evidence_for_display:
+            issue["evidence_formatted"] = _truncate(evidence_for_display, 500)
         if instruction:
             issue["user_instruction"] = instruction
         issues.append(issue)
@@ -227,11 +232,108 @@ def build_preventive_hil_issues(
             issue["evidence_formatted"] = trecho_formatado
         issues.append(issue)
 
+    # ── auditoria_fontes.erros_criticos → preventive_autoria ──
+    fontes = preventive_audit.get("auditoria_fontes") or {}
+    for idx, item in enumerate(_as_list(fontes.get("erros_criticos"))):
+        obj = item if isinstance(item, dict) else {"correcao_sugerida": _as_text(item)}
+        tipo = _as_text(obj.get("tipo"))
+        gravidade = _as_text(obj.get("gravidade"))
+        local = _as_text(obj.get("localizacao"))
+        correcao = _as_text(obj.get("correcao_sugerida"))
+        raw_snippet = _as_text(obj.get("trecho_raw"))
+        formatted_snippet = _as_text(obj.get("trecho_formatado"))
+        verdict = _as_text(obj.get("veredito"))
+
+        description = f"Erro de autoria{f' ({tipo})' if tipo else ''}: {_truncate(correcao or formatted_snippet or 'Revisar atribuição de autoria.', 220)}"
+        seed = json.dumps(obj, ensure_ascii=False, sort_keys=True)
+
+        reference = _guess_reference_from_text(correcao, formatted_snippet, raw_snippet) or ""
+        formatted_context = _extract_section_anchor(formatted_content, local) if local else ""
+
+        instruction = correcao if correcao else "Corrigir a atribuição de autoria conforme indicado no RAW."
+
+        issue: Dict[str, Any] = {
+            "id": _hash_id("preventive_autoria", seed + f":{idx}"),
+            "type": "preventive_autoria",
+            "fix_type": "content",
+            "severity": _map_severity(gravidade),
+            "description": description,
+            "suggestion": _truncate(correcao, 200) if correcao else "Corrigir autoria conforme RAW.",
+            "source": "preventive_audit",
+            "origin": "preventive_audit",
+        }
+        if verdict:
+            issue["verdict"] = verdict
+        if reference:
+            issue["reference"] = reference
+        if local:
+            issue["suggested_section"] = local
+        if raw_snippet:
+            issue["raw_evidence"] = [{"snippet": raw_snippet}]
+        if formatted_context:
+            issue["formatted_context"] = formatted_context
+        evidence_for_display = formatted_snippet or (formatted_context[:500] if formatted_context else "")
+        if evidence_for_display:
+            issue["evidence_formatted"] = _truncate(evidence_for_display, 500)
+        if instruction:
+            issue["user_instruction"] = instruction
+        issues.append(issue)
+
+    # ── auditoria_fontes.ambiguidades → preventive_autoria_ambiguidade ──
+    for idx, item in enumerate(_as_list(fontes.get("ambiguidades"))):
+        obj = item if isinstance(item, dict) else {"sugestao": _as_text(item)}
+        local = _as_text(obj.get("localizacao"))
+        problema = _as_text(obj.get("problema"))
+        sugestao = _as_text(obj.get("sugestao"))
+        verdict = _as_text(obj.get("veredito"))
+
+        combined = f"{problema} {sugestao}".lower()
+        # Ignore tooling/meta ambiguities that are not actionable text corrections.
+        if (
+            "resposta inválida da auditoria de fontes" in combined
+            or "reexecutar auditoria de fontes para obter nota consolidada" in combined
+        ):
+            continue
+
+        description = f"Ambiguidade de autoria: {_truncate(problema or sugestao or 'Revisar identificação de autor.', 220)}"
+        seed = json.dumps(obj, ensure_ascii=False, sort_keys=True)
+
+        reference = _guess_reference_from_text(problema, sugestao) or ""
+        formatted_context = _extract_section_anchor(formatted_content, local) if local else ""
+
+        instruction = sugestao if sugestao else "Revisar e esclarecer a identificação do autor no trecho indicado."
+
+        issue = {
+            "id": _hash_id("preventive_ambiguidade", seed + f":{idx}"),
+            "type": "preventive_autoria_ambiguidade",
+            "fix_type": "content",
+            "severity": "info",
+            "description": description,
+            "suggestion": _truncate(sugestao, 200) if sugestao else "Esclarecer autoria.",
+            "source": "preventive_audit",
+            "origin": "preventive_audit",
+        }
+        if verdict:
+            issue["verdict"] = verdict
+        if reference:
+            issue["reference"] = reference
+        if local:
+            issue["suggested_section"] = local
+        if formatted_context:
+            issue["formatted_context"] = formatted_context
+        evidence_for_display = formatted_context[:500] if formatted_context else ""
+        if evidence_for_display:
+            issue["evidence_formatted"] = _truncate(evidence_for_display, 500)
+        if instruction:
+            issue["user_instruction"] = instruction
+        issues.append(issue)
+
     for idx, item in enumerate(_as_list(preventive_audit.get("problemas_contexto"))):
         obj = item if isinstance(item, dict) else {"localizacao": _as_text(item)}
         tipo = _as_text(obj.get("tipo"))
         local = _as_text(obj.get("localizacao"))
         suggestion = _as_text(obj.get("sugestao"))
+        llm_context_snippet = _as_text(obj.get("trecho_formatado"))
         verdict = _as_text(obj.get("veredito"))
         description = f"Problema de contexto{f' ({tipo})' if tipo else ''}: {_truncate(local or 'Revisar contexto e transicoes.', 220)}"
         seed = json.dumps(obj, ensure_ascii=False, sort_keys=True)
@@ -254,7 +356,10 @@ def build_preventive_hil_issues(
             formatted_context = _extract_section_anchor(formatted_content, local)
             if formatted_context:
                 issue["formatted_context"] = formatted_context
+        # Prefer LLM-provided snippet, fall back to section anchor
+        evidence_for_display = llm_context_snippet or (formatted_context[:500] if local and formatted_context else "")
+        if evidence_for_display:
+            issue["evidence_formatted"] = _truncate(evidence_for_display, 500)
         issues.append(issue)
 
     return issues
-

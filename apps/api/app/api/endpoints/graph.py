@@ -40,6 +40,30 @@ def _parse_csv(value: Optional[str]) -> Optional[List[str]]:
     return out or None
 
 
+async def _neo4j_read(neo4j: Any, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Execute non-blocking Neo4j read from async endpoints."""
+    return await neo4j._execute_read_async(query, params)
+
+
+async def _neo4j_write(neo4j: Any, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Execute non-blocking Neo4j write from async endpoints."""
+    return await neo4j._execute_write_async(query, params)
+
+
+def _normalize_path_hops(max_length: int, *, is_admin: bool) -> tuple[int, list[str]]:
+    """Clamp path hops and enforce deep-traversal policy for interactive usage."""
+    warnings: list[str] = []
+    hops = max(1, min(int(max_length or 4), 6))
+    if hops == 6 and not is_admin:
+        warnings.append("6 hops requer perfil admin; profundidade ajustada para 5.")
+        hops = 5
+    if hops >= 5:
+        warnings.append(
+            "Profundidade alta pode aumentar latência e ruído; prefira 2-4 para consultas comuns."
+        )
+    return hops, warnings
+
+
 # =============================================================================
 # SCHEMAS
 # =============================================================================
@@ -175,6 +199,28 @@ class AddFactsFromRAGResponse(BaseModel):
     chunks_processed: int
     facts_upserted: int
     fact_refs_upserted: int
+
+
+class CandidateStatsResponse(BaseModel):
+    """Aggregated statistics for candidate edges."""
+    candidate_type: str
+    rel_type: str
+    edges: int
+    avg_confidence: float
+    with_evidence: int
+    distinct_docs: int
+
+
+class PromoteCandidatesRequest(BaseModel):
+    """Request to promote candidate edges to verified."""
+    candidate_type: str = Field(..., min_length=1, description="candidate_type to promote")
+    min_confidence: float = Field(0.0, ge=0.0, le=1.0)
+    require_evidence: bool = Field(False)
+    max_edges: int = Field(5000, ge=1, le=50000)
+    promote_to_typed: bool = Field(
+        False,
+        description="If true, migrate RELATED_TO-><typed> when candidate_type suffix matches an allowed relationship type.",
+    )
 
 
 class GraphStats(BaseModel):
@@ -441,7 +487,7 @@ async def search_entities(
     """
 
     try:
-        results = neo4j._execute_read(cypher, params)
+        results = await _neo4j_read(neo4j, cypher, params)
 
         # Add group and parse metadata
         for r in results:
@@ -490,7 +536,7 @@ async def get_entity_detail(
     """
 
     try:
-        entity_results = neo4j._execute_read(entity_query, {"entity_id": entity_id})
+        entity_results = await _neo4j_read(neo4j, entity_query, {"entity_id": entity_id})
 
         if not entity_results:
             raise HTTPException(status_code=404, detail=f"Entity {entity_id} not found")
@@ -557,7 +603,7 @@ async def get_entity_detail(
         LIMIT $limit
         """
 
-        neighbors = neo4j._execute_read(
+        neighbors = await _neo4j_read(neo4j, 
             neighbors_query,
             {
                 "entity_id": entity_id,
@@ -595,7 +641,7 @@ async def get_entity_detail(
             LIMIT 20
             """
 
-            chunks = neo4j._execute_read(
+            chunks = await _neo4j_read(neo4j, 
                 chunks_query,
                 {
                     "entity_id": entity_id,
@@ -723,7 +769,7 @@ async def export_graph(
                 }] AS neighbors
             """
 
-            results = neo4j._execute_read(seed_query, {
+            results = await _neo4j_read(neo4j, seed_query, {
                 "seed_ids": seed_ids,
                 "types": type_list,
                 "tenant_id": tenant_id,
@@ -808,7 +854,7 @@ async def export_graph(
                 mention_count
             """
 
-            results = neo4j._execute_read(
+            results = await _neo4j_read(neo4j, 
                 top_query,
                 {
                     "types": type_list,
@@ -861,7 +907,7 @@ async def export_graph(
                 LIMIT 200
                 """
 
-                rel_results = neo4j._execute_read(
+                rel_results = await _neo4j_read(neo4j, 
                     rel_query,
                     {
                         "node_ids": list(node_ids),
@@ -920,7 +966,7 @@ async def export_graph(
                     coalesce(r.weight, 1) AS weight
                 LIMIT 200
                 """
-                rel_related_results = neo4j._execute_read(
+                rel_related_results = await _neo4j_read(neo4j, 
                     rel_related_query,
                     {
                         "node_ids": list(node_ids),
@@ -968,7 +1014,7 @@ async def export_graph(
             """
 
             limit = min(500, max_nodes * 2)
-            fact_rows = neo4j._execute_read(
+            fact_rows = await _neo4j_read(neo4j, 
                 fact_query,
                 {
                     "node_ids": list(node_ids),
@@ -1050,11 +1096,34 @@ async def find_path(
     tenant_id = ctx.tenant_id
     doc_id_list = _parse_csv(document_ids)
     case_id_list = _parse_csv(case_ids)
+    requested_hops = max_length
+    effective_hops, warnings = _normalize_path_hops(
+        max_length,
+        is_admin=bool(getattr(ctx, "is_org_admin", False)),
+    )
+
+    # Additional protective downgrade for highly connected anchors on deep traversals.
+    if effective_hops >= 5:
+        degree_query = """
+        MATCH (e:Entity {entity_id: $entity_id})-[r]-()
+        RETURN count(r) AS degree
+        """
+        source_degree_rows = await _neo4j_read(neo4j, degree_query, {"entity_id": source_id})
+        target_degree_rows = await _neo4j_read(neo4j, degree_query, {"entity_id": target_id})
+        source_degree = int(source_degree_rows[0]["degree"]) if source_degree_rows else 0
+        target_degree = int(target_degree_rows[0]["degree"]) if target_degree_rows else 0
+        max_degree = max(source_degree, target_degree)
+
+        if max_degree >= 100 and not getattr(ctx, "is_org_admin", False):
+            warnings.append(
+                f"Nós com alto grau ({max_degree}) detectados; profundidade ajustada para 4 para evitar explosão."
+            )
+            effective_hops = 4
 
     path_query = f"""
     MATCH (e1:Entity {{entity_id: $source_id}})
     MATCH (e2:Entity {{entity_id: $target_id}})
-    MATCH path = shortestPath((e1)-[:MENTIONS|RELATED_TO|ASSERTS|REFERS_TO*1..{max_length}]-(e2))
+    MATCH path = shortestPath((e1)-[:MENTIONS|RELATED_TO|ASSERTS|REFERS_TO*1..{effective_hops}]-(e2))
     WHERE all(n IN nodes(path) WHERE NOT n:Chunk OR exists {{
         MATCH (d:Document)-[:HAS_CHUNK]->(n)
         WHERE (d.tenant_id = $tenant_id OR ($include_global = true AND d.scope = 'global'))
@@ -1093,7 +1162,7 @@ async def find_path(
     """
 
     try:
-        results = neo4j._execute_read(path_query, {
+        results = await _neo4j_read(neo4j, path_query, {
             "source_id": source_id,
             "target_id": target_id,
             "tenant_id": tenant_id,
@@ -1105,7 +1174,10 @@ async def find_path(
         if not results:
             return {
                 "found": False,
-                "message": f"No path found between {source_id} and {target_id} within {max_length} hops"
+                "message": f"No path found between {source_id} and {target_id} within {effective_hops} hops",
+                "requested_hops": requested_hops,
+                "effective_hops": effective_hops,
+                "warnings": warnings or None,
             }
 
         paths = []
@@ -1123,7 +1195,10 @@ async def find_path(
             "found": True,
             "source": source_id,
             "target": target_id,
-            "paths": paths
+            "paths": paths,
+            "requested_hops": requested_hops,
+            "effective_hops": effective_hops,
+            "warnings": warnings or None,
         }
 
     except Exception as e:
@@ -1211,8 +1286,8 @@ async def get_graph_stats(
             "case_ids": case_id_list,
             "document_ids": doc_id_list,
         }
-        stats_result = neo4j._execute_read(stats_query, params)
-        type_counts = neo4j._execute_read(type_count_query, params)
+        stats_result = await _neo4j_read(neo4j, stats_query, params)
+        type_counts = await _neo4j_read(neo4j, type_count_query, params)
 
         stats = stats_result[0] if stats_result else {}
 
@@ -1351,7 +1426,7 @@ async def get_semantic_neighbors(
     """
 
     try:
-        results = neo4j._execute_read(
+        results = await _neo4j_read(neo4j, 
             semantic_query,
             {
                 "entity_id": entity_id,
@@ -1428,6 +1503,13 @@ async def get_remissoes(
     """
     neo4j = get_neo4j_mvp()
     tenant_id = ctx.tenant_id
+    user_id = str(ctx.user.id)
+    group_ids = list(getattr(ctx, "team_ids", []) or [])
+    try:
+        from app.models.user import UserRole
+        show_sample_text = bool(getattr(ctx, "is_org_admin", False)) or getattr(ctx.user, "role", None) == UserRole.ADMIN
+    except Exception:
+        show_sample_text = bool(getattr(ctx, "is_org_admin", False))
     doc_id_list = _parse_csv(document_ids)
     case_id_list = _parse_csv(case_ids)
 
@@ -1439,7 +1521,19 @@ async def get_remissoes(
     MATCH (e)<-[:MENTIONS]-(c:Chunk)
     MATCH (d0:Document)-[:HAS_CHUNK]->(c)
     WHERE (d0.tenant_id = $tenant_id OR ($include_global = true AND d0.scope = 'global'))
-      AND (d0.sigilo IS NULL OR d0.sigilo = false)
+      AND (
+            d0.sigilo IS NULL
+            OR d0.sigilo = false
+            OR $user_id IS NULL
+            OR $user_id IN coalesce(d0.allowed_users, [])
+      )
+      AND (
+            d0.scope <> 'group'
+            OR (
+                coalesce(size($group_ids), 0) > 0
+                AND any(g IN $group_ids WHERE g IN coalesce(d0.group_ids, []))
+            )
+      )
       AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d0.scope <> 'local')
       AND ($case_ids IS NULL OR d0.case_id IN $case_ids)
       AND (
@@ -1457,41 +1551,75 @@ async def get_remissoes(
     WITH e, other, count(DISTINCT c) AS co_occurrences
 
     // Get sample chunk for context
-    OPTIONAL MATCH (e)<-[:MENTIONS]-(sample:Chunk)-[:MENTIONS]->(other)
-    OPTIONAL MATCH (d1:Document)-[:HAS_CHUNK]->(sample)
-    WITH e, other, co_occurrences,
-         collect(
+		    OPTIONAL MATCH (e)<-[:MENTIONS]-(sample:Chunk)-[:MENTIONS]->(other)
+		    OPTIONAL MATCH (d1:Document)-[:HAS_CHUNK]->(sample)
+		    WITH e, other, co_occurrences,
+		         collect(
             CASE
                 WHEN d1 IS NOT NULL
-                 AND (d1.tenant_id = $tenant_id OR ($include_global = true AND d1.scope = 'global'))
-                 AND (d1.sigilo IS NULL OR d1.sigilo = false)
-                 AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d1.scope <> 'local')
-                 AND ($case_ids IS NULL OR d1.case_id IN $case_ids)
-                 AND (
-                       $document_ids IS NULL
-                       OR d1.doc_id IN $document_ids
-                       OR d1.doc_hash IN $document_ids
-                 )
+                 AND $show_sample_text = true
+	                 AND (d1.tenant_id = $tenant_id OR ($include_global = true AND d1.scope = 'global'))
+	                 AND (
+	                        d1.sigilo IS NULL
+	                        OR d1.sigilo = false
+	                        OR $user_id IS NULL
+	                        OR $user_id IN coalesce(d1.allowed_users, [])
+	                 )
+                     AND (
+                           d1.scope <> 'group'
+                           OR (
+                               coalesce(size($group_ids), 0) > 0
+                               AND any(g IN $group_ids WHERE g IN coalesce(d1.group_ids, []))
+                           )
+                     )
+	                 AND ($case_ids IS NOT NULL OR $document_ids IS NOT NULL OR d1.scope <> 'local')
+	                 AND ($case_ids IS NULL OR d1.case_id IN $case_ids)
+	                 AND (
+	                       $document_ids IS NULL
+	                       OR d1.doc_id IN $document_ids
+	                       OR d1.doc_hash IN $document_ids
+	                 )
                 THEN sample.text_preview
                 ELSE NULL
-            END
-         )[0] AS sample_text
+		            END
+		         )[0] AS sample_text
 
-    RETURN
-        other.entity_id AS id,
-        other.name AS name,
-        other.entity_type AS type,
-        other.normalized AS normalized,
-        co_occurrences,
-        sample_text
-    ORDER BY co_occurrences DESC
-    LIMIT $limit
-    """
+	    // Annotate with stored graph edges when available (verified vs candidate)
+	    OPTIONAL MATCH (e)-[rv:REMETE_A]->(other)
+	    OPTIONAL MATCH (other)-[rv2:REMETE_A]->(e)
+	    OPTIONAL MATCH (e)-[rc:CO_MENCIONA]->(other)
+	    OPTIONAL MATCH (other)-[rc2:CO_MENCIONA]->(e)
+	    WITH e, other, co_occurrences, sample_text,
+	         coalesce(rv, rv2) AS rem_edge,
+	         coalesce(rc, rc2) AS cand_edge
+	
+	    RETURN
+	        other.entity_id AS id,
+	        other.name AS name,
+	        other.entity_type AS type,
+	        other.normalized AS normalized,
+	        co_occurrences,
+	        sample_text,
+	        CASE WHEN rem_edge IS NOT NULL THEN true ELSE false END AS verified,
+	        CASE
+	            WHEN rem_edge IS NOT NULL THEN 'REMETE_A'
+	            WHEN cand_edge IS NOT NULL THEN 'CO_MENCIONA'
+	            ELSE 'co_occurrence'
+	        END AS relationship_type,
+	        coalesce(rem_edge.dimension, cand_edge.dimension, NULL) AS dimension,
+	        coalesce(rem_edge.evidence, cand_edge.evidence, NULL) AS evidence,
+	        coalesce(rem_edge.layer, cand_edge.layer, CASE WHEN rem_edge IS NOT NULL THEN 'verified' ELSE 'candidate' END) AS layer
+	    ORDER BY co_occurrences DESC
+	    LIMIT $limit
+	    """
 
     try:
-        results = neo4j._execute_read(remissoes_query, {
+        results = await _neo4j_read(neo4j, remissoes_query, {
             "entity_id": entity_id,
             "tenant_id": tenant_id,
+            "user_id": user_id,
+            "group_ids": group_ids,
+            "show_sample_text": bool(show_sample_text),
             "include_global": bool(include_global),
             "limit": limit,
             "case_ids": case_id_list,
@@ -1521,6 +1649,124 @@ async def get_remissoes(
     except Exception as e:
         logger.error(f"Error getting remissoes: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# ENRICHMENT PIPELINE (L1→L2→L3→L3b)
+# ============================================================================
+
+
+@router.post("/enrich")
+async def enrich_graph(
+    ctx: OrgContext = Depends(get_org_context),
+    request: Optional[Dict[str, Any]] = None,
+):
+    """
+    Executa o pipeline de enriquecimento do grafo.
+
+    Layers:
+    - structural (L1): Inferência determinística (transitividade, co-citação, etc.)
+    - embedding (L2): Similaridade de embeddings → :RELATED_TO candidates
+    - llm (L3): Classificação/descoberta via LLM → :RELATED_TO candidates
+    - exploratory (L3b): Descoberta para nós isolados → :RELATED_TO candidates
+
+    Requer perfil admin.
+    """
+    if not getattr(ctx, "is_admin", False):
+        raise HTTPException(status_code=403, detail="Enrichment requires admin privileges")
+
+    from app.schemas.graph_enrich import EnrichRequest as EnrichReq
+    from app.services.graph_enrich_service import GraphEnrichService
+
+    enrich_request = EnrichReq(**(request or {}))
+    service = GraphEnrichService()
+    result = await service.run_enrichment(enrich_request)
+    return result
+
+
+@router.post("/candidates/recompute")
+async def recompute_candidate_graph(
+    ctx: OrgContext = Depends(get_org_context),
+    include_global: bool = Query(True, description="Include global scope content"),
+    min_cooccurrences: int = Query(2, ge=1, le=20, description="Min chunk co-occurrences to create a candidate edge"),
+    max_pairs: int = Query(20000, ge=1, le=200000, description="Maximum candidate edges to create/update"),
+):
+    """
+    Recompute candidate (inferred) edges for exploration.
+
+    Creates/updates (:Artigo)-[:CO_MENCIONA {layer:'candidate', verified:false, ...}]->(:Artigo)
+    based on chunk co-occurrence, skipping any pair that already has an official REMETE_A.
+
+    Admin only.
+    """
+    if not bool(getattr(ctx, "is_org_admin", False)):
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    neo4j = get_neo4j_mvp()
+    result = neo4j.recompute_candidate_comentions(
+        tenant_id=ctx.tenant_id,
+        include_global=bool(include_global),
+        min_cooccurrences=int(min_cooccurrences),
+        max_pairs=int(max_pairs),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=500, detail=result.get("error", "failed"))
+    return result
+
+
+@router.get("/candidates/stats", response_model=List[CandidateStatsResponse])
+async def get_candidate_stats(
+    ctx: OrgContext = Depends(get_org_context),
+    limit: int = Query(50, ge=1, le=500),
+    candidate_type_prefix: Optional[str] = Query(None, description="Filter candidate_type by prefix"),
+):
+    """List aggregated candidate edge stats (admin only)."""
+    if not bool(getattr(ctx, "is_org_admin", False)):
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    neo4j = get_neo4j_mvp()
+    rows = neo4j.get_candidate_edge_stats(
+        tenant_id=ctx.tenant_id,
+        limit=int(limit),
+        candidate_type_prefix=candidate_type_prefix,
+    )
+    # Ensure types match response model
+    out: List[CandidateStatsResponse] = []
+    for r in rows or []:
+        out.append(
+            CandidateStatsResponse(
+                candidate_type=str(r.get("candidate_type", "")),
+                rel_type=str(r.get("rel_type", "")),
+                edges=int(r.get("edges", 0) or 0),
+                avg_confidence=float(r.get("avg_confidence", 0.0) or 0.0),
+                with_evidence=int(r.get("with_evidence", 0) or 0),
+                distinct_docs=int(r.get("distinct_docs", 0) or 0),
+            )
+        )
+    return out
+
+
+@router.post("/candidates/promote")
+async def promote_candidate_edges(
+    request: PromoteCandidatesRequest,
+    ctx: OrgContext = Depends(get_org_context),
+):
+    """Promote candidate edges to verified (admin only)."""
+    if not bool(getattr(ctx, "is_org_admin", False)):
+        raise HTTPException(status_code=403, detail="Admin only")
+
+    neo4j = get_neo4j_mvp()
+    result = neo4j.promote_candidate_edges(
+        tenant_id=ctx.tenant_id,
+        candidate_type=request.candidate_type,
+        min_confidence=float(request.min_confidence),
+        require_evidence=bool(request.require_evidence),
+        max_edges=int(request.max_edges),
+        promote_to_typed=bool(request.promote_to_typed),
+    )
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "failed"))
+    return result
 
 
 # =============================================================================
@@ -1618,7 +1864,7 @@ async def lexical_search_entities(
     }
 
     try:
-        results = neo4j._execute_read(cypher, params)
+        results = await _neo4j_read(neo4j, cypher, params)
 
         # Add group and parse metadata
         for r in results:
@@ -1678,7 +1924,7 @@ async def lexical_search_entities(
             fallback_params[f"term{i}"] = term
 
         try:
-            results = neo4j._execute_read(fallback_cypher, fallback_params)
+            results = await _neo4j_read(neo4j, fallback_cypher, fallback_params)
             for r in results:
                 r["group"] = get_entity_group(r.get("type", ""))
                 r["metadata"] = parse_metadata(r.get("metadata"))
@@ -1900,7 +2146,7 @@ async def add_entities_from_rag(
     """
 
     try:
-        chunks = neo4j._execute_read(cypher_get_chunks, params)
+        chunks = await _neo4j_read(neo4j, cypher_get_chunks, params)
 
         if not chunks:
             return AddFromRAGResponse(
@@ -1944,7 +2190,7 @@ async def add_entities_from_rag(
                 MATCH (e:Entity {entity_id: $entity_id})
                 RETURN e.entity_id AS id
                 """
-                existing = neo4j._execute_read(exists_query, {"entity_id": entity_id})
+                existing = await _neo4j_read(neo4j, exists_query, {"entity_id": entity_id})
 
                 if existing:
                     entities_existing.append(entity)
@@ -1970,7 +2216,7 @@ async def add_entities_from_rag(
                 raw_metadata = entity.get("metadata", {})
                 metadata_str = json.dumps(raw_metadata) if isinstance(raw_metadata, dict) else str(raw_metadata)
 
-                neo4j._execute_write(merge_entity, {
+                await _neo4j_write(neo4j, merge_entity, {
                     "entity_id": entity_id,
                     "entity_type": entity.get("entity_type", "unknown"),
                     "name": entity.get("name", entity_id),
@@ -1987,7 +2233,7 @@ async def add_entities_from_rag(
                 ON CREATE SET r.created_at = datetime()
                 RETURN type(r) AS rel_type
                 """
-                result = neo4j._execute_write(merge_rel, {
+                result = await _neo4j_write(neo4j, merge_rel, {
                     "chunk_id": chunk_id,
                     "entity_id": entity_id
                 })
@@ -2169,7 +2415,7 @@ async def add_facts_from_rag(
     """
 
     try:
-        rows = neo4j._execute_read(cypher, params)
+        rows = await _neo4j_read(neo4j, cypher, params)
         if not rows:
             return AddFactsFromRAGResponse(
                 documents_processed=0,
@@ -2255,7 +2501,7 @@ async def add_facts_from_rag(
 
         batch_size = 200
         for i in range(0, len(fact_rows), batch_size):
-            neo4j._execute_write(upsert_query, {"rows": fact_rows[i:i + batch_size]})
+            await _neo4j_write(neo4j, upsert_query, {"rows": fact_rows[i:i + batch_size]})
 
         fact_refs = sum(len(r.get("entity_ids") or []) for r in fact_rows)
         return AddFactsFromRAGResponse(

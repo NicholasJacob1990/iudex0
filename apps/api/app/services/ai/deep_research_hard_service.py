@@ -475,6 +475,9 @@ class DeepResearchHardService:
             "type": "study_done",
             "total_chars": len(state.study_text),
             "sources_count": merged.total_after_dedup,
+            # Provide deduplicated sources so callers (Ask/workflows) can render citations.
+            "sources": merged.deduplicated_sources,
+            "provider_summaries": merged.provider_summaries,
             "iterations": state.iteration,
             "elapsed_ms": elapsed_total,
         }

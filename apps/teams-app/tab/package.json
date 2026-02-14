@@ -1,0 +1,33 @@
+{
+  "name": "@iudex/teams-tab",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite --port 3300",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "lint": "eslint src",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fluentui/react-components": "^9.56.0",
+    "@fluentui/react-icons": "^2.0.260",
+    "@microsoft/teams-js": "^2.31.0",
+    "axios": "^1.6.5",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@iudex/shared": "*",
+    "@types/react": "^18.2.48",
+    "@types/react-dom": "^18.2.18",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.16",
+    "eslint": "^9.39.0",
+    "postcss": "^8.4.33",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.3",
+    "vite": "^5.4.14"
+  }
+}

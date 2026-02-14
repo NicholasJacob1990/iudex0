@@ -1,0 +1,42 @@
+[tool.poetry]
+name = "neo4j-rag"
+version = "0.1.0"
+description = "Standalone Neo4j RAG for legal study materials (PGM-RJ)"
+authors = ["Nicholas Jacob"]
+readme = "README.md"
+packages = [{include = "neo4j_rag"}]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+neo4j = "^5.27"
+voyageai = "^0.3"
+tiktoken = "^0.8"
+typer = {version = "^0.15", extras = ["all"]}
+pydantic-settings = "^2.7"
+httpx = "^0.28"
+rich = "^13.9"
+pymupdf = "^1.25"
+python-docx = "^1.1"
+cohere = {version = "^5.13", optional = true}
+
+[tool.poetry.extras]
+rerank = ["cohere"]
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-asyncio = "^0.25"
+ruff = "^0.9"
+
+[tool.poetry.scripts]
+neo4j-rag = "neo4j_rag.cli:app"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

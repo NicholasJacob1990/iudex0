@@ -108,7 +108,7 @@ class RAGConfig:
     rerank_max_chars: int = 1800
 
     # Cohere Rerank settings
-    cohere_rerank_model: str = "rerank-multilingual-v3.0"
+    cohere_rerank_model: str = "rerank-v4.0-pro"
     cohere_rerank_max_candidates: int = 100
     cohere_fallback_to_local: bool = True
 
@@ -141,7 +141,8 @@ class RAGConfig:
     # ==========================================================================
     graph_backend: str = "neo4j"  # "neo4j" (default conforme rag.md) or "networkx"
     neo4j_only: bool = True  # Enforce Neo4j-only (no NetworkX/file fallback)
-    neo4j_uri: str = "bolt://localhost:7687"
+    # Local dev default: Iudex Docker maps Bolt to 8687 to avoid conflicting with Neo4j Desktop (7687).
+    neo4j_uri: str = "bolt://localhost:8687"
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
     neo4j_database: str = "iudex"
@@ -182,16 +183,46 @@ class RAGConfig:
     qdrant_collection_sei: str = "sei"
     qdrant_collection_local: str = "local_chunks"
 
+    # Qdrant Hybrid Sparse (SPLADE)
+    # When enabled, Qdrant collections should be created with `sparse_vectors_config`
+    # and points upserted with both dense + sparse vectors.
+    qdrant_sparse_enabled: bool = False
+    qdrant_dense_vector_name: str = "dense"
+    qdrant_sparse_vector_name: str = "sparse"
+    qdrant_hybrid_fusion: str = "rrf"  # "rrf" | "dbsf"
+    qdrant_hybrid_prefetch_limit: int = 40
+
+    # Hybrid query classifier (dynamic sparse/dense weights)
+    hybrid_default_sparse_weight: float = 0.50
+    hybrid_default_dense_weight: float = 0.50
+    hybrid_query_classifier_llm: bool = True
+    hybrid_query_classifier_model: str = "gemini-2.0-flash"
+
     # ==========================================================================
-    # Embeddings — Provider primário (OpenAI) usado pelo pipeline RAG
+    # Embeddings — Provider primário (OpenAI) usado pelas collections legadas
     # Dimensão 3072 corresponde ao modelo text-embedding-3-large.
-    # NOTA: O provider local/fallback (SentenceTransformers, 768d) é configurado
-    # em app/core/config.py → Settings.EMBEDDING_DIMENSION.
+    # IMPORTANTE: Dimensões por provider são hardcodadas nos respectivos módulos:
+    #   - Voyage V4 large: 1024d (voyage_embeddings.py MODEL_DIMENSIONS)
+    #   - JurisBERT: 768d (jurisbert_embeddings.py)
+    #   - Kanon 2: 1024d (kanon_embeddings.py)
+    #   - OpenAI fallback: 3072d (hardcoded nos fallback paths)
+    # Para o provider local SentenceTransformers (768d), ver:
+    #   app/core/config.py → Settings.EMBEDDING_DIMENSION
     # ==========================================================================
     embedding_model: str = "text-embedding-3-large"
     embedding_dimensions: int = 3072
     embedding_cache_ttl_seconds: int = 3600  # 1 hour
     embedding_batch_size: int = 100
+
+    # ==========================================================================
+    # Contextual Retrieval (Contextual Embeddings)
+    # ==========================================================================
+    # When enabled for ingestion/migration, chunks are embedded with a short
+    # metadata-derived context prefix prepended to the chunk text. This improves
+    # retrieval for ambiguous chunks, but requires re-embedding existing corpora
+    # to be fully consistent.
+    enable_contextual_embeddings: bool = False
+    contextual_embeddings_max_prefix_chars: int = 240
 
     # ==========================================================================
     # TTL Settings
@@ -357,7 +388,7 @@ class RAGConfig:
             rerank_cache_model=_env_bool("RAG_RERANK_CACHE_MODEL", True),
             rerank_top_k=_env_int("RAG_RERANK_TOP_K", 10),
             rerank_max_chars=_env_int("RAG_RERANK_MAX_CHARS", 1800),
-            cohere_rerank_model=os.getenv("COHERE_RERANK_MODEL", "rerank-multilingual-v3.0"),
+            cohere_rerank_model=os.getenv("COHERE_RERANK_MODEL", "rerank-v4.0-pro"),
             cohere_rerank_max_candidates=_env_int("COHERE_RERANK_MAX_CANDIDATES", 100),
             cohere_fallback_to_local=_env_bool("RERANK_FALLBACK_LOCAL", True),
             rerank_legal_boost=_env_float("RERANK_LEGAL_BOOST", 0.1),
@@ -380,7 +411,7 @@ class RAGConfig:
             # Graph Backend
             graph_backend=os.getenv("RAG_GRAPH_BACKEND", "neo4j"),
             neo4j_only=_env_bool("RAG_NEO4J_ONLY", True),
-            neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:8687"),
             # Aura typically provides NEO4J_USERNAME; accept it as an alias.
             neo4j_user=os.getenv("NEO4J_USER", os.getenv("NEO4J_USERNAME", "neo4j")),
             neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
@@ -413,12 +444,25 @@ class RAGConfig:
             qdrant_collection_doutrina=os.getenv("QDRANT_COLLECTION_DOUTRINA", "doutrina"),
             qdrant_collection_sei=os.getenv("QDRANT_COLLECTION_SEI", "sei"),
             qdrant_collection_local=os.getenv("QDRANT_COLLECTION_LOCAL", "local_chunks"),
+            qdrant_sparse_enabled=_env_bool("RAG_QDRANT_SPARSE_ENABLED", False),
+            qdrant_dense_vector_name=os.getenv("RAG_QDRANT_DENSE_VECTOR_NAME", "dense"),
+            qdrant_sparse_vector_name=os.getenv("RAG_QDRANT_SPARSE_VECTOR_NAME", "sparse"),
+            qdrant_hybrid_fusion=os.getenv("RAG_QDRANT_HYBRID_FUSION", "rrf"),
+            qdrant_hybrid_prefetch_limit=_env_int("RAG_QDRANT_HYBRID_PREFETCH_LIMIT", 40),
+
+            # Hybrid query classifier
+            hybrid_default_sparse_weight=_env_float("RAG_HYBRID_SPARSE_WEIGHT", 0.50),
+            hybrid_default_dense_weight=_env_float("RAG_HYBRID_DENSE_WEIGHT", 0.50),
+            hybrid_query_classifier_llm=_env_bool("RAG_HYBRID_QUERY_CLASSIFIER_LLM", True),
+            hybrid_query_classifier_model=os.getenv("RAG_HYBRID_CLASSIFIER_MODEL", "gemini-2.0-flash"),
 
             # Embeddings
             embedding_model=os.getenv("EMBEDDING_MODEL", "text-embedding-3-large"),
             embedding_dimensions=_env_int("EMBEDDING_DIMENSIONS", 3072),
             embedding_cache_ttl_seconds=_env_int("EMBEDDING_CACHE_TTL", 3600),
             embedding_batch_size=_env_int("EMBEDDING_BATCH_SIZE", 100),
+            enable_contextual_embeddings=_env_bool("RAG_CONTEXTUAL_EMBEDDINGS_ENABLED", False),
+            contextual_embeddings_max_prefix_chars=_env_int("RAG_CONTEXTUAL_EMBEDDINGS_MAX_PREFIX_CHARS", 240),
 
             # TTL
             local_ttl_days=_env_int("LOCAL_TTL_DAYS", 7),

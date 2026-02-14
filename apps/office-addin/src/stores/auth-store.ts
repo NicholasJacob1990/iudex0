@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { login as apiLogin, logout as apiLogout, type AuthResponse } from '@/api/client';
+import {
+  login as apiLogin,
+  microsoftSSOLogin as apiMicrosoftSSO,
+  logout as apiLogout,
+  type AuthResponse,
+} from '@/api/client';
+import { acquireToken, msalLogout } from '@/auth/msal-config';
 
 interface User {
   id: string;
@@ -19,6 +25,7 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<void>;
+  loginWithMicrosoft: () => Promise<void>;
   logout: () => void;
   clearError: () => void;
 }
@@ -49,8 +56,30 @@ export const useAuthStore = create<AuthState>()(
         }
       },
 
+      loginWithMicrosoft: async () => {
+        set({ isLoading: true, error: null });
+        try {
+          const result = await acquireToken();
+          const response: AuthResponse = await apiMicrosoftSSO(
+            result.accessToken
+          );
+          set({
+            user: response.user,
+            isAuthenticated: true,
+            isLoading: false,
+            error: null,
+          });
+        } catch (err: unknown) {
+          const message =
+            err instanceof Error ? err.message : 'Erro ao fazer login com Microsoft';
+          set({ isLoading: false, error: message });
+          throw err;
+        }
+      },
+
       logout: () => {
         apiLogout();
+        msalLogout().catch(() => {});
         set({
           user: null,
           isAuthenticated: false,

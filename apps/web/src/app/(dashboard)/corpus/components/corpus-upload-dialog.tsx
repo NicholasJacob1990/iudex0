@@ -21,7 +21,6 @@ import {
 } from '@/components/ui/select';
 import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
-import { useIngestDocument } from '../hooks/use-corpus';
 import type { CorpusScope } from '../hooks/use-corpus';
 import { formatFileSize } from '@/lib/utils';
 import { toast } from 'sonner';
@@ -50,8 +49,6 @@ export function CorpusUploadDialog({
   const [myTeams, setMyTeams] = useState<Array<{ id: string; name: string }>>([]);
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const ingestDocument = useIngestDocument();
 
   useEffect(() => {
     if (!open) return;
@@ -117,33 +114,55 @@ export function CorpusUploadDialog({
     }
 
     setIsSubmitting(true);
-    let successCount = 0;
-    let failCount = 0;
+    const uploadedIds: string[] = [];
+    let uploadFailCount = 0;
 
-    // The backend ingest endpoint expects document_ids, not files.
-    // In a full flow, files would be uploaded first (via /documents), then ingested by ID.
-    // Here we use the file names as placeholders; the real flow should upload first.
-    const documentIds = selectedFiles.map((f) => f.name);
     try {
-      await ingestDocument.mutateAsync({
-        document_ids: documentIds,
+      for (const file of selectedFiles) {
+        try {
+          const uploaded = await apiClient.uploadDocument(file, {
+            source: 'corpus_upload_dialog',
+          });
+          const uploadedId = String(uploaded?.id || '').trim();
+          if (uploadedId) {
+            uploadedIds.push(uploadedId);
+          } else {
+            uploadFailCount += 1;
+          }
+        } catch {
+          uploadFailCount += 1;
+        }
+      }
+
+      if (uploadedIds.length === 0) {
+        throw new Error('Nenhum documento foi enviado com sucesso.');
+      }
+
+      await apiClient.ingestCorpusDocuments({
+        document_ids: uploadedIds,
         scope,
         collection: collection || 'local',
         group_ids: scope === 'group' ? groupIds : undefined,
       });
-      successCount = selectedFiles.length;
+
+      const queuedMessage =
+        uploadedIds.length > 0
+          ? `${uploadedIds.length} documento(s) enviado(s) para ingestão.`
+          : 'Ingestão enviada.';
+      toast.success(queuedMessage);
+      if (uploadFailCount > 0) {
+        toast.error(`${uploadFailCount} arquivo(s) falharam no upload.`);
+      }
     } catch {
-      failCount = selectedFiles.length;
+      toast.error('Não foi possível enviar para o Corpus.');
+      if (uploadedIds.length > 0) {
+        toast.info(
+          `${uploadedIds.length} arquivo(s) foram enviados em Documentos, mas falharam na ingestão.`
+        );
+      }
     }
 
     setIsSubmitting(false);
-
-    if (successCount > 0) {
-      toast.success(`${successCount} documento(s) enviado(s) para ingestao.`);
-    }
-    if (failCount > 0) {
-      toast.error(`${failCount} documento(s) falharam ao enviar.`);
-    }
 
     setSelectedFiles([]);
     setCollection('');
@@ -265,7 +284,7 @@ export function CorpusUploadDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="lei">Legislacao</SelectItem>
-                <SelectItem value="jurisprudencia">Jurisprudencia</SelectItem>
+                <SelectItem value="juris">Jurisprudencia</SelectItem>
                 <SelectItem value="doutrina">Doutrina</SelectItem>
                 <SelectItem value="pecas_modelo">Pecas Modelo</SelectItem>
               </SelectContent>

@@ -1,0 +1,22 @@
+{
+  "pluginId": "legal@knowledge-work-plugins",
+  "createdAt": "2026-02-11T18:39:37.921Z",
+  "files": {
+    ".claude-plugin/plugin.json": "43d8ce9562bcc7dbecbf37082936352eaf06b6cbaf76f784031707afadb93f39",
+    ".mcp.json": "dc7d065ee2856739e60c648ff07acba964b6019f902bc21a7b9f79b9b1e0330a",
+    "CONNECTORS.md": "40cad011bb60643a07257d9ac033a1f5c08048238b411b06246d88e12789071d",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "README.md": "4942fa1b6eb83f1faecc99d5e6f585f5a9491392ab98d2df7fa58b6717fd1d7a",
+    "commands/brief.md": "526269db619b06cba7a389c3889a912c10f32fb4c2d7d6c402239f1fc8ba3f63",
+    "commands/respond.md": "319c785cdee1fee1e16670710ce7307025c897653c834171d44c1cf517c06239",
+    "commands/review-contract.md": "5e6ab577c63a912be40f099a4d3956f86428d885660a729f80f7798301d60970",
+    "commands/triage-nda.md": "cd9f275f9d0f2ce212c078c4f713be5a2be4cb5e6a2ae01ef8fc1d11884d549a",
+    "commands/vendor-check.md": "8a594343a16719db793c31cb67910a9a4596f2bb7aa713b0ee4d5f4830b1d015",
+    "skills/canned-responses/SKILL.md": "e245cfd0612604f4a8c1e060124dc72aa1db829a65250b40e22d119f02570415",
+    "skills/compliance/SKILL.md": "e327e02605a40aacaa311eaf70a93aed19e530f6a108e8e2ed45246b4f1a4c80",
+    "skills/contract-review/SKILL.md": "a81446e3dc73c8295fc493fe5e6cb56946c57c2f4eefcaf16efe8ff0c7efca0a",
+    "skills/legal-risk-assessment/SKILL.md": "9f7985e3a98ac8419b52067cdaa1b72f754fa38c20489e7f0bf9de36347d4d89",
+    "skills/meeting-briefing/SKILL.md": "4d19bc2ddb2138d1b306b150c5d0900ce0a398d5ab690b8eba8101ef33d98baa",
+    "skills/nda-triage/SKILL.md": "01c4636b30c6f6f0ae06f0a8bdb504a8a7b0a0763836deada48ea705a63e0710"
+  }
+}

@@ -33,6 +33,21 @@ import { useChatStore } from '@/stores/chat-store';
 const MAX_ROLE_MODELS = 3;
 
 type HilSectionPolicy = 'none' | 'optional' | 'required';
+type CitationStyle =
+  | 'forense'
+  | 'hibrido'
+  | 'abnt'
+  | 'forense_br'
+  | 'bluebook'
+  | 'harvard'
+  | 'apa'
+  | 'chicago'
+  | 'oscola'
+  | 'ecli'
+  | 'vancouver'
+  | 'inline'
+  | 'numeric'
+  | 'alwd';
 
 const QUALITY_PROFILE_SPECS = [
   {
@@ -136,6 +151,10 @@ interface MinutaSettingsDrawerProps {
   resetPageRange: () => void;
   formattingOptions: any;
   setFormattingOptions: (opts: any) => void;
+  citationStyle?: CitationStyle;
+  setCitationStyle?: (style: CitationStyle) => void;
+  graphHops?: number;
+  setGraphHops?: (hops: number) => void;
 
   // Quality
   reasoningLevel: 'low' | 'medium' | 'high';

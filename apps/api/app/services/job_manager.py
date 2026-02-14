@@ -10,7 +10,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import Lock
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 
 from app.core.config import settings
 
@@ -23,12 +23,12 @@ class JobManager:
     """
     
     def __init__(self, db_path: str = "jobs.db"):
+        backend_root = Path(__file__).resolve().parents[2]
         legacy_base = Path(__file__).parent.parent / "data"
         legacy_db = legacy_base / db_path
 
         storage_path = Path(settings.LOCAL_STORAGE_PATH) if settings else Path("./storage")
         if not storage_path.is_absolute():
-            backend_root = Path(__file__).resolve().parents[2]
             storage_path = backend_root / storage_path
         base_dir = storage_path / "job_manager"
         target_db = base_dir / db_path
@@ -50,6 +50,13 @@ class JobManager:
             else:
                 self.db_path = str(target_db)
         self._init_db()
+        self._migrate_legacy_transcription_jobs([
+            legacy_db,
+            backend_root / db_path,
+            backend_root / "storage" / "job_manager" / db_path,
+            backend_root.parent / "storage" / "job_manager" / db_path,
+            backend_root.parent.parent / "storage" / "job_manager" / db_path,
+        ])
         self._event_lock = Lock()
         self._event_counters: Dict[str, int] = {}
         self._event_queues: Dict[str, deque] = {}
@@ -101,7 +108,7 @@ class JobManager:
         if ttl_days <= 0 and max_rows <= 0:
             return
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             if ttl_days > 0:
                 cutoff = (datetime.now(timezone.utc) - timedelta(days=ttl_days)).isoformat().replace("+00:00", "Z")
@@ -207,7 +214,7 @@ class JobManager:
 
             oversized = self._event_payload_max_bytes > 0 and len(payload_json.encode("utf-8")) > self._event_payload_max_bytes
 
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -294,7 +301,7 @@ class JobManager:
         after_id_int = int(after_id or 0)
         if self._event_persist_enabled:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._connect()
                 cursor = conn.cursor()
                 cursor.execute(
                     """
@@ -370,7 +377,7 @@ class JobManager:
         self._job_users.pop(job_id, None)
         if self._event_persist_enabled:
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = self._connect()
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM job_events WHERE job_id = ?", (job_id,))
                 conn.commit()
@@ -460,9 +467,19 @@ class JobManager:
                 return {}
             return deepcopy(payload)
     
+    # ------------------------------------------------------------------
+    # Centralised SQLite connection — WAL + busy_timeout avoid lock
+    # contention when multiple Celery workers update jobs in parallel.
+    # ------------------------------------------------------------------
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
     def _init_db(self):
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             
             # Tabela de jobs (para LangGraph persistence futuramente)
@@ -575,6 +592,104 @@ class JobManager:
             
         except Exception as e:
             logger.error(f"❌ Erro ao inicializar JobManager DB: {e}")
+
+    @staticmethod
+    def _get_sqlite_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({table_name})")
+        rows = cursor.fetchall() or []
+        return [str(row[1]) for row in rows if len(row) > 1]
+
+    def _migrate_legacy_transcription_jobs(self, candidate_paths: List[Path]) -> None:
+        target_path = Path(self.db_path).resolve()
+        unique_sources: List[Path] = []
+        seen: Set[str] = set()
+
+        for raw_path in candidate_paths:
+            try:
+                source = Path(raw_path).resolve()
+            except Exception:
+                continue
+            source_key = str(source)
+            if source_key in seen:
+                continue
+            seen.add(source_key)
+            if source == target_path or not source.exists():
+                continue
+            unique_sources.append(source)
+
+        if not unique_sources:
+            return
+
+        base_columns = [
+            "jobid",
+            "job_type",
+            "status",
+            "config",
+            "file_names",
+            "file_paths",
+            "result_path",
+            "celery_task_id",
+            "created_at",
+            "updated_at",
+            "progress",
+            "stage",
+            "message",
+            "error",
+        ]
+
+        try:
+            target_conn = self._connect()
+        except Exception as exc:
+            logger.warning(f"⚠️ Falha ao abrir DB de destino para migração de jobs: {exc}")
+            return
+
+        imported_total = 0
+        try:
+            target_columns = set(self._get_sqlite_table_columns(target_conn, "transcription_jobs"))
+            if not target_columns:
+                return
+
+            target_cursor = target_conn.cursor()
+            for source in unique_sources:
+                source_conn: Optional[sqlite3.Connection] = None
+                try:
+                    source_conn = sqlite3.connect(str(source))
+                    source_columns = set(self._get_sqlite_table_columns(source_conn, "transcription_jobs"))
+                    if not source_columns or "jobid" not in source_columns:
+                        continue
+
+                    shared_columns = [col for col in base_columns if col in source_columns and col in target_columns]
+                    if "jobid" not in shared_columns:
+                        continue
+
+                    rows = source_conn.execute(
+                        f"SELECT {', '.join(shared_columns)} FROM transcription_jobs"
+                    ).fetchall()
+                    if not rows:
+                        continue
+
+                    placeholders = ", ".join(["?"] * len(shared_columns))
+                    before_changes = target_conn.total_changes
+                    target_cursor.executemany(
+                        f"INSERT OR IGNORE INTO transcription_jobs ({', '.join(shared_columns)}) VALUES ({placeholders})",
+                        rows,
+                    )
+                    target_conn.commit()
+                    imported = target_conn.total_changes - before_changes
+                    if imported > 0:
+                        imported_total += imported
+                        logger.info(f"📥 Migração transcription_jobs: +{imported} de {source}")
+                except Exception as exc:
+                    logger.warning(f"⚠️ Falha ao migrar jobs legados de {source}: {exc}")
+                finally:
+                    if source_conn is not None:
+                        source_conn.close()
+        finally:
+            target_conn.close()
+
+        if imported_total > 0:
+            logger.info(f"✅ Migração transcription_jobs concluída: {imported_total} jobs importados")
     
     def cache_deep_research(
         self,
@@ -595,7 +710,7 @@ class JobManager:
             # Cache key única com prefixo
             cache_key = f"dr_{query_hash[:16]}"
             
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             
             now = datetime.now().isoformat()
@@ -642,7 +757,7 @@ class JobManager:
             query_normalized = query.lower().strip()
             query_hash = hashlib.sha256(query_normalized.encode()).hexdigest()
             
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             
             cursor.execute("""
@@ -686,7 +801,7 @@ class JobManager:
     def clean_expired_cache(self) -> int:
         """Remove cache expirado e retorna contagem de deletados"""
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             
             cursor.execute("""
@@ -734,7 +849,7 @@ class JobManager:
     ) -> None:
         try:
             now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO transcription_jobs (
@@ -805,7 +920,7 @@ class JobManager:
             values.append(datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
             values.append(job_id)
 
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute(
                 f"UPDATE transcription_jobs SET {', '.join(fields)} WHERE jobid = ?",
@@ -818,7 +933,7 @@ class JobManager:
 
     def get_transcription_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT jobid, job_type, status, config, file_names, file_paths,
@@ -830,6 +945,10 @@ class JobManager:
             conn.close()
             if not row:
                 return None
+            try:
+                progress_value = int(row[10]) if row[10] is not None else 0
+            except (TypeError, ValueError):
+                progress_value = 0
             return {
                 "job_id": row[0],
                 "job_type": row[1],
@@ -841,7 +960,7 @@ class JobManager:
                 "celery_task_id": row[7],
                 "created_at": row[8],
                 "updated_at": row[9],
-                "progress": row[10],
+                "progress": progress_value,
                 "stage": row[11],
                 "message": row[12],
                 "error": row[13],
@@ -857,7 +976,7 @@ class JobManager:
         job_type: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
 
             where_clauses = []
@@ -885,6 +1004,10 @@ class JobManager:
 
             jobs = []
             for row in rows:
+                try:
+                    progress_value = int(row[9]) if row[9] is not None else 0
+                except (TypeError, ValueError):
+                    progress_value = 0
                 jobs.append({
                     "job_id": row[0],
                     "job_type": row[1],
@@ -895,7 +1018,7 @@ class JobManager:
                     "celery_task_id": row[6],
                     "created_at": row[7],
                     "updated_at": row[8],
-                    "progress": row[9],
+                    "progress": progress_value,
                     "stage": row[10],
                     "message": row[11],
                     "error": row[12],
@@ -907,7 +1030,7 @@ class JobManager:
 
     def delete_transcription_job(self, job_id: str) -> bool:
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             cursor = conn.cursor()
             cursor.execute(
                 "DELETE FROM transcription_jobs WHERE jobid = ?",

@@ -9,7 +9,6 @@ import logging
 import uuid
 
 from app.services.job_manager import job_manager
-from app.services.billing_service import calculate_points
 
 logger = logging.getLogger("ApiCallTracker")
 
@@ -223,16 +222,15 @@ def record_api_call(
     if success is False and not explicit_points_override and not has_usage_signals:
         should_compute_points = False
 
-    points = (
-        calculate_points(
+    points = None
+    if should_compute_points:
+        from app.services.billing_service import calculate_points
+        points = calculate_points(
             kind=kind,
             provider=provider,
             model=model,
             meta=merged_meta,
         )
-        if should_compute_points
-        else None
-    )
     if points is not None:
         merged_meta["points"] = points
         try:

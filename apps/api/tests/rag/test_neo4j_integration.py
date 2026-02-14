@@ -31,7 +31,7 @@ from neo4j.exceptions import ServiceUnavailable
 # =============================================================================
 
 # Use dedicated env vars for integration tests so local dev/prod config doesn't interfere.
-NEO4J_URI = os.getenv("NEO4J_TEST_URI", "bolt://localhost:7687")
+NEO4J_URI = os.getenv("NEO4J_TEST_URI", "bolt://localhost:8687")
 NEO4J_USER = os.getenv("NEO4J_TEST_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_TEST_PASSWORD", "testpassword")
 NEO4J_DATABASE = os.getenv("NEO4J_TEST_DATABASE", "neo4j")

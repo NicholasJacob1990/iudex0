@@ -5,19 +5,47 @@ from typing import Optional, Literal
 AreaType = Literal["juridico", "medicina", "ti", "engenharia", "financeiro", "geral"]
 
 # Motor de transcrição
-TranscriptionEngineType = Literal["whisper", "assemblyai"]
+TranscriptionEngineType = Literal["whisper", "assemblyai", "runpod", "elevenlabs"]
+
+# Provider de diarização
+DiarizationProviderType = Literal["auto", "local", "runpod", "assemblyai"]
 
 # Tipos de identificação de falantes (AssemblyAI Speaker Identification)
 SpeakerIdentificationType = Literal["name", "role"]
+
+# Escopo do prompt customizado
+CustomPromptScopeType = Literal["tables_only", "style_and_tables"]
+
+
+class SpellingCorrection(BaseModel):
+    """Par de correção ortográfica para AssemblyAI custom_spelling."""
+    from_text: str = Field(..., alias="from", description="Texto reconhecido incorretamente pelo ASR")
+    to_text: str = Field(..., alias="to", description="Correção desejada (grafia final)")
+
+    model_config = {"populate_by_name": True}
+
 
 class TranscriptionRequest(BaseModel):
     """Schema para requisição de transcrição via MLX Vomo"""
     mode: str = Field(default="APOSTILA", description="Modo de formatação: APOSTILA, FIDELIDADE ou RAW")
     thinking_level: str = Field(default="medium", pattern="^(none|minimal|low|medium|high|xhigh)$", description="Nível de pensamento (thinking budget)")
     custom_prompt: Optional[str] = Field(None, description="Prompt customizado para sobrescrever o padrão")
+    custom_prompt_scope: CustomPromptScopeType = Field(
+        default="tables_only",
+        description="Escopo do prompt customizado: 'tables_only' (padrão, seguro) personaliza apenas tabelas/extras; 'style_and_tables' (avançado) substitui estilo+tabelas."
+    )
     model_selection: str = Field(default="gemini-3-flash-preview", description="Modelo LLM para formatação")
-    transcription_engine: TranscriptionEngineType = Field(default="whisper", description="Motor de transcrição: whisper (local) ou assemblyai (nuvem)")
+    transcription_engine: TranscriptionEngineType = Field(
+        default="whisper",
+        description="Motor de transcrição: whisper, assemblyai, runpod ou elevenlabs."
+    )
     high_accuracy: bool = Field(default=False, description="Usa Beam Search para Whisper (mais lento, melhor para termos complexos)")
+    diarization: Optional[bool] = Field(default=None, description="Ativa identificação de falantes")
+    diarization_strict: bool = Field(default=False, description="Exige diarização (falha se indisponível)")
+    diarization_provider: Optional[DiarizationProviderType] = Field(
+        default="auto",
+        description="Provider de diarização: auto, local, runpod ou assemblyai"
+    )
     # Novos campos para melhorar transcrição bruta (ASR)
     area: Optional[AreaType] = Field(
         default=None,
@@ -37,6 +65,11 @@ class TranscriptionRequest(BaseModel):
         default=None,
         description="Lista de nomes ou papéis para identificar os falantes. Max 35 caracteres cada. Ex: ['Juiz', 'Advogado da Defesa', 'Promotor']"
     )
+    # Custom Spelling (AssemblyAI)
+    custom_spelling: Optional[list[dict]] = Field(
+        default=None,
+        description='Pares de correção ortográfica para ASR. JSON: [{"from":"Sequel","to":"SQL"}]. Max 100 pares.'
+    )
 
 
 class HearingTranscriptionRequest(BaseModel):
@@ -50,6 +83,10 @@ class HearingTranscriptionRequest(BaseModel):
     high_accuracy: bool = Field(default=False, description="Usa Beam Search (mais lento)")
     format_mode: str = Field(default="AUDIENCIA", description="Modo de formatação: AUDIENCIA, REUNIAO ou DEPOIMENTO")
     custom_prompt: Optional[str] = Field(None, description="Prompt customizado de estilo/tabela")
+    custom_prompt_scope: CustomPromptScopeType = Field(
+        default="tables_only",
+        description="Escopo do prompt customizado: 'tables_only' (padrão) ou 'style_and_tables' (avançado)."
+    )
     format_enabled: bool = Field(default=True, description="Gera texto formatado adicional")
     include_timestamps: bool = Field(
         default=True,

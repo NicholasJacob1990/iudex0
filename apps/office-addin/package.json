@@ -12,6 +12,7 @@
     "sideload": "npx office-addin-dev-certs install && npx office-addin-debugging start manifest.xml"
   },
   "dependencies": {
+    "@azure/msal-browser": "^3.27.0",
     "@fluentui/react-components": "^9.56.0",
     "@fluentui/react-icons": "^2.0.260",
     "axios": "^1.6.5",

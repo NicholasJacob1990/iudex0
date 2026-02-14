@@ -1,8 +1,10 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   FileText,
+  Eye,
   Clock,
   ArrowUpRight,
   Trash2,
@@ -22,6 +24,7 @@ import {
 import { formatDate, formatFileSize } from '@/lib/utils';
 import { toast } from 'sonner';
 import { CorpusExportButton } from './corpus-export-button';
+import apiClient from '@/lib/api-client';
 
 function getTTLInfo(expiresAt: string | null): { daysLeft: number; hoursLeft: number; percentage: number; isUrgent: boolean } {
   if (!expiresAt) return { daysLeft: 0, hoursLeft: 0, percentage: 0, isUrgent: true };
@@ -36,6 +39,7 @@ function getTTLInfo(expiresAt: string | null): { daysLeft: number; hoursLeft: nu
 }
 
 export function CorpusLocalTab() {
+  const router = useRouter();
   const { data, isLoading } = useCorpusDocuments({ scope: 'local' });
   const deleteDocument = useDeleteCorpusDocument();
   const promoteDocument = usePromoteDocument();
@@ -67,6 +71,11 @@ export function CorpusLocalTab() {
     } catch {
       toast.error('Erro ao estender TTL.');
     }
+  };
+
+  const handleViewSource = (id: string) => {
+    const route = apiClient.getCorpusViewerRouteUrl(id);
+    router.push(route);
   };
 
   if (isLoading) {
@@ -143,6 +152,15 @@ export function CorpusLocalTab() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-full gap-1 text-xs"
+                      onClick={() => handleViewSource(doc.id)}
+                    >
+                      <Eye className="h-3 w-3" />
+                      Abrir
+                    </Button>
                     <Button
                       variant="outline"
                       size="sm"

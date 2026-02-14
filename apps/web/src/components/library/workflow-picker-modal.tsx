@@ -10,6 +10,7 @@ interface WorkflowPickerModalProps {
   open: boolean;
   onClose: () => void;
   folderId?: string;
+  runInput?: string;
 }
 
 interface WorkflowItem {
@@ -18,7 +19,7 @@ interface WorkflowItem {
   description: string | null;
 }
 
-export function WorkflowPickerModal({ open, onClose, folderId }: WorkflowPickerModalProps) {
+export function WorkflowPickerModal({ open, onClose, folderId, runInput }: WorkflowPickerModalProps) {
   const router = useRouter();
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -54,8 +55,11 @@ export function WorkflowPickerModal({ open, onClose, folderId }: WorkflowPickerM
               <button
                 key={wf.id}
                 onClick={() => {
-                  const params = folderId ? `?folder_id=${folderId}` : '';
-                  router.push(`/workflows/${wf.id}/run${params}`);
+                  const params = new URLSearchParams();
+                  if (folderId) params.set('folder_id', folderId);
+                  if (runInput?.trim()) params.set('input', runInput.trim());
+                  const queryString = params.toString();
+                  router.push(`/workflows/${wf.id}/run${queryString ? `?${queryString}` : ''}`);
                   onClose();
                 }}
                 className="w-full text-left px-3 py-2.5 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors border border-slate-200 dark:border-slate-700 flex items-center gap-3"

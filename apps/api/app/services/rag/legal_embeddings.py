@@ -165,7 +165,7 @@ class LegalEmbeddingConfig:
 
         return cls(
             use_voyage=_bool("LEGAL_USE_VOYAGE", True),
-            voyage_legal_model=os.getenv("VOYAGE_DEFAULT_MODEL", "voyage-law-2"),
+            voyage_legal_model=os.getenv("VOYAGE_DEFAULT_MODEL", "voyage-4-large"),
             voyage_general_model=os.getenv("VOYAGE_FALLBACK_MODEL", "voyage-3-large"),
             primary_model=os.getenv("LEGAL_EMBEDDING_MODEL", "text-embedding-3-large"),
             primary_dimensions=_int("LEGAL_EMBEDDING_DIMENSIONS", 3072),

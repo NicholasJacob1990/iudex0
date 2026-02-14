@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useCallback, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useCallback, useMemo, useState, lazy, Suspense } from 'react';
 import { useChatStore, useCanvasStore, useAuthStore } from '@/stores';
 import { ChatMessage } from './chat-message';
 import { MultiModelResponse } from './multi-model-response';
@@ -11,7 +11,9 @@ import { CogRAGTreeViewer } from './cograg-tree-viewer';
 import { ToolApprovalModal } from './tool-approval-modal';
 import { ContextIndicatorCompact } from './context-indicator';
 import { CheckpointTimeline } from './checkpoint-timeline';
-import { DiffConfirmDialog } from '@/components/dashboard/diff-confirm-dialog';
+const LazyDiffConfirmDialog = lazy(() =>
+  import('@/components/dashboard/diff-confirm-dialog').then(m => ({ default: m.DiffConfirmDialog }))
+);
 import { Loader2, Download, FileText, FileType, RotateCcw, Scissors, X, Copy, PanelRight, Search, BookOpen } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
@@ -32,6 +34,9 @@ interface ChatInterfaceProps {
   autoCanvasOnDocumentRequest?: boolean;
   showCanvasButton?: boolean;
   renderBudgetModal?: boolean;
+  messageAreaStyle?: React.CSSProperties;
+  assistantBubbleStyle?: React.CSSProperties;
+  inputAreaStyle?: React.CSSProperties;
 }
 
 export function ChatInterface({
@@ -41,6 +46,9 @@ export function ChatInterface({
   autoCanvasOnDocumentRequest = false,
   showCanvasButton = false,
   renderBudgetModal = true,
+  messageAreaStyle,
+  assistantBubbleStyle,
+  inputAreaStyle,
 }: ChatInterfaceProps) {
   const {
     currentChat, setCurrentChat, sendMessage, startAgentGeneration, isSending, isLoading,
@@ -162,6 +170,21 @@ export function ChatInterface({
     if (!container) return true;
     const threshold = 100; // pixels from bottom
     return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+  }, []);
+
+  // Throttled scroll handler using RAF
+  const scrollRafRef = useRef<number | null>(null);
+  const handleScroll = useCallback(() => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      isNearBottomRef.current = checkIfNearBottom();
+      scrollRafRef.current = null;
+    });
+  }, [checkIfNearBottom]);
+  useEffect(() => {
+    return () => {
+      if (scrollRafRef.current !== null) cancelAnimationFrame(scrollRafRef.current);
+    };
   }, []);
 
   // Only auto-scroll when new messages arrive AND user is near bottom
@@ -509,7 +532,7 @@ export function ChatInterface({
     return null;
   };
 
-  const handleCopyMessage = async (message: any) => {
+  const handleCopyMessage = useCallback(async (message: any) => {
     if (!message) return;
     const text = String(message.content || '').trim();
     if (!text) {
@@ -536,15 +559,15 @@ export function ChatInterface({
       console.error('Failed to copy response:', error);
       toast.error('Não foi possível copiar.');
     }
-  };
+  }, []);
 
-  const handleFeedback = async (message: any, type: 'up' | 'down') => {
+  const handleFeedback = useCallback(async (message: any, type: 'up' | 'down') => {
     // TODO: Send feedback to backend
     console.log('Feedback:', type, message.id);
     toast.success(type === 'up' ? 'Obrigado pelo feedback positivo!' : 'Feedback registrado. Vamos melhorar!');
-  };
+  }, []);
 
-  const handleShareMessage = async (message: any) => {
+  const handleShareMessage = useCallback(async (message: any) => {
     const text = String(message.content || '').trim();
     if (!text) return;
 
@@ -563,9 +586,9 @@ export function ChatInterface({
         toast.error('Não foi possível compartilhar.');
       }
     }
-  };
+  }, []);
 
-  const handleRegenerateFromMessage = async (assistantMessage: any) => {
+  const handleRegenerateFromMessage = useCallback(async (assistantMessage: any) => {
     if (!assistantMessage || isSending) return;
     const userMessage = getUserMessageForAssistant(assistantMessage);
     const content = String(userMessage?.content || '').trim();
@@ -574,7 +597,7 @@ export function ChatInterface({
       return;
     }
     await sendMessage(content);
-  };
+  }, [isSending, sendMessage, getUserMessageForAssistant]);
 
   const handleCompact = useCallback(async () => {
     setIsCompacting(true);
@@ -628,9 +651,12 @@ export function ChatInterface({
       {/* Messages Area */}
       <div
         ref={messagesContainerRef}
-        onScroll={() => { isNearBottomRef.current = checkIfNearBottom(); }}
-        className="flex-1 min-h-0 overflow-y-auto py-4 px-2 md:px-4 relative"
-        style={{ background: '#f7f7f8' }}
+        onScroll={handleScroll}
+        role="log"
+        aria-live="polite"
+        aria-label="Mensagens do chat"
+        className="relative flex-1 min-h-0 overflow-y-auto bg-muted/50 py-4 px-2 md:px-4 dark:bg-background/70"
+        style={messageAreaStyle}
       >
         {/* Export Actions - Absolute Top Right */}
         {currentChat && currentChat.messages?.length > 0 && (
@@ -639,7 +665,7 @@ export function ChatInterface({
               <Button
                 variant="outline"
                 size="icon"
-                className="h-8 w-8 bg-white/80 backdrop-blur border-slate-200 shadow-sm"
+                className="h-8 w-8 border-border bg-background/80 shadow-sm backdrop-blur"
                 title="Abrir canvas"
                 onClick={openCanvas}
               >
@@ -655,7 +681,7 @@ export function ChatInterface({
             )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button variant="outline" size="icon" className="h-8 w-8 bg-white/80 backdrop-blur border-slate-200 shadow-sm">
+                <Button variant="outline" size="icon" className="h-8 w-8 border-border bg-background/80 shadow-sm backdrop-blur">
                   <Download className="h-4 w-4 text-muted-foreground" />
                 </Button>
               </DropdownMenuTrigger>
@@ -712,10 +738,10 @@ export function ChatInterface({
                 <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white font-bold text-xl shadow-lg">
                   I
                 </div>
-                <h2 className="text-xl font-semibold text-slate-800 dark:text-slate-200">
+                <h2 className="text-xl font-semibold text-foreground">
                   Como posso ajudar?
                 </h2>
-                <p className="text-sm text-slate-500 dark:text-slate-400">
+                <p className="text-sm text-muted-foreground">
                   Assistente jurídico com IA
                 </p>
               </div>
@@ -732,14 +758,14 @@ export function ChatInterface({
                     key={item.label}
                     type="button"
                     onClick={() => handleSendMessage(item.label)}
-                    className="flex items-start gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 text-left transition-all hover:border-emerald-300 hover:shadow-md hover:bg-emerald-50/50 dark:hover:bg-emerald-900/20 group"
+                    className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 text-left transition-all hover:border-emerald-300 hover:shadow-md hover:bg-emerald-50/50 dark:hover:bg-emerald-900/20 group"
                   >
-                    <item.icon className="h-5 w-5 mt-0.5 text-slate-400 group-hover:text-emerald-600 transition-colors shrink-0" />
+                    <item.icon className="h-5 w-5 mt-0.5 text-muted-foreground group-hover:text-emerald-600 transition-colors shrink-0" />
                     <div>
-                      <span className="text-sm font-medium text-slate-700 dark:text-slate-300 group-hover:text-emerald-700 dark:group-hover:text-emerald-400">
+                      <span className="text-sm font-medium text-foreground group-hover:text-emerald-700 dark:group-hover:text-emerald-400">
                         {item.label}
                       </span>
-                      <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">{item.desc}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{item.desc}</p>
                     </div>
                   </button>
                 ))}
@@ -781,6 +807,7 @@ export function ChatInterface({
                           onCopy={handleCopyMessage}
                           onRegenerate={handleRegenerateFromMessage}
                           disableRegenerate={isSending}
+                          assistantBubbleStyle={assistantBubbleStyle}
                         />
                       );
                       i = j;
@@ -797,6 +824,7 @@ export function ChatInterface({
                       onFeedback={handleFeedback}
                       onShare={handleShareMessage}
                       disableRegenerate={isSending}
+                      assistantBubbleStyle={assistantBubbleStyle}
                     />
                   );
                   i++;
@@ -819,13 +847,13 @@ export function ChatInterface({
                         input.value = '';
                       }
                     }}
-                    className="flex items-center gap-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50/50 dark:bg-slate-800/50 px-4 py-2.5 transition-all focus-within:border-emerald-300 focus-within:bg-white dark:focus-within:bg-slate-800 focus-within:shadow-sm"
+                    className="flex items-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-2.5 transition-all focus-within:border-emerald-300 focus-within:bg-card focus-within:shadow-sm"
                   >
                     <input
                       name="followup"
                       type="text"
                       placeholder="Pergunte um seguimento..."
-                      className="flex-1 bg-transparent text-sm text-slate-700 dark:text-slate-300 placeholder:text-slate-400 outline-none"
+                      className="flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground outline-none"
                       autoComplete="off"
                     />
                     <button
@@ -843,8 +871,9 @@ export function ChatInterface({
           )}
 
           {isSending && (
-            <div className="flex items-center space-x-2 text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin" />
+            <div className="flex items-center space-x-2 text-muted-foreground" role="status" aria-label="Enviando mensagem">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+              <span className="sr-only">Processando resposta...</span>
             </div>
           )}
         </div>
@@ -867,7 +896,7 @@ export function ChatInterface({
 
       {/* Checkpoint Timeline */}
       {checkpoints.length > 0 && (
-        <div className="border-t border-slate-200 bg-white">
+        <div className="border-t border-border bg-card">
           <CheckpointTimeline
             checkpoints={checkpoints}
             onRestore={restoreCheckpoint}
@@ -878,7 +907,7 @@ export function ChatInterface({
       {/* Input Area */}
       {
         !hideInput && (
-          <div className="border-t border-slate-200 bg-white p-3 md:p-4">
+          <div className="border-t border-border bg-card p-3 md:p-4 transition-colors duration-500" style={inputAreaStyle}>
             {/* Job Quality Panels - Moved to Canvas Quality Tab */}
             {useChatStore.getState().useMultiAgent && (
               <>
@@ -939,46 +968,50 @@ export function ChatInterface({
         )
       }
 
-      <DiffConfirmDialog
-        open={editPreviewOpen}
-        onOpenChange={(open) => {
-          setEditPreviewOpen(open);
-          if (!open) {
-            setEditPreview(null);
-          }
-        }}
-        title="Confirmar edição"
-        description="Revise a alteração sugerida antes de aplicar no documento."
-        original={editPreview?.original || ''}
-        replacement={editPreview?.edited || ''}
-        onAccept={() => {
-          if (!editPreview) return;
-          const result = applyTextReplacement(editPreview.original, editPreview.edited, 'Edição', editPreview.range);
-          if (result.success && result.reason === 'pending') {
-            toast.info("Aplicando edição no documento...");
-          } else if (result.success) {
-            toast.success("Edição aplicada com sucesso! 🎉");
-          } else {
-            toast.error(`Falha ao aplicar edição: ${result.reason}`);
-          }
+      {editPreviewOpen && (
+        <Suspense fallback={null}>
+          <LazyDiffConfirmDialog
+            open={editPreviewOpen}
+            onOpenChange={(open) => {
+              setEditPreviewOpen(open);
+              if (!open) {
+                setEditPreview(null);
+              }
+            }}
+            title="Confirmar edição"
+            description="Revise a alteração sugerida antes de aplicar no documento."
+            original={editPreview?.original || ''}
+            replacement={editPreview?.edited || ''}
+            onAccept={() => {
+              if (!editPreview) return;
+              const result = applyTextReplacement(editPreview.original, editPreview.edited, 'Edição', editPreview.range);
+              if (result.success && result.reason === 'pending') {
+                toast.info("Aplicando edição no documento...");
+              } else if (result.success) {
+                toast.success("Edição aplicada com sucesso!");
+              } else {
+                toast.error(`Falha ao aplicar edição: ${result.reason}`);
+              }
 
-          useChatStore.getState().addMessage({
-            id: `sys-${Date.now()}`,
-            role: 'assistant',
-            content: `Edição concluída por ${editPreview.agents.join(', ')}.`,
-            timestamp: new Date().toISOString()
-          });
-          clearSelectedText();
-          setEditPreviewOpen(false);
-          setEditPreview(null);
-        }}
-        onReject={() => {
-          toast.info("Edição descartada.");
-          clearSelectedText();
-          setEditPreviewOpen(false);
-          setEditPreview(null);
-        }}
-      />
+              useChatStore.getState().addMessage({
+                id: `sys-${Date.now()}`,
+                role: 'assistant',
+                content: `Edição concluída por ${editPreview.agents.join(', ')}.`,
+                timestamp: new Date().toISOString()
+              });
+              clearSelectedText();
+              setEditPreviewOpen(false);
+              setEditPreview(null);
+            }}
+            onReject={() => {
+              toast.info("Edição descartada.");
+              clearSelectedText();
+              setEditPreviewOpen(false);
+              setEditPreview(null);
+            }}
+          />
+        </Suspense>
+      )}
     </div >
   );
 }

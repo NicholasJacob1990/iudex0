@@ -3,15 +3,17 @@
 import { useEffect, useState } from 'react';
 import { useDocumentStore } from '@/stores';
 import { DocumentsDropzone, DocumentViewerDialog, DocumentActionsMenu } from '@/components/dashboard';
-import { FileText, Eye, Trash2, Sparkles, BookmarkPlus, Mic, Podcast, Network } from 'lucide-react';
+import { FileText, Eye, Trash2, Sparkles, BookmarkPlus, Mic, Podcast, Network, Database } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Switch } from '@/components/ui/switch';
 import { Label } from '@/components/ui/label';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatDate, formatFileSize } from '@/lib/utils';
 import { toast } from 'sonner';
 import apiClient from '@/lib/api-client';
 import { AnimatedContainer } from '@/components/ui/animated-container';
+import { ExportToCorpusDialog } from '@/components/dashboard/export-to-corpus-dialog';
 
 export default function DocumentsPage() {
   const { documents, fetchDocuments, deleteDocument } = useDocumentStore();
@@ -22,10 +24,26 @@ export default function DocumentsPage() {
   const [summaryDocName, setSummaryDocName] = useState('');
   const [summaryContent, setSummaryContent] = useState('');
   const [summaryLoading, setSummaryLoading] = useState(false);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState<Set<string>>(new Set());
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
+  const [exportingToCorpus, setExportingToCorpus] = useState(false);
+  const [exportDocumentIds, setExportDocumentIds] = useState<string[]>([]);
+  const [exportSourceLabel, setExportSourceLabel] = useState('documento(s)');
 
   useEffect(() => {
     fetchDocuments();
   }, [fetchDocuments]);
+
+  useEffect(() => {
+    const currentIds = new Set(documents.map((d) => String(d.id)));
+    setSelectedDocumentIds((prev) => {
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (currentIds.has(id)) next.add(id);
+      }
+      return next;
+    });
+  }, [documents]);
 
   const handleDelete = async (id: string, name: string) => {
     if (!confirm(`Deseja realmente excluir "${name}"?`)) return;
@@ -95,6 +113,69 @@ export default function DocumentsPage() {
       .catch(() => {
         toast.error('Não foi possível salvar na biblioteca.');
       });
+  };
+
+  const openCorpusExportDialog = (documentIds: string[], sourceLabel: string) => {
+    const uniqueIds = Array.from(new Set((documentIds || []).filter(Boolean)));
+    if (!uniqueIds.length) {
+      toast.error('Nenhum documento válido para exportar ao Corpus.');
+      return;
+    }
+    setExportDocumentIds(uniqueIds);
+    setExportSourceLabel(sourceLabel);
+    setExportDialogOpen(true);
+  };
+
+  const handleExportToCorpus = async (payload: { scope: 'group'; collection: string; group_ids: string[] }) => {
+    if (!exportDocumentIds.length) return;
+    setExportingToCorpus(true);
+    try {
+      const response = await apiClient.ingestCorpusDocuments({
+        document_ids: exportDocumentIds,
+        collection: payload.collection,
+        scope: payload.scope,
+        group_ids: payload.group_ids,
+      });
+      const queued = Number(response?.queued ?? 0);
+      const skipped = Number(response?.skipped ?? 0);
+      const errors = Array.isArray(response?.errors) ? response.errors.length : 0;
+
+      if (queued > 0) {
+        toast.success(`${queued} documento(s) enviado(s) para o Corpus.`);
+      }
+      if (skipped > 0) {
+        toast.info(`${skipped} documento(s) já estavam no escopo selecionado.`);
+      }
+      if (errors > 0) {
+        toast.error(`${errors} documento(s) falharam na ingestão.`);
+      }
+      if (queued === 0 && skipped === 0 && errors === 0) {
+        toast.info('Nenhum documento foi processado pelo Corpus.');
+      }
+      setExportDialogOpen(false);
+    } catch {
+      toast.error('Não foi possível exportar para o Corpus.');
+    } finally {
+      setExportingToCorpus(false);
+    }
+  };
+
+  const toggleSelectAllDocuments = () => {
+    if (!documents.length) return;
+    if (selectedDocumentIds.size === documents.length) {
+      setSelectedDocumentIds(new Set());
+      return;
+    }
+    setSelectedDocumentIds(new Set(documents.map((doc) => String(doc.id))));
+  };
+
+  const toggleSelectDocument = (docId: string) => {
+    setSelectedDocumentIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(docId)) next.delete(docId);
+      else next.add(docId);
+      return next;
+    });
   };
 
   const handleBulkAction = (action: string) => {
@@ -172,6 +253,21 @@ export default function DocumentsPage() {
                 <BookmarkPlus className="h-3 w-3" />
                 Salvar
               </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="rounded-full gap-2 text-xs"
+                onClick={() =>
+                  openCorpusExportDialog(
+                    Array.from(selectedDocumentIds),
+                    `${selectedDocumentIds.size} documento(s) selecionado(s)`
+                  )
+                }
+                disabled={selectedDocumentIds.size === 0}
+              >
+                <Database className="h-3 w-3" />
+                Corpus ({selectedDocumentIds.size})
+              </Button>
             </div>
           </div>
 
@@ -182,6 +278,13 @@ export default function DocumentsPage() {
                 <h2 className="font-display text-xl text-foreground">Seus documentos</h2>
                 <p className="text-sm text-muted-foreground">{documents.length} itens carregados</p>
               </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  checked={documents.length > 0 && selectedDocumentIds.size === documents.length}
+                  onCheckedChange={toggleSelectAllDocuments}
+                />
+                <span className="text-xs text-muted-foreground">Selecionar todos</span>
+              </div>
             </div>
 
             <div className="space-y-3">
@@ -191,6 +294,10 @@ export default function DocumentsPage() {
                   className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-outline/40 bg-sand/60 px-4 py-3"
                 >
                   <div className="flex items-center gap-3">
+                    <Checkbox
+                      checked={selectedDocumentIds.has(String(doc.id))}
+                      onCheckedChange={() => toggleSelectDocument(String(doc.id))}
+                    />
                     <FileText className="h-5 w-5 text-primary" />
                     <div>
                       <p className="font-semibold text-foreground">{doc.name}</p>
@@ -234,6 +341,15 @@ export default function DocumentsPage() {
                       Salvar
                     </Button>
                     <Button
+                      variant="outline"
+                      size="sm"
+                      className="rounded-full gap-1 text-xs"
+                      onClick={() => openCorpusExportDialog([doc.id], 'documento')}
+                    >
+                      <Database className="h-3 w-3" />
+                      Corpus
+                    </Button>
+                    <Button
                       variant="ghost"
                       size="icon"
                       className="rounded-full text-destructive"
@@ -267,6 +383,15 @@ export default function DocumentsPage() {
           </div>
         </DialogContent>
       </Dialog>
+
+      <ExportToCorpusDialog
+        open={exportDialogOpen}
+        onOpenChange={setExportDialogOpen}
+        onConfirm={handleExportToCorpus}
+        loading={exportingToCorpus}
+        itemCount={exportDocumentIds.length}
+        sourceLabel={exportSourceLabel}
+      />
     </div>
   );
 }

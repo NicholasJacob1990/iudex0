@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { formatDate } from '@/lib/utils';
 import { User, Bot, Check, Copy, RotateCcw, Globe, ExternalLink, Rocket, ThumbsUp, ThumbsDown, Share2, RefreshCw } from 'lucide-react';
@@ -30,6 +30,7 @@ interface ChatMessageProps {
   onFeedback?: (message: Message, type: 'up' | 'down') => void;
   onShare?: (message: Message) => void;
   disableRegenerate?: boolean;
+  assistantBubbleStyle?: React.CSSProperties;
 }
 
 type CitationItem = {
@@ -43,9 +44,9 @@ type CitationItem = {
 function LoadingDots() {
   return (
     <span className="inline-flex gap-1">
-      <span className="animate-bounce h-1 w-1 rounded-full bg-slate-400" style={{ animationDelay: '0ms' }} />
-      <span className="animate-bounce h-1 w-1 rounded-full bg-slate-400" style={{ animationDelay: '150ms' }} />
-      <span className="animate-bounce h-1 w-1 rounded-full bg-slate-400" style={{ animationDelay: '300ms' }} />
+      <span className="animate-bounce h-1 w-1 rounded-full bg-muted-foreground" style={{ animationDelay: '0ms' }} />
+      <span className="animate-bounce h-1 w-1 rounded-full bg-muted-foreground" style={{ animationDelay: '150ms' }} />
+      <span className="animate-bounce h-1 w-1 rounded-full bg-muted-foreground" style={{ animationDelay: '300ms' }} />
     </span>
   );
 }
@@ -67,7 +68,7 @@ function ResponseSourcesTabs({ citations }: { citations: CitationItem[] }) {
   }
 
   return (
-    <div className="mt-4 border-t border-slate-100 pt-3">
+    <div className="mt-4 border-t border-border pt-3">
       {/* Tab header */}
       <div className="flex items-center gap-1 mb-3">
         <button
@@ -75,12 +76,12 @@ function ResponseSourcesTabs({ citations }: { citations: CitationItem[] }) {
           onClick={() => setActiveTab('sources')}
           className={cn(
             'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors',
-            'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+            'bg-muted text-foreground',
           )}
         >
           <Globe className="h-3 w-3" />
           Fontes
-          <span className="ml-0.5 rounded-full bg-slate-200 dark:bg-slate-700 px-1.5 py-0.5 text-[10px] font-semibold">
+          <span className="ml-0.5 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold">
             {citations.length}
           </span>
         </button>
@@ -100,36 +101,36 @@ function ResponseSourcesTabs({ citations }: { citations: CitationItem[] }) {
                 target="_blank"
                 rel="noreferrer noopener"
                 className={cn(
-                  'flex items-start gap-3 rounded-lg border border-slate-100 dark:border-slate-800 p-3 transition-all group',
-                  item.url ? 'hover:border-slate-300 hover:bg-slate-50/50 dark:hover:bg-slate-800/50' : 'pointer-events-none opacity-60',
+                  'flex items-start gap-3 rounded-lg border border-border p-3 transition-all group',
+                  item.url ? 'hover:border-foreground/20 hover:bg-muted/50' : 'pointer-events-none opacity-60',
                 )}
               >
                 {/* Favicon */}
-                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 shrink-0">
+                <div className="flex h-8 w-8 items-center justify-center rounded-md bg-muted border border-border shrink-0">
                   {favicon ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img src={favicon} alt="" className="h-4 w-4 rounded-sm" onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
                   ) : (
-                    <Globe className="h-3.5 w-3.5 text-slate-400" />
+                    <Globe className="h-3.5 w-3.5 text-muted-foreground" />
                   )}
                 </div>
 
                 {/* Content */}
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
-                    <span className="rounded-full border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-1.5 py-0.5 text-[10px] font-bold text-slate-500 shrink-0">
+                    <span className="rounded-full border border-border bg-card px-1.5 py-0.5 text-[10px] font-bold text-muted-foreground shrink-0">
                       {item.number}
                     </span>
-                    <span className="text-sm font-medium text-slate-700 dark:text-slate-300 truncate group-hover:text-slate-900 dark:group-hover:text-slate-100">
+                    <span className="text-sm font-medium text-foreground truncate group-hover:text-foreground">
                       {item.title || domain || `Fonte ${item.number}`}
                     </span>
-                    <ExternalLink className="h-3 w-3 text-slate-300 group-hover:text-slate-400 shrink-0 ml-auto" />
+                    <ExternalLink className="h-3 w-3 text-muted-foreground/50 group-hover:text-muted-foreground shrink-0 ml-auto" />
                   </div>
                   {domain && (
-                    <span className="text-[11px] text-slate-400 dark:text-slate-500">{domain}</span>
+                    <span className="text-[11px] text-muted-foreground">{domain}</span>
                   )}
                   {item.quote && (
-                    <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed line-clamp-2">
+                    <p className="mt-1 text-[11px] text-muted-foreground leading-relaxed line-clamp-2">
                       {item.quote}
                     </p>
                   )}
@@ -167,7 +168,7 @@ function injectCitationHtml(html: string, citationMap: Map<string, CitationItem>
   });
 }
 
-export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, onFeedback, onShare, disableRegenerate }: ChatMessageProps) {
+export const ChatMessage = React.memo(function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, onFeedback, onShare, disableRegenerate, assistantBubbleStyle }: ChatMessageProps) {
   const [feedbackGiven, setFeedbackGiven] = useState<'up' | 'down' | null>(null);
   const isUser = message.role === 'user';
   const canvasSuggestion = !isUser ? message.metadata?.canvas_suggestion : null;
@@ -178,6 +179,16 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
   const activityAutoOpenedRef = useRef(false);
   const showActions = !isUser && (onCopy || onRegenerate || onPromoteToAgent);
   const modelLabel = !isUser ? (message.metadata?.model ? String(message.metadata.model) : '') : '';
+  const executionMode = !isUser ? String(message.metadata?.execution_mode || '').toLowerCase() : '';
+  const executionPath = !isUser ? String(message.metadata?.execution_path || '') : '';
+  const executionBadgeLabel =
+    executionMode === 'full'
+      ? 'Full'
+      : executionMode === 'lite'
+        ? 'Lite'
+        : '';
+  const traceUrl = !isUser ? String(message.metadata?.langsmith_trace_url || '').trim() : '';
+  const hasTraceLink = /^https?:\/\//i.test(traceUrl);
   const thinkingEnabled = typeof message.metadata?.thinking_enabled === 'boolean'
     ? message.metadata.thinking_enabled
     : true;
@@ -420,9 +431,13 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
             className={cn(
               'max-w-[min(98%,110ch)] rounded-2xl border px-6 py-5 transition-all duration-200',
               isUser
-                ? 'ml-auto bg-gradient-to-br from-slate-100 to-slate-50 dark:from-slate-800 dark:to-slate-900 text-black dark:text-slate-100 border-slate-200/60 dark:border-slate-700/60 shadow-sm'
-                : 'bg-white dark:bg-slate-900 text-black dark:text-slate-100 border-slate-200/80 dark:border-slate-700/80 shadow-[0_2px_8px_-4px_rgba(0,0,0,0.05)] hover:shadow-[0_4px_12px_-6px_rgba(0,0,0,0.08)] dark:shadow-[0_2px_8px_-4px_rgba(0,0,0,0.3)]'
+                ? 'ml-auto bg-gradient-to-br from-muted to-muted/60 text-foreground border-border/60 shadow-sm'
+                : cn(
+                    'text-foreground shadow-[0_2px_8px_-4px_rgba(0,0,0,0.05)] hover:shadow-[0_4px_12px_-6px_rgba(0,0,0,0.08)] dark:shadow-[0_2px_8px_-4px_rgba(0,0,0,0.3)]',
+                    assistantBubbleStyle ? '' : 'bg-card border-border/80',
+                  )
             )}
+            style={!isUser ? assistantBubbleStyle : undefined}
           >
             <div
               className="chat-markdown"
@@ -459,7 +474,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
           <div className={cn('mt-0.5 flex flex-col gap-1', isUser && 'items-end')}>
             {/* Only show timers if meaningful */}
             {(showThinkingTimer || (isStreaming && typeof writingSeconds === 'number')) && (
-              <div className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-400', isUser && 'justify-end')}>
+              <div className={cn('flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground', isUser && 'justify-end')}>
                 {showThinkingTimer && (
                   <span className="inline-flex items-center gap-1">
                     {streamTimes.tAnswerStart ? 'Pensou por' : 'Pensando há'} {thinkingSeconds}s
@@ -472,15 +487,28 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
                 )}
               </div>
             )}
-            <p className={cn('text-xs text-slate-400', isUser && 'text-right')}>
+            <p className={cn('text-xs text-muted-foreground', isUser && 'text-right')}>
               {formatDate(message.timestamp)}
             </p>
 
-            {!isUser && (modelLabel || showCanvasApply || showCanvasSuggestion) && (
+            {!isUser && (modelLabel || executionBadgeLabel || showCanvasApply || showCanvasSuggestion) && (
               <div className="flex items-center gap-2 flex-wrap">
                 {modelLabel && (
-                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 dark:bg-slate-800 px-2 py-1 text-xs font-semibold text-slate-700 dark:text-slate-300">
+                  <span className="inline-flex items-center gap-1 rounded bg-muted px-2 py-1 text-xs font-semibold text-foreground">
                     {modelLabel}
+                  </span>
+                )}
+                {executionBadgeLabel && (
+                  <span
+                    className={cn(
+                      'inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold',
+                      executionMode === 'full'
+                        ? 'bg-sky-50 dark:bg-sky-900/30 text-sky-700 dark:text-sky-300'
+                        : 'bg-muted text-muted-foreground'
+                    )}
+                    title={executionPath ? `execution_path: ${executionPath}` : undefined}
+                  >
+                    {executionBadgeLabel}
                   </span>
                 )}
                 {showCanvasApply && (
@@ -511,7 +539,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
                   'p-1.5 rounded-md transition-colors',
                   feedbackGiven === 'up'
                     ? 'text-emerald-600 bg-emerald-50 dark:bg-emerald-900/30'
-                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 )}
                 title="Boa resposta"
               >
@@ -529,7 +557,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
                   'p-1.5 rounded-md transition-colors',
                   feedbackGiven === 'down'
                     ? 'text-red-600 bg-red-50 dark:bg-red-900/30'
-                    : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                 )}
                 title="Resposta ruim"
               >
@@ -537,18 +565,32 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
               </button>
 
               {/* Divider */}
-              <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1" />
+              <div className="w-px h-4 bg-border mx-1" />
 
               {/* Copy */}
               {onCopy && (
                 <button
                   type="button"
                   onClick={() => onCopy(message)}
-                  className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                   title="Copiar"
                 >
                   <Copy className="h-3.5 w-3.5" />
                 </button>
+              )}
+
+              {/* LangSmith Trace */}
+              {hasTraceLink && (
+                <a
+                  href={traceUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="inline-flex items-center gap-1 p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                  title="Abrir trace no LangSmith"
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  <span className="text-[10px] font-medium">Trace</span>
+                </a>
               )}
 
               {/* Regenerate */}
@@ -560,8 +602,8 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
                   className={cn(
                     'p-1.5 rounded-md transition-colors',
                     disableRegenerate
-                      ? 'text-slate-300 cursor-not-allowed'
-                      : 'text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800'
+                      ? 'text-muted-foreground/50 cursor-not-allowed'
+                      : 'text-muted-foreground hover:text-foreground hover:bg-muted'
                   )}
                   title="Regenerar resposta"
                 >
@@ -574,7 +616,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
                 <button
                   type="button"
                   onClick={() => onShare(message)}
-                  className="p-1.5 rounded-md text-slate-400 hover:text-slate-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                   title="Compartilhar"
                 >
                   <Share2 className="h-3.5 w-3.5" />
@@ -584,7 +626,7 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
               {/* Promote to Agent */}
               {onPromoteToAgent && (
                 <>
-                  <div className="w-px h-4 bg-slate-200 dark:bg-slate-700 mx-1" />
+                  <div className="w-px h-4 bg-border mx-1" />
                   <button
                     type="button"
                     onClick={() => onPromoteToAgent(message)}
@@ -624,4 +666,4 @@ export function ChatMessage({ message, onCopy, onRegenerate, onPromoteToAgent, o
       )}
     </>
   );
-}
+});

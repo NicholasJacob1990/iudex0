@@ -18,6 +18,7 @@ from app.schemas.djen import (
     DatajudSearchParams,
     DatajudProcessResponse,
     ProcessWatchlistCreate,
+    ProcessWatchlistUpdate,
     ProcessWatchlistResponse,
     OabWatchlistCreate,
     OabWatchlistResponse,
@@ -27,6 +28,7 @@ from app.schemas.djen import (
     AdvogadoResponse,
     SyncResult,
 )
+from app.services.djen_scheduler import compute_next_sync
 from app.core.config import settings
 from app.services.djen_service import (
     DjenService,
@@ -199,6 +201,14 @@ async def add_to_watchlist(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Processo já está na watchlist")
     
+    # Calcular próximo sync
+    next_sync = compute_next_sync(
+        frequency=data.sync_frequency,
+        sync_time=data.sync_time,
+        timezone=data.sync_timezone,
+        cron=data.sync_cron,
+    )
+
     # Criar novo item
     watchlist_item = ProcessWatchlist(
         user_id=current_user.id,
@@ -207,13 +217,18 @@ async def add_to_watchlist(
         npu_formatted=data.npu,
         tribunal_sigla=data.tribunal_sigla.upper(),
         tribunal_alias=tribunal_alias,
+        sync_frequency=data.sync_frequency,
+        sync_time=data.sync_time,
+        sync_cron=data.sync_cron,
+        sync_timezone=data.sync_timezone,
+        next_sync_at=next_sync,
         is_active=True
     )
-    
+
     db.add(watchlist_item)
     await db.commit()
     await db.refresh(watchlist_item)
-    
+
     return watchlist_item
 
 
@@ -256,6 +271,13 @@ async def add_oab_watchlist(
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="OAB já está na watchlist")
 
+    next_sync = compute_next_sync(
+        frequency=data.sync_frequency,
+        sync_time=data.sync_time,
+        timezone=data.sync_timezone,
+        cron=data.sync_cron,
+    )
+
     watchlist_item = DjenOabWatchlist(
         user_id=current_user.id,
         numero_oab=data.numero_oab,
@@ -263,6 +285,11 @@ async def add_oab_watchlist(
         sigla_tribunal=data.sigla_tribunal.upper() if data.sigla_tribunal else None,
         meio=data.meio or "D",
         max_pages=data.max_pages or 3,
+        sync_frequency=data.sync_frequency,
+        sync_time=data.sync_time,
+        sync_cron=data.sync_cron,
+        sync_timezone=data.sync_timezone,
+        next_sync_at=next_sync,
         is_active=True
     )
     db.add(watchlist_item)
@@ -309,6 +336,84 @@ async def remove_oab_watchlist(
     item.updated_at = datetime.utcnow()
     await db.commit()
     return {"ok": True, "message": "OAB removida da watchlist"}
+
+
+@router.patch("/watchlist/{watchlist_id}", response_model=ProcessWatchlistResponse)
+async def update_watchlist_schedule(
+    watchlist_id: str,
+    data: ProcessWatchlistUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Atualizar agendamento de sincronização de um item da watchlist."""
+    result = await db.execute(
+        select(ProcessWatchlist).where(
+            ProcessWatchlist.id == watchlist_id,
+            ProcessWatchlist.user_id == current_user.id
+        )
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item não encontrado")
+
+    if data.sync_frequency is not None:
+        item.sync_frequency = data.sync_frequency
+    if data.sync_time is not None:
+        item.sync_time = data.sync_time
+    if data.sync_cron is not None:
+        item.sync_cron = data.sync_cron
+    if data.sync_timezone is not None:
+        item.sync_timezone = data.sync_timezone
+
+    item.next_sync_at = compute_next_sync(
+        frequency=item.sync_frequency,
+        sync_time=item.sync_time,
+        timezone=item.sync_timezone,
+        cron=item.sync_cron,
+    )
+    item.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(item)
+    return item
+
+
+@router.patch("/watchlist/oab/{watchlist_id}", response_model=OabWatchlistResponse)
+async def update_oab_watchlist_schedule(
+    watchlist_id: str,
+    data: ProcessWatchlistUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Atualizar agendamento de sincronização de uma OAB na watchlist."""
+    result = await db.execute(
+        select(DjenOabWatchlist).where(
+            DjenOabWatchlist.id == watchlist_id,
+            DjenOabWatchlist.user_id == current_user.id
+        )
+    )
+    item = result.scalar_one_or_none()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item não encontrado")
+
+    if data.sync_frequency is not None:
+        item.sync_frequency = data.sync_frequency
+    if data.sync_time is not None:
+        item.sync_time = data.sync_time
+    if data.sync_cron is not None:
+        item.sync_cron = data.sync_cron
+    if data.sync_timezone is not None:
+        item.sync_timezone = data.sync_timezone
+
+    item.next_sync_at = compute_next_sync(
+        frequency=item.sync_frequency,
+        sync_time=item.sync_time,
+        timezone=item.sync_timezone,
+        cron=item.sync_cron,
+    )
+    item.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(item)
+    return item
 
 
 @router.delete("/watchlist/{watchlist_id}")

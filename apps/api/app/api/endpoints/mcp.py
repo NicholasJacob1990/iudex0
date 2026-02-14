@@ -22,6 +22,22 @@ from app.services.ai.tool_gateway import (
 router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
+def _tenant_id_for_user(user: User) -> str:
+    """
+    Resolve tenant/org id defensivamente.
+
+    Alguns fluxos antigos ainda usam `tenant_id`, enquanto o modelo atual
+    persiste `organization_id`.
+    """
+    tenant_id = getattr(user, "tenant_id", None)
+    if tenant_id:
+        return str(tenant_id)
+    org_id = getattr(user, "organization_id", None)
+    if org_id:
+        return str(org_id)
+    return "default"
+
+
 @router.get("/servers")
 async def list_servers() -> Dict[str, Any]:
     return {"servers": mcp_hub.list_servers()}
@@ -32,9 +48,15 @@ async def mcp_tool_search(
     query: str = Body(..., embed=True),
     server_labels: Optional[List[str]] = Body(default=None, embed=True),
     limit: int = Body(default=20, embed=True, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     try:
-        return await mcp_hub.tool_search(query, server_labels=server_labels, limit=limit)
+        return await mcp_hub.tool_search(
+            query,
+            server_labels=server_labels,
+            limit=limit,
+            tenant_id=_tenant_id_for_user(current_user),
+        )
     except MCPHubError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -44,9 +66,19 @@ async def mcp_tool_call(
     server_label: str = Body(..., embed=True),
     tool_name: str = Body(..., embed=True),
     arguments: Dict[str, Any] = Body(default_factory=dict, embed=True),
+    request: Request = None,
+    current_user: User = Depends(get_current_user),
 ) -> Dict[str, Any]:
     try:
-        return await mcp_hub.tool_call(server_label, tool_name, arguments)
+        session_id = request.headers.get("X-Session-ID") if request else None
+        return await mcp_hub.tool_call(
+            server_label,
+            tool_name,
+            arguments,
+            tenant_id=_tenant_id_for_user(current_user),
+            user_id=str(current_user.id),
+            session_id=session_id,
+        )
     except MCPHubError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -71,7 +103,7 @@ async def mcp_gateway_rpc(
 
     context = {
         "user_id": str(current_user.id),
-        "tenant_id": current_user.tenant_id or "default",
+        "tenant_id": _tenant_id_for_user(current_user),
         "session_id": request.headers.get("X-Session-ID"),
     }
 
@@ -89,7 +121,7 @@ async def mcp_gateway_sse(
     """
     context = {
         "user_id": str(current_user.id),
-        "tenant_id": current_user.tenant_id or "default",
+        "tenant_id": _tenant_id_for_user(current_user),
     }
 
     return await handle_mcp_sse(request, context)
@@ -156,7 +188,7 @@ async def get_audit_log(
     """
     Get audit log of tool executions.
     """
-    tenant_id = current_user.tenant_id or "default"
+    tenant_id = _tenant_id_for_user(current_user)
     logs = policy_engine.get_audit_log(tenant_id=tenant_id, limit=limit)
 
     return {

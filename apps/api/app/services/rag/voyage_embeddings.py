@@ -67,6 +67,9 @@ class VoyageModel(str, Enum):
     LEGAL = "voyage-law-2"
     GENERAL = "voyage-3-large"
     FAST = "voyage-3-lite"
+    CONTEXT = "voyage-context-3"
+    V4_LARGE = "voyage-4-large"
+    V4_LITE = "voyage-4-lite"
 
 
 # Mapa de dimensoes por modelo
@@ -74,6 +77,9 @@ MODEL_DIMENSIONS: Dict[str, int] = {
     VoyageModel.LEGAL: 1024,
     VoyageModel.GENERAL: 1024,
     VoyageModel.FAST: 512,
+    VoyageModel.CONTEXT: 1024,
+    VoyageModel.V4_LARGE: 1024,
+    VoyageModel.V4_LITE: 1024,
 }
 
 # Mapa de max tokens por modelo
@@ -81,6 +87,9 @@ MODEL_MAX_TOKENS: Dict[str, int] = {
     VoyageModel.LEGAL: 16000,
     VoyageModel.GENERAL: 32000,
     VoyageModel.FAST: 32000,
+    VoyageModel.CONTEXT: 32000,
+    VoyageModel.V4_LARGE: 32000,
+    VoyageModel.V4_LITE: 32000,
 }
 
 # Custo estimado por 1M tokens (USD) para logging
@@ -88,7 +97,15 @@ MODEL_COST_PER_1M_TOKENS: Dict[str, float] = {
     VoyageModel.LEGAL: 0.12,
     VoyageModel.GENERAL: 0.13,
     VoyageModel.FAST: 0.02,
+    VoyageModel.CONTEXT: 0.18,
+    VoyageModel.V4_LARGE: 0.12,
+    VoyageModel.V4_LITE: 0.02,
 }
+
+
+def _is_contextual_model(model: str) -> bool:
+    m = (model or "").strip().lower()
+    return m == str(VoyageModel.CONTEXT.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +265,7 @@ class VoyageEmbeddingsProvider:
         self._api_key = api_key or os.getenv("VOYAGE_API_KEY", "")
         self._default_model = (
             default_model
-            or os.getenv("VOYAGE_DEFAULT_MODEL", VoyageModel.LEGAL)
+            or os.getenv("VOYAGE_DEFAULT_MODEL", VoyageModel.V4_LARGE)
         )
         self._fallback_model = (
             fallback_model
@@ -426,6 +443,12 @@ class VoyageEmbeddingsProvider:
             return []
 
         model = model or self._default_model
+
+        # voyage-context-3 uses contextualized chunk embeddings. For RAG ingestion we want
+        # "one document = many chunks", i.e. a single contextualized group.
+        if _is_contextual_model(model) and input_type == "document":
+            return await self._embed_contextualized_group([t.strip() if t else "" for t in texts], model=model, input_type=input_type)
+
         all_embeddings: List[List[float]] = []
 
         for i in range(0, len(texts), batch_size):
@@ -521,11 +544,18 @@ class VoyageEmbeddingsProvider:
                 self._cost_tracker.record_error()
 
         # Nivel 3: OpenAI como ultimo recurso
+        # Use same dimensions as original model to keep vectors compatible
+        # with the target collection/index (text-embedding-3-large supports
+        # Matryoshka dimension reduction).
+        target_dim = MODEL_DIMENSIONS.get(model, 1024)
         if _OPENAI_AVAILABLE and os.getenv("OPENAI_API_KEY", "").strip():
             try:
-                logger.info("Fallback para OpenAI embeddings")
+                logger.info(
+                    "Fallback para OpenAI embeddings (dimensions=%d para compatibilidade com %s)",
+                    target_dim, model,
+                )
                 self._cost_tracker.record_fallback()
-                return await self._call_openai_fallback(clean_texts)
+                return await self._call_openai_fallback(clean_texts, dimensions=target_dim)
             except Exception as e:
                 logger.error("OpenAI fallback tambem falhou: %s", e)
                 self._cost_tracker.record_error()
@@ -560,15 +590,30 @@ class VoyageEmbeddingsProvider:
         for attempt in range(self._max_retries):
             try:
                 start = time.time()
-                response = await client.embed(
-                    texts,
-                    model=model,
-                    input_type=input_type,
-                )
+                if _is_contextual_model(model) and hasattr(client, "contextualized_embed"):
+                    # Each text is treated as a single-chunk "document" group for compatibility.
+                    # For multi-chunk docs, callers should use embed_batch(..., input_type="document")
+                    # which routes to `_embed_contextualized_group`.
+                    response = await client.contextualized_embed(  # type: ignore[attr-defined]
+                        inputs=[[t] for t in texts],
+                        model=model,
+                        input_type=input_type,
+                    )
+                    # Flatten: one embedding per input text (one-chunk group).
+                    embeddings = []
+                    for g in getattr(response, "embeddings", []) or []:
+                        if g:
+                            embeddings.append(g[0])
+                    total_tokens = getattr(response, "total_tokens", 0) or getattr(response, "usage", {}).get("total_tokens", 0) or 0
+                else:
+                    response = await client.embed(
+                        texts,
+                        model=model,
+                        input_type=input_type,
+                    )
+                    embeddings = response.embeddings
+                    total_tokens = getattr(response, "total_tokens", 0) or 0
                 elapsed_ms = (time.time() - start) * 1000
-
-                embeddings = response.embeddings
-                total_tokens = getattr(response, "total_tokens", 0) or 0
 
                 self._cost_tracker.record(model, total_tokens)
 
@@ -598,6 +643,67 @@ class VoyageEmbeddingsProvider:
             raise last_error
         return None
 
+    async def _embed_contextualized_group(
+        self,
+        chunks: List[str],
+        *,
+        model: str,
+        input_type: InputType,
+    ) -> List[List[float]]:
+        """
+        Contextualized chunk embeddings: embed N chunks as a single "document group".
+
+        Requires voyageai AsyncClient to expose `contextualized_embed(inputs=...)`.
+        If not available, falls back to regular embeddings (no contextualization).
+        """
+        if not chunks:
+            return []
+        client = self._get_voyage_client()
+        if not hasattr(client, "contextualized_embed"):
+            # No SDK support; fall back to normal embeddings.
+            return await self._embed_with_fallback(chunks, model=model, input_type=input_type)
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self._max_retries):
+            try:
+                start = time.time()
+                response = await client.contextualized_embed(  # type: ignore[attr-defined]
+                    inputs=[chunks],
+                    model=model,
+                    input_type=input_type,
+                )
+                elapsed_ms = (time.time() - start) * 1000
+
+                groups = getattr(response, "embeddings", None) or []
+                embeddings = groups[0] if groups else []
+                total_tokens = getattr(response, "total_tokens", 0) or getattr(response, "usage", {}).get("total_tokens", 0) or 0
+                self._cost_tracker.record(model, int(total_tokens or 0))
+
+                logger.debug(
+                    "Voyage contextualized_embed OK: model=%s, chunks=%d, tokens=%d, time=%.1fms",
+                    model,
+                    len(chunks),
+                    int(total_tokens or 0),
+                    elapsed_ms,
+                )
+                return embeddings
+            except Exception as e:
+                last_error = e
+                if attempt < self._max_retries - 1:
+                    delay = self._base_retry_delay * (2**attempt)
+                    logger.warning(
+                        "Voyage contextualized_embed tentativa %d/%d falhou: %s. Retry em %.1fs",
+                        attempt + 1,
+                        self._max_retries,
+                        e,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+        if last_error:
+            raise last_error
+        dim = MODEL_DIMENSIONS.get(model, 1024)
+        return [[0.0] * dim for _ in chunks]
+
     # ------------------------------------------------------------------
     # Fallback OpenAI
     # ------------------------------------------------------------------
@@ -605,17 +711,19 @@ class VoyageEmbeddingsProvider:
     async def _call_openai_fallback(
         self,
         texts: List[str],
+        dimensions: int = 1024,
     ) -> List[List[float]]:
-        """Fallback para OpenAI embeddings quando Voyage falha."""
+        """Fallback para OpenAI embeddings quando Voyage falha.
+
+        Uses text-embedding-3-large with Matryoshka dimension reduction
+        to match the target collection dimensions.
+        """
         client = self._get_openai_client()
 
-        openai_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-large")
-        openai_dims = int(os.getenv("EMBEDDING_DIMENSIONS", "3072"))
-
         response = await client.embeddings.create(
-            model=openai_model,
+            model="text-embedding-3-large",
             input=texts,
-            dimensions=openai_dims,
+            dimensions=dimensions,
         )
 
         sorted_data = sorted(response.data, key=lambda x: x.index)

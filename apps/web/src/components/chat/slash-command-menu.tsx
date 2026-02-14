@@ -143,6 +143,24 @@ const SYSTEM_COMMANDS: SystemCommand[] = [
         action: 'insert-text:/template_clear',
         icon: Box,
         tooltip: 'Remove template_id, template_doc e filtros do chat.'
+    },
+    {
+        id: 'cmd-skill-wizard',
+        category: 'Comandos do Sistema',
+        name: 'Abrir Skill Builder (Basico)',
+        description: 'Abre o construtor guiado de skills',
+        action: 'navigate:/skills?mode=wizard',
+        icon: Sparkles,
+        tooltip: 'Use para criar skill em fluxo assistido.'
+    },
+    {
+        id: 'cmd-skill-editor',
+        category: 'Comandos do Sistema',
+        name: 'Abrir Skill Builder (Avancado)',
+        description: 'Abre o editor YAML/Markdown da skill',
+        action: 'navigate:/skills?mode=editor',
+        icon: Settings2,
+        tooltip: 'Use para editar frontmatter e guardrails manualmente.'
     }
 ];
 

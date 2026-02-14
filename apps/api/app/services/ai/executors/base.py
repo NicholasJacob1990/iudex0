@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, TypeVar
 
 from loguru import logger
+from app.services.ai.observability.audit_log import get_tool_audit_log
 
 
 class AgentProvider(str, Enum):
@@ -156,6 +157,14 @@ class BaseAgentExecutor(ABC):
         self._cancel_requested = False
         self._tools: List[Dict[str, Any]] = []
         self._tool_registry: Dict[str, Callable] = {}
+        self._permission_manager: Optional[Any] = None
+        self._audit_context: Dict[str, Optional[str]] = {
+            "provider": self.provider.value,
+            "user_id": None,
+            "session_id": None,
+            "project_id": None,
+            "job_id": None,
+        }
 
     @property
     @abstractmethod
@@ -331,16 +340,80 @@ class BaseAgentExecutor(ABC):
         Returns:
             Modo de permissão: 'allow', 'deny', 'ask'
         """
+        if self._permission_manager:
+            try:
+                result = await self._permission_manager.check(tool_name, tool_input or {})
+                decision = self._normalize_permission_mode(getattr(result, "decision", None))
+                if decision in ("allow", "deny", "ask"):
+                    return decision
+            except Exception as e:
+                logger.warning(
+                    f"[{self.provider.value}] PermissionManager check failed for {tool_name}: {e}"
+                )
+
         # Verificar permissão específica da tool
-        permission = self.config.tool_permissions.get(
+        permission = self._normalize_permission_mode(self.config.tool_permissions.get(
             tool_name,
             self.config.default_permission_mode
-        )
-
-        # TODO: Integrar com PermissionManager para hierarquia completa
-        # session > project > global > system
+        ))
+        try:
+            get_tool_audit_log().record_permission_decision(
+                tool_name=tool_name,
+                decision=permission,
+                user_id=self._audit_context.get("user_id"),
+                session_id=self._audit_context.get("session_id"),
+                project_id=self._audit_context.get("project_id"),
+                job_id=self._audit_context.get("job_id"),
+                provider=self.provider.value,
+                source="executor_config",
+                rule_scope="executor_fallback",
+                tool_input=tool_input,
+            )
+        except Exception:
+            # Auditoria não pode quebrar fluxo do executor.
+            pass
 
         return permission
+
+    def _normalize_permission_mode(self, value: Any) -> str:
+        raw = str(value or "").strip().lower()
+        if raw in ("allow", "deny", "ask"):
+            return raw
+        return "ask"
+
+    async def _init_permission_manager(
+        self,
+        *,
+        db_session: Optional[Any] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        project_id: Optional[str] = None,
+        security_profile: Optional[str] = None,
+    ) -> None:
+        """Initialize shared PermissionManager when request context is available."""
+        self._permission_manager = None
+        self._audit_context = {
+            "provider": self.provider.value,
+            "user_id": str(user_id) if user_id else None,
+            "session_id": str(session_id) if session_id else None,
+            "project_id": str(project_id) if project_id else None,
+            "job_id": self._state.job_id if self._state else None,
+        }
+        if not db_session or not user_id:
+            return
+        try:
+            from app.services.ai.claude_agent.permissions import PermissionManager
+            from app.services.ai.shared.security_profile import SecurityProfile
+
+            self._permission_manager = PermissionManager(
+                db=db_session,
+                user_id=str(user_id),
+                session_id=str(session_id) if session_id else None,
+                project_id=str(project_id) if project_id else None,
+                security_profile=SecurityProfile.from_value(security_profile),
+            )
+        except Exception as e:
+            logger.warning(f"[{self.provider.value}] Failed to initialize PermissionManager: {e}")
 
     async def _execute_tool(
         self,
@@ -358,20 +431,103 @@ class BaseAgentExecutor(ABC):
             Resultado da execução
         """
         if self.tool_executor:
-            return await self.tool_executor(tool_name, tool_input)
+            try:
+                start = datetime.now()
+                result = await self.tool_executor(tool_name, tool_input)
+                duration_ms = int((datetime.now() - start).total_seconds() * 1000)
+                success = not (isinstance(result, dict) and "error" in result)
+                try:
+                    get_tool_audit_log().record_tool_execution(
+                        tool_name=tool_name,
+                        success=success,
+                        user_id=self._audit_context.get("user_id"),
+                        session_id=self._audit_context.get("session_id"),
+                        project_id=self._audit_context.get("project_id"),
+                        job_id=self._audit_context.get("job_id"),
+                        provider=self.provider.value,
+                        duration_ms=duration_ms,
+                        error=(result.get("error") if isinstance(result, dict) else None),
+                        tool_input=tool_input,
+                    )
+                except Exception:
+                    pass
+                return result
+            except Exception as e:
+                try:
+                    get_tool_audit_log().record_tool_execution(
+                        tool_name=tool_name,
+                        success=False,
+                        user_id=self._audit_context.get("user_id"),
+                        session_id=self._audit_context.get("session_id"),
+                        project_id=self._audit_context.get("project_id"),
+                        job_id=self._audit_context.get("job_id"),
+                        provider=self.provider.value,
+                        error=str(e),
+                        tool_input=tool_input,
+                    )
+                except Exception:
+                    pass
+                raise
 
         if tool_name not in self._tool_registry:
+            try:
+                get_tool_audit_log().record_tool_execution(
+                    tool_name=tool_name,
+                    success=False,
+                    user_id=self._audit_context.get("user_id"),
+                    session_id=self._audit_context.get("session_id"),
+                    project_id=self._audit_context.get("project_id"),
+                    job_id=self._audit_context.get("job_id"),
+                    provider=self.provider.value,
+                    error=f"Tool '{tool_name}' not found",
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
             return {"error": f"Tool '{tool_name}' not found"}
 
         handler = self._tool_registry[tool_name]
         try:
+            started_at = datetime.now()
             import asyncio
             if asyncio.iscoroutinefunction(handler):
-                return await handler(**tool_input)
+                result = await handler(**tool_input)
             else:
-                return handler(**tool_input)
+                result = handler(**tool_input)
+            duration_ms = int((datetime.now() - started_at).total_seconds() * 1000)
+            success = not (isinstance(result, dict) and "error" in result)
+            try:
+                get_tool_audit_log().record_tool_execution(
+                    tool_name=tool_name,
+                    success=success,
+                    user_id=self._audit_context.get("user_id"),
+                    session_id=self._audit_context.get("session_id"),
+                    project_id=self._audit_context.get("project_id"),
+                    job_id=self._audit_context.get("job_id"),
+                    provider=self.provider.value,
+                    duration_ms=duration_ms,
+                    error=(result.get("error") if isinstance(result, dict) else None),
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
+            return result
         except Exception as e:
             logger.error(f"Tool execution error for {tool_name}: {e}")
+            try:
+                get_tool_audit_log().record_tool_execution(
+                    tool_name=tool_name,
+                    success=False,
+                    user_id=self._audit_context.get("user_id"),
+                    session_id=self._audit_context.get("session_id"),
+                    project_id=self._audit_context.get("project_id"),
+                    job_id=self._audit_context.get("job_id"),
+                    provider=self.provider.value,
+                    error=str(e),
+                    tool_input=tool_input,
+                )
+            except Exception:
+                pass
             return {"error": str(e)}
 
     async def _create_checkpoint(

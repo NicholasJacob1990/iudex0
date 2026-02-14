@@ -297,6 +297,18 @@ class CorpusSearchResult(BaseModel):
     source: str = Field(
         ..., description="Fonte do resultado (lexical, vector, graph)"
     )
+    source_url: Optional[str] = Field(
+        None,
+        description="URL para visualizar o documento original (quando disponível).",
+    )
+    source_page: Optional[int] = Field(
+        None,
+        description="Página de origem do trecho (quando disponível).",
+    )
+    highlight_text: Optional[str] = Field(
+        None,
+        description="Trecho destacado para navegação no documento de origem.",
+    )
     metadata: Optional[Dict[str, Any]] = Field(
         None, description="Metadados adicionais"
     )
@@ -310,6 +322,89 @@ class CorpusSearchResponse(BaseModel):
     results: List[CorpusSearchResult] = Field(default_factory=list)
     total: int = Field(0, description="Total de resultados encontrados")
     query: str = Field(..., description="Consulta original")
+
+
+class CorpusDocumentSource(BaseModel):
+    """Metadados para abrir o documento original associado ao Corpus."""
+
+    document_id: str = Field(..., description="ID do documento")
+    name: str = Field(..., description="Nome amigável do documento")
+    original_name: str = Field(..., description="Nome original do arquivo")
+    file_type: Optional[str] = Field(None, description="Tipo do arquivo")
+    size_bytes: Optional[int] = Field(None, description="Tamanho em bytes")
+    available: bool = Field(
+        ...,
+        description="Indica se o arquivo original está disponível para visualização/download.",
+    )
+    source_url: Optional[str] = Field(
+        None,
+        description="URL da fonte original (pode ser local via API ou URL externa).",
+    )
+    viewer_url: Optional[str] = Field(
+        None,
+        description="URL recomendada para visualização inline.",
+    )
+    download_url: Optional[str] = Field(
+        None,
+        description="URL recomendada para download direto.",
+    )
+    viewer_kind: Optional[str] = Field(
+        None,
+        description="Tipo de viewer: pdf_native | office_html | external | unavailable.",
+    )
+    preview_status: Optional[str] = Field(
+        None,
+        description="Status do preview: ready | processing | failed | not_supported.",
+    )
+    page_count: Optional[int] = Field(
+        None,
+        description="Total de páginas quando disponível.",
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        None, description="Metadados do documento úteis para viewer/RAG."
+    )
+
+
+class CorpusDocumentViewerManifest(BaseModel):
+    """Manifesto de viewer para abrir evidências com precisão."""
+
+    document_id: str
+    viewer_kind: str = Field(
+        ...,
+        description="Tipo do viewer: pdf_native | office_html | external | unavailable",
+    )
+    viewer_url: Optional[str] = Field(
+        None,
+        description="URL principal de visualização.",
+    )
+    download_url: Optional[str] = Field(
+        None,
+        description="URL para download direto.",
+    )
+    source_url: Optional[str] = Field(
+        None,
+        description="URL de origem do arquivo.",
+    )
+    page_count: Optional[int] = Field(
+        None,
+        description="Quantidade de páginas quando disponível.",
+    )
+    supports_highlight: bool = Field(
+        False,
+        description="Indica se o viewer suporta highlight por trecho.",
+    )
+    supports_page_jump: bool = Field(
+        False,
+        description="Indica se o viewer suporta navegação por página.",
+    )
+    preview_status: str = Field(
+        "not_supported",
+        description="Status do preview: ready | processing | failed | not_supported",
+    )
+    metadata: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Metadados extras do viewer/documento.",
+    )
 
 
 # =============================================================================
@@ -467,6 +562,22 @@ class CorpusAdminActivityList(BaseModel):
     total: int = Field(0)
     skip: int = Field(0)
     limit: int = Field(50)
+
+
+class CorpusViewerBackfillRequest(BaseModel):
+    """Requisição para enfileirar backfill de previews de viewer."""
+
+    limit: int = Field(200, ge=1, le=5000, description="Máximo de documentos avaliados")
+    dry_run: bool = Field(False, description="Somente simular sem enfileirar tasks")
+
+
+class CorpusViewerBackfillResponse(BaseModel):
+    """Resposta do backfill de previews de viewer."""
+
+    total_candidates: int = Field(0)
+    queued: int = Field(0)
+    skipped: int = Field(0)
+    errors: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class CorpusTransferRequest(BaseModel):

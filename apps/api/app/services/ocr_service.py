@@ -2,7 +2,7 @@
 Serviço de OCR Híbrido
 
 Estratégia:
-1. PDFs com texto selecionável → pdfplumber (gratuito, rápido)
+1. PDFs com texto selecionável → PyMuPDF (fitz) (rápido)
 2. Volume baixo (<threshold) → Tesseract local (gratuito)
 3. Volume alto ou fallback → Cloud OCR (Azure/Google/Gemini)
 """
@@ -21,7 +21,7 @@ from app.core.config import settings
 
 class OCRProvider(str, Enum):
     """Provedores de OCR disponíveis"""
-    PDFPLUMBER = "pdfplumber"  # Texto selecionável (não é OCR)
+    PYMUPDF = "pymupdf"        # Texto selecionável (não é OCR)
     TESSERACT = "tesseract"    # Local, gratuito
     AZURE = "azure"            # Azure Document Intelligence
     GOOGLE = "google"          # Google Cloud Vision
@@ -98,12 +98,12 @@ class HybridOCRService:
 
         # 1. Tentar extrair texto selecionável (não é OCR)
         if not force_ocr:
-            text = await self._try_pdfplumber(file_path)
+            text = await self._try_pymupdf_text(file_path)
             if text and len(text.strip()) > 100:
-                logger.info("Texto extraído via pdfplumber (texto selecionável)")
+                logger.info("Texto extraído via PyMuPDF (texto selecionável)")
                 return OCRResult(
                     text=text,
-                    provider=OCRProvider.PDFPLUMBER,
+                    provider=OCRProvider.PYMUPDF,
                     pages_processed=self._count_pdf_pages(file_path),
                 )
 
@@ -167,21 +167,42 @@ class HybridOCRService:
         # Caso contrário, usar configuração padrão
         return self.default_provider
 
-    async def _try_pdfplumber(self, file_path: str) -> Optional[str]:
-        """Tenta extrair texto selecionável do PDF"""
+    async def _try_pymupdf_text(self, file_path: str) -> Optional[str]:
+        """Tenta extrair texto selecionável do PDF via PyMuPDF."""
         try:
-            import pdfplumber
+            import fitz
 
             text_content = []
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text() or ""
+            with fitz.open(file_path) as pdf:
+                for page in pdf:
+                    text = page.get_text("text") or ""
                     text_content.append(text)
 
             return "\n\n".join(text_content)
         except Exception as e:
-            logger.debug(f"pdfplumber falhou: {e}")
+            logger.debug(f"PyMuPDF text extraction falhou: {e}")
             return None
+
+    def _render_pdf_pages_to_images(self, file_path: str, dpi: Optional[int] = None) -> list[Image.Image]:
+        """
+        Renderiza páginas de PDF em imagens PIL usando PyMuPDF.
+        Evita dependência de poppler/pdf2image no caminho principal.
+        """
+        import fitz
+
+        dpi = int(dpi or settings.OCR_DPI or 300)
+        zoom = dpi / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        images: list[Image.Image] = []
+
+        with fitz.open(file_path) as pdf:
+            for page in pdf:
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                mode = "RGB"
+                image = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+                images.append(image)
+
+        return images
 
     async def _execute_ocr(self, file_path: str, provider: OCRProvider) -> OCRResult:
         """Executa OCR no PDF usando provider especificado"""
@@ -233,12 +254,11 @@ class HybridOCRService:
 
     async def _ocr_tesseract_pdf(self, file_path: str) -> OCRResult:
         """OCR via Tesseract (local)"""
-        from pdf2image import convert_from_path
         import pytesseract
 
         logger.info(f"Tesseract OCR em PDF: {file_path}")
 
-        images = convert_from_path(file_path, dpi=settings.OCR_DPI)
+        images = self._render_pdf_pages_to_images(file_path, dpi=settings.OCR_DPI)
         ocr_texts = []
 
         for i, image in enumerate(images, 1):
@@ -353,21 +373,16 @@ class HybridOCRService:
     async def _ocr_google_pdf(self, file_path: str) -> OCRResult:
         """OCR via Google Cloud Vision"""
         from google.cloud import vision
+        import io
 
         logger.info(f"Google Vision OCR em PDF: {file_path}")
 
         client = vision.ImageAnnotatorClient()
-
-        # Google Vision requer conversão de PDF para imagens
-        from pdf2image import convert_from_path
-
-        images = convert_from_path(file_path, dpi=settings.OCR_DPI)
+        images = self._render_pdf_pages_to_images(file_path, dpi=settings.OCR_DPI)
         text_content = []
 
         for i, pil_image in enumerate(images, 1):
             # Converter PIL para bytes
-            import io
-
             img_byte_arr = io.BytesIO()
             pil_image.save(img_byte_arr, format="PNG")
             img_bytes = img_byte_arr.getvalue()
@@ -414,7 +429,6 @@ class HybridOCRService:
     async def _ocr_gemini_pdf(self, file_path: str) -> OCRResult:
         """OCR via Gemini Vision (mais barato que Google Vision tradicional)"""
         import google.generativeai as genai
-        from pdf2image import convert_from_path
         import io
 
         logger.info(f"Gemini Vision OCR em PDF: {file_path}")
@@ -422,7 +436,7 @@ class HybridOCRService:
         genai.configure(api_key=settings.GOOGLE_API_KEY)
         model = genai.GenerativeModel(settings.GEMINI_OCR_MODEL)
 
-        images = convert_from_path(file_path, dpi=settings.OCR_DPI)
+        images = self._render_pdf_pages_to_images(file_path, dpi=settings.OCR_DPI)
         text_content = []
 
         prompt = """Extraia TODO o texto desta imagem de documento.
@@ -491,10 +505,10 @@ Retorne APENAS o texto extraído, sem comentários adicionais."""
     def _count_pdf_pages(self, file_path: str) -> int:
         """Conta páginas do PDF"""
         try:
-            import pdfplumber
+            import fitz
 
-            with pdfplumber.open(file_path) as pdf:
-                return len(pdf.pages)
+            with fitz.open(file_path) as pdf:
+                return len(pdf)
         except Exception:
             return 1
 

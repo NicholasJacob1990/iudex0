@@ -1,3 +1,4 @@
+/** @deprecated Use UnifiedAuditPanel instead. This component will be removed in a future release. */
 "use client";
 
 import { useMemo } from "react";
@@ -76,6 +77,8 @@ export function PreventiveAuditPanel({
     const statusVariant = resolvedStatus.statusVariant as BadgeProps["variant"];
     const shouldBlock = resolvedStatus.shouldBlock;
     const shouldBlockDisplay = resolvedStatus.shouldBlockDisplay;
+    const hasConsolidatedScore =
+        typeof consolidatedScore === "number" && Number.isFinite(consolidatedScore);
 
     const metrics = audit?.metricas ?? {};
     const sources = audit?.auditoria_fontes ?? null;
@@ -121,6 +124,12 @@ export function PreventiveAuditPanel({
                                         ? "Relatório preventivo disponível (MD)."
                                         : "Relatório preventivo ainda não disponível."}
                     </p>
+                    {(hasConsolidatedScore || consolidatedStatus) && (
+                        <p className="text-[11px] text-muted-foreground">
+                            Consolidado: {hasConsolidatedScore ? `${Number(consolidatedScore).toFixed(1)}/10` : "—"}
+                            {consolidatedStatus ? ` • status ${consolidatedStatus}` : ""}
+                        </p>
+                    )}
                 </div>
                 <div className="flex items-center gap-2">
                     {canDownloadMd && onDownloadReport && (

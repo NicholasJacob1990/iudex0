@@ -255,6 +255,32 @@ export default function SpaceDetailPage() {
     }
   };
 
+  const handleOpenResource = (resource: SpaceResource) => {
+    if (resource.resource_type === `workflow`) {
+      router.push(`/workflows/${resource.resource_id}/run`);
+      return;
+    }
+
+    if (resource.resource_type === `folder`) {
+      router.push(`/library?folder_id=${resource.resource_id}`);
+      return;
+    }
+
+    if (resource.resource_type === `document`) {
+      router.push(`/documents`);
+      toast.message(`Recurso de documento aberto na area de documentos`);
+      return;
+    }
+
+    if (resource.resource_type === `run`) {
+      router.push(`/workflows`);
+      toast.message(`Abra o workflow para consultar a execucao`);
+      return;
+    }
+
+    toast.message(`Tipo de recurso sem visualizacao direta`);
+  };
+
   const handleSaveSettings = async () => {
     setSaving(true);
     try {
@@ -398,6 +424,15 @@ export default function SpaceDetailPage() {
                         {new Date(res.added_at).toLocaleDateString('pt-BR')}
                       </p>
                     </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-8 gap-1.5"
+                      onClick={() => handleOpenResource(res)}
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      {res.resource_type === `workflow` ? `Executar` : `Abrir`}
+                    </Button>
                     <Button
                       variant="ghost"
                       size="icon"

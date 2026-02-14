@@ -53,9 +53,12 @@ from app.services.ai.checklist_parser import (
     parse_document_checklist_from_prompt,
     merge_document_checklist_hints,
 )
+from app.services.ai.shared.stream_token_contract import (
+    build_compat_token_event,
+    extract_stream_token_text,
+)
 from app.services.context_strategy import summarize_documents
-from app.services.document_processor import extract_text_from_pdf_with_ocr
-from app.services.docling_adapter import get_docling_adapter
+from app.services.document_extraction_service import extract_text_from_path
 from app.services.model_registry import get_model_config as get_budget_model_config
 from app.services.token_budget_service import TokenBudgetService
 from app.core.config import settings
@@ -349,21 +352,12 @@ def _expand_context_file_paths(paths: list[str], max_files: int) -> list[str]:
 
 
 async def _extract_text_for_context_file(path: str) -> str:
-    ext = Path(path).suffix.lower()
-    adapter = get_docling_adapter()
-    result = await adapter.extract(path)
-    text = str(result.text or "")
-
-    ocr_enabled = bool(getattr(settings, "DOCLING_OCR_ENABLED", True)) and bool(settings.ENABLE_OCR)
-    if ext == ".pdf" and (not text or len(text.strip()) < 50) and ocr_enabled:
-        try:
-            ocr_text = await extract_text_from_pdf_with_ocr(path)
-            if ocr_text and len(ocr_text.strip()) > len(text.strip()):
-                return ocr_text
-        except Exception as exc:
-            logger.warning(f"OCR fallback falhou em context_file PDF {path}: {exc}")
-
-    return text
+    extraction = await extract_text_from_path(
+        path,
+        min_pdf_chars=50,
+        allow_pdf_ocr_fallback=True,
+    )
+    return str(extraction.text or "")
 
 
 async def _build_local_rag_context_from_paths(
@@ -404,7 +398,12 @@ async def _build_local_rag_context_from_paths(
                 chunks = index.index_documento(path)
                 remaining -= 1
                 if chunks <= 0 and ext == ".pdf" and settings.ENABLE_OCR:
-                    text = await extract_text_from_pdf_with_ocr(path)
+                    extraction = await extract_text_from_path(
+                        path,
+                        min_pdf_chars=50,
+                        allow_pdf_ocr_fallback=True,
+                    )
+                    text = str(extraction.text or "")
                     if text and text.strip():
                         index.index_text(
                             text,
@@ -616,14 +615,15 @@ async def stream_job(jobid: str, db: AsyncSession = Depends(get_db)):
 
                         # Map orchestration events to existing frontend events
                         if ev_type == "token":
-                            token_text = (ev_dict.get("data") or {}).get("token", "")
+                            token_payload = ev_dict.get("data") or {}
+                            token_text = extract_stream_token_text(token_payload)
                             if token_text:
                                 _accumulated_text += token_text
-                                yield sse_event({
-                                    "type": "token",
-                                    "token": token_text,
-                                    "phase": "generation",
-                                }, event="message")
+                                # Standardize on `delta` while keeping `token` for backward compatibility.
+                                yield sse_event(
+                                    build_compat_token_event(token_text, phase="generation"),
+                                    event="message",
+                                )
                         elif ev_type == "thinking":
                             yield sse_event({
                                 "type": "thinking",

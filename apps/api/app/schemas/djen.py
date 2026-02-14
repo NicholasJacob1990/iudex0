@@ -131,6 +131,52 @@ class ProcessWatchlistCreate(BaseModel):
     npu: str = Field(..., description="Número do processo")
     tribunal_sigla: str = Field(..., description="Sigla do tribunal (ex: TJMG)")
     case_id: Optional[str] = Field(None, description="ID do caso para vincular")
+    sync_frequency: str = Field("daily", description="Frequência: daily, twice_daily, weekly, custom")
+    sync_time: str = Field("06:00", description="Horário do sync (HH:MM)")
+    sync_cron: Optional[str] = Field(None, description="Cron customizado (quando frequency=custom)")
+    sync_timezone: str = Field("America/Sao_Paulo", description="Timezone do usuário")
+
+    @field_validator("sync_frequency")
+    @classmethod
+    def validate_frequency(cls, value: str) -> str:
+        allowed = ("daily", "twice_daily", "weekly", "custom")
+        if value not in allowed:
+            raise ValueError(f"sync_frequency must be one of {allowed}")
+        return value
+
+    @field_validator("sync_time")
+    @classmethod
+    def validate_time(cls, value: str) -> str:
+        if not re.match(r"^\d{2}:\d{2}$", value):
+            raise ValueError("sync_time must be in HH:MM format")
+        return value
+
+
+class ProcessWatchlistUpdate(BaseModel):
+    """Atualizar agendamento de watchlist"""
+    sync_frequency: Optional[str] = None
+    sync_time: Optional[str] = None
+    sync_cron: Optional[str] = None
+    sync_timezone: Optional[str] = None
+
+    @field_validator("sync_frequency")
+    @classmethod
+    def validate_frequency(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        allowed = ("daily", "twice_daily", "weekly", "custom")
+        if value not in allowed:
+            raise ValueError(f"sync_frequency must be one of {allowed}")
+        return value
+
+    @field_validator("sync_time")
+    @classmethod
+    def validate_time(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        if not re.match(r"^\d{2}:\d{2}$", value):
+            raise ValueError("sync_time must be in HH:MM format")
+        return value
 
 
 class ProcessWatchlistResponse(BaseModel):
@@ -144,6 +190,11 @@ class ProcessWatchlistResponse(BaseModel):
     last_datajud_check: Optional[datetime]
     last_mov_datetime: Optional[str]
     case_id: Optional[str]
+    sync_frequency: str = "daily"
+    sync_time: str = "06:00"
+    sync_cron: Optional[str] = None
+    sync_timezone: str = "America/Sao_Paulo"
+    next_sync_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 
@@ -158,6 +209,10 @@ class OabWatchlistCreate(BaseModel):
     sigla_tribunal: Optional[str] = Field(None, description="Sigla do tribunal (opcional)")
     meio: Optional[str] = Field("D", description="D=Diário, E=Edital")
     max_pages: Optional[int] = Field(3, description="Máximo de páginas por sync")
+    sync_frequency: str = Field("daily", description="Frequência: daily, twice_daily, weekly, custom")
+    sync_time: str = Field("06:00", description="Horário do sync (HH:MM)")
+    sync_cron: Optional[str] = Field(None, description="Cron customizado")
+    sync_timezone: str = Field("America/Sao_Paulo", description="Timezone")
 
     @field_validator("numero_oab")
     @classmethod
@@ -193,6 +248,11 @@ class OabWatchlistResponse(BaseModel):
     max_pages: Optional[int]
     last_sync_date: Optional[date]
     is_active: bool
+    sync_frequency: str = "daily"
+    sync_time: str = "06:00"
+    sync_cron: Optional[str] = None
+    sync_timezone: str = "America/Sao_Paulo"
+    next_sync_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
 

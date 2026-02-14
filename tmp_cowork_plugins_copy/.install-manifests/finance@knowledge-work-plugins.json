@@ -1,0 +1,22 @@
+{
+  "pluginId": "finance@knowledge-work-plugins",
+  "createdAt": "2026-02-11T18:35:00.691Z",
+  "files": {
+    ".claude-plugin/plugin.json": "311a143790a0f05a74200b39a93daa088478294e849ae6ef5ee39d9dd4c35855",
+    ".mcp.json": "3e6113d5fb1fff6f03a891f879a7af2a85ce3e36d8393e43237cba05c965e8f3",
+    "CONNECTORS.md": "af6f4e93e4af385fef0946f685216ba57104f785f35b8b596ea624808213624b",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "README.md": "acecf1c95d46a870f83930f852bc65f0851a1fe9a9d1a3cbb94b34d5b6d4af0d",
+    "commands/income-statement.md": "72ad6f648be6bdf8d4f2bec2856a9c967490ba0b9ad569eeaf4e997caae8d2dd",
+    "commands/journal-entry.md": "07ab16f353486a29516467fb771000f28b35f06c00e8df28e724906590f34f14",
+    "commands/reconciliation.md": "5805489942dd5ee219909c6492fbdb145da9d363db4c5cbe01701145eeafa371",
+    "commands/sox-testing.md": "026a87d7e6fae1ae6a6a371c0df453b46f4565f96c7711aef01308a9758ddb1a",
+    "commands/variance-analysis.md": "b2fc485c73ccffc915ef10521b76815e4a704842806bd1f3349ce0b5a8f645b1",
+    "skills/audit-support/SKILL.md": "4592b5d4153a707e7ac4abdc3485a08b02a6052a8952e748d27c7e7acd962d2e",
+    "skills/close-management/SKILL.md": "7901f839cba33956be8ae121dbad175cb0fa71d1f6d461111991e634438d7c23",
+    "skills/financial-statements/SKILL.md": "430a41aeec6d283987058290394681e4563a8f472679a0a665fc614afe5f7d19",
+    "skills/journal-entry-prep/SKILL.md": "40fd4cf722cb96259dfbd7c98d6b477987f975bb681052c1dc04fd183f347d73",
+    "skills/reconciliation/SKILL.md": "3412ddd23f36ab61a2fd8b664982f127a533469f8f707e59499fa1e7380e7d5d",
+    "skills/variance-analysis/SKILL.md": "ebfe7448e7c0c2eb6a67eeb943c3f588bfb95122c5926f6ecc31759b66a56de9"
+  }
+}

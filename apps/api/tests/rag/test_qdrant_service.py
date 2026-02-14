@@ -59,6 +59,24 @@ def mock_qdrant_client():
     mock_collection.name = "test_collection"
     client.get_collections.return_value = MagicMock(collections=[mock_collection])
 
+    # QdrantService.search() now prefers client.query_points() over client.search().
+    # Bridge query_points to wrap search results so existing tests that mock
+    # client.search.return_value / side_effect continue to work.
+    _search_mock = client.search
+
+    def _query_points_bridge(**kwargs):
+        # Adapt kwarg names: query_points uses "query", search uses "query_vector"
+        search_kwargs = dict(kwargs)
+        search_kwargs.pop("using", None)
+        if "query" in search_kwargs:
+            search_kwargs["query_vector"] = search_kwargs.pop("query")
+        resp = MagicMock()
+        # Always call the search mock so assert_called_once / call_args work
+        resp.points = _search_mock(**search_kwargs)
+        return resp
+
+    client.query_points.side_effect = _query_points_bridge
+
     return client
 
 
@@ -74,6 +92,10 @@ def mock_rag_config():
     config.qdrant_collection_pecas = "pecas_modelo"
     config.qdrant_collection_sei = "sei"
     config.qdrant_collection_local = "local_chunks"
+    # Explicitly disable sparse/hybrid features so the service uses simple vector paths
+    config.qdrant_sparse_enabled = False
+    config.qdrant_dense_vector_name = "dense"
+    config.qdrant_sparse_vector_name = "sparse"
     return config
 
 

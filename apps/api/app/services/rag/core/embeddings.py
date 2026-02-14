@@ -311,7 +311,7 @@ class EmbeddingsService:
 
                 self._voyage_provider = get_voyage_provider()
                 # Ajustar dimensoes para o modelo Voyage
-                voyage_model = os.getenv("VOYAGE_DEFAULT_MODEL", "voyage-law-2")
+                voyage_model = os.getenv("VOYAGE_DEFAULT_MODEL", "voyage-4-large")
                 self._model = voyage_model
                 self._dimensions = MODEL_DIMENSIONS.get(voyage_model, 1024)
                 logger.info(

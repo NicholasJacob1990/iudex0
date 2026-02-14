@@ -1,0 +1,29 @@
+{
+  "pluginId": "data@knowledge-work-plugins",
+  "createdAt": "2026-02-11T18:34:51.523Z",
+  "files": {
+    ".claude-plugin/plugin.json": "4a8c71098171fc10a05a151cbfc6c7488ae54f4a550070aa841d9e32f0030369",
+    ".mcp.json": "f336cf80d140be2909ed237547fdb61cb0d6b44a31cc2a0d4c2b2d65e8c2dad5",
+    "CONNECTORS.md": "f6cf9c09ea9f995bce72acd83060f5236c5832b01dead77b1af3143e9d693228",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "README.md": "ad6322926b204af8751739632ebc053d518512d59dba62406739db1e4855cd4b",
+    "commands/analyze.md": "b8bac8b88a189e8d35921b1d03a765fd210eca439af0593ce112ac0428e27711",
+    "commands/build-dashboard.md": "7fa55d21494f780787f3f191b94872abf52fafb096de6ecf2af07dfce1a415a0",
+    "commands/create-viz.md": "0c50831f19e5ccfdb5870e6ca0b1a49c9c64b285deda6029630855f816173ff3",
+    "commands/explore-data.md": "8a3b5f17d07ef38d613d5c1afbe4182d6d97f08c1319ef99ef04f75b55c2e76c",
+    "commands/validate.md": "4862f16199260e7781416359baab1158c41bae3a023f0296257ba1f4a5c93ebd",
+    "commands/write-query.md": "03e0828cbc45a7883f8219a1f585943ed32be1b4d9de50a9579bba5d9e83ace0",
+    "skills/data-context-extractor/SKILL.md": "6d05dec52ac3667b551898b9eb943f5ee08141bc8d2fabb69a8e39bb9ce7c754",
+    "skills/data-context-extractor/references/domain-template.md": "ad5658dba15bf15faae05ade116cdb9bc5c7cac2057a3dbd56a52556bf25faba",
+    "skills/data-context-extractor/references/example-output.md": "b19e188ed03d9417ff1136187944a6f9125c7da40b6ecb22abe096edd985932e",
+    "skills/data-context-extractor/references/skill-template.md": "0ceedd25de9a1e278832fc84e6124334af1bc6eaf7e4d3a29f31c23451cb3a71",
+    "skills/data-context-extractor/references/sql-dialects.md": "a62f61bf64699f7919f4360cce7255794522406c36689069c78c95796fce0ba0",
+    "skills/data-context-extractor/scripts/package_data_skill.py": "ce79da32ea049db99c91fff0dfcc8ba1ece91940bbbf992de9283cdebe5a4d64",
+    "skills/data-exploration/SKILL.md": "c8b1888ca08326bc4a1bef761b98846025b03c0db816a51e8fc7603e5c8c81bb",
+    "skills/data-validation/SKILL.md": "48886570df5ce7f94590b132cac0b3ca7e51a85fc27caf78f7605ae61f3f96de",
+    "skills/data-visualization/SKILL.md": "728d3b95b9ebc744594076a2263c02b2a3f8f16a947437e66c035ef2329a12df",
+    "skills/interactive-dashboard-builder/SKILL.md": "3756173c5802fd4f60eda76087edc778ceda155dc6404d6a2fa9ca54c0e18d9f",
+    "skills/sql-queries/SKILL.md": "dd4879f528bd904ef44b2a81b35f503e9170c87a0b65a85d508a7fe0da7bfc6d",
+    "skills/statistical-analysis/SKILL.md": "bc3ba97bd77717a9a2a9defcec4f3d1bdf6921d587306754396c9a6ba40e22c2"
+  }
+}

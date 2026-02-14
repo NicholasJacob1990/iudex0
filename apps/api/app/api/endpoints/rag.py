@@ -322,9 +322,20 @@ def get_rag_pipeline():
     Lazily initializes the pipeline singleton.
     """
     try:
-        from app.services.rag.pipeline.rag_pipeline import RAGPipeline, get_pipeline
-        return get_pipeline()
-    except ImportError:
+        from app.services.rag.pipeline import rag_pipeline as rag_pipeline_module
+
+        # Backward/forward compatibility:
+        # - older code exported get_pipeline()
+        # - current code exports get_rag_pipeline()
+        get_pipeline_fn = (
+            getattr(rag_pipeline_module, "get_pipeline", None)
+            or getattr(rag_pipeline_module, "get_rag_pipeline", None)
+        )
+        if get_pipeline_fn is None:
+            raise ImportError("No pipeline factory found in rag_pipeline module")
+        return get_pipeline_fn()
+    except Exception as new_pipeline_err:
+        logger.warning(f"Falling back to legacy RAG manager: {new_pipeline_err}")
         # Fallback to old module if new pipeline not available
         try:
             from app.services.rag_module import create_rag_manager
@@ -572,33 +583,36 @@ async def ingest_local(
         errors: List[Dict[str, str]] = []
 
         for idx, doc in enumerate(request.documents):
+            doc_id = doc.doc_id or str(uuid.uuid4())
+            ingest_error: Optional[str] = None
+            doc_indexed = False
+            doc_skipped = False
+
+            # Apply legal preprocessing if enabled
+            ingest_text = doc.text
+            if request.legal_mode:
+                try:
+                    from app.services.rag.legal_embeddings import get_legal_embeddings_service
+                    legal_svc = get_legal_embeddings_service()
+                    prep = legal_svc.preprocess_for_ingestion(doc.text, legal_mode=True)
+                    ingest_text = prep["processed_text"]
+                except Exception as le:
+                    logger.warning(f"Legal preprocessing failed for doc {idx}: {le}")
+
+            # Build metadata
+            metadata = doc.metadata.copy() if doc.metadata else {}
+            metadata.update({
+                "tenant_id": request.tenant_id,
+                "case_id": request.case_id,
+                "user_id": str(current_user.id),
+                "ingested_at": datetime.utcnow().isoformat(),
+                "scope": "local",
+                "doc_id": doc_id,
+                "legal_mode": bool(request.legal_mode),
+            })
+
+            # Ingest document to vector/lexical stores when supported.
             try:
-                doc_id = doc.doc_id or str(uuid.uuid4())
-
-                # Apply legal preprocessing if enabled
-                ingest_text = doc.text
-                if request.legal_mode:
-                    try:
-                        from app.services.rag.legal_embeddings import get_legal_embeddings_service
-                        legal_svc = get_legal_embeddings_service()
-                        prep = legal_svc.preprocess_for_ingestion(doc.text, legal_mode=True)
-                        ingest_text = prep["processed_text"]
-                    except Exception as le:
-                        logger.warning(f"Legal preprocessing failed for doc {idx}: {le}")
-
-                # Build metadata
-                metadata = doc.metadata.copy() if doc.metadata else {}
-                metadata.update({
-                    "tenant_id": request.tenant_id,
-                    "case_id": request.case_id,
-                    "user_id": str(current_user.id),
-                    "ingested_at": datetime.utcnow().isoformat(),
-                    "scope": "local",
-                    "doc_id": doc_id,
-                    "legal_mode": bool(request.legal_mode),
-                })
-
-                # Ingest document
                 if hasattr(pipeline, "ingest_local"):
                     result = await pipeline.ingest_local(
                         text=ingest_text,
@@ -615,51 +629,76 @@ async def ingest_local(
                         tenant_id=request.tenant_id,
                         case_id=request.case_id,
                     )
-                else:
-                    # Fallback: use generic add method
+                elif hasattr(pipeline, "add_to_collection"):
+                    result = pipeline.add_to_collection(
+                        collection="local",
+                        text=ingest_text,
+                        metadata=metadata,
+                    )
+                elif hasattr(pipeline, "add_document"):
                     result = pipeline.add_document(
                         text=ingest_text,
                         metadata=metadata,
                         collection="local",
                     )
+                else:
+                    raise RuntimeError(
+                        "Pipeline atual nao suporta ingestao local em vetor (ingest_local/add_local_document/add_to_collection)."
+                    )
 
                 if isinstance(result, dict):
                     chunk_uids.extend(result.get("chunk_ids", []))
-                    indexed_count += result.get("indexed", 1)
-                    skipped_count += result.get("skipped", 0)
+                    indexed_delta = int(result.get("indexed", 1) or 0)
+                    skipped_delta = int(result.get("skipped", 0) or 0)
+                    indexed_count += indexed_delta
+                    skipped_count += skipped_delta
+                    doc_indexed = indexed_delta > 0
+                    doc_skipped = skipped_delta > 0 and not doc_indexed
                 elif isinstance(result, list):
                     chunk_uids.extend(result)
                     indexed_count += 1
+                    doc_indexed = True
                 elif isinstance(result, int):
-                    indexed_count += 1
+                    indexed_count += max(0, result)
+                    doc_indexed = result > 0
                 else:
                     indexed_count += 1
-
-                # Ingest to knowledge graph if enabled
-                if _should_ingest_to_graph(request.ingest_to_graph):
-                    try:
-                        await _ingest_document_to_graph(
-                            text=ingest_text,
-                            doc_id=doc_id,
-                            metadata=metadata,
-                            tenant_id=request.tenant_id,
-                            scope="local",
-                            scope_id=request.case_id,
-                            case_id=request.case_id,
-                            chunk_size=int(request.chunk_size or 512),
-                            chunk_overlap=int(request.chunk_overlap or 0),
-                            extract_arguments=request.extract_arguments or False,
-                        )
-                    except Exception as graph_err:
-                        logger.warning(f"Graph ingest failed for doc {idx}: {graph_err}")
-                        # Don't fail the whole request for graph errors
-
+                    doc_indexed = True
             except Exception as e:
-                logger.warning(f"Failed to ingest document {idx}: {e}")
+                ingest_error = str(e)
+                logger.warning(f"Failed vector ingest for document {idx} ({doc_id}): {e}")
+
+            # Ingest to knowledge graph if enabled (independent from vector ingest success).
+            graph_ingested = False
+            if _should_ingest_to_graph(request.ingest_to_graph):
+                try:
+                    graph_result = await _ingest_document_to_graph(
+                        text=ingest_text,
+                        doc_id=doc_id,
+                        metadata=metadata,
+                        tenant_id=request.tenant_id,
+                        scope="local",
+                        scope_id=request.case_id,
+                        case_id=request.case_id,
+                        chunk_size=int(request.chunk_size or 512),
+                        chunk_overlap=int(request.chunk_overlap or 0),
+                        extract_arguments=request.extract_arguments or False,
+                    )
+                    graph_chunk_uids = graph_result.get("chunk_uids", [])
+                    if isinstance(graph_chunk_uids, list):
+                        chunk_uids.extend([str(c) for c in graph_chunk_uids if c])
+                    graph_ingested = "neo4j_mvp" in graph_result and "neo4j_mvp_error" not in graph_result
+                except Exception as graph_err:
+                    logger.warning(f"Graph ingest failed for doc {idx}: {graph_err}")
+
+            if not doc_indexed and graph_ingested and not doc_skipped:
+                indexed_count += 1
+
+            if ingest_error and not graph_ingested:
                 errors.append({
                     "doc_index": str(idx),
-                    "doc_id": doc.doc_id or "N/A",
-                    "error": str(e),
+                    "doc_id": doc_id,
+                    "error": ingest_error,
                 })
 
         logger.info(
@@ -1106,9 +1145,10 @@ async def _ingest_document_to_graph(
             from app.services.rag.core.neo4j_mvp import get_neo4j_mvp
 
             neo4j = get_neo4j_mvp()
-            mvp_stats = neo4j.ingest_document(
+            mvp_chunks = _chunk_for_mvp(text)
+            mvp_stats = await neo4j.ingest_document_async(
                 doc_hash=doc_id,
-                chunks=_chunk_for_mvp(text),
+                chunks=mvp_chunks,
                 metadata=metadata or {},
                 tenant_id=str(tenant_id),
                 scope=str(scope),
@@ -1120,6 +1160,8 @@ async def _ingest_document_to_graph(
                 in ("true", "1", "yes", "on"),
             )
             results["neo4j_mvp"] = mvp_stats
+            results["chunk_uids"] = [chunk.get("chunk_uid") for chunk in mvp_chunks if chunk.get("chunk_uid")]
+            results["chunks_count"] = len(mvp_chunks)
         except Exception as e:
             logger.warning(f"Neo4jMVP ingest failed: {e}")
             results["neo4j_mvp_error"] = str(e)
@@ -1404,12 +1446,6 @@ async def smart_ingest(
                 processing_time_ms=round(elapsed_ms, 2),
             )
 
-        # Gerar embeddings com o provider correto
-        embed_result = await router_instance.embed_with_routing(
-            texts=[request.text],
-            metadata=ingest_metadata,
-        )
-
         # Ingerir na collection correta
         indexed_count = 0
         target_collection = route.decision.collection
@@ -1429,6 +1465,49 @@ async def smart_ingest(
             "routing_confidence": route.decision.confidence,
         }
 
+        # Chunk-first: chunk the document BEFORE embedding so we can
+        # batch-embed all chunks via the routed provider.
+        from app.services.rag.utils.ingest import chunk_document
+
+        # Apply same clamping as rag_pipeline.py ingest_to_collection
+        eff_chunk_size = int(request.chunk_size) if request.chunk_size else 1200
+        eff_overlap = int(request.chunk_overlap) if request.chunk_overlap is not None else 200
+        eff_chunk_size = max(200, min(eff_chunk_size, 10000))
+        eff_overlap = max(0, min(eff_overlap, max(0, eff_chunk_size - 50)))
+
+        chunks = chunk_document(request.text, chunk_chars=eff_chunk_size, overlap=eff_overlap)
+        chunk_texts = [str(c.get("text", "")).strip() for c in chunks] if chunks else []
+
+        # Optional: apply contextual embeddings prefix before routing
+        embed_texts = chunk_texts
+        if chunk_texts:
+            try:
+                from app.services.rag.embedding_router import EmbeddingProviderName
+                from app.services.rag.core.contextual_embeddings import build_embedding_input
+                from app.services.rag.config import get_rag_config as _get_rag_cfg
+                _rcfg = _get_rag_cfg()
+                _ctx_enabled = bool(getattr(_rcfg, "enable_contextual_embeddings", False))
+                _max_prefix = int(getattr(_rcfg, "contextual_embeddings_max_prefix_chars", 240) or 240)
+                # Avoid double-contextualization: voyage-context-3 already encodes global doc context.
+                if _ctx_enabled and route.decision.provider != EmbeddingProviderName.VOYAGE_CONTEXT:
+                    embed_texts = []
+                    for ct in chunk_texts:
+                        emb_in, _info = build_embedding_input(
+                            ct, chunk_metadata, enabled=True, max_prefix_chars=_max_prefix,
+                        )
+                        embed_texts.append(emb_in)
+            except Exception as _ctx_err:
+                logger.debug("Contextual embeddings unavailable in smart_ingest: %s", _ctx_err)
+
+        # Batch-embed all chunks via the routed provider
+        routed_vectors = None
+        if embed_texts:
+            embed_result = await router_instance.embed_with_routing(
+                texts=embed_texts,
+                metadata=ingest_metadata,
+            )
+            routed_vectors = embed_result.vectors if embed_result.vectors else None
+
         # Usar pipeline existente para chunking + storage
         if hasattr(pipeline, "ingest_to_collection"):
             result = await pipeline.ingest_to_collection(
@@ -1437,7 +1516,7 @@ async def smart_ingest(
                 metadata=chunk_metadata,
                 chunk_size=request.chunk_size,
                 chunk_overlap=request.chunk_overlap,
-                embedding_vector=embed_result.vectors[0] if embed_result.vectors else None,
+                embedding_vectors=routed_vectors,
             )
             indexed_count = result if isinstance(result, int) else result.get("indexed", 1)
         elif hasattr(pipeline, "ingest_local"):
@@ -1448,6 +1527,7 @@ async def smart_ingest(
                 case_id=request.case_id or "smart_ingest",
                 chunk_size=request.chunk_size,
                 chunk_overlap=request.chunk_overlap,
+                embedding_vectors=routed_vectors,
             )
             indexed_count = result if isinstance(result, int) else result.get("indexed", 1)
         elif hasattr(pipeline, "add_document"):

@@ -903,6 +903,142 @@ def evaluate_legal_batch(
 
 
 # =============================================================================
+# RAGAs Integration — Métricas padrão + legais combinadas
+# =============================================================================
+
+async def evaluate_with_ragas(
+    samples: List[Dict],
+    metrics: Optional[List[str]] = None,
+    llm_provider: str = "openai",
+) -> Dict:
+    """
+    Avalia com RAGAs (métricas padrão) + métricas legais brasileiras.
+
+    Métricas RAGAs disponíveis:
+    - faithfulness: resposta é fiel aos contextos recuperados?
+    - answer_relevancy: resposta é relevante à pergunta?
+    - context_precision: contextos recuperados são precisos?
+    - context_recall: contextos cobrem a resposta esperada?
+
+    Métricas legais (sempre incluídas):
+    - citation_coverage, temporal_validity, jurisdiction_match
+    - entity_precision, entity_recall
+
+    Args:
+        samples: Lista de dicts com keys:
+            - question (str): Pergunta
+            - answer (str): Resposta gerada
+            - contexts (List[str]): Contextos recuperados
+            - ground_truth (str): Resposta de referência (opcional)
+        metrics: Lista de métricas RAGAs a usar (None = todas)
+        llm_provider: Provider LLM para RAGAs ("openai" ou "default")
+
+    Returns:
+        Dict com 'ragas_scores', 'legal_scores', 'combined_score', 'per_sample'
+    """
+    result = {
+        "ragas_scores": {},
+        "legal_scores": {},
+        "combined_score": 0.0,
+        "per_sample": [],
+        "ragas_available": False,
+    }
+
+    # --- Parte 1: Métricas RAGAs ---
+    try:
+        from ragas import evaluate as ragas_evaluate
+        from ragas.metrics import (
+            Faithfulness,
+            ResponseRelevancy,
+            LLMContextPrecisionWithoutReference,
+            LLMContextRecall,
+        )
+        from ragas import EvaluationDataset, SingleTurnSample
+
+        available_metrics = {
+            "faithfulness": Faithfulness(),
+            "answer_relevancy": ResponseRelevancy(),
+            "context_precision": LLMContextPrecisionWithoutReference(),
+            "context_recall": LLMContextRecall(),
+        }
+
+        selected = metrics or list(available_metrics.keys())
+        ragas_metrics = [available_metrics[m] for m in selected if m in available_metrics]
+
+        # Montar dataset RAGAs
+        ragas_samples = []
+        for s in samples:
+            ragas_samples.append(SingleTurnSample(
+                user_input=s.get("question", ""),
+                response=s.get("answer", ""),
+                retrieved_contexts=s.get("contexts", []),
+                reference=s.get("ground_truth", ""),
+            ))
+
+        dataset = EvaluationDataset(samples=ragas_samples)
+        ragas_result = ragas_evaluate(dataset=dataset, metrics=ragas_metrics)
+
+        # Extrair scores
+        for metric_name in selected:
+            if metric_name in available_metrics:
+                score = ragas_result.get(metric_name, 0.0)
+                if score is not None:
+                    result["ragas_scores"][metric_name] = round(float(score), 4)
+
+        result["ragas_available"] = True
+
+    except ImportError:
+        result["ragas_scores"] = {
+            "error": "ragas não instalado. Execute: pip install ragas>=0.2.0"
+        }
+    except Exception as e:
+        result["ragas_scores"] = {"error": f"RAGAs evaluation failed: {str(e)}"}
+
+    # --- Parte 2: Métricas legais (sempre executam) ---
+    legal_results_data = {"samples": samples}
+    legal_results_data = add_legal_metrics_to_ragas(legal_results_data)
+    result["legal_scores"] = legal_results_data.get("summary", {})
+
+    # --- Parte 3: Score combinado ---
+    ragas_scores = result["ragas_scores"]
+    legal_scores = result["legal_scores"]
+
+    weights = {
+        # RAGAs (50% do total)
+        "faithfulness": 0.15,
+        "answer_relevancy": 0.15,
+        "context_precision": 0.10,
+        "context_recall": 0.10,
+        # Legal (50% do total)
+        "legal_citation_coverage": 0.15,
+        "legal_temporal_validity": 0.10,
+        "legal_jurisdiction_match": 0.10,
+        "legal_entity_precision": 0.075,
+        "legal_entity_recall": 0.075,
+    }
+
+    combined = 0.0
+    total_weight = 0.0
+    for key, weight in weights.items():
+        value = ragas_scores.get(key) or legal_scores.get(key)
+        if value is not None and isinstance(value, (int, float)):
+            combined += weight * float(value)
+            total_weight += weight
+
+    result["combined_score"] = round(combined / total_weight, 4) if total_weight > 0 else 0.0
+
+    # Per-sample results
+    for i, s in enumerate(samples):
+        sample_result = {
+            "question": s.get("question", ""),
+            "legal_metrics": s.get("legal_metrics", {}),
+        }
+        result["per_sample"].append(sample_result)
+
+    return result
+
+
+# =============================================================================
 # Command-line interface
 # =============================================================================
 

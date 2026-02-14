@@ -710,7 +710,9 @@ DEFAULT_LEGAL_SYSTEM_INSTRUCTION = (
     "Você é um especialista jurídico brasileiro altamente qualificado. "
     f"{_INTERACTION_RULES} "
     "Quando o assunto exigir, use linguagem técnica e formal. "
-    "Ao citar fatos dos autos, use o formato [TIPO - Doc. X, p. Y]."
+    "Ao citar fatos dos autos, use o formato [TIPO - Doc. X, p. Y]. "
+    "GRAFO (ask_graph): para CRIAR arestas use ask_graph(operation=\"link_entities\") e "
+    "antes resolva entity_ids com ask_graph(operation=\"search\"); nunca invente IDs."
 )
 DEFAULT_GENERAL_SYSTEM_INSTRUCTION = (
     "Você é um assistente geral prestativo. Responda em português claro e natural, "
@@ -2097,7 +2099,7 @@ async def stream_anthropic_async(
     extended_thinking: bool = False,  # NEW: Enable extended thinking
     thinking_budget: Optional[int] = None,
     enable_code_execution: bool = True,  # Anthropic code execution server tool
-    code_execution_effort: str = "medium",  # "low", "medium", "high"
+    code_execution_effort: str = "medium",  # "low", "medium", "high", "max" (max for Opus 4.6 adaptive)
     container_id: Optional[str] = None,  # Container reuse for code execution
 ):
     """Async streaming for Claude (Vertex or direct) with thinking support.
@@ -2105,7 +2107,7 @@ async def stream_anthropic_async(
     Args:
         extended_thinking: Enable extended thinking mode for Claude Sonnet 4 Thinking
         enable_code_execution: Enable Anthropic code execution server tool (beta)
-        code_execution_effort: Effort level for code execution ("low", "medium", "high")
+        code_execution_effort: Effort level ("low", "medium", "high", "max")
         container_id: Optional container ID for reusing code execution sandbox state
 
     Yields:
@@ -2144,6 +2146,8 @@ async def stream_anthropic_async(
             "messages": [{"role": "user", "content": prompt}],
         }
 
+        is_opus_46 = model_id.startswith("claude-opus-4-6")
+
         # Add code execution server tool if enabled (only for compatible models)
         # Compatible: claude-sonnet-4+, claude-opus-4+, claude-haiku-4.5+, claude-3-7-sonnet
         _ce_compatible = any(
@@ -2160,33 +2164,50 @@ async def stream_anthropic_async(
             message_kwargs["tools"] = [
                 {"type": "code_execution_20250825", "name": "code_execution"},
             ]
-            # Effort goes in output_config (not tool definition), only for Opus 4.5
-            # Requires additional beta header: effort-2025-11-24
-            if code_execution_effort in ("low", "medium", "high") and model_id.startswith("claude-opus-4"):
+            # Effort goes in output_config (not tool definition).
+            # Legacy Opus 4.x (pre-4.6) still requires effort beta.
+            if (
+                not is_opus_46
+                and code_execution_effort in ("low", "medium", "high")
+                and model_id.startswith("claude-opus-4")
+            ):
                 message_kwargs["output_config"] = {"effort": code_execution_effort}
 
-        # NEW: Add extended thinking for Claude with thinking capability
-        # Per Anthropic docs: thinking: {"type": "enabled", "budget_tokens": N}
-        # Claude supports budget_tokens 0-63999
-        # IMPORTANT: max_tokens MUST be greater than budget_tokens
+        # Thinking mode:
+        # - Opus 4.6: adaptive thinking (opt-in via `thinking={"type":"adaptive"}`)
+        # - Legacy models: extended thinking with budget_tokens
         if extended_thinking:
-            budget_tokens = thinking_budget if thinking_budget is not None else 10000
-            try:
-                budget_tokens = int(budget_tokens)
-            except (TypeError, ValueError):
-                budget_tokens = 10000
-            if budget_tokens <= 0:
-                budget_tokens = 10000
-            if budget_tokens > 63999:
-                budget_tokens = 63999
-            # Ensure max_tokens > budget_tokens as required by Anthropic API
-            if max_tokens <= budget_tokens:
-                max_tokens = budget_tokens + 8000  # Give 8k for response after thinking
-            message_kwargs["max_tokens"] = max_tokens
-            logger.info(
-                f"🧠 [Claude Thinking] Ativando extended_thinking para {model_id}, budget={budget_tokens}, max_tokens={max_tokens}"
-            )
-            message_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
+            if is_opus_46:
+                effort = (code_execution_effort or "high").strip().lower()
+                if effort == "xhigh":
+                    effort = "high"
+                if effort == "minimal":
+                    effort = "low"
+                if effort not in ("low", "medium", "high", "max"):
+                    effort = "high"
+                logger.info(
+                    f"🧠 [Claude Adaptive] model={model_id}, effort={effort}"
+                )
+                message_kwargs["thinking"] = {"type": "adaptive"}
+                message_kwargs["output_config"] = {"effort": effort}
+            else:
+                budget_tokens = thinking_budget if thinking_budget is not None else 10000
+                try:
+                    budget_tokens = int(budget_tokens)
+                except (TypeError, ValueError):
+                    budget_tokens = 10000
+                if budget_tokens <= 0:
+                    budget_tokens = 10000
+                if budget_tokens > 63999:
+                    budget_tokens = 63999
+                # Ensure max_tokens > budget_tokens as required by Anthropic API
+                if max_tokens <= budget_tokens:
+                    max_tokens = budget_tokens + 8000  # Give 8k for response after thinking
+                message_kwargs["max_tokens"] = max_tokens
+                logger.info(
+                    f"🧠 [Claude Thinking] Ativando extended_thinking para {model_id}, budget={budget_tokens}, max_tokens={max_tokens}"
+                )
+                message_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
         
         provider_name = "vertex-anthropic" if is_vertex else "anthropic"
 
@@ -2194,7 +2215,7 @@ async def stream_anthropic_async(
         use_beta = enable_code_execution and not is_vertex and _ce_compatible
         if use_beta:
             _betas = ["code-execution-2025-08-25"]
-            if "output_config" in message_kwargs:
+            if "output_config" in message_kwargs and not is_opus_46:
                 _betas.append("effort-2025-11-24")
             message_kwargs["betas"] = _betas
             # Pass container_id for sandbox state reuse

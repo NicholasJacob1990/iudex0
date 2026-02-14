@@ -32,6 +32,7 @@ from app.models.table_chat import TableChatMessage, MessageRole, QueryType
 from app.models.shared_space import SharedSpace, SpaceInvite, SpaceResource, SpaceRole, InviteStatus
 from app.models.corpus_project import CorpusProject, CorpusProjectDocument, CorpusProjectShare
 from app.models.corpus_retention import CorpusRetentionConfig
+from app.models.graph_risk_report import GraphRiskReport
 from app.models.dms_integration import DMSIntegration
 from app.models.audit_log import AuditLog
 from app.models.redline_state import RedlineState, RedlineStatus
@@ -42,6 +43,9 @@ from app.models.extraction_job import (
     ExtractionJobType,
     DocumentExtractionStatus,
 )
+from app.models.guest_session import GuestSession
+from app.models.workflow_permission import WorkflowPermission, WorkflowBuilderRole, BuildAccess, RunAccess
+from app.models.email_trigger_config import EmailTriggerConfig
 
 __all__ = [
     "User",
@@ -107,6 +111,7 @@ __all__ = [
     "CorpusProjectDocument",
     "CorpusProjectShare",
     "CorpusRetentionConfig",
+    "GraphRiskReport",
     "DMSIntegration",
     "AuditLog",
     "RedlineState",
@@ -116,4 +121,10 @@ __all__ = [
     "ExtractionJobStatus",
     "ExtractionJobType",
     "DocumentExtractionStatus",
+    "GuestSession",
+    "WorkflowPermission",
+    "WorkflowBuilderRole",
+    "BuildAccess",
+    "RunAccess",
+    "EmailTriggerConfig",
 ]

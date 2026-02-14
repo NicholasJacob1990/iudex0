@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -63,7 +64,8 @@ class Neo4jConfig:
     """Configuration for Neo4j connection and embeddings."""
 
     # Connection settings
-    uri: str = "bolt://localhost:7687"
+    # Local dev default: Iudex Docker maps Bolt to 8687 to avoid conflicting with Neo4j Desktop (7687).
+    uri: str = "bolt://localhost:8687"
     user: str = "neo4j"
     password: str = "password"
     database: str = "iudex"
@@ -94,11 +96,11 @@ class Neo4jConfig:
     def from_env(cls) -> "Neo4jConfig":
         """Load configuration from environment variables."""
         return cls(
-            uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
+            uri=os.getenv("NEO4J_URI", "bolt://localhost:8687"),
             user=os.getenv("NEO4J_USER", "neo4j"),
             password=os.getenv("NEO4J_PASSWORD", "password"),
             database=os.getenv("NEO4J_DATABASE", "iudex"),
-            embedding_dim=int(os.getenv("NEO4J_EMBEDDING_DIM", "128")),
+            embedding_dim=int(os.getenv("NEO4J_KG_EMBEDDING_DIM", os.getenv("NEO4J_EMBEDDING_DIM", "128"))),
             embedding_method=EmbeddingMethod(
                 os.getenv("NEO4J_EMBEDDING_METHOD", "rotate")
             ),
@@ -235,8 +237,8 @@ class CypherTemplates:
     MATCH (art:ARTIGO {entity_id: $article_id})
     OPTIONAL MATCH (lei:LEI)-[:POSSUI]->(art)
     MATCH (dec)-[c:CITA|APLICA|INTERPRETA]->(art)
-    WHERE dec:JURISPRUDENCIA OR dec:ACORDAO OR dec:SUMULA
-    {court_filter}
+    WHERE (dec:JURISPRUDENCIA OR dec:ACORDAO OR dec:SUMULA)
+      AND ($court IS NULL OR dec.tribunal = $court)
     RETURN dec.entity_id AS decision_id,
            dec.name AS decision_name,
            type(c) AS citation_type,
@@ -266,10 +268,12 @@ class CypherTemplates:
     # Find related sumulas by topic/theme
     RELATED_SUMULAS = """
     MATCH (s:SUMULA)
-    WHERE toLower(s.name) CONTAINS toLower($topic)
-       OR toLower(s.ementa) CONTAINS toLower($topic)
-       OR ANY(tag IN s.tags WHERE toLower(tag) CONTAINS toLower($topic))
-    {court_filter}
+    WHERE (
+        toLower(s.name) CONTAINS toLower($topic)
+        OR toLower(s.ementa) CONTAINS toLower($topic)
+        OR ANY(tag IN s.tags WHERE toLower(tag) CONTAINS toLower($topic))
+    )
+      AND ($courts IS NULL OR size($courts) = 0 OR s.tribunal IN $courts)
     OPTIONAL MATCH (s)-[:VINCULA]->(t:TESE)
     OPTIONAL MATCH (s)<-[:CITA]-(dec)
     WITH s, t, count(dec) AS citation_count
@@ -393,11 +397,20 @@ class CypherTemplates:
     TRAVERSE_BFS = """
     MATCH (start {{entity_id: $entity_id}})
     MATCH path = (start)-[*1..{max_hops}]-(connected)
-    {relationship_filter}
+    WHERE (
+        $relationship_types IS NULL
+        OR size($relationship_types) = 0
+        OR ALL(rel IN relationships(path) WHERE type(rel) IN $relationship_types)
+    )
     WITH DISTINCT connected
     LIMIT $max_nodes
     MATCH (connected)-[r]->(other)
     WHERE (start)-[*0..{max_hops}]-(other)
+      AND (
+        $relationship_types IS NULL
+        OR size($relationship_types) = 0
+        OR type(r) IN $relationship_types
+      )
     RETURN collect(DISTINCT {{
                id: connected.entity_id,
                name: connected.name,
@@ -519,6 +532,33 @@ class Neo4jGraphRAG:
     - Legal-specific Cypher queries
     - Integration with existing LegalKnowledgeGraph
     """
+    _SAFE_CYPHER_TOKEN_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+    _ALLOWED_RELATIONSHIP_TYPES = frozenset({
+        "POSSUI", "CITA", "APLICA", "REVOGA", "ALTERA", "VINCULA",
+        "RELACIONADA", "INTERPRETA", "FUNDAMENTA", "CONTRAPOE", "DERIVA",
+        "JULGA", "RELATA", "RECURSO_DE", "RELATED_TO", "MENTIONS",
+        "HAS_CHUNK", "NEXT", "ASSERTS", "REFERS_TO", "SUPPORTS", "OPPOSES",
+        "EVIDENCES", "ARGUES", "RAISES", "CITES", "CONTAINS_CLAIM",
+        "SEMANTICALLY_RELATED",
+    })
+    _ALLOWED_VECTOR_LABELS = frozenset({"LEI", "SUMULA", "JURISPRUDENCIA", "ACORDAO"})
+    _ALLOWED_PATH_TARGET_LABELS = ("SUMULA", "JURISPRUDENCIA", "ACORDAO")
+
+    def _normalize_token(self, value: str) -> Optional[str]:
+        token = str(value or "").strip().upper().replace(" ", "_")
+        if not token or not self._SAFE_CYPHER_TOKEN_RE.fullmatch(token):
+            return None
+        return token
+
+    def _normalize_relationship_types(self, relationship_types: Optional[List[str]]) -> List[str]:
+        if not relationship_types:
+            return []
+        out: List[str] = []
+        for rel in relationship_types:
+            token = self._normalize_token(rel)
+            if token and token in self._ALLOWED_RELATIONSHIP_TYPES and token not in out:
+                out.append(token)
+        return out
 
     def __init__(self, config: Optional[Neo4jConfig] = None):
         """
@@ -648,13 +688,20 @@ class Neo4jGraphRAG:
 
             # Vector index for embeddings
             if self.config.use_vector_index:
+                similarity = str(self.config.vector_similarity or "cosine").strip().lower()
+                if similarity not in {"cosine", "euclidean"}:
+                    logger.warning(
+                        "Unsupported vector similarity %r; falling back to 'cosine'",
+                        self.config.vector_similarity,
+                    )
+                    similarity = "cosine"
                 for label in ["LEI", "SUMULA", "JURISPRUDENCIA", "ACORDAO"]:
                     try:
                         self._execute_write(
                             CypherTemplates.CREATE_VECTOR_INDEX.format(
                                 index_name=f"vec_{label.lower()}",
                                 label=label,
-                                similarity=self.config.vector_similarity,
+                                similarity=similarity,
                             ),
                             {"dimension": self.config.embedding_dim},
                         )
@@ -692,7 +739,10 @@ class Neo4jGraphRAG:
         if isinstance(entity_type, EntityType):
             entity_type = entity_type.value
 
-        label = entity_type.upper()
+        normalized_label = self._normalize_token(str(entity_type))
+        label = normalized_label or "ENTITY"
+        if normalized_label is None:
+            logger.warning("Invalid entity label %r; using fallback label ENTITY", entity_type)
         name = properties.pop("name", entity_id)
 
         if embedding is not None:
@@ -747,7 +797,10 @@ class Neo4jGraphRAG:
         if isinstance(rel_type, RelationType):
             rel_type = rel_type.value
 
-        rel_type_upper = rel_type.upper()
+        rel_type_upper = self._normalize_token(str(rel_type))
+        if rel_type_upper is None or rel_type_upper not in self._ALLOWED_RELATIONSHIP_TYPES:
+            logger.warning("Rejected relationship type %r", rel_type)
+            return False
         query = CypherTemplates.CREATE_RELATIONSHIP.format(rel_type=rel_type_upper)
 
         try:
@@ -1241,8 +1294,19 @@ class Neo4jGraphRAG:
         # Try vector index first
         if self.config.use_vector_index:
             try:
+                index_name = "vec_lei"
+                if entity_type_filter:
+                    label_token = self._normalize_token(entity_type_filter)
+                    if label_token and label_token in self._ALLOWED_VECTOR_LABELS:
+                        index_name = f"vec_{label_token.lower()}"
+                    else:
+                        logger.warning(
+                            "Invalid entity_type_filter %r for vector index; using default %s",
+                            entity_type_filter,
+                            index_name,
+                        )
                 query = CypherTemplates.SIMILAR_BY_EMBEDDING.format(
-                    index_name=f"vec_{entity_type_filter.lower()}" if entity_type_filter else "vec_lei"
+                    index_name=index_name
                 )
                 results = self._execute_query(
                     query,
@@ -1297,34 +1361,37 @@ class Neo4jGraphRAG:
         Returns:
             List of ReasoningPath objects
         """
-        max_hops = max_hops or self.config.max_hops
+        hops_raw = max_hops or self.config.max_hops
+        hops = max(1, min(int(hops_raw), 6))
+        rel_types = self._normalize_relationship_types(relationship_types)
 
         # Build relationship filter
         rel_filter = ""
-        if relationship_types:
-            rel_types = "|".join(r.upper() for r in relationship_types)
-            rel_filter = f"WHERE ALL(r IN relationships(path) WHERE type(r) IN ['{rel_types}'])"
+        if rel_types:
+            rel_filter = "WHERE ALL(r IN relationships(path) WHERE type(r) IN $relationship_types)"
 
         if end_entity:
             query = CypherTemplates.ALL_PATHS.format(
-                max_hops=max_hops,
+                max_hops=hops,
                 relationship_filter=rel_filter,
             )
             params = {
                 "start_id": start_entity,
                 "end_id": end_entity,
                 "limit": self.config.max_paths,
+                "relationship_types": rel_types,
             }
         else:
             # Find paths to any interesting entity
             query = CypherTemplates.PATHS_TO_PATTERN.format(
-                max_hops=max_hops,
-                target_label="SUMULA|JURISPRUDENCIA|ACORDAO",
+                max_hops=hops,
+                target_label="|".join(self._ALLOWED_PATH_TARGET_LABELS),
                 relationship_filter=rel_filter,
             )
             params = {
                 "start_id": start_entity,
                 "limit": self.config.max_paths,
+                "relationship_types": rel_types,
             }
 
         try:
@@ -1439,15 +1506,13 @@ class Neo4jGraphRAG:
         Returns:
             List of citing decisions with metadata
         """
-        court_filter = ""
-        if court:
-            court_filter = f"AND dec.tribunal = '{court.upper()}'"
-
-        query = CypherTemplates.CITING_DECISIONS.format(court_filter=court_filter)
+        normalized_court = self._normalize_token(court) if court else None
+        if court and normalized_court is None:
+            logger.warning("Ignoring invalid court token %r", court)
 
         return self._execute_query(
-            query,
-            {"article_id": law_article, "limit": limit},
+            CypherTemplates.CITING_DECISIONS,
+            {"article_id": law_article, "limit": limit, "court": normalized_court},
         )
 
     def get_law_amendments(
@@ -1485,16 +1550,18 @@ class Neo4jGraphRAG:
         Returns:
             List of related sumulas with citation counts
         """
-        court_filter = ""
+        normalized_courts: List[str] = []
         if courts:
-            court_list = "', '".join(c.upper() for c in courts)
-            court_filter = f"AND s.tribunal IN ['{court_list}']"
-
-        query = CypherTemplates.RELATED_SUMULAS.format(court_filter=court_filter)
+            for c in courts:
+                token = self._normalize_token(c)
+                if token:
+                    normalized_courts.append(token)
+                else:
+                    logger.warning("Ignoring invalid court token %r", c)
 
         return self._execute_query(
-            query,
-            {"topic": topic, "limit": limit},
+            CypherTemplates.RELATED_SUMULAS,
+            {"topic": topic, "limit": limit, "courts": normalized_courts},
         )
 
     def get_precedent_chain(
@@ -1508,7 +1575,8 @@ class Neo4jGraphRAG:
 
         Returns precedents ordered by court hierarchy and citation strength.
         """
-        query = CypherTemplates.PRECEDENT_CHAIN.format(max_hops=max_hops)
+        hops = max(1, min(int(max_hops or 1), 6))
+        query = CypherTemplates.PRECEDENT_CHAIN.format(max_hops=hops)
 
         return self._execute_query(
             query,
@@ -1670,14 +1738,10 @@ class Neo4jGraphRAG:
 
         Compatible with LegalKnowledgeGraph.traverse() interface.
         """
-        rel_filter = ""
-        if relationship_types:
-            rel_list = ", ".join(f"'{r.upper()}'" for r in relationship_types)
-            rel_filter = f"relationshipFilter: [{rel_list}],"
-
+        hops = max(1, min(int(max_hops or 1), 6))
+        rel_types = self._normalize_relationship_types(relationship_types)
         query = CypherTemplates.TRAVERSE_BFS.format(
-            max_hops=max_hops,
-            relationship_filter=f"WHERE type(r) IN [{rel_filter}]" if relationship_types else "",
+            max_hops=hops,
         )
 
         try:
@@ -1685,8 +1749,9 @@ class Neo4jGraphRAG:
                 query,
                 {
                     "entity_id": start_entity,
-                    "max_hops": max_hops,
+                    "max_hops": hops,
                     "max_nodes": max_nodes,
+                    "relationship_types": rel_types,
                 },
             )
 

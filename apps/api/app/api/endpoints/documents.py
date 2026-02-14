@@ -39,15 +39,9 @@ from app.services.ai.model_registry import (
     validate_model_id,
     validate_model_list,
 )
-from app.services.document_processor import (
-    extract_text_from_pdf,
-    extract_text_from_docx,
-    extract_text_from_odt,
-    extract_text_from_pptx,
-    extract_text_from_xlsx,
-    extract_text_from_csv,
-    extract_text_from_rtf,
-    extract_text_from_zip,
+from app.services.document_extraction_service import (
+    extract_text_from_path,
+    should_run_pdf_ocr,
 )
 
 from app.services.docs_utils import save_as_word_juridico
@@ -58,6 +52,7 @@ from app.workers.tasks.document_tasks import (
     generate_diagram_task,
     process_document_task,
     visual_index_task,
+    extract_document_text_task,
 )
 
 router = APIRouter()
@@ -273,57 +268,67 @@ async def upload_document(
         ocr_flag = parsed_metadata.get("ocr")
         transcribe_flag = parsed_metadata.get("transcribe")
         visual_index_flag = parsed_metadata.get("visual_index")
+        text_extractable_types = {
+            DocumentType.PDF,
+            DocumentType.DOCX,
+            DocumentType.DOC,
+            DocumentType.ODT,
+            DocumentType.TXT,
+            DocumentType.RTF,
+            DocumentType.HTML,
+            DocumentType.PPTX,
+            DocumentType.XLSX,
+            DocumentType.XLS,
+            DocumentType.CSV,
+            DocumentType.ZIP,
+        }
+        large_doc_threshold_mb = int(getattr(settings, "DOCLING_ASYNC_THRESHOLD_MB", 10))
+        should_queue_extraction = (
+            doc_type in text_extractable_types
+            and (file_size / (1024 * 1024)) >= large_doc_threshold_mb
+        )
         try:
-            if doc_type == DocumentType.PDF:
-                extracted_text = await extract_text_from_pdf(file_path)
-                # OCR assíncrono quando solicitado ou quando o PDF tem pouco texto
-                needs_ocr = ocr_flag is True or (
-                    ocr_flag is None and (not extracted_text or len(extracted_text.strip()) < 50)
+            if should_queue_extraction:
+                extract_task = extract_document_text_task.delay(document.id, file_path)
+                current_meta = document.doc_metadata if isinstance(document.doc_metadata, dict) else {}
+                document.doc_metadata = {
+                    **current_meta,
+                    "extraction_status": "queued",
+                    "extraction_task_id": extract_task.id,
+                    "extraction_engine": "docling_async",
+                    "extraction_threshold_mb": large_doc_threshold_mb,
+                }
+                queued_task = True
+            elif doc_type in text_extractable_types:
+                extraction_result = await extract_text_from_path(
+                    file_path,
+                    min_pdf_chars=50,
+                    allow_pdf_ocr_fallback=False,
                 )
-                if needs_ocr:
-                    logger.info(f"PDF com pouco texto detectado, enfileirando OCR: {file_path}")
-                    task = ocr_document_task.delay(document.id, file_path, settings.TESSERACT_LANG)
-                    document.doc_metadata = {
-                        **document.doc_metadata,
-                        "ocr_status": "queued",
-                        "ocr_task_id": task.id,
-                        "ocr_requested": bool(ocr_flag),
-                    }
-                    queued_task = True
-
-                # Indexação visual (ColPali) para PDFs com tabelas/figuras
-                if visual_index_flag:
-                    logger.info(f"Enfileirando indexação visual (ColPali): {file_path}")
-                    tenant_id = parsed_metadata.get("tenant_id", str(current_user.id))
-                    case_id = parsed_metadata.get("case_id")
-                    visual_task = visual_index_task.delay(
-                        document.id, file_path, tenant_id, case_id
+                extracted_text = extraction_result.text or ""
+                current_meta = document.doc_metadata if isinstance(document.doc_metadata, dict) else {}
+                document.doc_metadata = {
+                    **current_meta,
+                    **(extraction_result.metadata or {}),
+                }
+                if doc_type == DocumentType.PDF:
+                    # OCR assíncrono quando solicitado ou quando o PDF tem pouco texto.
+                    # A regra fica centralizada em document_extraction_service.
+                    needs_ocr = should_run_pdf_ocr(
+                        extracted_text,
+                        ocr_requested=ocr_flag,
+                        min_pdf_chars=50,
                     )
-                    document.doc_metadata = {
-                        **document.doc_metadata,
-                        "visual_index_status": "queued",
-                        "visual_index_task_id": visual_task.id,
-                    }
-                    queued_task = True
-
-                    
-            elif doc_type == DocumentType.DOCX:
-                extracted_text = await extract_text_from_docx(file_path)
-                
-            elif doc_type == DocumentType.ODT:
-                extracted_text = await extract_text_from_odt(file_path)
-
-            elif doc_type == DocumentType.PPTX:
-                extracted_text = await extract_text_from_pptx(file_path)
-
-            elif doc_type in (DocumentType.XLSX, DocumentType.XLS):
-                extracted_text = await extract_text_from_xlsx(file_path)
-
-            elif doc_type == DocumentType.CSV:
-                extracted_text = await extract_text_from_csv(file_path)
-
-            elif doc_type == DocumentType.RTF:
-                extracted_text = await extract_text_from_rtf(file_path)
+                    if needs_ocr:
+                        logger.info(f"PDF com pouco texto detectado, enfileirando OCR: {file_path}")
+                        task = ocr_document_task.delay(document.id, file_path, settings.TESSERACT_LANG)
+                        document.doc_metadata = {
+                            **document.doc_metadata,
+                            "ocr_status": "queued",
+                            "ocr_task_id": task.id,
+                            "ocr_requested": bool(ocr_flag),
+                        }
+                        queued_task = True
 
             elif doc_type == DocumentType.IMAGE:
                 if ocr_flag is False:
@@ -351,6 +356,20 @@ async def upload_document(
                     "transcribe_requested": bool(transcribe_flag),
                 }
                 queued_task = True
+
+            if doc_type == DocumentType.PDF and visual_index_flag:
+                logger.info(f"Enfileirando indexação visual (ColPali): {file_path}")
+                tenant_id = parsed_metadata.get("tenant_id", str(current_user.id))
+                case_id = parsed_metadata.get("case_id")
+                visual_task = visual_index_task.delay(
+                    document.id, file_path, tenant_id, case_id
+                )
+                document.doc_metadata = {
+                    **document.doc_metadata,
+                    "visual_index_status": "queued",
+                    "visual_index_task_id": visual_task.id,
+                }
+                queued_task = True
                 
             elif doc_type == DocumentType.VIDEO:
                 task = transcribe_audio_task.delay(
@@ -365,16 +384,6 @@ async def upload_document(
                     "transcribe_requested": bool(transcribe_flag),
                 }
                 queued_task = True
-                
-            elif doc_type == DocumentType.ZIP:
-                zip_result = await extract_text_from_zip(file_path)
-                extracted_text = zip_result.get("extracted_text", "")
-                document.doc_metadata = {
-                    **document.doc_metadata,
-                    "zip_files": zip_result.get("files", []),
-                    "zip_total_files": zip_result.get("total_files", 0),
-                    "zip_errors": zip_result.get("errors", [])
-                }
             
             if extracted_text:
                 document.extracted_text = extracted_text
@@ -382,6 +391,12 @@ async def upload_document(
             # Atualizar status do documento
             if queued_task:
                 document.status = DocumentStatus.PROCESSING
+            elif doc_type in text_extractable_types and not (document.extracted_text or "").strip():
+                document.status = DocumentStatus.ERROR
+                document.doc_metadata = {
+                    **(document.doc_metadata if isinstance(document.doc_metadata, dict) else {}),
+                    "error": "Falha na extração de texto",
+                }
             else:
                 # Documento aceito mas sem texto extraído (pode ser áudio, vídeo, etc)
                 document.status = DocumentStatus.READY

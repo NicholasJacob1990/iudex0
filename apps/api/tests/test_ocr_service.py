@@ -20,7 +20,7 @@ class TestOCRProvider:
 
     def test_provider_values(self):
         """Verifica valores dos providers"""
-        assert OCRProvider.PDFPLUMBER.value == "pdfplumber"
+        assert OCRProvider.PYMUPDF.value == "pymupdf"
         assert OCRProvider.TESSERACT.value == "tesseract"
         assert OCRProvider.AZURE.value == "azure"
         assert OCRProvider.GOOGLE.value == "google"
@@ -139,29 +139,27 @@ class TestHybridOCRService:
         assert provider == OCRProvider.AZURE
 
     @pytest.mark.asyncio
-    async def test_try_pdfplumber_with_text(self, service):
-        """pdfplumber extrai texto selecionável"""
-        mock_pdf = MagicMock()
+    async def test_try_pymupdf_text_with_text(self, service):
+        """PyMuPDF extrai texto selecionável"""
         mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Texto do PDF " * 50
+        mock_page.get_text.return_value = "Texto do PDF " * 50
 
-        with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [mock_page]
-            result = await service._try_pdfplumber("/fake/path.pdf")
+        with patch("fitz.open") as mock_open:
+            mock_open.return_value.__enter__.return_value = [mock_page]
+            result = await service._try_pymupdf_text("/fake/path.pdf")
 
         assert result is not None
         assert "Texto do PDF" in result
 
     @pytest.mark.asyncio
-    async def test_try_pdfplumber_no_text(self, service):
-        """pdfplumber retorna None quando sem texto"""
-        mock_pdf = MagicMock()
+    async def test_try_pymupdf_text_no_text(self, service):
+        """PyMuPDF retorna vazio quando sem texto"""
         mock_page = MagicMock()
-        mock_page.extract_text.return_value = ""
+        mock_page.get_text.return_value = ""
 
-        with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = [mock_page]
-            result = await service._try_pdfplumber("/fake/path.pdf")
+        with patch("fitz.open") as mock_open:
+            mock_open.return_value.__enter__.return_value = [mock_page]
+            result = await service._try_pymupdf_text("/fake/path.pdf")
 
         # Texto vazio não é considerado válido
         assert result == ""
@@ -170,8 +168,8 @@ class TestHybridOCRService:
         """Conta páginas do PDF"""
         mock_pages = [MagicMock(), MagicMock(), MagicMock()]
 
-        with patch("pdfplumber.open") as mock_open:
-            mock_open.return_value.__enter__.return_value.pages = mock_pages
+        with patch("fitz.open") as mock_open:
+            mock_open.return_value.__enter__.return_value = mock_pages
             count = service._count_pdf_pages("/fake/path.pdf")
 
         assert count == 3
@@ -187,22 +185,22 @@ class TestHybridOCRService:
         assert stats["default_provider"] == "tesseract"
 
     @pytest.mark.asyncio
-    async def test_extract_text_from_pdf_uses_pdfplumber_first(self, service):
-        """Tenta pdfplumber antes de OCR"""
+    async def test_extract_text_from_pdf_uses_pymupdf_first(self, service):
+        """Tenta PyMuPDF antes de OCR"""
         with patch.object(
-            service, "_try_pdfplumber", return_value="Texto selecionável " * 50
-        ) as mock_pdfplumber:
+            service, "_try_pymupdf_text", return_value="Texto selecionável " * 50
+        ) as mock_native:
             with patch.object(service, "_count_pdf_pages", return_value=1):
                 result = await service.extract_text_from_pdf("/fake/path.pdf")
 
-        mock_pdfplumber.assert_called_once()
-        assert result.provider == OCRProvider.PDFPLUMBER
+        mock_native.assert_called_once()
+        assert result.provider == OCRProvider.PYMUPDF
         assert "Texto selecionável" in result.text
 
     @pytest.mark.asyncio
     async def test_extract_text_from_pdf_force_ocr(self, service):
-        """Force OCR ignora pdfplumber"""
-        with patch.object(service, "_try_pdfplumber") as mock_pdfplumber:
+        """Force OCR ignora extração nativa"""
+        with patch.object(service, "_try_pymupdf_text") as mock_native:
             with patch.object(
                 service,
                 "_execute_ocr",
@@ -216,7 +214,7 @@ class TestHybridOCRService:
                     "/fake/path.pdf", force_ocr=True
                 )
 
-        mock_pdfplumber.assert_not_called()
+        mock_native.assert_not_called()
         assert result.provider == OCRProvider.TESSERACT
 
 

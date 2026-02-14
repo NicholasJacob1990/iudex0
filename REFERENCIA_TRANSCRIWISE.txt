@@ -1,0 +1,559 @@
+
+
+www.transcriwise.com
+www.transcrise.io
+www.transcriwise.com.br
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Obs: Ferramenta em fase de testes. Críticas e sugestões podem ser encaminhadas para (11)934538103
+
+
+
+
+
+Módulo - Concessões Públicas (05/02) - Dra. Fernanda Gonsalves
+1. Introdução e Orientações Estratégicas
+Sejam todos muito bem-vindos à nossa aula. Espero que este encontro seja extremamente proveitoso para a preparação de vocês. Antes de iniciarmos o conteúdo programático, gostaria de passar alguns avisos importantes e orientações para esta reta final.
+A aula da professora Olivia sobre consensualidade tributária já está disponível na plataforma, assim como o conteúdo da professora Fernanda Gonçalves, que é procuradora e mestranda. Recomendo fortemente que assistam a ambas.
+1.1. Aulão de Véspera e Logística
+Sobre o nosso aulão de véspera, gostaria de esclarecer que tentamos viabilizar locais na Zona Sul ou no Centro, mas, por questões de disponibilidade, o evento ocorrerá na Barra da Tijuca. Quanto à transmissão ao vivo, estamos verificando a logística, mas trabalhem com a possibilidade de não haver transmissão. Qualquer dúvida técnica ou logística pode ser sanada diretamente com a equipe do Revisão.
+1.2. Simulado e Gestão Emocional
+Nosso simulado com correção contará com a participação da professora Fernanda, que avaliará as respostas de vocês. Ela teve um desempenho sensacional no nosso concurso e trará essa experiência para aprimorar a escrita de vocês.
+Não se desesperem se não conseguiram responder tudo ou se a nota não foi a esperada. O simulado é desenhado para ser difícil, justamente para simular a pressão da prova e permitir que vocês ajustem a estratégia de tempo. O momento de errar e corrigir é agora. A ansiedade e o nervosismo são naturais, e o treinamento serve para diminuir o impacto desses fatores na performance real.
+1.3. Estratégia de Estudo: Reta Final
+Faltando menos de um mês para a prova, a orientação é clara:
+  Revisem os materiais de forma intensiva.
+  Treinem exaustivamente questões discursivas.
+  Caso não consigam escrever o texto completo, façam ao menos o esqueleto da resposta (tópicos principais) para confrontar com o espelho de correção.
+2. Apresentação da Professora e Experiência Prática
+Tenho a honra de apresentar a vocês a doutora Fernanda Gonçalves, que tratará do tema de Serviços Públicos. Fernanda é minha colega de concurso e uma das grandes amigas que fiz na PGM-Rio.
+Ela possui uma combinação extraordinária de visão teórica e prática, pois atua na linha de frente da Procuradoria de Serviços Públicos. No seu dia a dia, ela lida com questões complexas, como as concessões de ônibus e problemas estruturais de concessões em geral no Município do Rio de Janeiro. Além disso, é mestranda na Universidade de Berkeley e mantém um perfil acadêmico ativo (Instagram: @proc.fernanda).
+A PGM-Rio oferece uma oportunidade rara, que é o programa de licença para estudos, permitindo que o procurador se aperfeiçoe para trazer retorno técnico ao Município. Aproveitem a experiência dela, pois ela conhece profundamente o que a banca espera e como a prática administrativa se reflete nas provas.
+3. Perfil da Banca de Direito Administrativo
+Boa noite a todos. É um prazer estar aqui. Eu e o professor Simeão estivemos no lugar de vocês há pouco tempo, então compreendemos perfeitamente as dificuldades e a tensão deste momento pré-prova.
+Sou procuradora do Município do Rio de Janeiro (aprovada no 8º Concurso) e, desde a posse, atuo na Procuradoria de Serviços Públicos. Meu acervo concentra a maioria dos contratos de concessão do município. Sou formada pela UFPR e, como podem notar pelo meu sotaque curitibano, reforço o aviso: ignorem o mito de que apenas candidatos do Rio de Janeiro passam neste concurso. Foquem no estudo.
+3.1. Análise dos Examinadores
+Embora o professor Simeão já tenha disponibilizado um material excelente sobre o perfil da banca, quero destacar alguns pontos fundamentais para nortear nossa aula. A banca de Direito Administrativo é composta por:
+  Carmen Lúcia (Procuradora do Município)
+  Carolina Zaja
+  Diogo Lopes
+  Maria Paula
+  Neuza, Regina e Pedro de Holanda
+3.2. Destaque Especial: Carolina Zaja
+Gostaria de dar um destaque especial à examinadora Carolina Zaja. Ela atua junto à Subprocuradoria-Geral Consultiva. Para quem não está familiarizado com a estrutura interna, a Subprocuradoria Consultiva está acima da PADM (Procuradoria Administrativa) e é responsável pela análise final dos temas mais complexos e relevantes da Procuradoria.
+A presença dela na banca sinaliza uma tendência de cobrança voltada para questões consultivas de alta complexidade e temas que desafiam a administração municipal no dia a dia.
+A examinadora Carolina Zaja atuou diretamente na elaboração do novo edital de licitações dos ônibus e acompanhou de perto as questões envolvendo o BRT e os acordos judiciais do setor de transportes. Ela tratou de temas complexos de concessões de forma muito aprofundada por diversas vezes. Portanto, este é um tema extremamente latente para ela. Embora não possamos adivinhar a questão da prova, são pontos que exigem atenção redobrada.
+Já o examinador Diogo Lopes está lotado em Brasília. Por atuar diretamente perante os Tribunais Superiores, ele está muito atento a tudo o que o STJ e o STF estabelecem em sede de repercussão geral e teses jurídicas. Além disso, ele atua em casos de grande impacto da Procuradoria de Serviços Públicos, como os próprios acordos de ônibus, concessões de serviço público e concessões de uso.
+A doutora Maria Paula Gouvêa Galhardo, por sua vez, é atualmente Desembargadora do Tribunal de Justiça do Rio de Janeiro (TJRJ), mas possui vasta experiência na Vara de Fazenda Pública. Eu mesma cheguei a despachar questões importantes sobre ônibus com ela. Isso demonstra que a banca é composta por pessoas que possuem um contato prático muito intenso com a realidade administrativa.
+3.3. Perfil da Prova e Estratégia de Resposta
+A prova da PGM-Rio possui um viés muito prático, justamente por ter banca própria. Isso se reflete em questões baseadas em situações reais, tendência que pode aparecer já na primeira fase. Um ponto relevante para o estudo é saber por onde começar a fundamentação, especialmente em provas discursivas.
+Observo, por vezes, dois perfis de candidatos que cometem erros estratégicos:
+1.  O ansioso: pula etapas e tenta resolver o problema principal sem estabelecer as premissas necessárias. É o candidato que fala de reequilíbrio econômico-financeiro antes mesmo de conceituar o que é uma concessão.
+2.  O prolixo: inicia a resposta de forma muito remota. Se o tema é controle de constitucionalidade, ele começa citando Marbury v. Madison.
+A recomendação é ser objetivo e direto. Você não deve gastar linhas com reflexões que não estarão no gabarito. O ideal é mostrar ao examinador que você domina o tema: conceitue o instituto, indique a previsão legal (leis e artigos da Constituição) e demonstre como aquele problema específico deve ser resolvido.
+O problema proposto deve ser resolvido apresentando, caso existam, as duas vertentes doutrinárias ou jurisprudenciais, fechando a resposta com uma conclusão que demonstre o domínio da complexidade do tema. É fundamental não ir muito além do que foi perguntado.
+Para o examinador, quando se pergunta sobre um tema como controle de constitucionalidade, por exemplo, e o candidato inicia com digressões históricas longas, a sensação é de que ele está "enrolando". A banca da PGM-Rio não possui essa tendência histórica; ela é prática. Você não quer passar uma impressão negativa logo nas primeiras linhas, especialmente considerando que o examinador tem centenas de provas para corrigir.
+O que você deve transmitir nas duas primeiras linhas da sua resposta é: "eu sei do que você está falando". Comece conceituando o instituto e indicando os artigos que são realmente relevantes. Demonstre que compreendeu a pergunta e, a partir daí, desenvolva o tema de forma completa, contando a história do instituto sem retroceder demais no tempo e sem pular etapas por ansiedade.
+3.4. Fundamentos das Concessões de Serviços Públicos
+A base das concessões de serviços públicos reside nos artigos 37, inciso XXI, e 175 da Constituição Federal. É impossível responder a uma questão sobre este tema sem citar esses dispositivos.
+O artigo 37, inciso XXI, estabelece que, ressalvados os casos especificados na legislação, as obras, serviços, compras e alienações serão contratados mediante processo de licitação pública que assegure igualdade de condições a todos os concorrentes, com cláusulas que estabeleçam obrigações de pagamento, mantidas as condições efetivas da proposta.
+Já o artigo 175 dispõe que incumbe ao Poder Público, na forma da lei, diretamente ou sob regime de concessão ou permissão, sempre através de licitação, a prestação de serviços públicos.
+3.4.1. Titularidade e Forma de Prestação
+Essas previsões constitucionais, embora singelas, definem pontos fundamentais:
+  Titularidade: O "dono" do serviço público é o Poder Concedente.
+  Discricionariedade: O Poder Público decide se prestará o serviço de forma direta ou indireta.
+  Obrigatoriedade de Licitação: Caso opte pela prestação indireta, a licitação é indispensável para a celebração do contrato administrativo de concessão.
+3.5. Impacto no Equilíbrio Econômico-Financeiro
+Destaquei o inciso XXI do artigo 37 por um motivo especial: o equilíbrio econômico-financeiro do contrato. Embora seja um tema que envolva muitas questões fáticas e mudanças reais no dia a dia da execução contratual — o que torna sua cobrança complexa em uma primeira fase —, ele é extremamente relevante para as fases discursivas e práticas.
+A previsão constitucional que fundamenta o direito ao reequilíbrio econômico-financeiro está justamente na parte final do artigo 37, inciso XXI, que menciona a manutenção das "condições efetivas da proposta".
+Muitos candidatos passam batido por essa expressão, mas é ela que sustenta os pedidos de reequilíbrio, que são não apenas normais, mas corriqueiros nos contratos de concessão. Isso ocorre porque as concessões são o que chamamos de contratos incompletos, dada a sua longa duração e a impossibilidade de prever todas as variáveis no momento da assinatura.
+3.6. A Natureza dos Contratos Incompletos e o Reequilíbrio Econômico-Financeiro
+Os contratos de concessão são, por definição, contratos incompletos. Trata-se de ajustes de longo prazo que lidam com uma realidade que se modifica drasticamente ao longo do tempo. Diante dessa mutabilidade, surgem os pedidos de reequilíbrio econômico-financeiro, que visam manter as condições efetivas da proposta original.
+O raciocínio é o seguinte: quando o poder público lança um edital — como, por exemplo, uma licitação para o sistema de ônibus no Rio de Janeiro —, ele estabelece diversos critérios. A empresa ou consórcio apresenta uma proposta baseada na realidade daquele momento, com seus cálculos de custos e margem de lucro. No entanto, cinco anos depois, as condições podem ser totalmente diferentes.
+O exemplo mais óbvio e atual é a pandemia. Uma empresa que assinou um contrato em 2015 não poderia prever, em 2020, um cenário de lockdown com a população trancada em casa. Esse é um evento que afeta o contrato de forma imprevisível. Nesses casos, discute-se a matriz de risco do contrato administrativo para definir de quem é a responsabilidade, mas a base é clara: se as condições mudaram a ponto de afetar o contrato, a concessionária tem o direito de pleitear o reequilíbrio.
+3.7. Exigências de Qualificação e a Base Constitucional
+Outro ponto fundamental do inciso XXI do art. 37 da Constituição Federal refere-se às licitações. O texto constitucional permite apenas exigências de qualificação técnica e econômica indispensáveis à garantia do cumprimento das obrigações.
+Isso significa que o administrador não pode inserir cláusulas no edital que exijam experiências ou requisitos sem relação direta com o objeto da concessão. Embora pareça óbvio, existem nuances práticas que geram questionamentos: até onde o gestor pode restringir para garantir a segurança técnica ou abrir para aumentar a concorrência?
+Dica de Prova: Ao responder uma questão sobre reequilíbrio econômico-financeiro ou contratos, não pule a Constituição. Embora a Lei 8.987/95 e a Lei 14.133/21 (Nova Lei de Licitações) tragam regramentos específicos, o fundamento primeiro está no art. 37, XXI, da CF/88. Citar o arcabouço normativo sem mencionar a base constitucional demonstra falta de visão sistêmica.
+3.8. Conceituação e Estratégia de Resposta
+Se você se deparar com uma questão geral ou complexa sobre concessão de serviço público, comece estabelecendo um conceito rápido e direto para demonstrar ao examinador que você domina o tema.
+Sugestão de técnica para a prova discursiva:
+  Seja direto: evite expressões como "pode ser definida como".
+  Cite os artigos entre parênteses para economizar espaço: (Art. 37, XXI e Art. 175 da CF; Art. 2º da Lei 8.987/95).
+  Não perca tempo apenas repetindo o texto da lei, pois a prova é com consulta. O que garante nota é a aplicação do conceito ao caso prático e a indicação correta da referência.
+A concessão de serviço público é o contrato administrativo pelo qual o Poder Concedente delega a execução de um serviço a uma pessoa jurídica ou consórcio. É vital destacar: o Estado continua sendo o titular (dono) do serviço; ele apenas delega a execução.
+Dessa titularidade decorrem prerrogativas importantes:
+  Fiscalização: Se o Estado é o dono, ele deve fiscalizar permanentemente.
+  Cumprimento das Regras: O concessionário deve obedecer rigorosamente às normas estabelecidas pelo titular para atender ao interesse público.
+Dica Prática de Vade Mecum: No seu material de consulta, faça remissões cruzadas. Na Lei 8.987/95, anote os artigos 37, XXI e 175 da CF. Na hora da prova, sob pressão e com pouco tempo, ter essas referências à mão evita que você perca minutos preciosos folheando o código ou tentando lembrar se o inciso correto é o 20 ou o 21. Use a consulta de forma inteligente para economizar tempo.
+3.9. Debate sobre a Necessidade de Autorização Legislativa
+Existe uma discussão doutrinária, hoje com tendência majoritária consolidada, sobre a necessidade de autorização legislativa para que o Poder Concedente possa delegar um serviço.
+A questão é: para o Município ou o Estado decidir que não prestará o serviço diretamente, mas sim via concessionária, ele precisa de uma lei específica autorizando essa delegação ou basta o edital de licitação?
+Surge uma dúvida relevante no cenário das concessões: o Chefe do Poder Executivo precisa de uma lei autorizativa da Câmara Municipal para delegar um serviço? Ele precisa perguntar ao Legislativo se pode realizar a concessão ou não?
+Majoritariamente, o entendimento é de que não é necessária autorização legislativa específica para a delegação. Contudo, é fundamental que vocês conheçam as duas tendências doutrinárias. Saber trabalhar ambos os argumentos é essencial para a prova, especialmente se você estiver prestando concursos para diferentes esferas, como uma Câmara Municipal e uma Procuradoria.
+Muitas vezes, cometemos o erro de pensar que, em uma prova de Procuradoria, devemos apenas citar o que é favorável ao ente público e ignorar os demais argumentos. O ideal é estabelecer que existe uma corrente doutrinária em determinado sentido, mas ressaltar que há uma tendência de reconhecer a autonomia federativa dos municípios ou a competência do Poder Executivo. Isso demonstra domínio do tema e capacidade de fundamentação.
+3.9.1. Correntes Doutrinárias
+  Corrente Minoritária (Ex: Marçal Justen Filho): Defende que a expressão "na forma da lei" contida no art. 175 da Constituição Federal exige uma autorização legislativa específica para decidir se o serviço será delegado ou não. Por ser um tema de relevância pública extrema, o Legislativo deveria participar dessa escolha.
+  Corrente Majoritária (Ex: Professora Maria Sylvia Zanella Di Pietro): Sustenta que a exigência de lei autorizativa seria, na verdade, inconstitucional. Para essa vertente, quando a Constituição menciona "na forma da lei", refere-se às normas gerais de concessão (como a Lei 8.987/95) e ao regulamento do serviço, e não a uma autorização prévia para cada delegação.
+O fundamento central da corrente majoritária é o princípio da Separação de Poderes. A prestação direta de serviços públicos é competência do Poder Executivo. Cabe a ele decidir se prestará o serviço de forma direta ou indireta, uma vez que essa escolha envolve análise de orçamento, investimentos, gestão de servidores e planejamento administrativo.
+Um exemplo prático é o transporte coletivo intramunicipal. Embora em municípios muito pequenos a prestação direta possa ocorrer, em uma metrópole como o Rio de Janeiro a complexidade é imensa, envolvendo milhões de usuários. Cabe ao Executivo a decisão estratégica de delegar essa operação, não devendo se submeter ao crivo do Legislativo no momento dessa escolha discricionária de gestão.
+3.10. Base Normativa: Lei 8.987/95
+A Lei 8.987/95 é a base de toda a concessão de serviço público no Brasil. É fundamental estabelecermos conceitos sólidos sobre este diploma, pois eles servirão de alicerce para compreendermos casos complexos que resultam em ações milionárias, intervenções do STF e atuação intensa da PGM.
+3.11. Princípios do Serviço Adequado (Art. 6º da Lei 8.987/95)
+Muitos dos problemas jurídicos que enfrentamos na Procuradoria surgem da aplicação prática do artigo 6º da Lei 8.987/95. Este dispositivo estabelece que toda concessão ou permissão pressupõe a prestação de um serviço adequado, satisfazendo as condições de regularidade, continuidade, eficiência, segurança, atualidade, generalidade, cortesia e modicidade das tarifas.
+Esses parágrafos trazem os princípios que regem as concessões e que devem ser obrigatoriamente obedecidos. Quando falamos em continuidade, surgem os complexos problemas sobre a interrupção ou não do serviço. Da mesma forma, a modicidade tarifária é um conceito que gera inúmeros conflitos ao longo da execução do contrato.
+Esses princípios influenciam diretamente temas sensíveis como:
+  Subsídios ao sistema de ônibus;
+  Reequilíbrio econômico-financeiro do contrato;
+  Impedimento de suspensão de serviços essenciais;
+  Exigência de atitudes proativas do Município para evitar a paralisia do serviço.
+3.12. O Desafio da Atualidade e da Tecnologia
+O princípio da atualidade compreende a modernidade das técnicas, do equipamento e das instalações, bem como a sua conservação e melhoria. Hoje, essa discussão ganha novos contornos com o avanço tecnológico, embora o debate jurídico ainda esteja engatinhando.
+A grande questão que começa a ser trabalhada é: até que ponto posso exigir a atualização tecnológica constante do concessionário? Qual é o custo disso e quem deve arcar com ele? Devemos considerar isso como parte do risco do negócio (do concessionário) ou como um risco do Poder Concedente, que precisaria aportar recursos para cobrir essas diferenças?
+Apesar de ser um tema fascinante, considero que ele ainda está muito no início para figurar em uma prova de concurso, dada a sua natureza controversa e a falta de uma jurisprudência consolidada.
+3.13. Generalidade e Inadimplemento Contratual
+Pelo princípio da generalidade, os serviços públicos devem estar disponíveis a todos, respeitando a acessibilidade e a universalidade. O serviço deve ser disponibilizado dentro de seus limites necessários, garantindo que todos os cidadãos possam usufruí-lo.
+É fundamental destacar que o cumprimento desses princípios é uma exigência imposta ao concessionário, não um mero pedido. Portanto, qualquer descumprimento dessas condições é considerado inadimplemento contratual. Sucessivos inadimplementos podem levar à extinção prematura do contrato (caducidade), tema que estudaremos detalhadamente adiante.
+3.14. Modicidade Tarifária e a Realidade Política
+A modicidade tarifária é um dos pontos de maior atrito, especialmente no serviço de transporte por ônibus. Aumentar a tarifa é sempre uma medida impopular. No Direito, evitamos dizer "sempre", mas, neste caso, trata-se de uma realidade política quase absoluta.
+Existe uma dificuldade imensa para o gestor e para o procurador em equacionar esse "tripé":
+1.  Manter a continuidade do serviço;
+2.  Garantir a modernidade (atualidade);
+3.  Preservar a modicidade das tarifas.
+3.15. Casos Práticos e a Visão dos Examinadores
+Com esses conceitos em mente, entramos na parte mais relevante do nosso estudo, que é a aplicação prática desses temas. São situações que frequentemente aparecem nos noticiários (como no RJTV) e que, quando chegam à caixa de entrada do Procurador, causam aquela sensação de "mão gelada e perna mole", pois sabemos que o problema será grande.
+Vou apresentar casos que foram cruciais para a Procuradoria de Serviços Públicos (PSE), para a Procuradoria Administrativa (PADM) e para o Gabinete. É importante que vocês conheçam o panorama desses casos, pois os examinadores do seu concurso participaram ativamente deles:
+  Diogo Lopes: Atuou diretamente em casos complexos de concessões.
+  Carolina Zaja: Também teve atuação destacada nesses temas.
+  Maria Paula: Decidiu questões relacionadas a isso enquanto estava na magistratura de primeiro grau.
+Minha ideia é trabalhar questões fundamentais de concessões dentro desses casos reais, para que vocês aliem o conceito teórico aos problemas da realidade. Embora eu não acredite que a banca vá cobrar nominalmente "o caso do BRT" ou "o caso do Jardim de Alá" — até pela repercussão política que isso teria —, a lógica jurídica aplicada nesses episódios é exatamente o que será exigido de vocês.
+4. Intervenção e Extinção Contratual: O Caso BRT Rio
+4.1. A Aplicação Prática e a Visão da PGM-Rio
+É fundamental compreendermos a aplicação prática dos institutos, pois é muito provável que o examinador elabore questões hipotéticas complexas baseadas em casos reais, sem necessariamente citá-los de forma direta. O conceito teórico está na lei, mas o desafio é entender como conciliar esses institutos para chegar a uma solução jurídica adequada.
+Na PGM-Rio, é comum que o gabarito da segunda fase aceite mais de uma linha de raciocínio (Vertente 1 ou Vertente 2). Portanto, mais importante do que decorar um conceito é saber trabalhar diferentes vertentes em sua resposta, oferecendo uma solução jurídica consistente para o problema apresentado, especialmente quando a questão foge do campo meramente conceitual.
+4.2. Contextualização: A Concessão de 2010 e o BRT
+Para ilustrar essa dinâmica, utilizaremos o exemplo da caducidade parcial do contrato de transporte coletivo da cidade do Rio de Janeiro. Em 2010, o Município realizou uma licitação para conceder a execução do serviço de ônibus a quatro consórcios.
+Essa concessão abrangia tanto os ônibus comuns quanto o BRT (Bus Rapid Transit) — sistema de ônibus articulados que transitam em vias exclusivas. Trata-se de um contrato comum de concessão, cuja remuneração do concessionário advém da tarifa paga pelo usuário.
+Durante a execução contratual, surgiram diversos conflitos:
+Inúmeras ações judiciais e pedidos de reequilíbrio econômico-financeiro.
+Pleitos constantes das concessionárias pelo aumento da tarifa.
+Exigência, por parte do Município, de estudos econômicos que justificassem tais aumentos.
+4.3. A Intervenção como Instrumento de Fiscalização
+Diante do excesso de judicialização e de problemas na prestação do serviço, o Município realizou, em 2019, a primeira intervenção no BRT. É importante notar que a intervenção ocorreu apenas em uma parte do contrato (especificamente no serviço de BRT). Foi expedido um decreto nomeando um interventor e fixando um prazo de 180 dias para a fiscalização.
+Conforme estabelecido nos artigos 32 a 34 da Lei 8.987/95, a intervenção é o exercício regular do poder-dever de fiscalizar a concessão pelo poder concedente.
+Isso é MUITO importante: a intervenção não possui natureza de punição, mas sim de fiscalização. Essa distinção é fundamental para compreendermos o debate sobre o devido processo legal.
+4.4. O Debate sobre a Defesa Prévia na Intervenção
+Um ponto polêmico e recorrente em provas diz respeito à necessidade de defesa prévia antes da decretação da intervenção. Se a intervenção é um ato de fiscalização e não uma sanção, o concessionário teria direito de se defender antes de o poder concedente assumir o serviço?
+Este é um tema sensível que exige atenção, pois envolve a ponderação entre a continuidade do serviço público e as garantias constitucionais do contratado.
+4.5. O Entendimento do STJ sobre a Defesa Prévia na Intervenção
+Sobre a polêmica da necessidade de notificação prévia, é fundamental destacar que não há obrigatoriedade de intimar ou notificar o concessionário para que ele se explique antes do decreto de intervenção. Esse é um entendimento muito relevante da Segunda Turma do Superior Tribunal de Justiça (STJ).
+Embora não seja uma tese fixada em sede de recursos repetitivos, o STJ deixou claro que a intervenção é um exercício do poder-dever de fiscalização do contrato de concessão. Portanto, a urgência em garantir a continuidade e a segurança do serviço público permite que a medida seja tomada de imediato, sem a necessidade de oitiva prévia da empresa.
+4.6. A Criação da Sociedade de Propósito Específico (SPE)
+Após a primeira intervenção de 2019, que durou 180 dias, o Município do Rio de Janeiro celebrou um acordo com os quatro consórcios que operavam o sistema. O objetivo era sanar falhas e facilitar a gestão do serviço. Ficou estabelecido que os consórcios deveriam criar uma Sociedade de Propósito Específico (SPE), denominada BRT Rio S.A.
+Essa medida foi estratégica por alguns motivos:
+  Dificuldade de Fiscalização: Anteriormente, o serviço era pulverizado entre quatro consórcios que, por sua vez, eram compostos por diversas empresas.
+  Transparência Patrimonial: A criação da SPE permitiu um patrimônio mais claro e uma contabilidade segregada, facilitando o controle pelo poder concedente.
+Na prática, a concessão dos ônibus comuns continuou sob a responsabilidade direta dos quatro consórcios, enquanto a operação do BRT passou a ser executada pela SPE BRT Rio S.A. Não houve mudança do concessionário no sentido estrito, mas sim um ajuste na forma de execução para tornar o contrato mais fácil de fiscalizar.
+4.7. A Segunda Intervenção e o Risco ao Usuário
+Apesar do ajuste com a criação da SPE, o serviço de BRT no Rio de Janeiro sofreu uma degradação progressiva. Houve falta de manutenção nos veículos e fechamento de estações. Instalou-se um conflito entre as concessionárias e o Município em torno de reajustes e aumentos tarifários.
+Nesse cenário, as empresas negligenciaram a manutenção a tal ponto que o serviço tornou-se perigoso para os usuários. Diante da gravidade, em março de 2021, o Município decretou uma segunda intervenção, inicialmente por 180 dias (posteriormente prorrogada devido à complexidade dos contratos).
+É importante notar a dinâmica do devido processo legal aqui:
+1.  O Município decreta a intervenção e nomeia o interventor.
+2.  A lei estabelece um prazo de até 30 dias para a instauração do processo administrativo.
+3.  A defesa não é prévia, mas subsequente: primeiro o Estado intervém para garantir o serviço e, no curso do processo administrativo, assegura-se o direito de defesa à concessionária.
+4.8. A Caducidade Parcial do Contrato
+Ao final dessa segunda intervenção, em fevereiro de 2022, o Município do Rio de Janeiro publicou um decreto declarando a caducidade parcial do contrato de concessão. A fiscalização realizada durante a intervenção comprovou um inadimplemento parcial grave por parte da concessionária.
+Com a caducidade, o Município retomou o serviço para executá-lo de forma direta. Lembrem-se: a titularidade do serviço é sempre do ente público; o que estava delegado era apenas a execução.
+Os requisitos para a caducidade, previstos no artigo 38 da Lei 8.987/95, são rigorosos e devem ser observados:
+  Processo Administrativo Prévio: É indispensável a instauração de processo para apurar o inadimplemento. No caso do BRT, esse processo ocorreu durante o período de intervenção.
+  Direito de Defesa: Deve ser garantido o contraditório pleno ao concessionário.
+  Decreto Autorizativo: A extinção da concessão por caducidade deve ser formalizada por decreto do poder concedente.
+4.9. A Formalização da Caducidade por Decreto
+É fundamental saber que a caducidade é formalizada por meio de decreto. Lembrem-se de quando discutimos a decisão do poder concedente sobre delegar um serviço ou prestá-lo diretamente: a doutrina majoritária entende que essa escolha não se submete à necessidade de autorização legislativa.
+Aqui, seguimos a mesma lógica. Considerando que a caducidade é o exercício do poder de fiscalização, se o Município, em processo administrativo, conclui que houve inadimplemento grave, ele pode decretar a extinção da concessão. A lei utiliza o termo "pode", indicando uma margem de atuação: o poder público pode decretar a caducidade ou aplicar uma sanção contratual.
+Normalmente, opta-se pela caducidade quando a situação é irrecuperável, ou seja, quando não há mais condições de permitir que aquela concessionária preste o serviço devido à gravidade das falas e à falta de intenção econômica da empresa em melhorar a operação. Se eu sou o titular do serviço e você, delegado, descumpre o contrato de forma gravíssima, eu retomo o serviço via decreto, sem qualquer necessidade de autorização do Legislativo.
+4.10. A Continuidade do Serviço e a Requisição Administrativa
+Mas surge uma questão prática crucial: o que acontece no dia seguinte à caducidade? Como bem pontua nossa procuradora aposentada, Dra. Vanice, para o usuário que está no ponto de ônibus, não importa quem é o prestador; ele precisa do serviço.
+O serviço público é regido pelo princípio da continuidade. No caso do Rio de Janeiro, uma cidade com seis milhões de habitantes, o transporte não pode parar. Uma interrupção causaria um nó sistêmico no trânsito e sobrecarregaria todas as outras linhas.
+Para resolver isso, no mesmo Diário Oficial em que foi publicado o decreto de caducidade do BRT, o Município publicou também o decreto de requisição de bens. O Município requisitou ônibus e garagens. Essa medida foi essencial porque o BRT utiliza veículos específicos (tamanho e altura de plataforma diferenciados) que não podem ser alugados ou comprados prontos do dia para a noite.
+4.11. Operação Provisória e a Base Constitucional
+Para operar esses bens requisitados, o Município delegou o serviço de forma provisória para uma estatal municipal, a Mobi-Rio. A criação ou utilização de uma estrutura específica foi necessária devido à complexidade do sistema e à necessidade de um corpo técnico focado na recuperação do serviço, visando restabelecer os padrões de qualidade previstos no artigo 6º da Lei 8.987/95.
+A base jurídica para essa atuação encontra-se na Constituição Federal:
+  Artigo 5º, inciso XXV, CF: "no caso de iminente perigo público, a autoridade competente poderá usar de propriedade particular, assegurada ao proprietário indenização ulterior, se houver dano".
+Notem que a indenização na requisição é ulterior (posterior) e condicionada à existência de dano. Isso gerou um embate jurídico imenso. Tivemos mais de dez ações judiciais imediatas: umas questionando a caducidade em si, outras a requisição dos bens e, posteriormente, o valor das indenizações fixadas quando os bens começaram a ser devolvidos.
+4.12. Dinâmica da Retomada e Desfecho Jurídico
+Enquanto utilizava os bens requisitados, o Município abriu licitação para a compra de frota própria (inicialmente 200 ônibus, chegando hoje a cerca de 500). À medida que os ônibus novos chegavam da fábrica, o Município devolvia os bens requisitados às antigas concessionárias, arbitrava a indenização pelo desgaste do uso e encerrava a utilização.
+Sobre o desfecho dessas discussões:
+1.  Caducidade: A discussão sobre a validade da extinção foi encerrada por meio de um acordo firmado com as concessionárias (envolvendo também o subsídio tarifário). Elas aceitaram a caducidade e não questionam mais o inadimplemento.
+2.  Requisição: Esta discussão ainda persiste. As concessionárias defendem a tese de que o Município deveria pagar um "aluguel" pelo uso. Contudo, o Poder Público possui cláusulas exorbitantes e uma posição de supremacia que permite o uso da requisição administrativa, que é um instituto distinto da locação civil.
+4.13. Caso Prático (Simulação de Prova)
+Para fixarmos como isso pode aparecer em uma prova, imaginem a seguinte questão hipotética:
+O Município X decretou intervenção na concessão de ônibus "Expresso Leste" por 180 dias para sanar precariedades na manutenção, instaurando o processo administrativo em 30 dias, conforme a Lei 8.987/95. Ao final, constatada a violação das obrigações, o Município decretou a **caducidade**. Para garantir a continuidade, editou novo decreto determinando a **requisição dos bens** (frota e garagens). A empresa ajuizou ação anulatória alegando:
+1. Nulidade da intervenção por ausência de contraditório e ampla defesa **prévios**.
+2. Ilegalidade da utilização dos bens sem indenização **prévia e justa**, equiparando o ato a uma desapropriação indireta ou exigindo o pagamento de aluguel.
+Como responder?
+Quanto ao primeiro ponto, a defesa na intervenção é subsequente, não prévia, para garantir a supremacia do interesse público. Quanto ao segundo, a requisição administrativa é constitucional (Art. 5º, XXV) e prevê indenização ulterior, não se confundindo com desapropriação (que exige indenização prévia) nem com aluguel (contrato privado).
+4.14. Natureza Jurídica da Intervenção e o Contraditório
+Existem duas questões fundamentais que precisamos resolver quanto à intervenção estatal nas concessões. A primeira diz respeito ao rito processual: a intervenção é o exercício direto do poder de fiscalização do ente concedente. Por essa razão, ela não exige contraditório ou ampla defesa prévios ao ato.
+O que a lei e a doutrina estabelecem é que, após a edição do decreto de intervenção, deve ser iniciado um processo administrativo. Nesse processo, a empresa concessionária poderá exercer sua defesa durante o período da intervenção. É importante compreender que a intervenção, em si, não é uma punição, mas sim um instrumento de fiscalização.
+A caducidade, por outro lado, é uma consequência que pode ou não ocorrer após a intervenção. No caso real do Rio de Janeiro, tivemos duas intervenções no mesmo serviço:
+  Na primeira intervenção: Não houve extinção; resultou em um acordo para ajustes operacionais, reforçando seu caráter fiscalizatório.
+  Na segunda intervenção: Verificou-se o inadimplemento grave, o que levou à determinação da caducidade do serviço.
+Dica de Prova: O Superior Tribunal de Justiça (STJ), especificamente em julgados da Segunda Turma, já consolidou o entendimento de que a intervenção é um exercício do poder-dever de fiscalização, inexistindo a necessidade de contraditório e ampla defesa prévios. Ela serve para verificar o cumprimento regular do contrato de concessão.
+4.15. Legalidade da Requisição Administrativa de Bens
+Outro ponto polêmico é a utilização dos bens da concessionária sem pagamento imediato. No caso do BRT, o município aplicou a requisição administrativa de bens. Embora seja um instituto antigo, ele ganhou muito destaque durante a pandemia, quando clínicas particulares e bens sem uso foram requisitados pelo Estado.
+Diferente da desapropriação ou do aluguel, a requisição administrativa:
+1.  Não é remunerada por si só;
+2.  Gera indenização apenas posteriormente (ulterior) e somente se houver dano comprovado.
+Se você se deparar com uma questão de prova sobre esse tema, o examinador espera que você fundamente a resposta na Constituição Federal (Art. 5º, XXV). O argumento vencedor é que, em casos excepcionais de iminente perigo público — como o risco de interrupção do serviço essencial de transporte coletivo —, a requisição é aplicável para garantir o princípio da continuidade. Não há que se falar em indenização prévia ou justa, como na desapropriação, mas sim em proteção ao interesse público.
+5. Gestão Contratual e Modicidade: Acordos Judiciais dos Ônibus
+Vou tratar agora dos acordos judiciais envolvendo o sistema de ônibus, que é um caso que envolve diversas ações judiciais culminando em uma composição. Se você acompanha o noticiário no Rio de Janeiro, verá muita divulgação sobre esses acordos, mas muitas vezes falta o rigor técnico-jurídico necessário.
+5.1. O Acordo de 2022 e a Transição do Modelo
+Tivemos dois acordos principais no município. O fato de existir um segundo acordo já demonstra que o primeiro não foi plenamente eficaz. Em maio de 2022, logo após a caducidade do BRT, o município e os consórcios sentaram para encerrar uma disputa judicial longa sobre o aumento da tarifa.
+Os pontos centrais desse acordo foram:
+  Desistência quanto ao BRT: As concessionárias concordaram em desistir das ações que questionavam a caducidade do BRT. O município foi enfático: para pagar subsídios no sistema de ônibus comum, não aceitaria mais discussões judiciais ou liminares atrapalhando a retomada do BRT.
+  Subsídio por Quilometragem: O município concordou em pagar um subsídio baseado em metas de quilometragem rodada. Através do GPS, a prefeitura verifica se o ônibus cumpriu o itinerário e paga um valor complementar ao que é recebido do usuário.
+5.2. Remuneração e Antecipação do Fim do Contrato
+Na concessão comum (Lei 8.987/95), a remuneração advém da tarifa paga pelo usuário. Contudo, devido à complexidade do sistema, aumento de combustíveis e a necessidade de manter a modicidade tarifária, o subsídio tornou-se essencial, conforme prevê a Lei de Mobilidade Urbana. Hoje, se o usuário paga R$ 4,00, o município aporta quase o mesmo valor para fechar a conta do concessionário.
+Além disso, houve uma alteração no prazo contratual. A licitação de 2010 previa vigência até 2035, mas o acordo antecipou o encerramento para 28 de agosto de 2028. Isso significa que, nesta data, o município já deve ter novas concessionárias licitadas e prontas para operar, respeitando a continuidade do serviço.
+5.3. A "Caixa Preta" das Concessões de Ônibus e a Bilhetagem Eletrônica
+Um dos temas mais sensíveis na gestão do transporte público é o que chamamos de "caixa preta" das concessões. Esse termo refere-se, basicamente, à ausência de compartilhamento de dados com o Poder Concedente. Historicamente, as concessionárias não compartilhavam as informações operacionais com o Município do Rio de Janeiro de forma automática ou transparente.
+Considerem que estamos lidando com um volume massivo de dados. No modelo anterior, a empresa que controlava os pagamentos de tarifa era a RioCard, que não fornecia ao Município detalhes específicos sobre a operação. Sem esses dados, a administração pública não tinha como saber, com exatidão:
+  Quantos usuários eram pagantes e quantos eram isentos;
+  Quais linhas apresentavam maior pico de uso;
+  Quais eram os horários de maior demanda.
+É evidente que o Município precisa ter o controle dessas informações para poder fiscalizar o serviço adequadamente. A falta dessa transparência é o que caracteriza a "caixa preta".
+5.4. A Retomada do Controle e o Sistema "Jaé"
+A mudança de paradigma ocorreu com a intervenção e a posterior retomada do BRT. Quando a Mobi-Rio (empresa pública) começou a operar o sistema, passamos a ter acesso real às informações: o custo de operação, os gastos com manutenção, o número exato de passageiros e o fluxo financeiro.
+Diante disso, o Município decidiu retirar das mãos da RioCard a gestão da bilhetagem eletrônica. A lógica jurídica para isso é clara: a bilhetagem é parte integrante do serviço público delegado. Se ela compõe o serviço, o controle sobre esses dados também pertence ao ente público.
+O Município, então, realizou uma nova licitação para conceder especificamente a exploração do serviço de bilhetagem (o sistema Jaé). Trata-se de um modelo de negócio muito lucrativo, pois é um sistema operacional de pagamentos, mas o objetivo principal da prefeitura não é o lucro, e sim o controle total dos dados.
+5.5. Impacto no Equilíbrio Econômico-Financeiro
+Ter o controle dos dados altera completamente a dinâmica das negociações de reequilíbrio econômico-financeiro. Antes, as empresas podiam alegar que a tarifa estava baixa ou que o número de usuários havia caído sem que o Município pudesse contestar com precisão.
+Agora, se uma concessionária solicitar o reequilíbrio, o Poder Público pode confrontar o pedido com a realidade: "Analisei todas as planilhas e verifiquei que esta linha específica é superavitária". A dificuldade que tínhamos anteriormente era justamente a falta de provas técnicas para refutar as alegações dos consórcios.
+5.6. Dificuldades Processuais e Judicialização
+Muitos perguntam se não seria possível obter esses dados da RioCard por via judicial. Na prática, nós tentamos exaustivamente, mas a resistência é enorme. Durante as sessões de negociação do acordo, a própria magistrada ressaltou aos consórcios que eles se recusavam a apresentar os dados de maneira robusta — ou seja, aquela "planilha gigantesca" com todas as especificidades da operação.
+Existe um embate gigantesco nesse setor. Precisamos entender que enfrentamos uma legião de empresas e advogados dentro dos consórcios. É um direito deles, faz parte do jogo, mas a judicialização é recorrente. Qualquer passo dado pela Secretaria Municipal de Transportes (SMTR) costuma ser alvo de uma liminar, o que gera uma dificuldade prática imensa para a execução das políticas públicas.
+5.7. A Transição no BRT e a Operação pela Mobi-Rio
+É importante compreendermos como se deu a mudança na gestão do BRT. Originalmente, quatro consórcios venceram a licitação e prestavam todo o serviço. No contexto da primeira intervenção, foi formada a SPBRT Rio S.A., uma sociedade composta por esses quatro consórcios para facilitar a gestão do contrato. Diferente do ônibus regular, onde a operação é dividida por linhas, no BRT a estrutura era mais centralizada nessa figura.
+Atualmente, a realidade é outra: quem opera o BRT é a Mobi-Rio, uma empresa estatal do Município do Rio de Janeiro. Essa gestão pública deve permanecer até que seja realizada uma nova licitação para a concessão do serviço. Essa mudança foi fundamental porque, durante muito tempo, enfrentamos uma dificuldade prática imensa para obter dados fidedignos sobre a operação quando ela estava nas mãos dos consórcios privados.
+5.8. O Problema da Bilhetagem e a "Bizarrice" da RioCard
+Um dos grandes entraves práticos que enfrentamos envolve a RioCard. Historicamente, ela operava não apenas o sistema de ônibus municipal, mas também o metrô (que é uma concessão estadual). Essa confusão entre esferas municipal e estadual é uma herança complexa da época do antigo Estado da Guanabara.
+Naturalmente, as empresas não tinham interesse em solucionar essa falta de transparência. Por isso, o Município decidiu implementar um sistema próprio de bilhetagem eletrônica, o Jaé. Essa é uma tendência internacional já estudada e elogiada em outros países, pois permite separar dois serviços distintos:
+  O serviço de transporte: a operação física dos veículos.
+  O serviço de pagamento: a gestão financeira e tecnológica da bilhetagem.
+Ao licitar esses serviços separadamente, garantimos ampla concorrência e a contratação de empresas especializadas em cada setor. Além disso, o Poder Público retoma o controle total dos dados financeiros e operacionais.
+5.9. O Acordo Judicial e a Bilhetagem Eletrônica
+Para vocês terem uma dimensão do valor envolvido, os lances dados pelos primeiros colocados na licitação da bilhetagem ultrapassaram a marca de 100 milhões de reais. Quando uma empresa oferece esse montante apenas para operar o sistema de pagamentos, fica claro o quão lucrativo esse serviço é.
+Dentro do acordo judicial firmado com as empresas de ônibus, estabelecemos um ponto crucial: as concessionárias deveriam desistir das ações judiciais que tentavam impedir a licitação da bilhetagem eletrônica. Houve uma resistência ferrenha quando o Município decidiu separar a bilhetagem dos contratos de concessão de transporte, mas a pacificação desse ponto foi uma vitória estratégica para a gestão pública.
+5.10. Reflexos para Provas e Concursos
+Dificilmente um examinador perguntará o conteúdo específico do "acordo de ônibus do Rio", mas vocês precisam saber trabalhar os conceitos jurídicos que fundamentaram essa solução. Fiquem atentos aos seguintes temas, que podem ser cobrados em casos práticos:
+1.  Pagamento de subsídios: Como forma de manter a modicidade tarifária e o equilíbrio do contrato.
+2.  Decreto de Caducidade: As consequências da extinção do contrato por inadimplemento do concessionário.
+3.  Antecipação do fim do contrato: Os desdobramentos jurídicos de encerrar a concessão antes do prazo previsto.
+Na prática, o pagamento dos subsídios ocorre quinzenalmente (nos dias 5 e 20 de cada mês). Desde 2022, o Município já repassou mais de 2 bilhões de reais em subsídios. Esse valor é calculado com base no quilômetro rodado, mas o pagamento está condicionado ao cumprimento de uma série de regras de qualidade e operação.
+5.11. Evolução Normativa e Matriz de Risco
+É interessante notar a evolução dos instrumentos contratuais. O contrato de concessão de 2010 era extremamente singelo e omitia detalhes que hoje consideramos essenciais. Atualmente, sob a égide da nova Lei de Licitações (Lei nº 14.133/2021), os contratos são muito mais robustos, exigindo, por exemplo, uma matriz de risco detalhada para definir as responsabilidades de cada parte diante de imprevistos.
+5.12. Aplicação Subsidiária da Lei 14.133/21 e Fiscalização
+É importante abrirmos um parênteses para recordar que, embora a Lei 8.987/95 seja a norma específica para a concessão de serviços públicos, a Lei 14.133/21 (Nova Lei de Licitações e Contratos), no que tange aos contratos administrativos, também possui aplicação subsidiária. Portanto, para não contrariar a lógica da concessão, buscamos na Lei 14.133/21 os detalhes que a legislação específica às vezes não traz.
+No exercício do seu poder-dever de fiscalização, o Poder Concedente expede regras constantes, como a vistoria anual, a regularidade da documentação dos veículos e o funcionamento obrigatório do ar-condicionado. O Município do Rio de Janeiro passou a adotar uma postura mais rígida: tudo o que não for prestado estritamente de acordo com o contrato e com as normas exaradas pelo ente público, não ensejará o pagamento de subsídio.
+Se um ônibus circular a 45 graus no Rio de Janeiro com o ar-condicionado desligado, o Município não paga o subsídio. Como era de se esperar, essa decisão gerou uma série de ações judiciais milionárias questionando a retenção desses valores, o que resultou em um excesso de judicialização.
+5.13. O Novo Acordo Judicial de Maio e o Índice de Qualidade
+Para solucionar esse impasse, celebramos um novo acordo judicial em maio do ano passado. Na PGM, costumamos brincar que maio é o "mês dos acordos". Esse ajuste ocorreu justamente em uma ação que questionava o não pagamento de subsídios em razão de descumprimentos contratuais pelas concessionárias.
+Este acordo traz pontos modernos que eu gostaria de destacar. Embora talvez não sejam cobrados com tamanha especificidade em uma primeira fase de concurso, é fundamental que vocês saibam que existem, caso o examinador decida ser mais rigoroso. Os principais pontos são:
+  Vinculação do Subsídio ao Índice de Qualidade: A Secretaria Municipal de Transportes elaborou um estudo técnico estabelecendo requisitos e notas para itens essenciais do serviço.
+  Mudança no Critério de Pagamento: Antes, o subsídio era pago apenas pela quilometragem rodada. Agora, ele é condicionado à nota obtida no índice de qualidade.
+  Previsão Expressa de Glosa e Penalidades Automáticas: O acordo passou a prever mecanismos automáticos de controle para aumentar a eficiência do serviço.
+5.14. O Conceito de Glosa no Direito Administrativo
+A glosa é um termo técnico que, na prática administrativa, muitas vezes é confundido com penalidade, mas possui natureza distinta. A glosa ocorre quando o Município, ao realizar o pagamento, identifica um problema e retém parte do valor.
+Atenção: isso é muito importante para a prova. Glosa não é o mesmo que penalidade.
+  Glosa: É a retenção ou o não pagamento de um valor por um serviço que não foi prestado ou foi prestado em desacordo com o padrão (ex: o ônibus que circulou no calor sem ar-condicionado). Eu não estou punindo você diretamente com uma multa; eu apenas não pago por aquilo que não foi entregue corretamente. O contraditório e a defesa ocorrem a posteriori, mas o dinheiro fica retido.
+  Penalidade: É a aplicação de uma sanção (como uma multa) que reduz o valor do subsídio devido ao descumprimento de metas, fraudes ou infrações regulatórias.
+5.15. Vedações Específicas ao Pagamento de Subsídio
+Além da glosa, o acordo estabeleceu casos em que o pagamento do subsídio é vedado de forma específica. Não se paga subsídio para:
+1.  Veículos não licenciados;
+2.  Falhas na bilhetagem (ex: não ligar o validador do sistema novo, o "Jaé", e manter o sistema antigo);
+3.  Descumprimento de itinerário.
+Sobre o itinerário, vale notar que o trajeto é definido em contrato. O motorista não pode desviar da rota apenas porque o trânsito está ruim; ele deve seguir as vias e pontos estabelecidos. Hoje, o Município controla isso em tempo real via GPS e pelo sistema de bilhetagem, monitorando tempo, temperatura e localização.
+5.16. A Evolução Tecnológica e a Alternativa à Caducidade
+Percebam que esses acordos mostram uma evolução tecnológica. Em 2010, quando a concessão foi assinada, não se pensava em sensores de temperatura mandando dados em tempo real para o ente público. O acordo permitiu adequar um contrato antigo às novas tecnologias.
+Surge então uma dúvida comum: diante das péssimas condições dos ônibus, a caducidade não seria uma alternativa mais viável e drástica?
+Cuidado com isso: A caducidade é um processo extremamente complexo. Operar um sistema de transportes é um desafio hercúleo. A Mobi-Rio opera o BRT com cerca de 500 ônibus, o que é apenas uma fração do sistema total do Município. Toda extinção prematura de contrato gera um custo altíssimo, não só pela judicialização, mas pelo risco operacional.
+O Princípio da Preservação dos Contratos também se aplica aqui. Se o Município decreta a caducidade de todas as concessões hoje, como o serviço será operado amanhã? Por isso, o ideal buscado pela Administração não é a extinção (caducidade), mas sim estabelecer formas de execução que garantam a melhoria do sistema através de acordos e fiscalização rigorosa.
+5.17. O Sistema de Bilhetagem Eletrônica: O Caso Jaé
+É importante esclarecer uma dúvida comum sobre o sistema Jaé. Diferente do que muitos pensam, o Jaé não é uma empresa estatal, ele pertence à Prefeitura do Rio no sentido de que o Município detém o controle do sistema, mas a operação é feita por uma empresa privada. Essa empresa venceu a licitação para a bilhetagem eletrônica e atua mediante um contrato administrativo de prestação de serviço para o Município do Rio de Janeiro.
+Atualmente, a única empresa estatal operando no sistema de transportes municipal é a Mobi-Rio, que é responsável pela operação do BRT. No caso do Jaé, a grande vantagem para a Administração Pública é o acesso direto aos dados.
+Nas máquinas de pagamento, quando o usuário passa o cartão, as informações são enviadas automaticamente para um software. Isso permite a transmissão de dados em tempo real para os sistemas da Secretaria Municipal de Transportes (SMTR). Esse controle é fundamental para a fiscalização e para o planejamento do sistema.
+5.18. A Alternativa da Relicitação e a Estratégia de Transição
+Surge frequentemente o questionamento se não seria mais interessante aplicar a Lei de Relicitação para romper com a continuidade do serviço atual. No entanto, enfrentamos um problema prático: a tendência da Administração é tentar preservar o contrato enquanto se organiza.
+Em 2022, estabelecemos um acordo que prevê o encerramento das concessões atuais em 2028. São seis anos de transição. Esse prazo é necessário para que os consórcios se readequem, para que o Município pague o subsídio e recupere o sistema, e, principalmente, para que o poder público tenha tempo de realizar estudos técnicos sérios.
+Não adianta realizar uma relicitação ou um novo edital sem ter dados precisos. Um contrato que não reflete a realidade do Município acaba não sendo efetivo. Por isso, o Município optou por uma finalização gradual das operações até 2028.
+Através do Índice de Desempenho (IDP), as empresas atingem notas. Aqueles consórcios que apresentarem os piores resultados serão retirados do sistema primeiro. Faremos as licitações por blocos, iniciando pelos que estão em situação financeira precária ou prestando um serviço de má qualidade, até que, em 2028, todos os antigos operadores sejam substituídos por novos.
+5.19. Assimetria de Informações e Dados Técnicos
+O que estamos combatendo aqui é o que o professor Egon Bockmann Moreira define como assimetria de informações nos contratos de concessão. Historicamente, o Município não detinha as informações técnicas exatas: quanto custa a operação, onde o passageiro entra, qual o impacto real das gratuidades e isenções.
+O poder concedente tinha apenas uma noção superficial, mas não possuía dados exatos em tempo real. Com o novo sistema de bilhetagem e o monitoramento, agora temos esses dados. Isso permite elaborar um edital de licitação muito mais aderente à realidade prática, garantindo um contrato mais equilibrado e eficiente.
+5.20. Bens Reversíveis e a Requisição Administrativa no BRT
+Uma dúvida muito pertinente surgiu sobre o caso do BRT: por que foi necessária a requisição administrativa se os ônibus não seriam bens reversíveis?
+A resposta é que, neste contrato específico, os ônibus não foram classificados como bens reversíveis. Se fossem, eles passariam automaticamente ao patrimônio do Município ao final da concessão. Vocês podem pensar que isso foi um erro de planejamento, mas há uma razão prática para essa escolha no setor de transportes.
+O ônibus é um bem que sofre um desgaste físico altíssimo e muito rápido. Se eu sou um concessionário e sei que, daqui a dois anos, meu ônibus será revertido para o Município, qual o meu incentivo para investir em manutenção pesada ou renovação da frota? A tendência seria usar o veículo até o limite e entregá-lo sucateado.
+Como o desgaste de um ônibus em um único ano de operação urbana é algo surreal, muitas vezes a lógica da reversibilidade não se aplica bem a esses veículos, exigindo que a Administração busque outras formas de garantir a continuidade do serviço, como foi o caso da intervenção e requisição no BRT.
+5.21. Reversibilidade de Bens e a Estratégia de Mobilidade
+Mesmo com a manutenção em dia, não é interessante para o Município receber uma frota de ônibus velhos ao final do contrato. Por isso, normalmente, estabelecemos a garagem e os terminais de ônibus como bens reversíveis, mas não os veículos em si.
+A garagem é um ponto fundamental para a logística do serviço. É a partir dela que se estabelece a dinâmica de "onde sai" e "para onde vai" cada coletivo. Isso altera diretamente a mobilidade urbana e a quilometragem que o ônibus percorrerá até chegar à sua linha de operação. Portanto, para garantir a continuidade e a eficiência do sistema, a reversibilidade recai sobre a infraestrutura (garagens e terminais), enquanto os ônibus são excluídos devido ao desgaste excessivo na execução do serviço.
+5.22. O Caso da Bilhetagem Eletrônica e o Sistema RioCard
+Surgiu uma dúvida sobre como ocorreu o rompimento do contrato de bilhetagem com a RioCard e se isso foi feito via acordo. Na verdade, a RioCard operava o serviço de bilhetagem de forma geral para todos os modais de transporte na cidade do Rio de Janeiro. É importante lembrar que o metrô, por exemplo, é de competência estadual, mas ela operava tudo.
+O Município decidiu retomar esse controle — ou melhor, decidiu estabelecer novas regras que não existiam até então. O Poder Público afirmou que, em relação aos ônibus e ao VLT (Veículo Leve sobre Trilhos), que também são serviços municipais, a bilhetagem passaria a seguir diretrizes próprias da prefeitura.
+Foi uma escolha política e administrativa: "tudo o que é meu será feito por bilhetagem eletrônica pública". A RioCard não possuía um acordo específico que garantisse a perpetuidade dessa operação exclusiva. Além disso, sabemos que parte da composição societária da RioCard era formada pelas próprias empresas de ônibus, o que gerava um compartilhamento de interesses entre quem prestava o serviço de transporte e quem controlava a arrecadação.
+5.23. Perspectivas Futuras: VLT e VLP no BRT
+Existe um plano, já publicado em Diário Oficial, para a possível substituição ou implementação de VLT ou VLP (Veículo Leve sobre Pneus) nos corredores de BRT. O VLP, que já é utilizado em cidades como Curitiba, costuma ser mais econômico.
+Acredito que a nova licitação do BRT ainda não ocorreu justamente por essa possível mudança de modal. A Administração deve estar aguardando a definição técnica para realizar um certame que já preveja essa transição tecnológica.
+Dica de Prova: Pessoal, vocês não precisam se preocupar excessivamente com os detalhes minuciosos desses acordos judiciais específicos. Trago esses exemplos para que vocês compreendam a complexidade da gestão pública e as soluções jurídicas adotadas no caminho. O tema da bilhetagem é muito específico e não acredito que seja cobrado em provas objetivas ou discursivas, talvez apenas em uma eventual prova oral para demonstrar conhecimento prático.
+5.24. Subsídios e Modicidade Tarifária
+O pagamento de subsídios pelo ente público é uma realidade consolidada e necessária. Já presenciei debates onde se afirmava que o Estado não deveria pagar subsídios, mas isso é um equívoco. Cidades como São Paulo, Rio de Janeiro e Curitiba utilizam esse mecanismo rotineiramente, amparadas pela Lei de Mobilidade Urbana (Lei 12.587/12).
+O fundamento central aqui é o princípio da modicidade tarifária. Da mesma forma que o Poder Público deve zelar pelo equilíbrio econômico-financeiro do contrato para o concessionário, ele também deve garantir que a tarifa seja acessível ao usuário. O subsídio é a ferramenta que permite fechar essa conta: mantém a saúde financeira da empresa sem repassar todo o custo operacional para o valor da passagem paga pelo cidadão.
+6. Concessão de Uso vs. Concessão de Serviço Público: Jardim de Alá
+Dando continuidade, pessoal, vamos tratar de um tema que esteve muito presente na mídia recentemente e que gerou uma reação popular considerável, além de diversas ações judiciais. Refiro-me à concessão do Jardim de Alá.
+A questão da licitação foi amplamente discutida e, embora não existam liminares impedindo o início das obras no âmbito da Procuradoria de Serviços Mutuários (PSM), acredito que ainda vigore uma liminar da Procuradoria de Urbanismo e Meio Ambiente tratando de questões especificamente ambientais.
+Trouxe este caso para a nossa aula porque ele ilustra perfeitamente a distinção entre os institutos e possui um paralelo histórico importante aqui no Rio de Janeiro, que também foi objeto de questionamentos judiciais de longa data.
+6.1. Gestão e Exploração Econômica de Bem Público
+O primeiro ponto fundamental que vocês precisam anotar é: o caso do Jardim de Alá não é uma concessão de serviço público, mas sim uma concessão de uso e gestão de bem público.
+Qual é a lógica aqui? O Município possui um bem público com grande apelo econômico, mas entende que a iniciativa privada pode geri-lo de forma mais eficiente. O parceiro privado assume o compromisso de cuidar, restaurar e estabelecer atividades econômicas no local. Afinal, ninguém realiza recuperação ambiental e restauração de bens gratuitamente; o particular precisa ser remunerado para trazer vida àquela área.
+Para quem não conhece a geografia do Rio de Janeiro, o Jardim de Alá fica em um córrego que liga a Lagoa Rodrigo de Freitas ao mar, na Zona Sul, situado entre os bairros de Ipanema e Leblon — dois dos metros quadrados mais caros da cidade. Atualmente, a área encontra-se desvalorizada, sem exploração econômica e com problemas de segurança pública, pois poucas pessoas utilizam o espaço.
+Diferente da concessão de serviço público, onde a concessionária é remunerada majoritariamente por tarifa paga pelo usuário, na concessão de uso a remuneração advém da exploração econômica do bem. No Jardim de Alá, a empresa vencedora fará a recuperação ambiental e instalará um complexo gastronômico e de lojas, explorando comercialmente o espaço para amortizar os investimentos e manter a segurança e a manutenção da área.
+6.2. O Precedente da Marina da Glória
+Se vocês tiverem dificuldade em visualizar esse modelo, pensem no caso da Marina da Glória. Como o doutor Diogo trabalha muito com isso em Brasília, é um exemplo valioso para se ter em mente.
+A Marina da Glória é uma concessão de uso do Município do Rio de Janeiro que abriga tanto a atividade náutica (estacionamento de barcos) quanto um complexo gastronômico e áreas de eventos. A concessionária (BR Marinas) explora essas atividades, remunera-se e mantém o espaço em funcionamento. Para a administração municipal, este é considerado um caso de concessão de uso muito exitoso.
+Entretanto, assim como o Jardim de Alá, a Marina da Glória foi alvo de uma Ação Popular em 1998, que é um material de estudo riquíssimo. Na época, o processo contou com pareceres de juristas renomados, como Luís Roberto Barroso (então advogado) e Marcos Juruena.
+Os questionamentos nessas ações costumam girar em torno de dois pontos:
+1.  O Objeto do Edital: Questiona-se se o edital poderia exigir experiência em complexos gastronômicos ou se deveria se limitar estritamente ao serviço principal (no caso, serviços náuticos).
+2.  A Conveniência do Modelo: Argumenta-se que o Município deveria ser o responsável direto pela recuperação, e não o particular.
+6.3. Critérios de Julgamento na Licitação: Técnica e Preço
+No caso específico do Jardim de Alá, a modelagem seguiu a mesma lógica: uma concessão de uso e gestão de bem público municipal, precedida de licitação na modalidade concorrência, do tipo técnica e preço.
+O contrato delega à concessionária vencedora quatro obrigações principais:
+  Revitalização: Realização de uma série de obras e recuperação ambiental.
+  Operação: Gestão das atividades no local.
+  Manutenção: Conservação contínua do espaço.
+  Exploração Econômica: Direito de auferir receitas para cobrir o investimento realizado.
+Nesse modelo de concessão de uso, o particular realiza o investimento na revitalização do bem e, em seguida, explora-o economicamente para se remunerar. É importante destacar que isso ocorre por um prazo determinado e sem transferência da titularidade do bem. O bem continua pertencendo ao Município, assim como ocorre na concessão de serviço público; a diferença é que, aqui, o espaço está sendo executado e explorado por uma empresa privada.
+Essa exploração impõe encargos obrigatórios ao concessionário. No caso do Jardim de Alá, os encargos envolvem investimentos urbanísticos, ambientais, sociais e de segurança. A remuneração do particular é indireta: não há pagamento de tarifa pelo usuário para acessar o local. A remuneração advém da exploração econômica da área.
+Em contrapartida, há o pagamento de outorga ao Município. Vejam a lógica: o Município tem uma área importante da cidade recuperada, gerando renda, impostos e circulação segura de pessoas, e ainda é remunerado por isso. Obviamente, nem todo bem público pode ser objeto desse modelo; o bem precisa ser atrativo. O Jardim de Alá e a Marina da Glória (onde há serviços náuticos, aluguel e garagem de barcos) são exemplos de ativos muito interessantes para o mercado.
+6.4. Limites do Controle Judicial sobre o Mérito Administrativo
+Um ponto muito questionado no caso do Jardim de Alá foi a licitação do tipo técnica e preço, com um peso aproximado de 70% para a técnica e 30% para a proposta econômica.
+Ao ser provocado, o que o Judiciário entendeu até agora? A decisão foi no sentido de não ingressar no mérito administrativo. O juiz não deve avaliar se a nota técnica conferida ao licitante estava certa ou errada, ou se o peso deveria ser 60/40 em vez de 70/30. Isso é competência do Poder Executivo, baseada em estudos técnicos complexos.
+Quando estudamos a autocontenção do Poder Judiciário e a não intervenção no mérito, às vezes parece algo abstrato, mas na prática é fundamental. Em questões complexas, que envolvem estudos ambientais, econômicos e centenas de leis, o Judiciário não tem como substituir o critério do administrador por um "eu acho que fica melhor assim". O Judiciário se autoconteve e não entrou no mérito administrativo, embora a parte ambiental ainda siga em discussão nas instâncias próprias.
+Trouxe o exemplo do Jardim de Alá para que vocês não confundam a concessão de uso de bem público com a concessão de serviço público. São regramentos, remunerações e lógicas diferentes.
+________________________________________________________________________________
+7. Encampação e Limites do Poder Concedente: Caso Linha Amarela
+Agora, entramos em outro problema jurídico maravilhoso que enfrentamos na Procuradoria: o caso da Linha Amarela. Para quem não é do Rio de Janeiro, a Linha Amarela é uma via expressa vital que liga a Zona Norte à Zona Oeste (região da Barra da Tijuca).
+Ela foi concedida em 1994 para a concessionária LAMSA, sob o regime de cobrança de pedágio. A lógica básica era: a empresa faz as obras, a manutenção, presta o serviço de atendimento e cobra o pedágio. No entanto, o contrato sofreu uma forte judicialização porque o valor do pedágio começou a subir muito, seguindo a fórmula matemática prevista no edital.
+Fatos que contribuíram para a crise desse contrato:
+  Operações Policiais: Delações premiadas informaram a ocorrência de fraude na licitação originária.
+  Conflitos Tarifários: Sucessivas disputas judiciais sobre os reajustes.
+  Inadimplementos: O Município apontava falhas graves na execução contratual.
+  Atuação Unilateral: Em dado momento, o Chefe do Executivo determinou a suspensão do pedágio "na caneta", gerando uma briga jurídica imensa.
+7.1. Requisitos Legais: Interesse Público, Lei Autorizativa e Indenização Prévia
+Em 2019, diante de toda essa confusão, o Município decidiu pela encampação do serviço. Aqui, cuidado para não confundir com a caducidade.
+Tanto a encampação quanto a caducidade são formas de extinção prematura (antes do prazo final) do contrato de concessão, mas possuem naturezas distintas:
+1.  Caducidade: É a extinção por inadimplemento do concessionário. Exige processo administrativo com contraditório e ampla defesa.
+2.  Encampação: É a extinção por motivo de interesse público.
+No caso da Linha Amarela, o Município optou pela encampação para retomar o serviço por interesse público, visando uma solução mais célere diante dos problemas jurídicos da caducidade. Contudo, a Lei 8.987/95 exige requisitos rígidos para a encampação:
+  Autorização Legislativa: É necessária uma lei específica autorizando o ato.
+  Indenização Prévia: O concessionário deve ser indenizado antes da retomada.
+Ponto de atenção: Vocês podem me perguntar: "Professora, você não disse que não precisa de lei para a concessão porque ela é ato do Executivo?". Observem a lógica: para extinguir o contrato por interesse público (encampação) antes do prazo, o legislador impôs a trava da autorização legislativa para proteger a estabilidade dos contratos e evitar arbítrios.
+É fundamental compreendermos a diferença prática entre as formas de extinção do contrato. Quando eu disse anteriormente que não é necessária autorização legislativa para decidir se o Estado delega um serviço ou o presta diretamente, isso é uma decisão estritamente do Poder Executivo. O administrador decide delegar, estabelece um contrato e deve respeitá-lo. Se a concessionária desrespeita esse ajuste, o serviço retorna ao poder público por meio da caducidade.
+Agora, se eu decido pela encampação, a premissa é outra: a concessionária está cumprindo o contrato, ou, ao menos, eu não consegui provar que ela está inadimplente. Na encampação, a retomada ocorre por razões de interesse público, e não por culpa do particular. Justamente por isso, a Lei 8.987/95 exige o requisito da autorização legislativa.
+Trata-se de um sistema de freios e contrapesos. Em um contrato de concessão, todo risco é precificado. Se eu sou um licitante e percebo que existe um risco alto de o Chefe do Executivo retomar o contrato "do nada", sem que eu tenha descumprido qualquer cláusula, eu vou precificar esse risco na minha proposta. Imagine que hoje o governante é o "Fulano", mas daqui a quatro anos pode ser outro que não goste da concessionária e decida encampar o serviço alegando interesse público.
+A lei prevê esse segundo controle — a autorização da Câmara ou Assembleia — para evitar decisões puramente políticas que prejudiquem as concessões. Acreditem em mim: toda vez que um município decreta caducidade ou encampação de forma arbitrária, os futuros serviços licitados ficam caríssimos para a população, pois os licitantes elevam os preços para cobrir a insegurança jurídica. A lógica da lei é evitar o exercício arbitrário do poder concedente.
+7.2. A Necessidade de Indenização Prévia e o Caso da Linha Amarela
+Outro ponto crucial na encampação é a indenização prévia. Vejam bem: na encampação, a concessionária não está inadimplente; ela está cumprindo o contrato e realizou investimentos considerando o prazo final originalmente estabelecido. Se o contrato será extinto antes da hora, sem culpa do particular, tudo o que foi investido e que seria amortizado ao longo dos anos precisa ser pago antes da retomada, e não depois.
+No caso da Linha Amarela, no Rio de Janeiro, o Município chegou a decretar a encampação com autorização legislativa da Câmara. No entanto, o Município afirmou que não pagaria a indenização prévia. A justificativa era a suspeita de um grande desequilíbrio econômico-financeiro em favor da concessionária. O argumento da prefeitura era que, após a apuração de haveres e amortizações, a concessionária é quem acabaria devendo ao Município.
+O Judiciário, contudo, foi taxativo: nem pensar. Se a administração entende que há desequilíbrio, deve buscar o reequilíbrio pelas vias próprias. Mas, para a retomada por interesse público (encampação), a indenização prévia é requisito indispensável. Não se pode decretar a encampação para pagar depois. Por essa razão, o Judiciário não permitiu que o Município retomasse a Linha Amarela naquele momento. Esse imbróglio seguiu por diversos processos, chegando inclusive ao Supremo Tribunal Federal (STF).
+7.3. Solução Consensual e Reequilíbrio Econômico-Financeiro no STF
+No desdobramento do caso da Linha Amarela, buscamos uma solução que colocasse fim aos inúmeros processos judiciais que questionavam as tarifas, os aumentos e o equilíbrio do contrato. Discutia-se, primordialmente, se a conta estava sendo feita corretamente e se respeitava a fórmula prevista no edital. Foram realizadas perícias judiciais que concluíram que o contrato estava, de fato, desequilibrado em favor da concessionária, com valores tarifários muito elevados.
+Em 2025, chegamos a uma solução consensual no STF. Foi firmado um acordo por meio de um termo aditivo. Lembrem-se de que a intenção original do Município era a encampação, mas o Judiciário barrou a medida, afirmando que, sem o pagamento da indenização prévia, não haveria retomada. Como a encampação não ocorreu, a concessionária continuou prestando o serviço, o que abriu espaço para essa composição amigável.
+Esse acordo estabeleceu:
+  A celebração de um termo aditivo ao contrato;
+  O reequilíbrio econômico-financeiro com novos critérios tarifários;
+  A extinção das ações judiciais em curso.
+O objetivo principal foi privilegiar a segurança jurídica e a preservação do contrato. Na prática, a tarifa baixou consideravelmente, seguindo os parâmetros apontados pela perícia técnica realizada nos processos.
+7.4. Distinção entre Encampação e Caducidade: Mitigação de Riscos
+É fundamental que vocês percebam que a encampação e a caducidade são institutos totalmente diferentes, com requisitos e fundamentos distintos. Existe uma razão técnica para submeter o Poder Executivo ao crivo do Poder Legislativo no caso da encampação: a mitigação de riscos nos contratos de concessão.
+Os riscos previsíveis são sempre precificados pelo particular. Se o ambiente jurídico é instável, o custo aumenta, o que afeta diretamente a modicidade tarifária. Ao exigir lei autorizativa e indenização prévia, a legislação protege o contrato contra rupturas arbitrárias, garantindo que o serviço continue sendo prestado de forma viável. No caso citado, como o Município não cumpriu os requisitos, o Judiciário não permitiu a encampação e o contrato seguiu via termo aditivo.
+7.5. Caso Prático: Questão Hipotética de Prova
+Vamos analisar uma questão hipotética que tem grandes chances de aparecer em uma prova de Procuradoria. Dificilmente o examinador citará nominalmente o "Caso Linha Amarela", mas ele construirá um cenário similar para testar seu conhecimento técnico.
+O Cenário:
+O Município, por razões de conveniência e oportunidade (interesse público), decide retomar a operação de uma importante via expressa pedagiada antes do fim do prazo contratual. O ato é motivado pelo desejo de reduzir o valor do pedágio, além de suspeitas de fraude na licitação e descumprimento de obrigações contratuais. A administração pretende baixar um decreto de encampação e iniciar a operação direta por uma autarquia, deixando para apurar a indenização ao final de um processo administrativo de liquidação, justificando essa postergação na suspeita de corrupção.
+A Análise Jurídica:
+Se você for instado a analisar essa pretensão à luz da Lei 8.987/95, deve apontar que a estratégia municipal é juridicamente inviável. Para que o ato de encampação seja válido, os requisitos são cumulativos:
+1.  Autorização legislativa específica: Não basta um decreto do Chefe do Executivo; a Câmara Municipal deve autorizar a retomada.
+2.  Pagamento de indenização prévia: É obrigatório indenizar as parcelas dos investimentos vinculados a bens reversíveis ainda não amortizados ou depreciados.
+Atenção: A administração não pode "encampar agora para pagar depois". Mesmo sob alegação de corrupção ou desequilíbrio, a lei exige que a indenização ocorra antes da retomada para garantir a segurança jurídica. Se há descumprimento contratual (como alegado na questão), o instituto correto a ser avaliado seria a caducidade, e não a encampação, mas cada um possui seu rito próprio.
+8. Orientações Práticas para a Prova e Identificação de Município
+Um ponto fundamental para a realização da prova, especialmente se vocês estiverem prestando concurso para o Município do Rio de Janeiro, diz respeito à identificação da peça ou da resposta. Recebemos uma orientação muito clara: se o enunciado da questão não mencionar expressamente o "Município do Rio de Janeiro", vocês não devem citá-lo nominalmente.
+Essa cautela é necessária porque a menção injustificada ao município pode ser interpretada pela banca examinadora como uma tentativa de identificação de prova, o que gera a eliminação do candidato. Portanto, sigam estritamente o que propõe o enunciado.
+Mesmo que a questão apresente uma situação concreta que vocês saibam ter ocorrido no Rio de Janeiro (como os casos da Linha Amarela ou do BRT), se o texto for genérico, a análise deve ser feita exclusivamente à luz da legislação federal, da jurisprudência dos Tribunais Superiores e da doutrina, sem "trazer de fora" o nome do ente federativo.
+9. Integração de Modais e Conflitos de Competência
+Surge frequentemente uma dúvida sobre a diferença de tarifas e a dificuldade de integração entre modais (ônibus, metrô e trem), como ocorre em grandes metrópoles. No caso do Rio de Janeiro, enfrentamos uma dificuldade técnica e federativa específica:
+  O transporte municipal (ônibus) é de competência do Município.
+  O metrô e os trens são concessões do Estado.
+Essa dualidade de entes federativos com contratos de concessão distintos dificulta a unificação tarifária. Para que o usuário pague apenas uma passagem ao trocar de modal, é necessário um acordo de cooperação entre Estado e Município.
+A grande complexidade reside na equação econômica do contrato: definir como a tarifa será rateada entre as concessionárias de entes diferentes. Não se pode forçar um ente a aceitar a tarifa do outro sem que haja um reequilíbrio financeiro, o que torna a gestão do bilhete único um desafio de negociação política e técnica constante.
+10. Extinção da Concessão: Encampação vs. Caducidade
+Inspirando-me no caso real da Linha Amarela, é muito provável que questões de prova abordem os problemas enfrentados pela Procuradoria na retomada de serviços. Se o enunciado não citar o caso real, utilizem as ferramentas da Lei 8.987/95.
+10.1. Requisitos da Encampação
+Como vimos, a encampação é a retomada do serviço por motivo de interesse público. Para sua validade, os requisitos são cumulativos e rígidos:
+1.  Lei autorizativa específica.
+2.  Indenização prévia e em dinheiro.
+É importante destacar que a lei busca a preservação dos contratos administrativos. A extinção prematura nunca é o objetivo ideal e não deve ser estimulada. Por isso, a exigência de indenização prévia serve como um mecanismo de controle contra atos arbitrários do poder concedente.
+10.2. O Caminho da Caducidade
+Diferente da encampação, a caducidade é a extinção do contrato por inadimplemento da concessionária.
+  Intervenção prévia: No caso do BRT, o Município optou por fazer uma intervenção na gestão antes de decretar a caducidade. Embora seja um caminho cauteloso e recomendável para apurar falhas de perto, a intervenção não é um requisito obrigatório para a caducidade.
+  Processo Administrativo: O que é obrigatório para a caducidade é a existência de um processo administrativo prévio, garantindo o contraditório e a ampla defesa, para apurar detalhadamente o inadimplemento.
+10.3. Impacto no Equilíbrio Econômico-Financeiro
+Antes de partir para a extinção (que é a ultima ratio), o poder concedente deve buscar o reequilíbrio do contrato. Se houver um desequilíbrio que prejudique o usuário ou a Administração, o gestor pode:
+  Determinar a execução de novas obras pela concessionária.
+  Revisar o cálculo tarifário (reduzindo a tarifa se houver ganho excessivo ou erro de cálculo).
+  Celebrar termos aditivos para ajustar as obrigações.
+Na prática, o reequilíbrio é extremamente complexo. O corpo técnico da Administração muitas vezes hesita em assinar revisões por receio de órgãos de controle, exigindo planilhas e laudos de engenharia exaustivos. Além disso, há a tensão entre a modicidade tarifária (o serviço deve ser acessível) e o risco do negócio (a concessionária não pode repassar ao usuário riscos que são inerentes à sua atividade empresarial).
+11. Concessão dos Cemitérios e Tarifa de Manutenção
+Um caso recente e relevante envolve a concessão dos cemitérios. Historicamente, a maioria dos cemitérios eram geridos diretamente pelo poder público. Contudo, em 2014, o Município decidiu conceder esses serviços à iniciativa privada.
+Atualmente, essa gestão está dividida em dois grandes blocos de concessão (um com seis cemitérios e outro com sete). Um dos pontos centrais dessa transição é a discussão sobre a tarifa de manutenção anual, que gera debates sobre o regime jurídico aplicável aos titulares de jazigos adquiridos antes da concessão.
+12. Regime Jurídico e Direito Adquirido: Caso dos Cemitérios
+12.1. A Tarifa de Manutenção Anual e o Custeio do Serviço
+No caso das concessionárias Rio Pax e Reviver, que venceram a licitação para a gestão dos cemitérios no Rio de Janeiro, o edital previa expressamente as formas de remuneração. Como sabemos, a indicação de como o serviço será pago é um requisito obrigatório pela Lei 8.987/95.
+Nesse contexto, um decreto de 2014 estabeleceu a tarifa de manutenção anual. Essa tarifa deve ser paga pelo usuário que possui o jazigo. É importante entender a dinâmica desse serviço: muitas vezes, a família adquiriu o jazigo há décadas — o bisavô comprou o espaço para uso perpétuo. No entanto, o serviço cemiterial exige manutenção constante, envolvendo inclusive questões ambientais complexas.
+A concessionária precisa realizar uma série de manutenções na área e prestar o serviço de forma contínua; não se trata apenas do pagamento inicial pelo espaço físico. Por isso, a tarifa de manutenção anual tornou-se a principal fonte de custeio do contrato. Como a maioria dos jazigos foi adquirida há muito tempo, as tarifas de transferência ou outras taxas específicas são raras e insuficientes para sustentar a operação. O que mantém o serviço vivo, economicamente falando, é a tarifa anual.
+12.2. A Tese do Direito Adquirido e a Representação de Inconstitucionalidade
+O Procurador-Geral de Justiça ajuizou uma Representação de Inconstitucionalidade no Tribunal de Justiça do Rio de Janeiro (TJRJ), questionando a cobrança dessa tarifa para os usuários que adquiriram suas sepulturas antes da vigência do decreto de 2014.
+O argumento central do Ministério Público foi o de que quem adquiriu o jazigo em um regime que não previa tal tarifa teria direito adquirido ao regime jurídico anterior. Segundo essa tese, o regime não poderia ser alterado para criar uma nova obrigação financeira após a aquisição.
+O Tribunal de Justiça acolheu esse entendimento e julgou a representação procedente, declarando a inconstitucionalidade parcial da cobrança. Paralelamente, existia uma Ação Civil Pública (ACP) movida pelo Ministério Público com o mesmo objetivo, que também tramitava no tribunal.
+12.3. Suspensão da Cobrança e o Pleito de Reequilíbrio Econômico-Financeiro
+Com base na decisão do Órgão Especial do TJRJ, uma das câmaras cíveis determinou, em sede de liminar na ACP, a suspensão imediata da cobrança. A lógica foi direta: se o Órgão Especial já havia declarado a inconstitucionalidade da norma, a cobrança deveria cessar. Isso ocorreu por volta de 2019, embora a discussão tenha se iniciado em 2014.
+Diante da interrupção de sua principal fonte de receita, as concessionárias pleitearam o reequilíbrio econômico-financeiro do contrato junto ao Município. O argumento das empresas é claro: "esta é a minha principal fonte de custeio; se ela for retirada, o serviço acaba, pois não há viabilidade financeira para a prestação".
+Entretanto, esse processo administrativo de reequilíbrio não é simples e nem rápido. O Município exigiu estudos técnicos aprofundados, análises de engenharia e um levantamento detalhado de todas as outras tarifas para mensurar o real impacto do prejuízo. Essa tramitação administrativa durou quase 10 anos, começando em 2014, enquanto os recursos para o Supremo Tribunal Federal (STF) aguardavam análise.
+12.4. O Acordo de Reequilíbrio e a Decisão do Supremo Tribunal Federal
+Após anos de tramitação processual, com recursos subindo e descendo nos tribunais superiores, chegamos ao desfecho do caso dos cemitérios no Rio de Janeiro. No final de 2014, poucos meses antes de uma decisão definitiva do Supremo Tribunal Federal (STF), o Município celebrou um acordo com a concessionária para formalizar o reequilíbrio econômico-financeiro do contrato.
+Essa medida foi fundamentada em um estudo técnico rigoroso, assinado por engenheiros, que comprovou um prejuízo milionário para as empresas. O impacto era tão severo que ameaçava a própria continuidade do serviço público. Como o sistema de manutenção cemiterial é um ativo que exige custeio constante, a retirada da tarifa principal gerou um desequilíbrio que não poderia ser sanado apenas com o ajuste de outras tarifas pontuais, sob pena de torná-las excessivamente caras para a população.
+Para viabilizar a manutenção do serviço sem ferir a modicidade tarifária, o termo aditivo ao contrato de concessão estabeleceu um conjunto de mecanismos compensatórios:
+  Prorrogação do prazo contratual: o contrato foi estendido por mais 10 anos para permitir a amortização dos investimentos e prejuízos.
+  Redução e supressão de outorgas: o Município abriu mão de valores que as concessionárias deveriam pagar aos cofres públicos (tanto a outorga fixa quanto a variável sobre o faturamento).
+  Reajuste tarifário moderado: aumento controlado de outras tarifas para recompor parte da receita.
+  Revisão Periódica: previsão de reanálise a cada 5 anos para verificar se o equilíbrio foi atingido ou se novos ajustes são necessários.
+12.5. A Tese da Obrigação de Trato Sucessivo e o Consequencialismo
+Meses após a celebração desse acordo, o STF finalmente se pronunciou por meio de uma decisão monocrática do Ministro Nunes Marques, posteriormente acompanhada de forma unânime pelo colegiado. O Supremo declarou a constitucionalidade da cobrança da tarifa de manutenção, mesmo para quem já possuía jazigos antes do decreto.
+O argumento central do Ministro foi que o serviço cemiterial é um serviço contínuo, gerando uma obrigação de trato sucessivo. O raciocínio é lógico: embora o usuário tenha adquirido o jazigo no passado, ele continua usufruindo dos serviços de conservação, limpeza e segurança no presente. Se o serviço exige manutenção constante, ele deve ser remunerado. Caso contrário, haveria um enriquecimento sem causa do particular, pois "alguém teria que pagar a conta" pelo serviço prestado.
+Além disso, o STF acolheu a tese municipal de que não existe direito adquirido a regime jurídico. O fato de alguém ter adquirido uma sepultura em 1980 não vincula o Município eternamente àquelas condições originais, pois a administração do serviço público deve se adaptar às necessidades atuais de custeio.
+Por fim, a decisão aplicou o consequencialismo jurídico, analisando as consequências práticas da decisão (conforme orienta a LINDB). O Ministro entendeu que a isenção absoluta dos proprietários antigos levaria o sistema ao colapso financeiro, dada a magnitude do desequilíbrio econômico gerado.
+12.6. O Papel das Entidades Reguladoras nos Acordos
+Surgiu um questionamento relevante sobre a participação de entidades reguladoras nesses acordos de concessão. No âmbito do Município do Rio de Janeiro, esse papel de análise técnica e fiscalização das concessões tem sido centralizado pela CCPAR (Companhia Carioca de Parcerias e Investimentos).
+Embora a CCPAR tenha assumido esse protagonismo técnico de forma mais estruturada nos últimos anos, ela é o órgão responsável por validar os estudos de engenharia e os cálculos que fundamentam os termos aditivos e os processos de reequilíbrio contratual.
+12.7. O Papel Técnico da CCPAR e da SEPAR no Reequilíbrio
+No âmbito do Município do Rio de Janeiro, contamos com um corpo técnico muito forte para realizar a análise dos pedidos de reequilíbrio econômico-financeiro. Não se trata apenas de receber os cálculos da concessionária e obter um "ok" do procurador na PGM (Procuradoria Geral do Município). Existe um fluxo rigoroso: o processo é encaminhado para órgãos técnicos específicos, como a SEPAR (Secretaria de Parcerias Estratégicas) ou a CCPAR (Companhia Carioca de Parcerias e Investimentos).
+Nesse caso específico que mencionamos, a SEPAR realizou um estudo próprio. Quando a concessionária apresentou o pleito de reequilíbrio acompanhado de um estudo de engenharia, os engenheiros do município avaliaram se aquele desequilíbrio era real e como compensá-lo de forma proporcional. Foi a SEPAR que formulou a proposta de prorrogação do prazo contratual.
+Diferente da União, que possui agências reguladoras consolidadas como a ANATEL ou a ANEEL, o Município do Rio não possui hoje uma agência reguladora de transportes propriamente dita. Em Curitiba, por exemplo, existe a URBS, que se assemelha à nossa MOBI-Rio, mas que atua fortemente na gestão. Aqui, a CCPAR assumiu esse protagonismo técnico, auxiliando na análise de contratos complexos e até na condução de licitações, como a dos ônibus.
+12.8. Dinâmica Prática do Reequilíbrio Pós-Decisão Judicial
+É importante entender como o reequilíbrio opera na prática diante de decisões judiciais. Imaginem o seguinte cenário: uma empresa fica quase 10 anos sem poder realizar uma cobrança devido a uma liminar. Isso gera um prejuízo acumulado imenso que precisa ser compensado via termo aditivo.
+Se, após esses 10 anos, vem uma decisão do STF dizendo que a cobrança é constitucional, o problema não se resolve simplesmente revogando o termo aditivo que concedeu o reequilíbrio. O prejuízo passado já ocorreu. É necessário um novo estudo técnico para entender em quanto tempo aquele desequilíbrio causado pela decisão judicial anterior será compensado, mesmo que a empresa volte a cobrar a tarifa imediatamente.
+Tenho conhecimento de uma Ação Popular que questiona justamente isso. Assim que saiu a decisão monocrática no STF favorável à cobrança, a ação foi ajuizada alegando que o reequilíbrio (prorrogação de contrato e aumento de tarifa) seria um absurdo, já que o Supremo validou a cobrança. No entanto, ignora-se que houve um hiato de uma década de desequilíbrio. O estudo de engenharia serve para proteger tanto o usuário quanto a concessionária, garantindo que a empresa mantenha a margem lucrativa estabelecida na proposta original para que o serviço continue sendo prestado até o fim.
+12.9. Dica de Prova: O Artigo do Procurador Toches
+Gostaria de destacar um ponto que pode ser explorado em provas. Recentemente, saiu um artigo do Procurador Toches (PGM-RJ) na coluna "Esquinas do Direito Municipal" do portal Migalhas. Ele aborda justamente essa decisão que discutimos.
+Atenção: Embora o Dr. Toches não esteja na banca examinadora atual, o artigo circulou amplamente dentro da PGM. Como esse era um tema muito interno da PSA (Procuradoria de Serviços Assistenciais) e agora se tornou público e debatido, é fundamental que vocês tenham esse conhecimento. É um exemplo perfeito de como desequilíbrios contratuais podem ser causados por atos de outro Poder (o Judiciário).
+________________________________________________________________________________
+13. O Direito de Passagem e a Lei das Antenas (ADI 6482)
+Vou trazer agora um julgado dos Tribunais Superiores que considero muito interessante para a banca, inclusive por já ter sido tema de questionamento em prova oral de Direito Civil. Trata-se da discussão sobre modicidade tarifária, direitos em colisão e receitas alternativas.
+13.1. O Artigo 12 da Lei 13.116/2015
+A discussão central gira em torno da ADI 6482, que questionou a constitucionalidade do Artigo 12 da Lei 13.116/2015 (Lei das Antenas). O dispositivo prevê o seguinte:
+*Não será exigida contraprestação em razão do direito de passagem em vias públicas, em faixas de domínio e em outros bens públicos de uso comum do povo, ainda que esses bens sejam explorados por meio de concessão, excetuados os contratos anteriores à lei.*
+Na prática, isso significa que empresas de telecomunicações podem instalar infraestrutura (como cabos e antenas) em vias públicas municipais sem pagar nada ao município ou à concessionária que administra a via (como a Linha Amarela, por exemplo).
+13.2. Conflito de Autonomia e Votos no STF
+Para fins de prova, é essencial conhecer os dois lados dessa discussão para construir uma resposta completa:
+1.  Voto Vencido (Favorável à Fazenda Pública): Defende a autonomia do ente federativo. O município, como proprietário do bem, deveria ter autonomia para dispor sobre ele e exigir contraprestação pelo seu uso, sob pena de violação do pacto federativo.
+2.  Voto Vencedor (Ministro Gilmar Mendes): Prevaleceu o entendimento de que a União tem competência privativa para legislar sobre telecomunicações. O objetivo da norma é fomentar a expansão da rede de telecomunicações no país, reduzindo custos de infraestrutura.
+Se você se deparar com uma questão sobre receitas alternativas, pode citar essa decisão como uma crítica ou um limite: a impossibilidade de o município cobrar pelo direito de passagem reduz as fontes de receita que poderiam auxiliar na manutenção da modicidade tarifária.
+14. ADI 6482: Lei das Antenas e o Direito de Passagem em Vias Públicas
+Dando continuidade à análise da ADI 6482, precisamos entender o embate de teses entre os ministros do STF, pois isso reflete exatamente o conflito entre a autonomia dos entes federados e a competência da União. Imaginem um contrato novo de concessão de rodovia. Se a rodovia é um bem público estadual ou municipal, como uma lei federal pode proibir o ente titular de prever, em seu contrato, que a concessionária cobre das empresas de telecomunicações pela passagem de cabos e conexões na faixa de domínio?
+O objetivo dessa cobrança, como vimos, seria utilizar esse valor como receita alternativa para reduzir a tarifa paga pelo usuário (modicidade tarifária). Esse é o cerne do argumento do Ministro Edson Fachin, que acabou sendo voto vencido.
+14.1. A Tese Vencida: A Defesa da Autonomia Federativa (Min. Fachin)
+O Ministro Fachin defendeu que não se pode retirar dos demais entes federativos as prerrogativas de utilização econômica de seus próprios bens. Para ele, permitir a passagem gratuita de infraestrutura de telecomunicações por vias estaduais e municipais, mediante regra federal, estabelece um gravame indevido a esses entes.
+Fachin argumentou de forma muito elegante: a União pode dispor sobre seus próprios bens públicos, mas não pode impedir que o município explore economicamente o que é dele. Além disso, ele trouxe um ponto fundamental para a nossa matéria:
+  Migração para o Direito Privado: As telecomunicações têm migrado para o regime privado, e não há garantia de que o barateamento do direito de passagem será revertido em favor do consumidor final.
+  Controle da Modicidade: Na concessão de rodovias, o poder concedente (Estado ou Município) consegue controlar e filtrar se a receita alternativa está efetivamente reduzindo a tarifa. No caso das telecomunicações, a União não possui esse controle direto sobre o repasse da economia para o preço da internet ou telefonia.
+Como procuradora do município, eu concordo plenamente com essa visão, e vocês, já se colocando na posição de futuros Procuradores, também devem compreender esse raciocínio mentalmente. No entanto, prevaleceu a tese contrária.
+14.2. A Tese Vencedora: Consequencialismo e Unidade Nacional (Min. Gilmar Mendes)
+O Ministro Gilmar Mendes, vencedor da tese, fundamentou seu voto em um argumento consequencialista. Ele afirmou que a gratuidade do direito de passagem é um ponto crítico para a expansão da infraestrutura de redes no Brasil.
+Segundo o Ministro, a "pulverização descoordenada" de condicionamentos jurídicos — ou seja, cada um dos mais de 5 mil municípios criando suas próprias regras e cobranças — incrementaria significativamente o custo regulatório, impedindo a expansão do sistema.
+Os principais pontos do argumento vencedor foram:
+1.  Competência Privativa da União: A Lei Geral das Antenas (Lei 13.116/15) não trata apenas de bens públicos, mas de telecomunicações. Sendo matéria de telecomunicações, a competência para legislar é privativa da União (Art. 22, IV, CF), afastando a possibilidade de estados e municípios legislarem sobre o tema.
+2.  Afastamento do Artigo 11 da Lei 8.987/95: Aqui reside um argumento que considero "genial" (ainda que prejudicial aos municípios). O Ministro defendeu que, embora o Art. 11 da Lei de Concessões preveja receitas alternativas para modicidade tarifária, ele foi afastado pela Lei das Antenas no que tange às telecomunicações. Por ser uma lei específica, ela tem o condão de afastar a regra geral da Lei 8.987/95 nesse ponto específico.
+14.3. Estratégia para a Segunda Fase e Prova Oral
+Atenção, pois isso é muito importante para provas discursivas e orais. Eu mesma já fui questionada sobre isso em uma prova oral de Direito Civil, justamente porque o tema envolve a natureza dos bens públicos.
+O examinador não quer apenas que você diga, de forma simplista, que o STF declarou o Art. 12 da Lei 13.116/15 constitucional. Ele espera que você realize o cotejo de direitos:
+  De um lado, a autonomia federativa e o direito de disposição sobre bens públicos (argumento do Fachin, baseado na Constituição e no Código Civil).
+  De outro, a competência privativa da União e a busca pela universalização de serviços essenciais através da redução de custos regulatórios (argumento do Gilmar Mendes).
+Ainda tratando da questão das telecomunicações e da Lei das Antenas, é preciso destacar que houve uma clara tensão entre princípios constitucionais no julgamento do STF. De um lado, temos o argumento de que essa lei federal violou a autonomia federativa. Ao tratar de bens públicos pertencentes a Estados e Municípios, a União acabou retirando desses entes uma competência que lhes é própria: a de explorar economicamente seu patrimônio.
+Por outro lado, o voto vencedor, que declarou a constitucionalidade do dispositivo, pautou-se em uma análise consequencialista. Considerou-se a importância da evolução do serviço de telecomunicações, que hoje é essencial para a sociedade. Além disso, prevaleceu o entendimento de que a União possui competência privativa para legislar sobre telecomunicações (Art. 22, IV, CF), o que justificaria a imposição da gratuidade do direito de passagem para expandir a infraestrutura nacional.
+14.4. Estratégia de Prova: O Cotejo de Direitos
+Para fins de prova, o examinador não quer apenas que você decore o resultado do julgamento. Ele quer que você demonstre entender o problema e os direitos em colisão. Em uma questão discursiva ou oral, você deve construir seu raciocínio apresentando as duas posições:
+  Posição A (Concessionária/Ente Federado): Defende que a concessionária tem direito às receitas alternativas previstas no contrato e no Art. 11 da Lei 8.987/95 para garantir a modicidade tarifária e o equilíbrio econômico-financeiro.
+  Posição B (União/Setor de Telecomunicações): Defende a necessidade de expansão do serviço de dados e a competência da União para desonerar essa infraestrutura em prol do interesse nacional.
+Ao final, você conclui com o entendimento do STF pela constitucionalidade, mas o "recheio" da sua resposta deve ser esse cotejo de direitos. Mostrar que você sabe trabalhar os problemas contidos no enunciado é o que diferencia um candidato preparado.
+15. Teses do STJ: Ilegitimidade de Corte de Energia em Unidades Indispensáveis
+Passando agora para a jurisprudência do STJ, selecionei dois temas que constam no "Jurisprudência em Teses". Embora possam parecer temas antigos, eles continuam extremamente atuais e recorrentes na prática das Procuradorias. É um ponto fundamental para a primeira fase, pois muitos alunos esquecem os detalhes que resolvem a questão sob a ótica da Fazenda Pública.
+Vejamos as duas previsões distintas do STJ:
+1.  Corte e Direito à Saúde: É ilegítimo o corte no fornecimento de energia elétrica quando puder afetar o direito à saúde e a integridade física do usuário. Um exemplo clássico é o paciente em home care; a concessionária não pode interromper o serviço por inadimplência. Se precisar fazer uma manutenção, deve providenciar um gerador.
+2.  Corte e Pessoa Jurídica de Direito Público: É legítimo o corte de serviços essenciais quando o ente público estiver inadimplente, desde que haja notificação prévia e que a interrupção não atinja unidades prestadoras de serviços indispensáveis à população.
+15.1. O Conflito Prático no Caso de Hospitais
+Imagine um caso real: um hospital municipal fica inadimplente com a concessionária de energia. A conta, que pode chegar a centenas de milhares de reais, não é paga. A concessionária notifica o Município e ameaça o corte. O Município, por sua vez, busca o Judiciário alegando que o corte é ilegal por se tratar de um serviço de saúde indispensável.
+Nesse cenário, temos um embate de princípios:
+  Lado da Concessionária: Tem o direito de ser remunerada pelo serviço prestado. O Art. 6º, §3º, II, da Lei 8.987/95 prevê que a interrupção por inadimplência é possível e não descaracteriza a continuidade do serviço.
+  Lado do Ente Público: Invoca o princípio da continuidade do serviço público e a essencialidade do direito à saúde, que impede a interrupção em unidades críticas.
+Qual é o fechamento da questão do ponto de vista da Procuradoria?
+O ponto de equilíbrio que concilia esses direitos reside no regime de pagamento das dívidas públicas. Todas as dívidas da União, Estados e Municípios são garantidas pelo orçamento público. Se o ente federativo não paga uma dívida voluntariamente, o sistema jurídico oferece o caminho dos precatórios ou das requisições de pequeno valor, mas não permite que a sanção do corte coloque em risco a vida da população.
+15.2. A Judicialização da Dívida e o Regime de Precatórios
+Essa dívida, quando judicializada, será necessariamente paga por meio de precatório ou de RPV (Requisição de Pequeno Valor), a depender do montante. A Constituição Federal garante que o orçamento público lastreia todas as dívidas do ente federativo. Portanto, a solução que o Procurador deve apresentar em juízo é demonstrar que existe uma medida muito menos gravosa do que a interrupção da prestação de um serviço essencial.
+Essa solução não coloca a vida da população em risco e, simultaneamente, garante a remuneração da concessionária pelo serviço prestado. O caminho adequado é o ajuizamento de uma ação de cobrança pela concessionária. Com o trânsito em julgado dessa ação, o valor será pago seguindo o rito constitucional dos precatórios.
+É importante destacar que não se aplica ao ente federativo a mesma lógica das pessoas físicas ou das empresas privadas, que podem falir. As dívidas públicas são embasadas e protegidas pelo orçamento. Embora o pagamento possa não ser imediato, a concessionária tem a certeza jurídica de que irá receber os valores devidos.
+15.3. Estratégia de Prova: O Cotejo de Direitos em Colisão
+Essa argumentação é o que o examinador espera de um candidato que sabe proteger e ponderar direitos em colisão. Ao apresentar essa solução, você demonstra que entende o regime jurídico de direito público ao qual o Município está submetido, o qual oferece o orçamento como garantia ao credor.
+Para o sucesso na prova, deixo algumas dicas fundamentais:
+  Calma na análise: Mantenha a serenidade ao ler o enunciado para identificar os pontos de tensão.
+  Cotejo de direitos: Sempre realize a ponderação entre os princípios e direitos que estão em conflito no caso concreto.
+  Exercício de alteridade: Se encontrar um tema desconhecido, pense: "Se eu fosse o Procurador e tivesse que defender o ente público, quais argumentos eu utilizaria?". Isso ajuda a desenvolver o raciocínio jurídico.
+  Foco no Gabarito: Tente esboçar os itens fundamentais que o examinador espera encontrar na resposta. O examinador busca a mentalidade e a técnica de um Procurador.
+É natural que, no momento da prova, a adrenalina esteja elevada. No entanto, ao focar na técnica de identificar a medida menos gravosa e na proteção do interesse público primário, você conseguirá estruturar uma resposta sólida e condizente com o cargo pretendido.
+16. Considerações Finais e Estratégia de Prova
+16.1. Gestão Emocional e Técnica de Resolução
+No momento em que você vira a prova, é natural que a adrenalina suba e o estresse apareça. Mesmo sem relógio, você sente a pressão do tempo. Minha recomendação é: respire fundo, leia a questão com atenção e vá marcando os pontos principais. Conforme você realiza a leitura, puxe da memória as previsões legais e os conceitos relacionados.
+Eu costumava adotar uma estratégia que me ajudava muito: eu esboçava o que acreditava ser fundamental para o gabarito. Se a questão tratava de concessão, eu já anotava tópicos como caducidade, formas de extinção e seus requisitos. Pensava comigo: "isso aqui tem que estar no gabarito".
+Faça uma leitura geral de todas as questões e depois volte respondendo. Isso evita que você esqueça as ideias iniciais que teve no primeiro contato com a prova. Além disso, eu sempre respondia primeiro as questões que eu dominava mais, deixando as que eu tinha mais dificuldade para o final. No início da prova, você está mais descansado, consegue escrever e desenvolver melhor o tema, garantindo uma nota alta naquilo que você realmente sabe.
+16.2. Objetividade e Relacionamento com o Examinador
+Nesta fase, não desperdicem palavras. Pensem muito bem no que vão escrever, pois o espaço de linhas costuma ser limitado. Deixem para escrever de forma mais extensa na segunda fase, onde geralmente não há esse limite rigoroso, mas na primeira fase discursiva, o cuidado deve ser redobrado.
+Muitas vezes, na vontade de escrever "bonito" ou "florear" o texto, utilizamos três linhas para dizer o que poderia ser dito em apenas uma. Sejam claros e diretos. Lembrem-se de que o examinador corrigirá a sua prova e a de outros milhares de candidatos. Facilitem a vida de quem corrige: se o texto for confuso e obrigar o examinador a reler o parágrafo várias vezes, isso prejudica sua avaliação.
+16.3. Mentalidade de Aprovação
+Quero dizer que estou torcendo por vocês. Eu sei perfeitamente o quanto esses dias que antecedem a prova são pesados e difíceis. No entanto, tentem enxergar a prova não como um obstáculo intransponível para o cargo de Procurador, mas sim como um degrau.
+Vocês estão subindo o primeiro degrau agora; depois virá a segunda fase, seguida da prova oral. Encarem cada etapa como parte de um processo de evolução constante rumo ao objetivo final.
+17. Considerações Finais e Estratégia de Prova
+Nesta reta final, é fundamental que vocês vejam o concurso, por mais pesada que seja a preparação, como uma oportunidade real de mudar de vida e de exercer a carreira que vocês tanto almejam. Quero dizer que vale muito a pena todo esse esforço que vocês estão empreendendo.
+A carreira de Procurador é excelente e proporciona oportunidades únicas. Eu mesma tive a chance de ir para a Califórnia estudar nas melhores universidades do mundo; não é qualquer profissão que permite e sustenta a realização desse tipo de sonho. Portanto, dediquem-se e foquem nestes últimos momentos.
+17.1. Mentalidade e Gestão Emocional
+Cheguem no dia do exame com uma percepção positiva, preparados para fazer a melhor prova de suas vidas. É comum sentir medo ou ter a sensação de que não se sabe nada. Eu mesma cheguei na prova oral com esse sentimento, questionando como havia conseguido chegar até ali.
+Essa sensação de insuficiência é normal e até esperada. O estranho seria você se sentir plenamente seguro e dizer que sabe tudo; provavelmente, nesse caso, você não estaria prestando atenção aos detalhes necessários. Aqueles candidatos que saem da prova dizendo que "estava fácil" raramente são encontrados na segunda fase ou na prova oral.
+Mantenham a calma e sejam positivos. Chegar com uma mentalidade confiante ajuda o cérebro a se acalmar, transformando o que seria uma sensação de perigo ou obstáculo em algo a ser desenvolvido com técnica. Para fazer prova, é necessário ter um pouco de "sangue frio", baixar a ansiedade e concentrar todo o conhecimento acumulado.
+17.2. Próximos Passos e Revisão Final
+Estarei torcendo muito por cada um de vocês. Ainda nos encontraremos na nossa revisão final e no evento de véspera, onde teremos mais uma dose de conteúdo focado na aprovação.
+Além disso, como mencionei, estou participando da correção dos simulados. As inscrições para quem deseja ter essa correção individualizada — que é uma excelente oportunidade de ajuste técnico — vão até domingo. Se você ainda não se inscreveu e deseja esse acompanhamento, não perca o prazo.
+Agradeço imensamente a presença de todos que acompanharam a aula até agora e também aos que assistirão posteriormente. Sigam com muita força nesta reta finalíssima. Qualquer dúvida, estamos à disposição.

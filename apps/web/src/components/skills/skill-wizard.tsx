@@ -1,178 +1,320 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { Loader2, Sparkles } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
+import JSZip from 'jszip';
+import { ArrowLeft, Bot, ClipboardList, FileUp, Loader2, Sparkles, Upload } from 'lucide-react';
 import type { GenerateSkillRequestPayload } from '@/lib/api-client';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { toast } from 'sonner';
 
 interface SkillWizardProps {
   isGenerating: boolean;
   onGenerate: (payload: GenerateSkillRequestPayload) => Promise<void>;
+  onImportMarkdown: (markdown: string) => void;
 }
 
-const splitLines = (value: string): string[] =>
-  value
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean);
+type WizardStep = 'menu' | 'manual' | 'upload';
 
-export function SkillWizard({ isGenerating, onGenerate }: SkillWizardProps) {
+const SKILL_CREATOR_PREFILL =
+  "Let's create a skill together using your skill-creator skill. First ask me what the skill should do.";
+
+const SUPPORTED_UPLOAD_EXTENSIONS = ['.zip', '.skill', '.md'];
+
+const isSupportedSkillFile = (fileName: string): boolean =>
+  SUPPORTED_UPLOAD_EXTENSIONS.some((extension) => fileName.toLowerCase().endsWith(extension));
+
+export function SkillWizard({ isGenerating, onGenerate, onImportMarkdown }: SkillWizardProps) {
+  const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<WizardStep>('menu');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [directive, setDirective] = useState('');
-  const [examplesInput, setExamplesInput] = useState('');
-  const [guardrailsInput, setGuardrailsInput] = useState('');
-  const [citationStyle, setCitationStyle] = useState('abnt');
-  const [outputFormat, setOutputFormat] = useState<'chat' | 'document' | 'checklist' | 'json'>('document');
-  const [audience, setAudience] = useState<'beginner' | 'advanced' | 'both'>('both');
+  const [instructions, setInstructions] = useState('');
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
 
-  const examples = useMemo(() => splitLines(examplesInput), [examplesInput]);
-  const guardrails = useMemo(() => splitLines(guardrailsInput), [guardrailsInput]);
+  const handleCreateWithClaude = () => {
+    if (typeof window !== 'undefined') {
+      window.sessionStorage.setItem('iudex.skillCreator.prefill', SKILL_CREATOR_PREFILL);
+    }
+    setOpen(false);
+    setStep('menu');
+    router.push('/ask');
+  };
 
-  const handleGenerate = async () => {
-    if (!directive.trim()) {
+  const handleCreateByInstructions = async () => {
+    if (!instructions.trim()) {
       toast.error('Descreva o objetivo da skill antes de gerar.');
       return;
     }
 
     await onGenerate({
-      directive: directive.trim(),
+      directive: instructions.trim(),
       name: name.trim() || undefined,
       description: description.trim() || undefined,
-      citation_style: citationStyle,
-      output_format: outputFormat,
-      audience,
-      examples: examples.length ? examples : undefined,
-      guardrails: guardrails.length ? guardrails : undefined,
+      citation_style: 'abnt',
+      output_format: 'document',
+      audience: 'both',
     });
   };
 
-  return (
-    <Card className="border-white/70 bg-white/95 shadow-soft">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Sparkles className="h-4 w-4 text-indigo-500" />
-          Construtor Assistido (Basico)
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="skill-name">Nome tecnico (opcional)</Label>
-            <Input
-              id="skill-name"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="ex: analise-contrato-trabalhista"
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="skill-description">Descricao curta (opcional)</Label>
-            <Input
-              id="skill-description"
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              placeholder="Resumo da finalidade da skill"
-            />
-          </div>
-        </div>
+  const extractMarkdownFromUpload = async (file: File): Promise<string> => {
+    const lowerName = file.name.toLowerCase();
 
+    if (lowerName.endsWith('.md') || lowerName.endsWith('.skill')) {
+      return file.text();
+    }
+
+    if (lowerName.endsWith('.zip')) {
+      const archive = await JSZip.loadAsync(file);
+      const candidates = Object.values(archive.files)
+        .filter((entry) => !entry.dir)
+        .filter((entry) => entry.name.toLowerCase().endsWith('.md') || entry.name.toLowerCase().endsWith('.skill'))
+        .sort((a, b) => a.name.localeCompare(b.name));
+
+      if (!candidates.length) {
+        throw new Error('ZIP sem arquivos .md/.skill para importacao.');
+      }
+
+      return candidates[0].async('string');
+    }
+
+    throw new Error('Formato nao suportado.');
+  };
+
+  const handleImport = async () => {
+    if (!selectedFile) {
+      toast.error('Selecione um arquivo antes de importar.');
+      return;
+    }
+
+    setIsImporting(true);
+    try {
+      const markdown = (await extractMarkdownFromUpload(selectedFile)).trim();
+      if (!markdown) {
+        toast.error('Arquivo vazio. Selecione um arquivo valido.');
+        return;
+      }
+      onImportMarkdown(markdown);
+      setSelectedFile(null);
+      setStep('menu');
+      toast.success('Skill importada para o editor avancado.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Falha ao importar skill.';
+      toast.error(message);
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
+  const handleCloseDialog = (nextOpen: boolean) => {
+    setOpen(nextOpen);
+    if (!nextOpen) {
+      setStep('menu');
+      setSelectedFile(null);
+      setIsImporting(false);
+    }
+  };
+
+  const renderStepHeader = (title: string) => (
+    <div className="flex items-center justify-between">
+      <h3 className="text-2xl font-semibold tracking-tight text-foreground">{title}</h3>
+      {step !== 'menu' ? (
+        <Button variant="ghost" size="icon" onClick={() => setStep('menu')} aria-label="Voltar">
+          <ArrowLeft className="h-5 w-5" />
+        </Button>
+      ) : null}
+    </div>
+  );
+
+  const renderManualStep = () => (
+    <div className="space-y-6">
+      <DialogHeader className="text-left">
+        <DialogTitle asChild>{renderStepHeader('Escreva as instrucoes da skill')}</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-5">
         <div className="space-y-2">
-          <Label htmlFor="skill-directive">Objetivo da skill</Label>
+          <Label htmlFor="skill-name">Nome da skill</Label>
+          <Input
+            id="skill-name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="relatorio-status-semanal"
+            className="h-11 rounded-lg"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="skill-description">Descricao</Label>
           <Textarea
-            id="skill-directive"
-            rows={6}
-            value={directive}
-            onChange={(event) => setDirective(event.target.value)}
-            placeholder="Explique como a skill deve atuar, quando deve ser acionada e quais riscos deve evitar."
+            id="skill-description"
+            rows={4}
+            value={description}
+            onChange={(event) => setDescription(event.target.value)}
+            placeholder="Gere relatorios de status semanais com foco em progresso e proximos passos."
+            className="rounded-lg"
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="skill-instructions">Instrucoes</Label>
+          <Textarea
+            id="skill-instructions"
+            rows={12}
+            value={instructions}
+            onChange={(event) => setInstructions(event.target.value)}
+            placeholder="Resuma meu trabalho recente em tres secoes: conquistas, obstaculos e proximos passos..."
+            className="rounded-lg"
           />
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-2">
-            <Label htmlFor="skill-examples">Exemplos de prompts (1 por linha)</Label>
-            <Textarea
-              id="skill-examples"
-              rows={4}
-              value={examplesInput}
-              onChange={(event) => setExamplesInput(event.target.value)}
-              placeholder={'analisar peticao inicial\nrevisar clausulas de risco'}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="skill-guardrails">Guardrails (1 por linha)</Label>
-            <Textarea
-              id="skill-guardrails"
-              rows={4}
-              value={guardrailsInput}
-              onChange={(event) => setGuardrailsInput(event.target.value)}
-              placeholder={'nao inventar jurisprudencia\nmarcar duvidas como verificar'}
-            />
-          </div>
-        </div>
-
-        <div className="grid gap-4 md:grid-cols-3">
-          <div className="space-y-2">
-            <Label>Publico-alvo</Label>
-            <Select value={audience} onValueChange={(value: 'beginner' | 'advanced' | 'both') => setAudience(value)}>
-              <SelectTrigger>
-                <SelectValue placeholder="Selecione o publico" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="both">Basico e avancado</SelectItem>
-                <SelectItem value="beginner">Basico</SelectItem>
-                <SelectItem value="advanced">Avancado</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>Estilo de citacao padrao</Label>
-            <Select value={citationStyle} onValueChange={setCitationStyle}>
-              <SelectTrigger>
-                <SelectValue placeholder="Selecione o estilo" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="abnt">ABNT</SelectItem>
-                <SelectItem value="forense_br">Forense BR</SelectItem>
-                <SelectItem value="bluebook">Bluebook</SelectItem>
-                <SelectItem value="harvard">Harvard</SelectItem>
-                <SelectItem value="apa">APA</SelectItem>
-                <SelectItem value="oscola">OSCOLA</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-          <div className="space-y-2">
-            <Label>Formato de saida</Label>
-            <Select
-              value={outputFormat}
-              onValueChange={(value) => setOutputFormat(value as 'chat' | 'document' | 'checklist' | 'json')}
-            >
-              <SelectTrigger>
-                <SelectValue placeholder="Selecione o formato" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="document">Documento</SelectItem>
-                <SelectItem value="chat">Chat</SelectItem>
-                <SelectItem value="checklist">Checklist</SelectItem>
-                <SelectItem value="json">JSON</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
-        </div>
-
-        <div className="flex justify-end">
-          <Button onClick={handleGenerate} disabled={isGenerating}>
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => setStep('menu')}>
+            Cancelar
+          </Button>
+          <Button disabled={isGenerating || !instructions.trim()} onClick={handleCreateByInstructions}>
             {isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-            Gerar rascunho
+            Criar
           </Button>
         </div>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
+  );
+
+  const renderUploadStep = () => (
+    <div className="space-y-6">
+      <DialogHeader className="text-left">
+        <DialogTitle asChild>{renderStepHeader('Fazer upload de uma habilidade')}</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-4">
+        <input
+          ref={fileInputRef}
+          className="hidden"
+          type="file"
+          accept=".zip,.skill,.md,text/markdown"
+          onChange={(event) => {
+            const file = event.target.files?.[0] ?? null;
+            if (!file) return;
+            if (!isSupportedSkillFile(file.name)) {
+              toast.error('Formato invalido. Use .zip, .skill ou .md.');
+              return;
+            }
+            setSelectedFile(file);
+          }}
+        />
+
+        <button
+          type="button"
+          className="flex w-full items-center gap-3 rounded-xl border border-dashed border-border bg-muted/30 px-4 py-6 text-left transition hover:bg-muted/50"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <FileUp className="h-5 w-5" />
+          </div>
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-foreground">Selecionar arquivo</p>
+            <p className="text-sm text-muted-foreground">Importe um arquivo .zip, .skill ou .md</p>
+          </div>
+        </button>
+
+        {selectedFile ? (
+          <div className="rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
+            Arquivo selecionado: <span className="font-medium text-foreground">{selectedFile.name}</span>
+          </div>
+        ) : null}
+
+        <div className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => setStep('menu')}>
+            Cancelar
+          </Button>
+          <Button disabled={!selectedFile || isImporting} onClick={handleImport}>
+            {isImporting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+            Importar
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderMenuStep = () => (
+    <div className="space-y-6">
+      <DialogHeader className="text-left">
+        <DialogTitle className="text-2xl font-semibold text-foreground">Nova skill</DialogTitle>
+      </DialogHeader>
+      <div className="space-y-3">
+        <button
+          type="button"
+          className="flex w-full items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition hover:bg-accent/30"
+          onClick={handleCreateWithClaude}
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <Bot className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="text-base font-semibold text-foreground">Criar com o Claude</p>
+            <p className="text-sm text-muted-foreground">Crie skills complexas atraves de conversa</p>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          className="flex w-full items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition hover:bg-accent/30"
+          onClick={() => setStep('manual')}
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <ClipboardList className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="text-base font-semibold text-foreground">Escreva as instrucoes da skill</p>
+            <p className="text-sm text-muted-foreground">Ideal para skills faceis de descrever</p>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          className="flex w-full items-center gap-4 rounded-xl border border-border bg-card p-5 text-left transition hover:bg-accent/30"
+          onClick={() => setStep('upload')}
+        >
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-muted text-muted-foreground">
+            <Upload className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="text-base font-semibold text-foreground">Fazer upload de uma habilidade</p>
+            <p className="text-sm text-muted-foreground">Importar um arquivo .zip, .skill ou .md</p>
+          </div>
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="rounded-2xl border border-white/70 bg-white/95 p-6 shadow-soft">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-foreground">Criacao assistida de skills</p>
+          <p className="text-sm text-muted-foreground">
+            Abra o modal para criar por conversa, instrucoes ou upload.
+          </p>
+        </div>
+        <Button onClick={() => setOpen(true)}>
+          <Sparkles className="mr-2 h-4 w-4" />
+          Nova skill
+        </Button>
+      </div>
+
+      <Dialog open={open} onOpenChange={handleCloseDialog}>
+        <DialogContent className="max-w-[820px] border-border bg-background p-0">
+          <div className="p-6 sm:p-8">
+            {step === 'menu' ? renderMenuStep() : null}
+            {step === 'manual' ? renderManualStep() : null}
+            {step === 'upload' ? renderUploadStep() : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
   );
 }

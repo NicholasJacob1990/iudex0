@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Office Add-in task pane constraints */
+:root {
+  --taskpane-width: 100%;
+  --taskpane-padding: 12px;
+}
+
+body {
+  @apply bg-surface text-text-primary text-office-base;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+/* Scrollbar styling for task pane */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-text-tertiary/30 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-text-tertiary/50;
+}
+
+/* Office theme integration */
+@layer utilities {
+  .office-panel {
+    @apply p-office-lg;
+  }
+
+  .office-card {
+    @apply rounded-lg border border-gray-200 bg-white p-office-md;
+  }
+
+  .office-input {
+    @apply w-full rounded-md border border-gray-300 px-3 py-2 text-office-base
+           placeholder:text-text-tertiary
+           focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand;
+  }
+
+  .office-btn-primary {
+    @apply rounded-md bg-brand px-4 py-2 text-office-base font-medium text-white
+           hover:bg-brand-dark active:bg-brand-dark
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .office-btn-secondary {
+    @apply rounded-md border border-gray-300 bg-white px-4 py-2 text-office-base
+           font-medium text-text-primary hover:bg-surface-tertiary
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+}

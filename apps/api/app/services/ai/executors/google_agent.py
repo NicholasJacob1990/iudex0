@@ -463,6 +463,13 @@ class GoogleAgentExecutor(BaseAgentExecutor):
             start_time=datetime.now(timezone.utc),
         )
         self._cancel_requested = False
+        await self._init_permission_manager(
+            db_session=kwargs.get("db_session") or kwargs.get("db"),
+            user_id=kwargs.get("user_id"),
+            session_id=kwargs.get("session_id") or kwargs.get("chat_id"),
+            project_id=kwargs.get("project_id") or kwargs.get("case_id"),
+            security_profile=kwargs.get("security_profile"),
+        )
 
         # Construir system prompt
         full_system = self._build_system_prompt(system_prompt, context)

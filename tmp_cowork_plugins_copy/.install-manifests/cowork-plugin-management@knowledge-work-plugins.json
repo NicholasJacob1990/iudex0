@@ -1,0 +1,16 @@
+{
+  "pluginId": "cowork-plugin-management@knowledge-work-plugins",
+  "createdAt": "2026-02-11T18:34:40.329Z",
+  "files": {
+    ".claude-plugin/plugin.json": "39682c73e4ac18ae041c19b93582711ab81fb9113c36362ea36ef9f5e8bdf52b",
+    "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+    "skills/cowork-plugin-customizer/LICENSE.txt": "58d1e17ffe5109a7ae296caafcadfdbe6a7d176f0bc4ab01e12a689b0499d8bd",
+    "skills/cowork-plugin-customizer/SKILL.md": "8f4f9e8dcae3e993839d676596fdb4c54d42436e39bf3405dea1edce2bbde241",
+    "skills/cowork-plugin-customizer/examples/customized-mcp.json": "1a04cd378d4e1266b05f1e42b2655592a5fdad47ca189aca169da9a05fcda721",
+    "skills/cowork-plugin-customizer/references/mcp-servers.md": "2107613a7922d96318808fa468bc8cf5210a9ca2d7da021f5eeb8598d2fd733c",
+    "skills/cowork-plugin-customizer/references/search-strategies.md": "66a53f10aac4738b8fd091de6054145511f8416e8633627f8a5a4dd9250f355a",
+    "skills/create-cowork-plugin/SKILL.md": "7d2e20bfda7ed7414835227e44faf218b511cf246fadbbd74102c15a18fdb066",
+    "skills/create-cowork-plugin/references/component-schemas.md": "da2c48b8b86b6b1eb593038268497eb2df855023d30fc9a424fe49e004c2a95c",
+    "skills/create-cowork-plugin/references/example-plugins.md": "fe40adb5d8ad6ff54371aa59e75481d1f397e41ae11025af6038180013a6735e"
+  }
+}

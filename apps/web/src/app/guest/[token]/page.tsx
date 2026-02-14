@@ -66,6 +66,8 @@ export default function GuestAccessPage({ params }: { params: { token: string } 
             is_guest: true,
           },
           isAuthenticated: true,
+          isGuest: true,
+          guestSession: data.guest,
         },
         version: 0,
       };

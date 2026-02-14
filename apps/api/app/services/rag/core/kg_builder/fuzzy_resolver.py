@@ -77,6 +77,17 @@ def _normalize_legal(text: str) -> str:
 
     text = text.lower().strip()
 
+    # Canonicalize common Brazilian legal diploma names to siglas
+    # (helps merge entities across extractors/LLM outputs).
+    text = re.sub(r"\b(constituicao federal|crfb|carta magna)\b", "cf", text)
+    text = re.sub(r"\b(codigo de processo civil|cpc/?2015|cpc 2015|codigo de 2015)\b", "cpc", text)
+    text = re.sub(r"\b(codigo tributario nacional)\b", "ctn", text)
+    text = re.sub(r"\b(codigo de defesa do consumidor)\b", "cdc", text)
+    text = re.sub(r"\b(codigo penal)\b", "cp", text)
+    text = re.sub(r"\b(codigo civil|cc/?2002|cc 2002)\b", "cc", text)
+    text = re.sub(r"\b(lei de execucao fiscal|lei 6\\.830/80|lei 6830/80)\b", "lef", text)
+    text = re.sub(r"\b(lei de mandado de seguranca|lei 12\\.016/2009|lei 12016/2009)\b", "lms", text)
+
     # Normalize ordinal markers
     text = re.sub(r"[ºª°]", "", text)
 

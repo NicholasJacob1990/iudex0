@@ -136,6 +136,8 @@ export default function CaseDetailPage() {
         setMaxDivergenceHilRounds,
         formattingOptions,
         setFormattingOptions,
+        citationStyle,
+        setCitationStyle,
         chatMode,
         setChatMode,
         selectedModels,
@@ -801,6 +803,8 @@ export default function CaseDetailPage() {
                             resetPageRange={resetPageRange}
                             formattingOptions={formattingOptions}
                             setFormattingOptions={setFormattingOptions}
+                            citationStyle={citationStyle}
+                            setCitationStyle={setCitationStyle}
                             reasoningLevel={reasoningLevel as 'low' | 'medium' | 'high'}
                             setReasoningLevel={setReasoningLevel}
                             effortLevel={effortLevel}

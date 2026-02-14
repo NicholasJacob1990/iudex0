@@ -58,10 +58,13 @@ async def _preload_rag_models() -> None:
             from app.services.rag.core.embeddings import preload_embeddings_cache
 
             logger.info("Preloading embeddings cache...")
-            load_time, count = await loop.run_in_executor(
-                None, preload_embeddings_cache
+            load_time, count = await asyncio.wait_for(
+                loop.run_in_executor(None, preload_embeddings_cache),
+                timeout=30.0,
             )
             logger.info(f"Embeddings cache preloaded: {count} queries in {load_time:.2f}s")
+        except asyncio.TimeoutError:
+            logger.warning("Embeddings preload timed out after 30s (quota issue?). Skipping.")
         except ImportError as e:
             logger.warning(f"Embeddings module not available: {e}")
         except Exception as e:

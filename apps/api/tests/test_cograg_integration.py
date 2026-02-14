@@ -224,3 +224,46 @@ class TestCogGRAGPipelineMethod:
         assert len(result["results"]) == 2
         assert result["sub_questions"] == mock_result["sub_questions"]
         assert result["mind_map"] == mock_result["mind_map"]
+
+    @pytest.mark.asyncio
+    async def test_cograg_pipeline_aligns_graph_hops_with_ui_cap(self):
+        """
+        CogGRAG graph evidence max_hops should follow the request-level graph_hops
+        (UI-configured) and clamp to 1..5.
+        """
+        from app.services.rag.pipeline.rag_pipeline import RAGPipeline, PipelineTrace
+
+        pipeline = RAGPipeline()
+        trace = PipelineTrace(original_query="Complex query")
+
+        # Return "complex enough" so pipeline doesn't fallback early.
+        mock_result = {
+            "sub_questions": [
+                {"node_id": "1", "question": "Sub Q1?", "level": 1},
+                {"node_id": "2", "question": "Sub Q2?", "level": 1},
+            ],
+            "evidence_map": {},
+            "text_chunks": [{"text": "Chunk 1", "score": 0.9, "_content_hash": "h1"}],
+            "mind_map": {"root_question": "Complex query"},
+            "metrics": {},
+        }
+
+        mock_run = AsyncMock(return_value=mock_result)
+        with patch("app.services.rag.pipeline.rag_pipeline.run_cognitive_rag", new=mock_run):
+            result = await pipeline._cograg_pipeline(
+                query="Complex query",
+                trace=trace,
+                tenant_id="default",
+                scope="global",
+                case_id=None,
+                indices=["test"],
+                collections=["test"],
+                filters=None,
+                top_k=10,
+                graph_hops=999,  # UI should cap at 5
+            )
+
+        assert result["fallback"] is False
+        # Ensure clamped value is passed through to CogGRAG runner.
+        called_kwargs = mock_run.call_args.kwargs
+        assert called_kwargs["graph_evidence_max_hops"] == 5

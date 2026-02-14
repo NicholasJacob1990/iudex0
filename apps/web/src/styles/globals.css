@@ -4,6 +4,15 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Hide scrollbar but keep scroll functionality */
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
 /* 
   Houdini worklet props (verbium-particles.js) 
   Strict typing allows the browser to interpolate these values smoothly on the compositor thread.
@@ -1213,6 +1222,294 @@
 
 .animate-logo-scroll {
   animation: logo-scroll 30s linear infinite;
+}
+
+/* ============================
+   Dashboard Tint-Safe Overrides
+   Cards get slight translucency so the tinted background peeks through.
+   Borders use neutral transparency instead of opaque white.
+   ============================ */
+
+/* Light mode: borders → neutral */
+.dashboard-shell .border-white\/80 { border-color: rgba(0, 0, 0, 0.06); }
+.dashboard-shell .border-white\/70 { border-color: rgba(0, 0, 0, 0.06); }
+.dashboard-shell .border-white\/60 { border-color: rgba(0, 0, 0, 0.05); }
+
+/* Light mode: pure bg-white → slight glass so tint bleeds through */
+.dashboard-shell .bg-white {
+  background-color: rgba(255, 255, 255, 0.88);
+}
+
+/* Component-class overrides for light mode */
+.dashboard-shell .glass-panel {
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+.dashboard-shell .panel-card {
+  border-color: rgba(0, 0, 0, 0.06);
+}
+
+/* Dark mode: remap bg-white/* to card color */
+.dark .dashboard-shell .bg-white { background-color: hsl(var(--card)); }
+.dark .dashboard-shell .bg-white\/95 { background-color: hsl(var(--card) / 0.95); }
+.dark .dashboard-shell .bg-white\/90 { background-color: hsl(var(--card) / 0.9); }
+.dark .dashboard-shell .bg-white\/85 { background-color: hsl(var(--card) / 0.85); }
+.dark .dashboard-shell .bg-white\/80 { background-color: hsl(var(--card) / 0.8); }
+.dark .dashboard-shell .bg-white\/70 { background-color: hsl(var(--card) / 0.7); }
+.dark .dashboard-shell .bg-white\/50 { background-color: hsl(var(--card) / 0.5); }
+
+/* Dark mode: borders → subtle white */
+.dark .dashboard-shell .border-white\/80,
+.dark .dashboard-shell .border-white\/70,
+.dark .dashboard-shell .border-white\/60 {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.dark .dashboard-shell .border-slate-200,
+.dark .dashboard-shell .border-slate-200\/60,
+.dark .dashboard-shell .border-slate-200\/80 {
+  border-color: hsl(var(--border));
+}
+
+/* ============================
+   Tint Homogenized Mode (uniform)
+   When active, bg-white / bg-card / slate-bg match tinted --background
+   so the page looks uniform.
+   ============================ */
+
+/* Light mode: bg-white → solid tinted background */
+.dashboard-shell.tint-homogenized .bg-white {
+  background-color: hsl(var(--background));
+}
+
+/* Light mode: bg-card → solid match with background */
+.dashboard-shell.tint-homogenized .bg-card {
+  background-color: hsl(var(--background));
+}
+
+/* Light mode: bg-muted variants → solid match */
+.dashboard-shell.tint-homogenized .bg-muted\/50,
+.dashboard-shell.tint-homogenized .bg-muted\/30,
+.dashboard-shell.tint-homogenized .bg-muted\/10 {
+  background-color: hsl(var(--background));
+}
+
+/* Light mode: bg-background → ensure solid (no opacity leak) */
+.dashboard-shell.tint-homogenized .bg-background {
+  background-color: hsl(var(--background));
+}
+
+/* Light mode: bg-white opacity variants → solid match */
+.dashboard-shell.tint-homogenized .bg-white\/95,
+.dashboard-shell.tint-homogenized .bg-white\/90,
+.dashboard-shell.tint-homogenized .bg-white\/85,
+.dashboard-shell.tint-homogenized .bg-white\/80,
+.dashboard-shell.tint-homogenized .bg-white\/70,
+.dashboard-shell.tint-homogenized .bg-white\/50 {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: bg-white → solid tinted background (no lighter leak) */
+.dark .dashboard-shell.tint-homogenized .bg-white {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: bg-card → exact match with background */
+.dark .dashboard-shell.tint-homogenized .bg-card {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: slate backgrounds (chat-input) → solid tinted */
+.dark .dashboard-shell.tint-homogenized .dark\:bg-slate-900\/95 {
+  background-color: hsl(var(--background)) !important;
+}
+
+/* Dark mode: bg-background/70 (message area) → solid tinted */
+.dark .dashboard-shell.tint-homogenized .dark\:bg-background\/70 {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: bg-white with opacity variants → solid tinted */
+.dark .dashboard-shell.tint-homogenized .bg-white\/95,
+.dark .dashboard-shell.tint-homogenized .bg-white\/90,
+.dark .dashboard-shell.tint-homogenized .bg-white\/85,
+.dark .dashboard-shell.tint-homogenized .bg-white\/80,
+.dark .dashboard-shell.tint-homogenized .bg-white\/70,
+.dark .dashboard-shell.tint-homogenized .bg-white\/50 {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: muted variants → match background for uniform look */
+.dark .dashboard-shell.tint-homogenized .bg-muted\/50,
+.dark .dashboard-shell.tint-homogenized .bg-muted\/30,
+.dark .dashboard-shell.tint-homogenized .bg-muted\/10 {
+  background-color: hsl(var(--background));
+}
+
+/* Dark mode: bg-background → ensure solid (no opacity leak) */
+.dark .dashboard-shell.tint-homogenized .bg-background {
+  background-color: hsl(var(--background));
+}
+
+/* Borders → subtler in homogenized mode */
+.dashboard-shell.tint-homogenized .border-slate-200\/80 {
+  border-color: hsl(var(--border) / 0.4);
+}
+
+.dashboard-shell.tint-homogenized .border-outline\/30,
+.dashboard-shell.tint-homogenized .border-outline\/20,
+.dashboard-shell.tint-homogenized .border-outline\/10 {
+  border-color: hsl(var(--border) / 0.15);
+}
+
+.dark .dashboard-shell.tint-homogenized .dark\:border-slate-700 {
+  border-color: hsl(var(--border) / 0.4);
+}
+
+/* ============================
+   Tint Blended Mode
+   Cards stay distinct from page background, but tinted with theme hue.
+   ============================ */
+
+/* Light mode: blend cards to tinted card token */
+.dashboard-shell.tint-blended .bg-white,
+.dashboard-shell.tint-blended .bg-card {
+  background-color: hsl(var(--card-blended));
+}
+
+/* Light mode: opacity variants align with blended card tone */
+.dashboard-shell.tint-blended .bg-white\/95,
+.dashboard-shell.tint-blended .bg-white\/90,
+.dashboard-shell.tint-blended .bg-white\/85,
+.dashboard-shell.tint-blended .bg-white\/80 {
+  background-color: hsl(var(--card-blended));
+}
+
+/* Light mode: borders follow blended border tone */
+.dashboard-shell.tint-blended .border-slate-200\/80 {
+  border-color: hsl(var(--border-blended));
+}
+
+/* Dark mode: blend cards and slate chat-input to card token */
+.dark .dashboard-shell.tint-blended .bg-white,
+.dark .dashboard-shell.tint-blended .bg-card,
+.dark .dashboard-shell.tint-blended .dark\:bg-slate-900\/95 {
+  background-color: hsl(var(--card-blended)) !important;
+}
+
+/* Dark mode: opacity variants align with blended card tone */
+.dark .dashboard-shell.tint-blended .bg-white\/95,
+.dark .dashboard-shell.tint-blended .bg-white\/90,
+.dark .dashboard-shell.tint-blended .bg-white\/85,
+.dark .dashboard-shell.tint-blended .bg-white\/80 {
+  background-color: hsl(var(--card-blended));
+}
+
+/* Dark mode: borders follow blended border tone */
+.dark .dashboard-shell.tint-blended .dark\:border-slate-700 {
+  border-color: hsl(var(--border-blended));
+}
+
+/* ============================
+   Tint Inset Mode
+   Cards and inputs get a darker tone (sunken/recessed look).
+   Chat interface bg stays lighter, chat input/canvas go darker.
+   ============================ */
+
+/* Light mode: bg-white cards → darker inset tone */
+.dashboard-shell.tint-inset .bg-white {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Light mode: bg-card → darker inset tone */
+.dashboard-shell.tint-inset .bg-card {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Light mode: white opacity variants → inset */
+.dashboard-shell.tint-inset .bg-white\/95,
+.dashboard-shell.tint-inset .bg-white\/90,
+.dashboard-shell.tint-inset .bg-white\/85,
+.dashboard-shell.tint-inset .bg-white\/80 {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Light mode: borders adapt to inset */
+.dashboard-shell.tint-inset .border-slate-200\/80 {
+  border-color: hsl(var(--border-inset));
+}
+
+/* Dark mode: bg-white → inset tone */
+.dark .dashboard-shell.tint-inset .bg-white {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Dark mode: bg-card → inset tone */
+.dark .dashboard-shell.tint-inset .bg-card {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Dark mode: dark slate (chat-input) → inset tone */
+.dark .dashboard-shell.tint-inset .dark\:bg-slate-900\/95 {
+  background-color: hsl(var(--card-inset)) !important;
+}
+
+/* Dark mode: white opacity variants → inset */
+.dark .dashboard-shell.tint-inset .bg-white\/95,
+.dark .dashboard-shell.tint-inset .bg-white\/90,
+.dark .dashboard-shell.tint-inset .bg-white\/85,
+.dark .dashboard-shell.tint-inset .bg-white\/80 {
+  background-color: hsl(var(--card-inset));
+}
+
+/* Dark mode: borders adapt to inset */
+.dark .dashboard-shell.tint-inset .dark\:border-slate-700 {
+  border-color: hsl(var(--border-inset));
+}
+
+/* ============================
+   Chat Tint Slider
+   ============================ */
+.chat-tint-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  border: 1.5px solid rgba(100, 116, 139, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+.chat-tint-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.chat-tint-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: white;
+  border: 1.5px solid rgba(100, 116, 139, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  cursor: pointer;
+}
+
+.chat-tint-slider::-moz-range-track {
+  background: transparent;
+  border: none;
+}
+
+.dark .chat-tint-slider::-webkit-slider-thumb {
+  background: #334155;
+  border-color: rgba(148, 163, 184, 0.3);
+}
+
+.dark .chat-tint-slider::-moz-range-thumb {
+  background: #334155;
+  border-color: rgba(148, 163, 184, 0.3);
 }
 
 /* ============================

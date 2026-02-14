@@ -62,6 +62,7 @@ const RAG_SELECTED_GROUPS_STORAGE_KEY = 'iudex_rag_selected_groups';
 const RAG_ALLOW_GROUPS_STORAGE_KEY = 'iudex_rag_allow_groups';
 const RAG_GLOBAL_JURISDICTIONS_STORAGE_KEY = 'iudex_rag_global_jurisdictions';
 const RAG_GLOBAL_SOURCE_IDS_STORAGE_KEY = 'iudex_rag_global_source_ids';
+const RAG_GRAPH_HOPS_STORAGE_KEY = 'iudex_rag_graph_hops';
 const DEFAULT_USD_PER_POINT = 0.00003;
 
 const describeApiError = (error: unknown) => {
@@ -385,6 +386,13 @@ const closeLangGraphStream = () => {
   langGraphEventSource = null;
 };
 
+const extractStreamDelta = (payload: any): string => {
+  const raw = payload?.delta ?? payload?.token;
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number') return String(raw);
+  return '';
+};
+
 const attachLangGraphStream = (jobId: string, persistChatId: string | null, set: any, get: any) => {
   if (typeof window === 'undefined') return;
 
@@ -416,8 +424,8 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
     const isOutlineEvent =
       eventType === 'outline_done' || eventType === 'outline_generated' || eventType === 'outline';
 
-    if (eventType === 'token' && payload?.delta) {
-      const delta = String(payload.delta);
+    if (eventType === 'token') {
+      const delta = extractStreamDelta(payload);
       if (!delta) return;
       if (payload?.reset || !streamActive) {
         streamActive = true;
@@ -445,8 +453,8 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
     }
 
     // Hard Research: study_token streams content into the canvas
-    if (eventType === 'study_token' && payload?.delta) {
-      const delta = String(payload.delta);
+    if (eventType === 'study_token') {
+      const delta = extractStreamDelta(payload);
       if (!delta) return;
       if (!streamActive) {
         streamActive = true;
@@ -813,9 +821,11 @@ const attachLangGraphStream = (jobId: string, persistChatId: string | null, set:
     if (eventType === 'tool_approval_required') {
       set({
         pendingToolApproval: {
-          tool: payload?.tool || payload?.name || 'unknown',
-          input: payload?.input || {},
+          tool: payload?.tool || payload?.name || payload?.tool_name || 'unknown',
+          input: payload?.input || payload?.tool_input || {},
           riskLevel: payload?.risk_level || 'medium',
+          toolId: payload?.tool_id || payload?.id || null,
+          approvalToken: payload?.approval_token || null,
         },
       });
     }
@@ -1261,6 +1271,20 @@ function loadOptionalIntPreference(key: string, min: number, max: number): strin
   }
 }
 
+function loadGraphHops(): number {
+  if (typeof window === 'undefined') return 3;
+  try {
+    const raw = (localStorage.getItem(RAG_GRAPH_HOPS_STORAGE_KEY) || '').trim();
+    if (!raw) return 3;
+    const parsed = Math.floor(Number(raw));
+    if (!Number.isFinite(parsed)) return 3;
+    // Chat/Minuta GraphRAG is validated server-side with le=5.
+    return Math.max(1, Math.min(5, parsed));
+  } catch {
+    return 3;
+  }
+}
+
 function loadChatPersonality(): 'juridico' | 'geral' {
   if (typeof window === 'undefined') return 'juridico';
   try {
@@ -1584,6 +1608,8 @@ interface ChatState {
     tool: string;
     input: Record<string, unknown>;
     riskLevel: 'low' | 'medium' | 'high';
+    toolId?: string | null;
+    approvalToken?: string | null;
   } | null;
   toolPermissions: Record<string, 'allow' | 'deny' | 'ask'>;
   checkpoints: Array<{
@@ -2464,7 +2490,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   hydeEnabled: true,
   graphRagEnabled: true,
   argumentGraphEnabled: true,
-  graphHops: 2,
+  graphHops: loadGraphHops(),
   ragScope: 'case_and_global', // case_only, case_and_global, global_only
   ragSelectedGroups: loadRagSelectedGroups(),
   ragAllowPrivate: true,
@@ -3213,7 +3239,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setHydeEnabled: () => set({ hydeEnabled: true }),
   setGraphRagEnabled: () => set({ graphRagEnabled: true, argumentGraphEnabled: true }),
   setArgumentGraphEnabled: () => set({ argumentGraphEnabled: true, graphRagEnabled: true }),
-  setGraphHops: (hops) => set({ graphHops: hops }),
+  setGraphHops: (hops) => {
+    // Chat/Minuta GraphRAG is validated server-side with le=5.
+    const normalized = Math.max(1, Math.min(5, Math.floor(Number(hops) || 3)));
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem(RAG_GRAPH_HOPS_STORAGE_KEY, String(normalized));
+      } catch {
+        // ignore storage errors
+      }
+    }
+    set({ graphHops: normalized });
+  },
   setRagScope: (scope) => set({ ragScope: scope }),
   setRagSelectedGroups: (groupIds) => {
     const normalized = (Array.isArray(groupIds) ? groupIds : [])
@@ -4604,13 +4641,33 @@ export const useChatStore = create<ChatState>((set, get) => ({
               }
             }
 
-            if (data.type === 'meta' && data.phase && typeof data.t === 'number') {
+            if (
+              data.type === 'meta' &&
+              data.phase &&
+              (
+                typeof data.t === 'number' ||
+                data.phase === 'routing' ||
+                data.phase === 'execution_mode'
+              )
+            ) {
               updateAssistant((message) => ({
                 ...message,
                 metadata: {
                   ...(message.metadata || {}),
                   ...(data.phase === 'start' ? { stream_t0: data.t } : {}),
                   ...(data.phase === 'answer_start' ? { stream_t_answer_start: data.t } : {}),
+                  ...(typeof data.execution_mode === 'string'
+                    ? { execution_mode: data.execution_mode }
+                    : {}),
+                  ...(typeof data.execution_path === 'string'
+                    ? { execution_path: data.execution_path }
+                    : {}),
+                  ...(typeof data.document_route === 'string'
+                    ? { document_route: data.document_route }
+                    : {}),
+                  ...(Number.isFinite(Number(data.estimated_pages))
+                    ? { estimated_pages: Number(data.estimated_pages) }
+                    : {}),
                 },
               }));
             } else if (data.type === 'error') {
@@ -4726,6 +4783,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         : {}),
                       ...(typeof data.execution_path === 'string'
                         ? { execution_path: data.execution_path }
+                        : {}),
+                      ...(typeof data.document_route === 'string'
+                        ? { document_route: data.document_route }
+                        : {}),
+                      ...(Number.isFinite(Number(data.estimated_pages))
+                        ? { estimated_pages: Number(data.estimated_pages) }
+                        : {}),
+                      ...(typeof data.langsmith_run_id === 'string'
+                        ? { langsmith_run_id: data.langsmith_run_id }
+                        : {}),
+                      ...(typeof data.langsmith_trace_url === 'string'
+                        ? { langsmith_trace_url: data.langsmith_trace_url }
                         : {}),
                       ...(typeof data.thinking_enabled === 'boolean'
                         ? { thinking_enabled: data.thinking_enabled }
@@ -4995,6 +5064,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
                         : {}),
                       ...(typeof data.execution_path === 'string'
                         ? { execution_path: data.execution_path }
+                        : {}),
+                      ...(typeof data.document_route === 'string'
+                        ? { document_route: data.document_route }
+                        : {}),
+                      ...(Number.isFinite(Number(data.estimated_pages))
+                        ? { estimated_pages: Number(data.estimated_pages) }
+                        : {}),
+                      ...(typeof data.langsmith_run_id === 'string'
+                        ? { langsmith_run_id: data.langsmith_run_id }
+                        : {}),
+                      ...(typeof data.langsmith_trace_url === 'string'
+                        ? { langsmith_trace_url: data.langsmith_trace_url }
                         : {}),
                       ...(typeof data.thinking_enabled === 'boolean'
                         ? { thinking_enabled: data.thinking_enabled }
@@ -6657,6 +6738,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     if (typeof data.execution_path === 'string') {
                       next.execution_path = data.execution_path;
                     }
+                    if (typeof data.document_route === 'string') {
+                      next.document_route = data.document_route;
+                    }
+                    if (Number.isFinite(Number(data.estimated_pages))) {
+                      next.estimated_pages = Number(data.estimated_pages);
+                    }
+                    if (typeof data.langsmith_run_id === 'string') {
+                      next.langsmith_run_id = data.langsmith_run_id;
+                    }
+                    if (typeof data.langsmith_trace_url === 'string') {
+                      next.langsmith_trace_url = data.langsmith_trace_url;
+                    }
                     if (typeof data.thinking_enabled === 'boolean') {
                       next.thinking_enabled = data.thinking_enabled;
                     }
@@ -6857,6 +6950,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           body: JSON.stringify({
             job_id: currentJobId,
             tool: pendingToolApproval.tool,
+            tool_id: pendingToolApproval.toolId || undefined,
+            approval_token: pendingToolApproval.approvalToken || undefined,
             approved,
             remember,
           }),
@@ -6882,6 +6977,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set({ pendingToolApproval: null });
 
       toast.success(approved ? 'Ferramenta aprovada.' : 'Ferramenta negada.');
+
+      // Re-attach stream so resumed events show up (JobManager SSE).
+      if (currentJobId) {
+        try {
+          attachLangGraphStream(currentJobId, currentChat.id, set, get);
+        } catch {
+          // noop
+        }
+      }
     } catch (error) {
       console.error('Error approving tool call:', error);
       toast.error('Erro ao enviar aprovação.');

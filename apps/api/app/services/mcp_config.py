@@ -63,6 +63,12 @@ BUILTIN_MCP_SERVERS = [
         "builtin": True,
         "handler_class": "app.services.mcp_servers.bnp_server.BNPMCPServer",
     },
+    {
+        "label": "neo4j-graph",
+        "name": "Neo4j Legal Knowledge Graph",
+        "builtin": True,
+        "handler_class": "app.services.mcp_servers.neo4j_server.Neo4jMCPServer",
+    },
 ]
 
 

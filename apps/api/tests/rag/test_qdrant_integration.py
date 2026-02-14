@@ -68,6 +68,24 @@ def qdrant_client_real():
         pass
 
 
+def _search(client, *, collection_name, query_vector, limit=10, **kwargs):
+    """Compatibility wrapper: use query_points (new API) with search-style kwargs."""
+    if hasattr(client, "query_points"):
+        resp = client.query_points(
+            collection_name=collection_name,
+            query=query_vector,
+            limit=limit,
+            **kwargs,
+        )
+        return getattr(resp, "points", [])
+    return client.search(
+        collection_name=collection_name,
+        query_vector=query_vector,
+        limit=limit,
+        **kwargs,
+    )
+
+
 @pytest.fixture(scope="module")
 def test_collection(qdrant_client_real):
     """Create a test collection and clean up after tests."""
@@ -259,7 +277,7 @@ class TestQdrantSearch:
         """Test basic vector search."""
         query_vector = self.sample_vectors[0]["vector"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             limit=10,
@@ -275,7 +293,7 @@ class TestQdrantSearch:
 
         query_vector = self.sample_vectors[0]["vector"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             query_filter=Filter(
@@ -296,7 +314,7 @@ class TestQdrantSearch:
 
         query_vector = self.sample_vectors[0]["vector"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             query_filter=Filter(
@@ -318,7 +336,7 @@ class TestQdrantSearch:
         query_vector = self.sample_vectors[0]["vector"]
 
         # Simulate multi-tenant filter: global OR (local AND tenant-001)
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             query_filter=Filter(
@@ -348,7 +366,7 @@ class TestQdrantSearch:
         """Test search with score threshold."""
         query_vector = self.sample_vectors[0]["vector"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             score_threshold=0.5,
@@ -363,7 +381,7 @@ class TestQdrantSearch:
         """Test search returning specific payload fields."""
         query_vector = self.sample_vectors[0]["vector"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             with_payload=["text", "doc_id"],
@@ -490,7 +508,7 @@ class TestQdrantMultiTenant:
         query_vector = [random.random() for _ in range(EMBEDDING_DIM)]
 
         # Tenant A searching - should only see global OR local+tenant-A
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             query_filter=Filter(
@@ -524,7 +542,7 @@ class TestQdrantMultiTenant:
         # User with publico+restrito access (not confidencial)
         allowed_sigilo = ["publico", "restrito"]
 
-        results = qdrant_client_real.search(
+        results = _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             query_filter=Filter(
@@ -587,7 +605,7 @@ class TestQdrantPerformance:
         query_vector = [random.random() for _ in range(EMBEDDING_DIM)]
 
         # Warmup
-        qdrant_client_real.search(
+        _search(qdrant_client_real,
             collection_name=test_collection,
             query_vector=query_vector,
             limit=10,
@@ -598,7 +616,7 @@ class TestQdrantPerformance:
         start = time.time()
 
         for _ in range(num_queries):
-            qdrant_client_real.search(
+            _search(qdrant_client_real,
                 collection_name=test_collection,
                 query_vector=query_vector,
                 limit=10,
