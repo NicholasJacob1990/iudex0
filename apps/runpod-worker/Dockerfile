@@ -70,6 +70,7 @@ ENV WHISPER_MODEL=large-v3-turbo
 ENV WHISPER_DEVICE=cuda
 ENV WHISPER_COMPUTE_TYPE=int8_float16
 ENV WHISPER_BATCH_SIZE=16
+ENV DIARIZATION_MODEL=pyannote/speaker-diarization-community-1
 
 # RunPod serverless entry point
 CMD ["python", "-u", "rp_handler.py"]

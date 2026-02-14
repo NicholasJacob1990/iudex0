@@ -54,6 +54,7 @@ DEFAULT_MODEL = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
 DEVICE = os.environ.get("WHISPER_DEVICE", "cuda")
 COMPUTE_TYPE = os.environ.get("WHISPER_COMPUTE_TYPE", "int8_float16")
 DEFAULT_BATCH_SIZE = int(os.environ.get("WHISPER_BATCH_SIZE", "16"))
+DIARIZATION_MODEL = os.environ.get("DIARIZATION_MODEL", "pyannote/speaker-diarization-community-1")
 
 # Legal vocabulary hotwords (improves recognition of domain-specific terms)
 DEFAULT_HOTWORDS = (
@@ -140,9 +141,9 @@ def _get_diarization_pipeline():
         import torch
 
         hf_token = os.environ.get("HF_TOKEN", "")
-        logger.info("Loading pyannote/speaker-diarization-community-1...")
+        logger.info("Loading diarization model: %s", DIARIZATION_MODEL)
         _diarization_pipeline = PyannotePipeline.from_pretrained(
-            "pyannote/speaker-diarization-community-1",
+            DIARIZATION_MODEL,
             use_auth_token=hf_token if hf_token else None,
         )
         if torch.cuda.is_available():
